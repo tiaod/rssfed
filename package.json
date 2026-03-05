@@ -11,15 +11,25 @@
     "typecheck": "nuxt typecheck"
   },
   "dependencies": {
+    "@better-auth/drizzle-adapter": "^1.5.3",
+    "@electric-sql/pglite": "^0.3.15",
     "@iconify-json/lucide": "^1.2.95",
     "@iconify-json/simple-icons": "^1.2.72",
+    "@libsql/client": "^0.17.0",
     "@nuxt/ui": "^4.5.1",
+    "better-auth": "^1.5.3",
+    "dotenv": "^17.3.1",
+    "drizzle-orm": "^0.45.1",
     "nuxt": "^4.3.1",
+    "pg": "^8.19.0",
     "tailwindcss": "^4.2.1"
   },
   "devDependencies": {
     "@nuxt/eslint": "^1.15.2",
+    "@types/pg": "^8.18.0",
+    "drizzle-kit": "^0.31.9",
     "eslint": "^10.0.2",
+    "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "vue-tsc": "^3.2.5"
   },
