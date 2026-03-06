@@ -1,5 +1,3 @@
-import { drizzle } from 'drizzle-orm/pglite';
-
-
-// 初始化PGlite数据库
-export const db = drizzle("local.db");
+import { drizzle } from 'drizzle-orm/node-postgres';
+import * as authSchema from "./schema/auth";
+export const db = drizzle(process.env.DATABASE_URL!, { schema: authSchema });
