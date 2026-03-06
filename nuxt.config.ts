@@ -11,6 +11,10 @@ export default defineNuxtConfig({
 
   css: ['~/assets/css/main.css'],
 
+  ui: {
+    fonts: false
+  },
+
   routeRules: {
     '/': { prerender: true }
   },
@@ -24,9 +28,5 @@ export default defineNuxtConfig({
         braceStyle: '1tbs'
       }
     }
-  },
-
-  ui: {
-    fonts: false
   }
 })
