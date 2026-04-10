@@ -1,10 +1,18 @@
 import { betterAuth } from 'better-auth'
 import { drizzleAdapter } from '@better-auth/drizzle-adapter'
 import { db } from './db'
+import { Redis } from 'ioredis'
+import { redisStorage } from '@better-auth/redis-storage'
+
+const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379')
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
     provider: 'pg'
+  }),
+  secondaryStorage: redisStorage({
+    client: redis,
+    keyPrefix: 'better-auth:'
   }),
   // 从环境变量读取配置，生产环境自动读取
   secret: process.env.BETTER_AUTH_SECRET,
@@ -83,8 +91,8 @@ export const auth = betterAuth({
     window: 15 * 60,
     // 最多100次请求
     max: 100,
-    // 使用数据库存储限流数据
-    storage: 'database',
+    // 使用 Redis 存储限流数据
+    storage: 'secondary-storage',
   },
   
   // 第三方登录（需要时取消注释）
