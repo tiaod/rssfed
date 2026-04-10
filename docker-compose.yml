@@ -14,5 +14,19 @@ services:
       interval: 10s
       start_period: 30s
     restart: always
+
+  redis:
+    image: redis:8-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - rssfed-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      start_period: 30s
+    restart: always
+
 volumes:
   rssfed-db:
+  rssfed-redis:
