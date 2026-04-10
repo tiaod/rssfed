@@ -28,5 +28,14 @@ export default defineNuxtConfig({
         braceStyle: '1tbs'
       }
     }
+  },
+
+  nitro: {
+    storage: {
+      redis: {
+        driver: 'redis',
+        url: process.env.REDIS_URL || 'redis://localhost:6379'
+      }
+    }
   }
 })
