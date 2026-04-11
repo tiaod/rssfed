@@ -1,5 +1,5 @@
 import { drizzle } from 'drizzle-orm/node-postgres'
-import * as authSchema from './schema/auth'
+import * as authSchema from '@@/auth-schema'
 import * as minifluxSchema from './schema/miniflux'
 
 const schema = {

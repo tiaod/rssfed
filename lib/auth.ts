@@ -1,4 +1,5 @@
 import { betterAuth } from 'better-auth'
+import { admin } from 'better-auth/plugins'
 import { drizzleAdapter } from '@better-auth/drizzle-adapter'
 import { createAuthMiddleware } from 'better-auth/api'
 import { db } from './db'
@@ -74,5 +75,9 @@ export const auth = betterAuth({
     window: 15 * 60,
     max: 100,
     storage: 'secondary-storage'
-  }
+  },
+
+  plugins: [
+    admin()
+  ]
 })

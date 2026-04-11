@@ -1,5 +1,8 @@
 import { createAuthClient } from 'better-auth/vue'
+import { adminClient } from 'better-auth/client/plugins'
 
 export const authClient = createAuthClient({
-  // 客户端配置
+  plugins: [
+    adminClient()
+  ]
 })

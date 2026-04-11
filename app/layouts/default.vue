@@ -1,7 +1,10 @@
 <script setup>
 import { authClient } from '~~/lib/auth-client'
+import { computed } from 'vue'
 
 const { data: session, isPending, refetch } = authClient.useSession()
+
+const isAdmin = computed(() => session.value?.user?.role === 'admin')
 
 const handleLogout = async () => {
   await authClient.signOut()
@@ -31,6 +34,14 @@ const handleLogout = async () => {
         </UButton>
 
         <template v-else>
+          <UButton
+            v-if="isAdmin"
+            to="/admin/users"
+            variant="ghost"
+            size="sm"
+          >
+            管理后台
+          </UButton>
           <UDropdownMenu :items="[
             { label: '个人设置', to: '/settings' },
             { label: '退出登录', click: handleLogout, color: 'error' }
