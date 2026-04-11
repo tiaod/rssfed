@@ -21,6 +21,15 @@ export default defineNuxtConfig({
 
   compatibilityDate: '2025-01-15',
 
+  nitro: {
+    storage: {
+      redis: {
+        driver: 'redis',
+        url: process.env.REDIS_URL || 'redis://localhost:6379'
+      }
+    }
+  },
+
   eslint: {
     config: {
       stylistic: {
@@ -29,13 +38,11 @@ export default defineNuxtConfig({
       }
     }
   },
-
-  nitro: {
-    storage: {
-      redis: {
-        driver: 'redis',
-        url: process.env.REDIS_URL || 'redis://localhost:6379'
-      }
+  vite: {
+    optimizeDeps: {
+      include: [
+        'better-auth/vue',
+      ]
     }
   }
 })

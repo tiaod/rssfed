@@ -22,7 +22,7 @@ import type {
   APIKey,
   CreateAPIKeyRequest,
   UnreadReadCounters,
-  VersionInfo,
+  VersionInfo
 } from './types'
 
 /**
@@ -78,8 +78,8 @@ export class MinifluxClient {
   constructor(options: MinifluxClientOptions) {
     const baseUrl = options.baseUrl.replace(/\/$/, '')
 
-    let headers: Record<string, string> = {
-      'Content-Type': 'application/json',
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json'
     }
 
     if (options.apiKey) {
@@ -102,7 +102,7 @@ export class MinifluxClient {
           fetchError.status,
           fetchError.data?.error_message
         )
-      },
+      }
     })
   }
 
@@ -250,7 +250,7 @@ export class MinifluxClient {
   /**
    * 获取条目列表
    */
-  async getEntries(params?: EntriesRequest): Promise<{ total: number; entries: Entry[] }> {
+  async getEntries(params?: EntriesRequest): Promise<{ total: number, entries: Entry[] }> {
     return this.get('/entries', params)
   }
 
@@ -299,7 +299,7 @@ export class MinifluxClient {
   /**
    * 获取 Feed 条目
    */
-  async getFeedEntries(feedId: number, params?: EntriesRequest): Promise<{ total: number; entries: Entry[] }> {
+  async getFeedEntries(feedId: number, params?: EntriesRequest): Promise<{ total: number, entries: Entry[] }> {
     return this.get(`/feeds/${feedId}/entries`, params)
   }
 
@@ -359,7 +359,7 @@ export class MinifluxClient {
   /**
    * 获取分类条目
    */
-  async getCategoryEntries(categoryId: number, params?: EntriesRequest): Promise<{ total: number; entries: Entry[] }> {
+  async getCategoryEntries(categoryId: number, params?: EntriesRequest): Promise<{ total: number, entries: Entry[] }> {
     return this.get(`/categories/${categoryId}/entries`, params)
   }
 
