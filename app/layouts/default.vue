@@ -2,9 +2,10 @@
 import { authClient } from '~~/lib/auth-client'
 import { computed } from 'vue'
 
-const session = authClient.useSession() 
+const session = authClient.useSession()
 
 const isAdmin = computed(() => session.value.data?.user?.role === 'admin')
+const isPending = computed(() => session.value.isPending)
 
 const handleLogout = async () => {
   await authClient.signOut()
@@ -22,15 +23,25 @@ const handleLogout = async () => {
 
       <template #right>
         <UColorModeButton />
+        <!-- 加载状态 -->
         <UButton
-          v-if="!session.data?.user"
+          v-if="isPending"
+          variant="ghost"
+          size="sm"
+          disabled
+        >
+          <UIcon name="i-svg-spinners-pulse-2" />
+        </UButton>
+        <!-- 未登录 -->
+        <UButton
+          v-else-if="!session.data?.user"
           to="/auth/login"
           variant="ghost"
           size="sm"
         >
           登录
         </UButton>
-
+        <!-- 已登录 -->
         <template v-else>
           <UButton
             v-if="isAdmin"
