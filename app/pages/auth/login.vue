@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive } from 'vue'
+import { ref, reactive, onMounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { authClient } from '~~/lib/auth-client'
 
@@ -9,9 +9,18 @@ useHead({
 
 const router = useRouter()
 
+const isDev = computed(() => import.meta.dev)
+
 const form = reactive({
   email: '',
   password: ''
+})
+
+onMounted(() => {
+  if (isDev.value) {
+    form.email = 'admin@example.com'
+    form.password = 'Admin123!'
+  }
 })
 
 const errors = reactive({
@@ -93,13 +102,21 @@ const handleKeydown = (e: KeyboardEvent) => {
         <p class="mt-2 text-sm text-gray-600 dark:text-gray-400">
           登录您的账户以继续
         </p>
+        <ClientOnly>
+          <div v-if="isDev" class="mt-4">
+            <UBadge color="primary" variant="soft">
+              开发环境 - 测试账号已自动填充
+            </UBadge>
+          </div>
+        </ClientOnly>
       </div>
 
-      <UForm
-        :state="form"
-        class="space-y-6"
-        @submit="handleLogin"
-      >
+      <ClientOnly>
+        <UForm
+          :state="form"
+          class="space-y-6"
+          @submit="handleLogin"
+        >
         <UFormField
           label="邮箱地址"
           name="email"
@@ -181,7 +198,8 @@ const handleKeydown = (e: KeyboardEvent) => {
         >
           {{ isLoading ? '登录中...' : '登录' }}
         </UButton>
-      </UForm>
+        </UForm>
+      </ClientOnly>
 
       <div class="mt-6">
         <div class="relative">

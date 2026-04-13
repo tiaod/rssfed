@@ -26,19 +26,9 @@ export const auth = betterAuth({
     requireEmailVerification: true
   },
 
-  emailVerification: {
-    sendOnSignUp: true,
-    sendOnSignIn: false,
-    expiresIn: 60 * 60
-  },
-
   session: {
     expiresIn: 7 * 24 * 60 * 60,
-    updateAge: 24 * 60 * 60,
-    cookieCache: {
-      strategy: 'jwe',
-      maxAge: 60 * 60
-    }
+    updateAge: 24 * 60 * 60
   },
 
   hooks: {
@@ -68,13 +58,6 @@ export const auth = betterAuth({
     useSecureCookies: process.env.NODE_ENV === 'production',
     disableCSRFCheck: false,
     disableOriginCheck: false
-  },
-
-  rateLimit: {
-    enabled: true,
-    window: 15 * 60,
-    max: 100,
-    storage: 'secondary-storage'
   },
 
   plugins: [

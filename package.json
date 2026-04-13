@@ -8,7 +8,9 @@
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
     "lint": "eslint .",
-    "typecheck": "nuxt typecheck"
+    "typecheck": "nuxt typecheck",
+    "auth:generate": "auth generate --output lib/schema/auth.ts",
+    "create-test-users": "tsx scripts/create-test-users.ts"
   },
   "dependencies": {
     "@better-auth/drizzle-adapter": "^1.6.2",

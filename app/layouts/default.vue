@@ -2,13 +2,12 @@
 import { authClient } from '~~/lib/auth-client'
 import { computed } from 'vue'
 
-const { data: session, isPending, refetch } = authClient.useSession()
+const session = authClient.useSession() 
 
-const isAdmin = computed(() => session.value?.user?.role === 'admin')
+const isAdmin = computed(() => session.value.data?.user?.role === 'admin')
 
 const handleLogout = async () => {
   await authClient.signOut()
-  await refetch()
 }
 </script>
 
@@ -23,9 +22,8 @@ const handleLogout = async () => {
 
       <template #right>
         <UColorModeButton />
-
         <UButton
-          v-if="!session?.user"
+          v-if="!session.data?.user"
           to="/auth/login"
           variant="ghost"
           size="sm"
@@ -46,7 +44,7 @@ const handleLogout = async () => {
             { label: '个人设置', to: '/settings' },
             { label: '退出登录', click: handleLogout, color: 'error' }
           ]">
-            <UAvatar :name="session.user.name" size="sm" />
+            <UAvatar :name="session.data.user.name" size="sm" />
           </UDropdownMenu>
         </template>
       </template>

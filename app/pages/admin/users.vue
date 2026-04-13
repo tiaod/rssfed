@@ -6,7 +6,7 @@ useHead({
   title: '用户管理 - RSSFed'
 })
 
-const { data: session } = authClient.useSession()
+const { data: session } = await authClient.useSession(useFetch)
 const isAdmin = computed(() => session.value?.user?.role === 'admin')
 
 const users = ref<any[]>([])
@@ -56,7 +56,7 @@ const handleUnbanUser = async (userId: string) => {
   }
 }
 
-const handleSetRole = async (userId: string, role: string) => {
+const handleSetRole = async (userId: string, role: 'user' | 'admin') => {
   try {
     await authClient.admin.setRole({ userId, role })
     await fetchUsers()

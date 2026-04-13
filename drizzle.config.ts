@@ -4,8 +4,7 @@ import { defineConfig } from 'drizzle-kit'
 export default defineConfig({
   out: './drizzle',
   schema: [
-    './auth-schema.ts', // 这个是使用better-auth生成的schema，npx auth generate就可以生成。
-    './lib/schema/*.ts'
+    './lib/schema/*.ts',
   ],
   dialect: 'postgresql',
   dbCredentials: {
