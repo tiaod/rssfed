@@ -16,7 +16,8 @@ export default defineNuxtConfig({
   },
 
   routeRules: {
-    '/': { prerender: true }
+    '/': { prerender: true },
+    '/@vite/**': { ssr: false }
   },
 
   compatibilityDate: '2025-01-15',
