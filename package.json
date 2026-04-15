@@ -30,7 +30,6 @@
     "tailwindcss": "^4.2.1"
   },
   "devDependencies": {
-    "@iconify-json/svg-spinners": "^1.2.4",
     "@nuxt/eslint": "^1.15.2",
     "@types/pg": "^8.18.0",
     "drizzle-kit": "^0.31.10",

@@ -1,6 +1,22 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, watch, h, resolveComponent } from 'vue'
 import { authClient } from '~~/lib/auth-client'
+import type { TableColumn } from '@nuxt/ui'
+
+// Nuxt UI 组件自动注册，在渲染函数中使用需要通过 resolveComponent 获取
+const UAvatar = resolveComponent('UAvatar')
+const UButton = resolveComponent('UButton')
+const UBadge = resolveComponent('UBadge')
+const UDropdownMenu = resolveComponent('UDropdownMenu')
+
+interface User {
+  id: string
+  name: string
+  email: string
+  role?: string
+  banned?: boolean | null
+  createdAt: Date | string
+}
 
 useHead({
   title: '用户管理 - RSSFed'
@@ -9,11 +25,181 @@ useHead({
 const { data: session } = await authClient.useSession(useFetch)
 const isAdmin = computed(() => session.value?.user?.role === 'admin')
 
-const users = ref<any[]>([])
+const users = ref<User[]>([])
 const isLoading = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
+
+// 定义用户列表列
+const columns: TableColumn<User>[] = [
+  {
+    accessorKey: 'name',
+    header: ({ column }) => {
+      const isSorted = column.getIsSorted()
+      return h(UButton, {
+        color: 'neutral',
+        variant: 'ghost',
+        label: '用户',
+        icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
+        class: '-mx-2.5',
+        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+      })
+    },
+    cell: ({ row }) => {
+      const user = row.original
+      return h('div', { class: 'flex items-center gap-3' }, [
+        h(UAvatar, { name: user.name, size: 'sm' }),
+        h('span', { class: 'font-medium' }, user.name)
+      ])
+    },
+    meta: {
+      class: {
+        th: 'w-[200px]'
+      }
+    }
+  },
+  {
+    accessorKey: 'email',
+    header: ({ column }) => {
+      const isSorted = column.getIsSorted()
+      return h(UButton, {
+        color: 'neutral',
+        variant: 'ghost',
+        label: '邮箱',
+        icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
+        class: '-mx-2.5',
+        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+      })
+    },
+    cell: ({ row }) => {
+      return h('span', { class: 'text-sm text-muted' }, row.original.email)
+    },
+    meta: {
+      class: {
+        th: 'w-[240px]'
+      }
+    }
+  },
+  {
+    accessorKey: 'role',
+    header: ({ column }) => {
+      const isSorted = column.getIsSorted()
+      return h(UButton, {
+        color: 'neutral',
+        variant: 'ghost',
+        label: '角色',
+        icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
+        class: '-mx-2.5',
+        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+      })
+    },
+    cell: ({ row }) => {
+      const user = row.original
+      const items = [
+        { label: '普通用户', onSelect: () => handleSetRole(user.id, 'user'), checked: user.role === 'user' },
+        { label: '管理员', onSelect: () => handleSetRole(user.id, 'admin'), checked: user.role === 'admin' }
+      ]
+      return h(UDropdownMenu, { items }, () =>
+        h(UButton, {
+          color: user.role === 'admin' ? 'primary' : 'neutral',
+          variant: 'soft',
+          size: 'sm'
+        }, () => user.role === 'admin' ? '管理员' : '普通用户')
+      )
+    },
+    meta: {
+      class: {
+        th: 'w-[100px]'
+      }
+    }
+  },
+  {
+    accessorKey: 'banned',
+    header: ({ column }) => {
+      const isSorted = column.getIsSorted()
+      return h(UButton, {
+        color: 'neutral',
+        variant: 'ghost',
+        label: '状态',
+        icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
+        class: '-mx-2.5',
+        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+      })
+    },
+    cell: ({ row }) => {
+      const user = row.original
+      return h(UBadge, {
+        color: user.banned ? 'error' : 'success',
+        variant: 'soft'
+      }, () => user.banned ? '已禁用' : '正常')
+    },
+    meta: {
+      class: {
+        th: 'w-[100px]'
+      }
+    }
+  },
+  {
+    accessorKey: 'createdAt',
+    header: ({ column }) => {
+      const isSorted = column.getIsSorted()
+      return h(UButton, {
+        color: 'neutral',
+        variant: 'ghost',
+        label: '注册时间',
+        icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
+        class: '-mx-2.5',
+        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+      })
+    },
+    cell: ({ row }) => {
+      const date = new Date(row.original.createdAt).toLocaleDateString('zh-CN')
+      return h('span', { class: 'text-sm text-muted' }, date)
+    },
+    meta: {
+      class: {
+        th: 'w-[120px]'
+      }
+    }
+  },
+  {
+    id: 'actions',
+    enableHiding: false,
+    header: () => h('div', { class: 'text-right' }, '操作'),
+    cell: ({ row }) => {
+      const user = row.original
+      const items = [
+        {
+          label: user.banned ? '解禁用户' : '禁用用户',
+          onSelect: () => user.banned ? handleUnbanUser(user.id) : handleBanUser(user.id),
+          color: user.banned ? 'success' : 'warning'
+        },
+        {
+          label: '删除用户',
+          onSelect: () => handleDeleteUser(user.id),
+          color: 'error'
+        }
+      ]
+      return h('div', { class: 'text-right' },
+        h(UDropdownMenu, { items }, () =>
+          h(UButton, {
+            size: 'sm',
+            variant: 'ghost',
+            icon: 'i-lucide-more-vertical'
+          })
+        )
+      )
+    },
+    meta: {
+      class: {
+        th: 'text-right w-[100px]',
+        td: 'text-right'
+      }
+    },
+    enableSorting: false
+  }
+]
 
 const fetchUsers = async () => {
   if (!isAdmin.value) return
@@ -36,6 +222,11 @@ const fetchUsers = async () => {
   } finally {
     isLoading.value = false
   }
+}
+
+const handlePageChange = (newPage: number) => {
+  currentPage.value = newPage
+  fetchUsers()
 }
 
 const handleBanUser = async (userId: string) => {
@@ -90,106 +281,36 @@ watch(isAdmin, (newVal) => {
 </script>
 
 <template>
-  <div class="container mx-auto px-4 py-8">
+  <UContainer class="py-8">
     <div class="flex items-center justify-between mb-8">
       <h1 class="text-3xl font-bold">用户管理</h1>
     </div>
 
     <ClientOnly>
       <div v-if="!isAdmin" class="text-center py-12">
-        <UIcon name="i-lucide-shield-alert" class="w-16 h-16 mx-auto text-gray-400 mb-4" />
-        <p class="text-lg text-gray-600 dark:text-gray-400">您没有权限访问此页面</p>
+        <UIcon name="i-lucide-shield-alert" class="w-16 h-16 mx-auto text-muted mb-4" />
+        <p class="text-lg text-muted">您没有权限访问此页面</p>
       </div>
 
       <div v-else>
-        <UCard>
-          <div v-if="isLoading" class="text-center py-8">
-            <UIcon name="i-lucide-loader-2" class="w-8 h-8 animate-spin mx-auto" />
-          </div>
+        <UTable
+          :data="users"
+          :columns="columns"
+          :loading="isLoading"
+        />
 
-          <div v-else-if="users.length === 0" class="text-center py-8">
-            <p class="text-gray-600 dark:text-gray-400">暂无用户数据</p>
-          </div>
-
-          <table v-else class="w-full">
-            <thead>
-              <tr class="border-b border-gray-200 dark:border-gray-700">
-                <th class="text-left py-3 px-4">用户</th>
-                <th class="text-left py-3 px-4">邮箱</th>
-                <th class="text-left py-3 px-4">角色</th>
-                <th class="text-left py-3 px-4">状态</th>
-                <th class="text-left py-3 px-4">注册时间</th>
-                <th class="text-right py-3 px-4">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="user in users" :key="user.id" class="border-b border-gray-100 dark:border-gray-800">
-                <td class="py-3 px-4">
-                  <div class="flex items-center gap-3">
-                    <UAvatar :name="user.name" size="sm" />
-                    <span class="font-medium">{{ user.name }}</span>
-                  </div>
-                </td>
-                <td class="py-3 px-4 text-sm text-gray-600 dark:text-gray-400">
-                  {{ user.email }}
-                </td>
-                <td class="py-3 px-4">
-                  <UDropdownMenu :items="[
-                    { label: '普通用户', click: () => handleSetRole(user.id, 'user'), checked: user.role === 'user' },
-                    { label: '管理员', click: () => handleSetRole(user.id, 'admin'), checked: user.role === 'admin' }
-                  ]">
-                    <UButton
-                      :color="user.role === 'admin' ? 'primary' : 'neutral'"
-                      variant="soft"
-                      size="sm"
-                    >
-                      {{ user.role === 'admin' ? '管理员' : '普通用户' }}
-                    </UButton>
-                  </UDropdownMenu>
-                </td>
-                <td class="py-3 px-4">
-                  <UBadge :color="user.banned ? 'error' : 'success'" variant="soft">
-                    {{ user.banned ? '已禁用' : '正常' }}
-                  </UBadge>
-                </td>
-                <td class="py-3 px-4 text-sm text-gray-600 dark:text-gray-400">
-                  {{ new Date(user.createdAt).toLocaleDateString('zh-CN') }}
-                </td>
-                <td class="py-3 px-4 text-right">
-                  <UDropdownMenu :items="[
-                    { label: user.banned ? '解禁用户' : '禁用用户', click: () => user.banned ? handleUnbanUser(user.id) : handleBanUser(user.id), color: user.banned ? 'success' : 'warning' },
-                    { label: '删除用户', click: () => handleDeleteUser(user.id), color: 'error' }
-                  ]">
-                    <UButton size="sm" variant="ghost" icon="i-lucide-more-vertical" />
-                  </UDropdownMenu>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-
-          <div v-if="total > pageSize" class="flex items-center justify-between mt-6 pt-6 border-t border-gray-200 dark:border-gray-700">
-            <p class="text-sm text-gray-600 dark:text-gray-400">
-              共 {{ total }} 条记录，第 {{ currentPage }} / {{ Math.ceil(total / pageSize) }} 页
-            </p>
-            <div class="flex gap-2">
-              <UButton
-                size="sm"
-                :disabled="currentPage <= 1"
-                @click="currentPage--; fetchUsers()"
-              >
-                上一页
-              </UButton>
-              <UButton
-                size="sm"
-                :disabled="currentPage >= Math.ceil(total / pageSize)"
-                @click="currentPage++; fetchUsers()"
-              >
-                下一页
-              </UButton>
-            </div>
-          </div>
-        </UCard>
+        <div v-if="total > pageSize" class="flex items-center justify-between p-4 mt-4 border-t border-muted">
+          <p class="text-sm text-muted">
+            共 {{ total }} 条记录，第 {{ currentPage }} / {{ Math.ceil(total / pageSize) }} 页
+          </p>
+          <UPagination
+            v-model:page="currentPage"
+            :total="total"
+            :items-per-page="pageSize"
+            @update:page="handlePageChange"
+          />
+        </div>
       </div>
     </ClientOnly>
-  </div>
+  </UContainer>
 </template>
