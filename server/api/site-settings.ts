@@ -1,7 +1,6 @@
 import { db } from '~/lib/db'
 import { siteSettings } from '~/lib/schema/site-settings'
 import { eq } from 'drizzle-orm'
-import { auth } from '~/lib/auth'
 
 export default defineEventHandler(async (event) => {
   // GET: 获取网站设置（公开访问）
@@ -19,11 +18,7 @@ export default defineEventHandler(async (event) => {
 
   // PUT: 更新网站设置（需要管理员权限）
   if (event.method === 'PUT') {
-    const session = await auth.api.getSession({
-      headers: event.headers
-    })
-
-    if (!session?.user || session.user.role !== 'admin') {
+    if (!event.context.isAuthenticated || event.context.user?.role !== 'admin') {
       throw createError({
         statusCode: 403,
         statusMessage: 'Forbidden'
