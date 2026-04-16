@@ -1,5 +1,5 @@
 <script setup>
-import { authClient } from '~~/lib/auth-client'
+import { authClient } from '~/lib/auth-client'
 import { computed } from 'vue'
 
 const session = authClient.useSession()

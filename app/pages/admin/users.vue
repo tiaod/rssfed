@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, h, resolveComponent } from 'vue'
-import { authClient } from '~~/lib/auth-client'
+import { authClient } from '~/lib/auth-client'
 import type { TableColumn } from '@nuxt/ui'
 
 const UAvatar = resolveComponent('UAvatar')

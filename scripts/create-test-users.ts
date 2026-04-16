@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { auth } from '../lib/auth'
+import { auth } from '../app/lib/auth'
 
 interface TestUser {
   email: string

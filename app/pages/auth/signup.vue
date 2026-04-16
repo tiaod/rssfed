@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed } from 'vue'
 import { useRouter } from 'vue-router'
-import { authClient } from '~~/lib/auth-client'
+import { authClient } from '~/lib/auth-client'
 
 useHead({
   title: '注册 - RSSFed'
