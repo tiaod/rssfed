@@ -3,7 +3,6 @@ import { ref, computed, onMounted, watch, h, resolveComponent } from 'vue'
 import { authClient } from '~~/lib/auth-client'
 import type { TableColumn } from '@nuxt/ui'
 
-// Nuxt UI 组件自动注册，在渲染函数中使用需要通过 resolveComponent 获取
 const UAvatar = resolveComponent('UAvatar')
 const UButton = resolveComponent('UButton')
 const UBadge = resolveComponent('UBadge')
@@ -30,8 +29,9 @@ const isLoading = ref(false)
 const currentPage = ref(1)
 const pageSize = ref(20)
 const total = ref(0)
+const sortBy = ref<string>('createdAt')
+const sortDirection = ref<'asc' | 'desc'>('desc')
 
-// 定义用户列表列
 const columns: TableColumn<User>[] = [
   {
     accessorKey: 'name',
@@ -43,7 +43,13 @@ const columns: TableColumn<User>[] = [
         label: '用户',
         icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
         class: '-mx-2.5',
-        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+        onClick: () => {
+          column.toggleSorting(column.getIsSorted() === 'asc')
+          sortBy.value = 'name'
+          sortDirection.value = (column.getIsSorted() || 'asc') as 'asc' | 'desc'
+          currentPage.value = 1
+          fetchUsers()
+        }
       })
     },
     cell: ({ row }) => {
@@ -69,7 +75,13 @@ const columns: TableColumn<User>[] = [
         label: '邮箱',
         icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
         class: '-mx-2.5',
-        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+        onClick: () => {
+          column.toggleSorting(column.getIsSorted() === 'asc')
+          sortBy.value = 'email'
+          sortDirection.value = (column.getIsSorted() || 'asc') as 'asc' | 'desc'
+          currentPage.value = 1
+          fetchUsers()
+        }
       })
     },
     cell: ({ row }) => {
@@ -91,7 +103,13 @@ const columns: TableColumn<User>[] = [
         label: '角色',
         icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
         class: '-mx-2.5',
-        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+        onClick: () => {
+          column.toggleSorting(column.getIsSorted() === 'asc')
+          sortBy.value = 'role'
+          sortDirection.value = (column.getIsSorted() || 'asc') as 'asc' | 'desc'
+          currentPage.value = 1
+          fetchUsers()
+        }
       })
     },
     cell: ({ row }) => {
@@ -124,7 +142,13 @@ const columns: TableColumn<User>[] = [
         label: '状态',
         icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
         class: '-mx-2.5',
-        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+        onClick: () => {
+          column.toggleSorting(column.getIsSorted() === 'asc')
+          sortBy.value = 'banned'
+          sortDirection.value = (column.getIsSorted() || 'asc') as 'asc' | 'desc'
+          currentPage.value = 1
+          fetchUsers()
+        }
       })
     },
     cell: ({ row }) => {
@@ -150,7 +174,13 @@ const columns: TableColumn<User>[] = [
         label: '注册时间',
         icon: isSorted ? (isSorted === 'asc' ? 'i-lucide-arrow-up-narrow-wide' : 'i-lucide-arrow-down-wide-narrow') : 'i-lucide-arrow-up-down',
         class: '-mx-2.5',
-        onClick: () => column.toggleSorting(column.getIsSorted() === 'asc')
+        onClick: () => {
+          column.toggleSorting(column.getIsSorted() === 'asc')
+          sortBy.value = 'createdAt'
+          sortDirection.value = (column.getIsSorted() || 'asc') as 'asc' | 'desc'
+          currentPage.value = 1
+          fetchUsers()
+        }
       })
     },
     cell: ({ row }) => {
@@ -209,7 +239,9 @@ const fetchUsers = async () => {
     const result = await authClient.admin.listUsers({
       query: {
         limit: pageSize.value,
-        offset: (currentPage.value - 1) * pageSize.value
+        offset: (currentPage.value - 1) * pageSize.value,
+        sortBy: sortBy.value,
+        sortDirection: sortDirection.value
       }
     })
 
