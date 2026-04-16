@@ -168,6 +168,7 @@ export interface User {
   openid_connect_id: string
   last_login_at: string
   two_factor_auth_enabled: boolean
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   extra: Record<string, any>
 }
 
@@ -190,6 +191,7 @@ export interface UpdateUserRequest {
   show_reading_time?: boolean
   entry_swipe?: boolean
   stylesheet?: string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   extra?: Record<string, any>
 }
 

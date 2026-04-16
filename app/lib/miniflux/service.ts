@@ -67,7 +67,6 @@ export class MinifluxAccountService {
         createdAt: new Date(),
         updatedAt: new Date()
       })
-
     } catch (error) {
       if (minifluxUser?.id) {
         try {

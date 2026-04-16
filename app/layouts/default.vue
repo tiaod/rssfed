@@ -51,11 +51,16 @@ const handleLogout = async () => {
           >
             管理后台
           </UButton>
-          <UDropdownMenu :items="[
-            { label: '个人设置', to: '/settings' },
-            { label: '退出登录', click: handleLogout, color: 'error' }
-          ]">
-            <UAvatar :name="session.data.user.name" size="sm" />
+          <UDropdownMenu
+            :items="[
+              { label: '个人设置', to: '/settings' },
+              { label: '退出登录', click: handleLogout, color: 'error' }
+            ]"
+          >
+            <UAvatar
+              :name="session.data.user.name"
+              size="sm"
+            />
           </UDropdownMenu>
         </template>
       </template>

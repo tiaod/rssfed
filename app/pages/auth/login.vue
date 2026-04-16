@@ -103,8 +103,14 @@ const handleKeydown = (e: KeyboardEvent) => {
           登录您的账户以继续
         </p>
         <ClientOnly>
-          <div v-if="isDev" class="mt-4">
-            <UBadge color="primary" variant="soft">
+          <div
+            v-if="isDev"
+            class="mt-4"
+          >
+            <UBadge
+              color="primary"
+              variant="soft"
+            >
               开发环境 - 测试账号已自动填充
             </UBadge>
           </div>
@@ -117,87 +123,87 @@ const handleKeydown = (e: KeyboardEvent) => {
           class="space-y-6"
           @submit="handleLogin"
         >
-        <UFormField
-          label="邮箱地址"
-          name="email"
-          :error="errors.email"
-          required
-        >
-          <UInput
-            v-model="form.email"
-            type="email"
-            placeholder="your@email.com"
-            icon="i-lucide-mail"
-            size="lg"
-            class="w-full"
-            :disabled="isLoading"
-            @keydown="handleKeydown"
-          />
-        </UFormField>
-
-        <UFormField
-          label="密码"
-          name="password"
-          :error="errors.password"
-          required
-        >
-          <UInput
-            v-model="form.password"
-            :type="showPassword ? 'text' : 'password'"
-            placeholder="请输入密码"
-            icon="i-lucide-lock"
-            size="lg"
-            class="w-full"
-            :disabled="isLoading"
-            @keydown="handleKeydown"
+          <UFormField
+            label="邮箱地址"
+            name="email"
+            :error="errors.email"
+            required
           >
-            <template #trailing>
-              <UButton
-                color="neutral"
-                variant="link"
-                size="sm"
-                :icon="showPassword ? 'i-lucide-eye-off' : 'i-lucide-eye'"
-                @click="showPassword = !showPassword"
-              />
-            </template>
-          </UInput>
-        </UFormField>
+            <UInput
+              v-model="form.email"
+              type="email"
+              placeholder="your@email.com"
+              icon="i-lucide-mail"
+              size="lg"
+              class="w-full"
+              :disabled="isLoading"
+              @keydown="handleKeydown"
+            />
+          </UFormField>
 
-        <div class="flex items-center justify-between">
-          <UCheckbox
-            label="记住我"
-            name="remember"
+          <UFormField
+            label="密码"
+            name="password"
+            :error="errors.password"
+            required
+          >
+            <UInput
+              v-model="form.password"
+              :type="showPassword ? 'text' : 'password'"
+              placeholder="请输入密码"
+              icon="i-lucide-lock"
+              size="lg"
+              class="w-full"
+              :disabled="isLoading"
+              @keydown="handleKeydown"
+            >
+              <template #trailing>
+                <UButton
+                  color="neutral"
+                  variant="link"
+                  size="sm"
+                  :icon="showPassword ? 'i-lucide-eye-off' : 'i-lucide-eye'"
+                  @click="showPassword = !showPassword"
+                />
+              </template>
+            </UInput>
+          </UFormField>
+
+          <div class="flex items-center justify-between">
+            <UCheckbox
+              label="记住我"
+              name="remember"
+            />
+            <UButton
+              to="/auth/forgot-password"
+              variant="link"
+              color="primary"
+              size="sm"
+              class="p-0"
+            >
+              忘记密码？
+            </UButton>
+          </div>
+
+          <UAlert
+            v-if="errors.general"
+            color="error"
+            variant="soft"
+            icon="i-lucide-circle-alert"
+            :title="errors.general"
+            class="mb-4"
           />
+
           <UButton
-            to="/auth/forgot-password"
-            variant="link"
+            type="submit"
             color="primary"
-            size="sm"
-            class="p-0"
+            size="lg"
+            block
+            :loading="isLoading"
+            :disabled="isLoading"
           >
-            忘记密码？
+            {{ isLoading ? '登录中...' : '登录' }}
           </UButton>
-        </div>
-
-        <UAlert
-          v-if="errors.general"
-          color="error"
-          variant="soft"
-          icon="i-lucide-circle-alert"
-          :title="errors.general"
-          class="mb-4"
-        />
-
-        <UButton
-          type="submit"
-          color="primary"
-          size="lg"
-          block
-          :loading="isLoading"
-          :disabled="isLoading"
-        >
-          {{ isLoading ? '登录中...' : '登录' }}
-        </UButton>
         </UForm>
       </ClientOnly>
 

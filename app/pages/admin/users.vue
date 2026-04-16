@@ -328,17 +328,30 @@ watch(isAdmin, (newVal) => {
 <template>
   <UContainer class="py-8">
     <div class="flex items-center justify-between mb-8">
-      <h1 class="text-3xl font-bold">用户管理</h1>
+      <h1 class="text-3xl font-bold">
+        用户管理
+      </h1>
     </div>
 
     <ClientOnly>
-      <div v-if="!isAdmin" class="text-center py-12">
-        <UIcon name="i-lucide-shield-alert" class="w-16 h-16 mx-auto text-muted mb-4" />
-        <p class="text-lg text-muted">您没有权限访问此页面</p>
+      <div
+        v-if="!isAdmin"
+        class="text-center py-12"
+      >
+        <UIcon
+          name="i-lucide-shield-alert"
+          class="w-16 h-16 mx-auto text-muted mb-4"
+        />
+        <p class="text-lg text-muted">
+          您没有权限访问此页面
+        </p>
       </div>
 
       <div v-else>
-        <div v-if="isLoading" class="space-y-4">
+        <div
+          v-if="isLoading"
+          class="space-y-4"
+        >
           <!-- 表头骨架 -->
           <div class="flex items-center gap-4 p-4 border-b border-muted">
             <USkeleton class="h-8 w-[200px]" />
@@ -349,7 +362,11 @@ watch(isAdmin, (newVal) => {
             <USkeleton class="h-8 w-[100px] ml-auto" />
           </div>
           <!-- 表格行骨架（显示 10 行） -->
-          <div v-for="i in 10" :key="i" class="flex items-center gap-4 p-4 border-b border-muted/50">
+          <div
+            v-for="i in 10"
+            :key="i"
+            class="flex items-center gap-4 p-4 border-b border-muted/50"
+          >
             <USkeleton class="h-10 w-[200px]" />
             <USkeleton class="h-6 w-[240px]" />
             <USkeleton class="h-6 w-[100px]" />
@@ -360,12 +377,15 @@ watch(isAdmin, (newVal) => {
         </div>
         <template v-else>
           <UTable
+            v-model:sorting="sorting"
             :data="users"
             :columns="columns"
-            v-model:sorting="sorting"
           />
 
-          <div v-if="total > pageSize" class="flex items-center justify-between p-4 mt-4 border-t border-muted">
+          <div
+            v-if="total > pageSize"
+            class="flex items-center justify-between p-4 mt-4 border-t border-muted"
+          >
             <p class="text-sm text-muted">
               共 {{ total }} 条记录，第 {{ currentPage }} / {{ Math.ceil(total / pageSize) }} 页
             </p>

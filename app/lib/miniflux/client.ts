@@ -109,6 +109,7 @@ export class MinifluxClient {
   /**
    * 发送 HTTP GET 请求
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async get<T>(endpoint: string, params?: Record<string, any>): Promise<T> {
     return this.fetch(endpoint, { method: 'GET', params })
   }
@@ -116,6 +117,7 @@ export class MinifluxClient {
   /**
    * 发送 HTTP POST 请求
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async post<T>(endpoint: string, body?: any): Promise<T> {
     return this.fetch(endpoint, { method: 'POST', body })
   }
@@ -123,6 +125,7 @@ export class MinifluxClient {
   /**
    * 发送 HTTP PUT 请求
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private async put<T>(endpoint: string, body?: any): Promise<T> {
     return this.fetch(endpoint, { method: 'PUT', body })
   }
@@ -463,6 +466,7 @@ export class MinifluxClient {
   /**
    * 获取集成状态
    */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   async getIntegrationsStatus(): Promise<Record<string, any>> {
     return this.get('/integrations')
   }

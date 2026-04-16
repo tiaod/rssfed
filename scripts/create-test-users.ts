@@ -19,8 +19,8 @@ function generateTestUsers(): TestUser[] {
       email: 'admin@example.com',
       name: '管理员',
       password: 'Admin123!',
-      role: 'admin',
-    },
+      role: 'admin'
+    }
   ]
 
   // 生成 N 个测试用户
@@ -29,7 +29,7 @@ function generateTestUsers(): TestUser[] {
       email: `user${i}@test.com`,
       name: `测试用户 ${i}`,
       password: 'Password123!',
-      role: 'user',
+      role: 'user'
     })
   }
 
@@ -52,8 +52,8 @@ async function main() {
           name: testUser.name,
           password: testUser.password,
           emailVerified: true,
-          role: testUser.role || 'user',
-        },
+          role: testUser.role || 'user'
+        }
       })
 
       if (result.error) {

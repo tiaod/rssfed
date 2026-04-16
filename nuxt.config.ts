@@ -30,6 +30,13 @@ export default defineNuxtConfig({
       }
     }
   },
+  vite: {
+    optimizeDeps: {
+      include: [
+        'better-auth/vue'
+      ]
+    }
+  },
 
   eslint: {
     config: {
@@ -37,13 +44,6 @@ export default defineNuxtConfig({
         commaDangle: 'never',
         braceStyle: '1tbs'
       }
-    }
-  },
-  vite: {
-    optimizeDeps: {
-      include: [
-        'better-auth/vue',
-      ]
     }
   }
 })
