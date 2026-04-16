@@ -7,6 +7,7 @@ const UAvatar = resolveComponent('UAvatar')
 const UButton = resolveComponent('UButton')
 const UBadge = resolveComponent('UBadge')
 const UDropdownMenu = resolveComponent('UDropdownMenu')
+const USkeleton = resolveComponent('USkeleton')
 
 interface User {
   id: string
@@ -31,6 +32,12 @@ const pageSize = ref(20)
 const total = ref(0)
 const sortBy = ref<string>('createdAt')
 const sortDirection = ref<'asc' | 'desc'>('desc')
+
+// 排序状态，用于 Nuxt UI Table 显示
+const sorting = ref([{
+  id: 'createdAt',
+  desc: true
+}])
 
 const columns: TableColumn<User>[] = [
   {
@@ -184,12 +191,18 @@ const columns: TableColumn<User>[] = [
       })
     },
     cell: ({ row }) => {
-      const date = new Date(row.original.createdAt).toLocaleDateString('zh-CN')
+      const date = new Date(row.original.createdAt).toLocaleString('zh-CN', {
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      })
       return h('span', { class: 'text-sm text-muted' }, date)
     },
     meta: {
       class: {
-        th: 'w-[120px]'
+        th: 'w-[180px]'
       }
     }
   },
@@ -325,23 +338,45 @@ watch(isAdmin, (newVal) => {
       </div>
 
       <div v-else>
-        <UTable
-          :data="users"
-          :columns="columns"
-          :loading="isLoading"
-        />
-
-        <div v-if="total > pageSize" class="flex items-center justify-between p-4 mt-4 border-t border-muted">
-          <p class="text-sm text-muted">
-            共 {{ total }} 条记录，第 {{ currentPage }} / {{ Math.ceil(total / pageSize) }} 页
-          </p>
-          <UPagination
-            v-model:page="currentPage"
-            :total="total"
-            :items-per-page="pageSize"
-            @update:page="handlePageChange"
-          />
+        <div v-if="isLoading" class="space-y-4">
+          <!-- 表头骨架 -->
+          <div class="flex items-center gap-4 p-4 border-b border-muted">
+            <USkeleton class="h-8 w-[200px]" />
+            <USkeleton class="h-8 w-[240px]" />
+            <USkeleton class="h-8 w-[100px]" />
+            <USkeleton class="h-8 w-[100px]" />
+            <USkeleton class="h-8 w-[180px]" />
+            <USkeleton class="h-8 w-[100px] ml-auto" />
+          </div>
+          <!-- 表格行骨架（显示 10 行） -->
+          <div v-for="i in 10" :key="i" class="flex items-center gap-4 p-4 border-b border-muted/50">
+            <USkeleton class="h-10 w-[200px]" />
+            <USkeleton class="h-6 w-[240px]" />
+            <USkeleton class="h-6 w-[100px]" />
+            <USkeleton class="h-6 w-[100px]" />
+            <USkeleton class="h-6 w-[180px]" />
+            <USkeleton class="h-8 w-[60px] ml-auto" />
+          </div>
         </div>
+        <template v-else>
+          <UTable
+            :data="users"
+            :columns="columns"
+            v-model:sorting="sorting"
+          />
+
+          <div v-if="total > pageSize" class="flex items-center justify-between p-4 mt-4 border-t border-muted">
+            <p class="text-sm text-muted">
+              共 {{ total }} 条记录，第 {{ currentPage }} / {{ Math.ceil(total / pageSize) }} 页
+            </p>
+            <UPagination
+              v-model:page="currentPage"
+              :total="total"
+              :items-per-page="pageSize"
+              @update:page="handlePageChange"
+            />
+          </div>
+        </template>
       </div>
     </ClientOnly>
   </UContainer>
