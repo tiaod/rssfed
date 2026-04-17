@@ -10,9 +10,11 @@
     "lint": "eslint .",
     "typecheck": "nuxt typecheck",
     "auth:generate": "auth generate --output lib/schema/auth.ts",
+    "db:push": "drizzle-kit push",
     "create-test-users": "tsx scripts/create-test-users.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1030.0",
     "@better-auth/drizzle-adapter": "^1.6.2",
     "@better-auth/redis-storage": "^1.6.2",
     "@electric-sql/pglite": "^0.3.15",
