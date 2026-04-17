@@ -24,3 +24,7 @@ logs
 !.env.example
 
 local.db
+
+# Test coverage
+coverage
+*.lcov

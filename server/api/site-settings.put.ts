@@ -1,6 +1,5 @@
 import { db } from '~/lib/db'
 import { siteSettings } from '~/lib/schema/site-settings'
-import { auth } from '~/lib/auth'
 
 export default defineEventHandler(async (event) => {
   // 验证管理员权限

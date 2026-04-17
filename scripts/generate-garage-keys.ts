@@ -35,7 +35,7 @@ async function main() {
   console.log('✅ Done! Keys have been appended to .env')
 }
 
-main().catch(err => {
+main().catch((err) => {
   console.error('❌ Error:', err)
   process.exit(1)
 })
