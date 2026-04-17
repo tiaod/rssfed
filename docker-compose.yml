@@ -40,7 +40,23 @@ services:
       - db
     restart: always
 
+  garage:
+    image: dxflrs/garage:v2.3.0
+    command: /garage server --single-node --default-bucket
+    ports:
+      - "3900:3900"
+    environment:
+      - GARAGE__RPC_SECRET=${GARAGE_RPC_SECRET}
+      - GARAGE__ADMIN__ADMIN_TOKEN=${GARAGE_ADMIN_TOKEN}
+      - GARAGE_DEFAULT_ACCESS_KEY=${GARAGE_DEFAULT_ACCESS_KEY}
+      - GARAGE_DEFAULT_SECRET_KEY=${GARAGE_DEFAULT_SECRET_KEY}
+      - GARAGE_DEFAULT_BUCKET=${GARAGE_DEFAULT_BUCKET:-rssfed}
+    volumes:
+      - garage-data:/var/lib/garage
+    restart: always
+
 volumes:
   rssfed-db:
   rssfed-redis:
   rssfed-pgadmin:
+  garage-data:
