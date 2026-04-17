@@ -9,19 +9,21 @@ export interface StorageAdapter {
   /**
    * 写入文件
    * @param content 文件内容
-   * @param path 相对存储根的路径
+   * @param path 建议的存储路径（有些适配器如 SeaweedFS 会自己分配）
+   * @param contentType MIME 类型
+   * @returns 实际存储路径/fid，如果没变就是输入的 path
    */
-  write(content: Buffer, path: string, contentType?: string): Promise<void>
+  write(content: Buffer, path: string, contentType?: string): Promise<string>
 
   /**
    * 读取文件
-   * @param path 相对存储根的路径
+   * @param path 存储路径/fid
    */
   read(path: string): Promise<Buffer>
 
   /**
    * 删除文件
-   * @param path 相对存储根的路径
+   * @param path 存储路径/fid
    */
   delete(path: string): Promise<void>
 
@@ -55,11 +57,12 @@ export class LocalStorageAdapter implements StorageAdapter {
     return fullPath
   }
 
-  async write(content: Buffer, relativePath: string): Promise<void> {
+  async write(content: Buffer, relativePath: string): Promise<string> {
     const fullPath = this.getFullPath(relativePath)
     const dir = path.dirname(fullPath)
     await fs.mkdir(dir, { recursive: true })
     await fs.writeFile(fullPath, content)
+    return relativePath
   }
 
   async read(relativePath: string): Promise<Buffer> {
@@ -123,7 +126,7 @@ export class S3StorageAdapter implements StorageAdapter {
     this.pathPrefix = options.pathPrefix ?? ''
   }
 
-  async write(content: Buffer, key: string, contentType?: string): Promise<void> {
+  async write(content: Buffer, key: string, contentType?: string): Promise<string> {
     const fullKey = this.pathPrefix ? `${this.pathPrefix}/${key}` : key
     await this.client.send(new PutObjectCommand({
       Bucket: this.bucket,
@@ -131,6 +134,7 @@ export class S3StorageAdapter implements StorageAdapter {
       Body: content,
       ContentType: contentType || 'application/octet-stream'
     }))
+    return fullKey
   }
 
   async read(key: string): Promise<Buffer> {

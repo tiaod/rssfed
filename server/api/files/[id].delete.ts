@@ -3,7 +3,6 @@ import { db } from '~/lib/db'
 import { files } from '~/lib/schema/files'
 import { storage } from '~/lib/storage'
 import { eq } from 'drizzle-orm'
-import { auth } from '~/lib/auth'
 
 export default defineEventHandler(async (event) => {
   const fileId = getRouterParam(event, 'id')
@@ -11,11 +10,9 @@ export default defineEventHandler(async (event) => {
     throw createError({ statusCode: 400, message: '缺少文件 ID' })
   }
 
-  const session = await auth.api.getSession({
-    headers: event.headers
-  })
+  const { user } = event.context
 
-  if (!session) {
+  if (!user) {
     throw createError({ statusCode: 401, message: '需要登录' })
   }
 
@@ -30,7 +27,7 @@ export default defineEventHandler(async (event) => {
   }
 
   // 权限检查：只有所有者可以删除
-  if (fileRecord.uploadedBy !== session.user.id) {
+  if (fileRecord.uploadedBy !== user.id) {
     throw createError({ statusCode: 403, message: '无权限删除此文件' })
   }
 

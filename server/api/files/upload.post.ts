@@ -2,15 +2,12 @@ import { createError } from 'h3'
 import { db } from '~/lib/db'
 import { files } from '~/lib/schema/files'
 import { storage, generateUniqueFileName, getUserFilePath } from '~/lib/storage'
-import { auth } from '~/lib/auth'
 
 export default defineEventHandler(async (event) => {
   // 验证用户登录
-  const session = await auth.api.getSession({
-    headers: event.headers
-  })
+  const { user } = event.context
 
-  if (!session) {
+  if (!user) {
     throw createError({ statusCode: 401, message: '需要登录才能上传' })
   }
 
@@ -29,13 +26,14 @@ export default defineEventHandler(async (event) => {
   const titleField = formData.find(f => f.name === 'title')
   const title = titleField?.data?.toString('utf-8')
 
-  // 生成文件名和存储路径
+  // 生成文件名和建议存储路径
   const uniqueFilename = generateUniqueFileName(fileField.filename)
-  const storagePath = getUserFilePath(session.user.id, uniqueFilename)
+  const suggestedPath = getUserFilePath(user.id, uniqueFilename)
   const contentType = fileField.type || 'application/octet-stream'
 
   // 存储文件到适配器
-  await storage.write(fileField.data, storagePath, contentType)
+  // SeaweedFS 会自己分配 fid 覆盖 path，local/S3 会用建议路径
+  const actualPath = await storage.write(fileField.data, suggestedPath, contentType)
 
   // 保存元数据到数据库
   const fileRecords = await db.insert(files).values({
@@ -47,8 +45,8 @@ export default defineEventHandler(async (event) => {
     size: fileField.data.length,
     title: title || null,
     isPublic: false,
-    uploadedBy: session.user.id,
-    path: storagePath
+    uploadedBy: user.id,
+    path: actualPath
   }).returning()
 
   const fileRecord = fileRecords[0]
@@ -57,7 +55,7 @@ export default defineEventHandler(async (event) => {
   }
 
   // 返回信息
-  const publicUrl = storage.getPublicUrl(storagePath)
+  const publicUrl = storage.getPublicUrl(actualPath)
 
   return {
     success: true,

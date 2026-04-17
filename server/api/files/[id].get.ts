@@ -3,7 +3,6 @@ import { db } from '~/lib/db'
 import { files } from '~/lib/schema/files'
 import { storage } from '~/lib/storage'
 import { eq } from 'drizzle-orm'
-import { auth } from '~/lib/auth'
 
 export default defineEventHandler(async (event) => {
   const fileId = getRouterParam(event, 'id')
@@ -22,11 +21,9 @@ export default defineEventHandler(async (event) => {
   }
 
   // 权限检查：只有公开文件或文件所有者可以访问
-  const session = await auth.api.getSession({
-    headers: event.headers
-  })
+  const { user } = event.context
 
-  if (!fileRecord.isPublic && (!session || session.user.id !== fileRecord.uploadedBy)) {
+  if (!fileRecord.isPublic && (!user || user.id !== fileRecord.uploadedBy)) {
     throw createError({ statusCode: 403, message: '无权限访问此文件' })
   }
 
