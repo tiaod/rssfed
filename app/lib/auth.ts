@@ -1,5 +1,6 @@
 import { betterAuth } from 'better-auth'
 import { admin } from 'better-auth/plugins'
+import { organization } from 'better-auth/plugins/organization'
 import { drizzleAdapter } from '@better-auth/drizzle-adapter'
 import { createAuthMiddleware } from 'better-auth/api'
 import { db } from './db'
@@ -61,6 +62,21 @@ export const auth = betterAuth({
   },
 
   plugins: [
-    admin()
+    admin(),
+    organization({
+      // 允许用户创建组织
+      allowUserToCreateOrganization: async (user) => {
+        // 只允许已验证邮箱的用户创建组织
+        return user.emailVerified === true
+      },
+      // 每个用户最多创建多少组织
+      organizationLimit: 5,
+      // 每个组织最多多少成员
+      membershipLimit: 50,
+      // 启用动态权限控制（自定义角色）
+      dynamicAccessControl: {
+        enabled: true
+      }
+    })
   ]
 })
