@@ -13,7 +13,10 @@
 9. Props 下，events 上，都要有 TypeScript 类型
 10. 复用逻辑抽去 `composables/`，命名 `use<Feature>.ts`
 11. 按功能组织组件到 `components/<feature>/`，别堆根目录
-12. 使用 pnpm 包管理器
-13. 遵循 ESLint：`1tbs` 花括号，不使用拖尾逗号
-14. 避免过早优化，功能完成再优化
-15. 提交前跑 `pnpm lint` 和 `pnpm typecheck`
+12. **测试驱动开发**：新增功能先写测试，再写实现，遵循红→绿→重构循环
+13. 测试文件放在对应目录 `__tests__/`，命名 `*.test.ts`
+14. Composables 必须有单元测试，复杂组件要有组件测试
+15. 使用 pnpm 包管理器
+16. 遵循 ESLint：`1tbs` 花括号，不使用拖尾逗号
+17. 避免过早优化，功能完成再优化
+18. 提交前跑 `pnpm lint`、`pnpm typecheck` 和 `pnpm test:run`
