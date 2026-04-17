@@ -8,6 +8,7 @@ export default defineConfig({
     environment: 'jsdom',
     globals: true,
     include: ['**/*.test.{ts,js,vue}'],
+    setupFiles: ['./vitest.setup.ts'],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'lcov', 'html'],
@@ -24,5 +25,8 @@ export default defineConfig({
       '~': resolve(__dirname, './app'),
       '~~': resolve(__dirname, '.')
     }
+  },
+  define: {
+    'process.env.NODE_ENV': JSON.stringify('test')
   }
 })
