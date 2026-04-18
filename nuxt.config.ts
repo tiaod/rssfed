@@ -3,8 +3,8 @@ export default defineNuxtConfig({
   modules: [
     '@nuxt/eslint',
     '@nuxt/ui',
-    '@nuxt/test-utils/module'
-  ],
+    process.env.NODE_ENV === 'test' ? '@nuxt/test-utils/module' : null
+  ].filter(Boolean),
 
   devtools: {
     enabled: true
