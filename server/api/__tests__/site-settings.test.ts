@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import type { H3Event } from 'h3'
 import type { siteSettings } from '~/lib/schema/site-settings'
 
 type SiteSettings = typeof siteSettings.$inferSelect
@@ -20,9 +21,9 @@ vi.mock('~/lib/db', () => ({
 }))
 
 vi.mock('#imports', () => ({
-  defineEventHandler: (handler: any) => handler,
-  readBody: (event: any) => event.readBody(),
-  createError: (options: any) => options
+  defineEventHandler: (handler: unknown) => handler,
+  readBody: (event: { readBody: () => unknown }) => event.readBody(),
+  createError: (options: unknown) => options
 }))
 
 describe('GET /api/site-settings', () => {
@@ -51,7 +52,7 @@ describe('GET /api/site-settings', () => {
 
     const module = await import('../site-settings.get')
     const handler = module.default
-    const result = await handler({} as any)
+    const result = await handler({} as H3Event)
 
     expect(result.settings).toEqual(mockSettings)
     expect(mockDb.select).toHaveBeenCalled()
@@ -62,7 +63,7 @@ describe('GET /api/site-settings', () => {
 
     const module = await import('../site-settings.get')
     const handler = module.default
-    const result = await handler({} as any)
+    const result = await handler({} as H3Event)
 
     expect(result.settings).toBeNull()
     expect(mockDb.select).toHaveBeenCalled()
@@ -103,7 +104,7 @@ describe('PUT /api/site-settings', () => {
         user: { role: 'admin' }
       },
       readBody: () => Promise.resolve(mockBody)
-    } as any)
+    } as unknown as H3Event)
 
     expect(result.success).toBe(true)
     expect(result.settings).toEqual(mockResult[0])
@@ -120,11 +121,12 @@ describe('PUT /api/site-settings', () => {
           user: { role: 'user' }
         },
         readBody: () => Promise.resolve({})
-      } as any)
+      } as unknown as H3Event)
       expect.fail('应该抛出错误')
-    } catch (error: any) {
-      expect(error.statusCode).toBe(403)
-      expect(error.statusMessage).toBe('Forbidden')
+    } catch (error) {
+      const err = error as { statusCode: number, statusMessage: string }
+      expect(err.statusCode).toBe(403)
+      expect(err.statusMessage).toBe('Forbidden')
     }
   })
 
@@ -138,11 +140,12 @@ describe('PUT /api/site-settings', () => {
           user: null
         },
         readBody: () => Promise.resolve({})
-      } as any)
+      } as unknown as H3Event)
       expect.fail('应该抛出错误')
-    } catch (error: any) {
-      expect(error.statusCode).toBe(403)
-      expect(error.statusMessage).toBe('Forbidden')
+    } catch (error) {
+      const err = error as { statusCode: number, statusMessage: string }
+      expect(err.statusCode).toBe(403)
+      expect(err.statusMessage).toBe('Forbidden')
     }
   })
 })
