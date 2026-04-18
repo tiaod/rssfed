@@ -1,14 +1,12 @@
 <script setup>
-import { authClient } from '~/lib/auth-client'
-import { computed } from 'vue'
+const userStore = useUserStore()
 
-const session = authClient.useSession()
-
-const isAdmin = computed(() => session.value.data?.user?.role === 'admin')
-const isPending = computed(() => session.value.isPending)
+const isAdmin = userStore.isAdmin
+const isPending = userStore.isPending
 
 const handleLogout = async () => {
-  await authClient.signOut()
+  await userStore.logout()
+  await navigateTo('/auth/login')
 }
 </script>
 
@@ -34,7 +32,7 @@ const handleLogout = async () => {
         </UButton>
         <!-- 未登录 -->
         <UButton
-          v-else-if="!session.data?.user"
+          v-else-if="!userStore.isAuthenticated"
           to="/auth/login"
           variant="ghost"
           size="sm"
@@ -58,7 +56,7 @@ const handleLogout = async () => {
             ]"
           >
             <UAvatar
-              :name="session.data.user.name"
+              :name="userStore.user?.name"
               size="sm"
             />
           </UDropdownMenu>
