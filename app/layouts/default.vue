@@ -148,7 +148,7 @@ onMounted(async () => {
       :ui="{ footer: 'lg:border-t lg:border-default' }"
     >
       <template #header="{ collapsed }">
-        <TeamsMenu :collapsed="collapsed" />
+        <AppLogo :class="collapsed ? 'w-8 h-8' : 'w-28 h-8'" />
       </template>
 
       <template #default="{ collapsed }">
