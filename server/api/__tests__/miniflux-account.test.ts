@@ -1,6 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { H3Event } from 'h3'
-import type { User } from '~/lib/miniflux/types'
 import type { Mock } from 'vitest'
 
 const mockGetSession = vi.fn()
@@ -8,11 +7,8 @@ const mockSelect = vi.fn().mockReturnThis()
 const mockFrom = vi.fn().mockReturnThis()
 const mockWhere = vi.fn().mockReturnThis()
 const mockLimit = vi.fn().mockResolvedValue([])
-const mockInsert = vi.fn().mockReturnThis()
-const mockValues = vi.fn().mockReturnThis()
 
-let mockCreateUser: Mock
-let mockCreateAPIKey: Mock
+const mockCreateMinifluxAccount = vi.fn().mockResolvedValue(undefined)
 
 vi.mock('~/lib/auth', () => ({
   auth: {
@@ -27,48 +23,20 @@ vi.mock('~/lib/db', () => ({
     select: mockSelect,
     from: mockFrom,
     where: mockWhere,
-    limit: mockLimit,
-    insert: mockInsert,
-    values: mockValues
+    limit: mockLimit
   }
 }))
 
 vi.mock('~/lib/miniflux/service', () => ({
-  MinifluxAccountService: vi.fn(),
   MinifluxServiceError: function MinifluxServiceError(message: string): Error {
     const err = new Error(message)
     err.name = 'MinifluxServiceError'
     return err
   } as unknown as typeof import('~/lib/miniflux/service').MinifluxServiceError,
-  minifluxAccountService: {}
+  minifluxAccountService: {
+    createMinifluxAccount: mockCreateMinifluxAccount
+  }
 }))
-
-vi.mock('~/lib/miniflux/client', () => {
-  mockCreateUser = vi.fn()
-  mockCreateAPIKey = vi.fn()
-
-  function MockMinifluxClient(this: {
-    createUser: typeof mockCreateUser
-    createAPIKey: typeof mockCreateAPIKey
-  }) {
-    this.createUser = mockCreateUser
-    this.createAPIKey = mockCreateAPIKey
-  }
-
-  MockMinifluxClient.prototype.createUser = mockCreateUser
-  MockMinifluxClient.prototype.createAPIKey = mockCreateAPIKey
-
-  return {
-    MinifluxClient: MockMinifluxClient as unknown as typeof import('~/lib/miniflux/client').MinifluxClient,
-    MinifluxError: function MinifluxError(message: string, statusCode?: number, errorMessage?: string): Error {
-      const err = new Error(message)
-      err.name = 'MinifluxError'
-      Object.defineProperty(err, 'statusCode', { value: statusCode })
-      Object.defineProperty(err, 'errorMessage', { value: errorMessage })
-      return err
-    } as unknown as typeof import('~/lib/miniflux/client').MinifluxError
-  }
-})
 
 vi.mock('#imports', () => ({
   defineEventHandler: (handler: unknown) => handler,
@@ -164,17 +132,25 @@ describe('GET /api/miniflux/account', () => {
       }
     })
 
-    mockLimit.mockResolvedValue([])
-    mockSelect.mockReturnValue({ from: mockFrom })
+    const mockAccount = {
+      minifluxUserId: 456,
+      minifluxUsername: 'test_abc123',
+      minifluxApiKey: 'new-auto-created-key'
+    }
+
+    let callCount = 0
+    mockSelect.mockImplementation(() => {
+      callCount++
+      return { from: mockFrom }
+    })
     mockFrom.mockReturnValue({ where: mockWhere })
-    mockWhere.mockReturnValue({ limit: mockLimit })
-
-    mockCreateUser.mockResolvedValue({
-      id: 456
-    } as User)
-
-    mockCreateAPIKey.mockResolvedValue({
-      token: 'new-auto-created-key'
+    mockWhere.mockReturnValue({
+      limit: () => {
+        if (callCount === 1) {
+          return Promise.resolve([])
+        }
+        return Promise.resolve([mockAccount])
+      }
     })
 
     const module = await import('../miniflux/account.get')
@@ -186,7 +162,6 @@ describe('GET /api/miniflux/account', () => {
     expect(result.success).toBe(true)
     expect(result.data.minifluxUserId).toBe(456)
     expect(result.data.apiKey).toBe('new-auto-created-key')
-    expect(mockCreateUser).toHaveBeenCalled()
-    expect(mockCreateAPIKey).toHaveBeenCalled()
+    expect(mockCreateMinifluxAccount).toHaveBeenCalledWith('user-123', 'test@example.com')
   })
 })
