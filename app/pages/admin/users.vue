@@ -335,7 +335,6 @@ watch(isAdmin, (newVal) => {
         <template #leading>
           <UDashboardSidebarCollapse />
         </template>
-
       </UDashboardNavbar>
     </template>
     <template #body>

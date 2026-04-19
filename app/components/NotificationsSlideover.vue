@@ -17,7 +17,7 @@ const props = defineProps<{
 
 const open = computed({
   get: () => props.open,
-  set: (value) => emit('update:open', value)
+  set: value => emit('update:open', value)
 })
 
 defineShortcuts({
@@ -52,49 +52,49 @@ defineExpose({
 
 <template>
   <USlideover
-      v-model:open="open"
-      title="通知"
-    >
-      <template #body>
-        <div class="space-y-2">
-          <div
-            v-for="notification in notifications"
-            :key="notification.id"
-            :class="[
-              'p-3 rounded-lg transition-colors cursor-pointer',
-              notification.read ? 'bg-transparent' : 'bg-muted/50'
-            ]"
-          >
-            <div class="flex items-start justify-between gap-2">
-              <p class="font-medium text-sm">
-                {{ notification.title }}
-              </p>
-              <span class="text-xs text-muted whitespace-nowrap">
-                {{ notification.time }}
-              </span>
-            </div>
-            <p class="text-sm text-muted mt-1">
-              {{ notification.description }}
+    v-model:open="open"
+    title="通知"
+  >
+    <template #body>
+      <div class="space-y-2">
+        <div
+          v-for="notification in notifications"
+          :key="notification.id"
+          :class="[
+            'p-3 rounded-lg transition-colors cursor-pointer',
+            notification.read ? 'bg-transparent' : 'bg-muted/50'
+          ]"
+        >
+          <div class="flex items-start justify-between gap-2">
+            <p class="font-medium text-sm">
+              {{ notification.title }}
             </p>
+            <span class="text-xs text-muted whitespace-nowrap">
+              {{ notification.time }}
+            </span>
           </div>
-
-          <p
-            v-if="notifications.length === 0"
-            class="text-center py-8 text-sm text-muted"
-          >
-            暂无通知
+          <p class="text-sm text-muted mt-1">
+            {{ notification.description }}
           </p>
         </div>
-      </template>
-      <template #footer>
-        <UButton
-          variant="ghost"
-          color="neutral"
-          block
-          @click="markAllAsRead"
+
+        <p
+          v-if="notifications.length === 0"
+          class="text-center py-8 text-sm text-muted"
         >
-          全部标为已读
-        </UButton>
-      </template>
+          暂无通知
+        </p>
+      </div>
+    </template>
+    <template #footer>
+      <UButton
+        variant="ghost"
+        color="neutral"
+        block
+        @click="markAllAsRead"
+      >
+        全部标为已读
+      </UButton>
+    </template>
   </USlideover>
 </template>

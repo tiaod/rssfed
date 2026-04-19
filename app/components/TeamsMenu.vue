@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui'
 
-const props = defineProps<{
+const _props = defineProps<{
   collapsed: boolean
 }>()
 

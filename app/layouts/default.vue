@@ -208,7 +208,7 @@ onMounted(async () => {
     <UDashboardSearch :groups="groups" />
 
     <slot />
-  </UDashboardGroup>
 
-  <NotificationsSlideover v-model:open="notificationsOpen" />
+    <NotificationsSlideover v-model:open="notificationsOpen" />
+  </UDashboardGroup>
 </template>

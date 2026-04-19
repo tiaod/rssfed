@@ -4,7 +4,7 @@ import type { DropdownMenuItem } from '@nuxt/ui'
 const userStore = useUserStore()
 const user = userStore.user
 
-const props = defineProps<{
+const _props = defineProps<{
   collapsed: boolean
 }>()
 
