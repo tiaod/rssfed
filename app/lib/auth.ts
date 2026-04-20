@@ -1,5 +1,5 @@
 import { betterAuth } from 'better-auth'
-import { admin } from 'better-auth/plugins'
+import { admin, customSession } from 'better-auth/plugins'
 import { organization } from 'better-auth/plugins/organization'
 import { drizzleAdapter } from '@better-auth/drizzle-adapter'
 import { createAuthMiddleware } from 'better-auth/api'
@@ -7,6 +7,8 @@ import { db } from './db'
 import { Redis } from 'ioredis'
 import { redisStorage } from '@better-auth/redis-storage'
 import { minifluxAccountService, MinifluxServiceError } from './miniflux'
+import { minifluxAccount } from './schema/miniflux'
+import { eq } from 'drizzle-orm'
 
 const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379')
 
@@ -34,6 +36,7 @@ export const auth = betterAuth({
 
   hooks: {
     after: createAuthMiddleware(async (ctx) => {
+      // 注册成功后自动创建 Miniflux 账户
       if (ctx.path.startsWith('/sign-up')) {
         const newSession = ctx.context.newSession
         if (newSession) {
@@ -76,6 +79,41 @@ export const auth = betterAuth({
       // 启用动态权限控制（自定义角色）
       dynamicAccessControl: {
         enabled: true
+      }
+    }),
+    // 自定义 session，添加 Miniflux 信息
+    customSession(async ({ user, session }) => {
+      // 查询 Miniflux 账户信息
+      const miniflux = await db.query.minifluxAccount.findFirst({
+        columns: {
+          minifluxUserId: true,
+          minifluxUsername: true,
+          minifluxApiKey: true
+        },
+        where: eq(minifluxAccount.userId, user.id)
+      })
+
+      // 返回拓展后的 session，包含 miniflux 信息
+      // admin 插件已经添加了 role/banned 等字段，这里用类型断言
+      const userWithAdmin = user as typeof user & {
+        role?: string
+        banned?: boolean
+        banReason?: string | null
+        banExpires?: Date | null
+      }
+
+      return {
+        user: {
+          ...userWithAdmin,
+          miniflux: miniflux
+            ? {
+                minifluxUserId: miniflux.minifluxUserId,
+                minifluxUsername: miniflux.minifluxUsername,
+                minifluxApiKey: miniflux.minifluxApiKey
+              }
+            : null
+        },
+        session
       }
     })
   ]
