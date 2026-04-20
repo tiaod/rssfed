@@ -7,98 +7,59 @@ const toast = useToast()
 const open = ref(false)
 const notificationsOpen = ref(false)
 
-const links = [[
-// {
-//   label: '概览',
-//   icon: 'i-lucide-house',
-//   to: '/feeds',
-//   onSelect: () => {
-//     open.value = false
-//   }
-// }, {
-//   label: '订阅源',
-//   icon: 'i-lucide-rss',
-//   to: '/feeds',
-//   onSelect: () => {
-//     open.value = false
-//   }
-// }, {
-//   label: '分类',
-//   icon: 'i-lucide-folder',
-//   to: '/categories',
-//   onSelect: () => {
-//     open.value = false
-//   }
-// }, {
-//   label: '文章',
-//   icon: 'i-lucide-file-text',
-//   to: '/entries',
-//   onSelect: () => {
-//     open.value = false
-//   }
-// }, {
-//   label: 'Miniflux',
-//   icon: 'i-lucide-external-link',
-//   to: 'https://miniflux.app',
-//   target: '_blank',
-//   onSelect: () => {
-//     open.value = false
-//   }
-// }, {
-//   label: '设置',
-//   to: '/settings',
-//   icon: 'i-lucide-settings',
-//   defaultOpen: true,
-//   type: 'trigger',
-//   children: [{
-//     label: '通用',
-//     to: '/settings/general',
-//     onSelect: () => {
-//       open.value = false
-//     }
-//   }, {
-//     label: '成员',
-//     to: '/settings/members',
-//     onSelect: () => {
-//       open.value = false
-//     }
-//   }, {
-//     label: '通知',
-//     to: '/settings/notifications',
-//     onSelect: () => {
-//       open.value = false
-//     }
-//   }, {
-//     label: '安全',
-//     to: '/settings/security',
-//     onSelect: () => {
-//       open.value = false
-//     }
-//   }]
-// }
+// 侧边栏导航
+const navItems = [
   {
-    label: '用户管理',
-    icon: 'i-lucide-users',
-    to: '/admin/users',
+    label: '主页',
+    icon: 'i-lucide-house',
+    to: '/',
     onSelect: () => {
       open.value = false
     }
-  }], [{
-  label: '反馈',
-  icon: 'i-lucide-message-circle',
-  to: 'https://github.com',
-  target: '_blank'
-}, {
-  label: '文档',
-  icon: 'i-lucide-book-open',
-  to: 'https://github.com',
-  target: '_blank'
-}]] satisfies NavigationMenuItem[][]
+  },
+  {
+    label: '动态',
+    icon: 'i-lucide-activity',
+    to: '/timeline',
+    onSelect: () => {
+      open.value = false
+    }
+  },
+  {
+    label: '消息',
+    icon: 'i-lucide-bell',
+    to: '/notifications',
+    onSelect: () => {
+      open.value = false
+    }
+  },
+  {
+    label: '我的',
+    icon: 'i-lucide-user',
+    to: '/profile',
+    onSelect: () => {
+      open.value = false
+    }
+  }
+] satisfies NavigationMenuItem[]
+
+// 底部导航
+const bottomNavItems = [
+  { label: '主页', icon: 'i-lucide-house', to: '/' },
+  { label: '动态', icon: 'i-lucide-activity', to: '/timeline' },
+  { label: '消息', icon: 'i-lucide-bell', to: '/notifications' },
+  { label: '我的', icon: 'i-lucide-user', to: '/profile' }
+]
+
+const isBottomNavActive = (to: string) => {
+  if (to === '/') return route.path === '/'
+  return route.path === to || route.path.startsWith(to + '/')
+}
 
 const groups = computed(() => [{
   id: 'links',
   label: 'Go to',
-  items: links.flat()
+  items: navItems
 }, {
   id: 'code',
   label: 'Code',
@@ -144,7 +105,7 @@ onMounted(async () => {
       v-model:open="open"
       collapsible
       resizable
-      class="bg-elevated/25"
+      class="bg-elevated/25 hidden sm:block"
       :ui="{ footer: 'lg:border-t lg:border-default' }"
     >
       <template #header="{ collapsed }">
@@ -152,25 +113,12 @@ onMounted(async () => {
       </template>
 
       <template #default="{ collapsed }">
-        <UDashboardSearchButton
-          :collapsed="collapsed"
-          class="bg-transparent ring-default"
-        />
-
         <UNavigationMenu
           :collapsed="collapsed"
-          :items="links[0]"
+          :items="navItems"
           orientation="vertical"
           tooltip
           popover
-        />
-
-        <UNavigationMenu
-          :collapsed="collapsed"
-          :items="links[1]"
-          orientation="vertical"
-          tooltip
-          class="mt-auto"
         />
       </template>
 
@@ -207,7 +155,30 @@ onMounted(async () => {
 
     <UDashboardSearch :groups="groups" />
 
-    <slot />
+    <main class="pb-16 sm:pb-0">
+      <slot />
+    </main>
+
+    <!-- 手机端底部导航 -->
+    <nav class="fixed bottom-0 left-0 right-0 z-50 border-t border-default bg-background/95 backdrop-blur sm:hidden">
+      <div class="flex items-center justify-around py-2">
+        <NuxtLink
+          v-for="item in bottomNavItems"
+          :key="item.to"
+          :to="item.to"
+          class="flex flex-col items-center gap-1 rounded-lg px-3 py-2 transition-colors"
+          :class="isBottomNavActive(item.to) ? 'text-primary' : 'text-muted'"
+        >
+          <UIcon
+            :name="item.icon"
+            class="size-6"
+          />
+          <span class="text-xs font-medium">
+            {{ item.label }}
+          </span>
+        </NuxtLink>
+      </div>
+    </nav>
 
     <NotificationsSlideover v-model:open="notificationsOpen" />
   </UDashboardGroup>
