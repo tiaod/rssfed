@@ -82,7 +82,7 @@ const { data: timeline } = await useFetch<MastodonPost[]>('/api/mastodon/timelin
             </UCard>
           </div>
 
-          <UEmptyState
+          <UEmpty
             v-else
             icon="i-lucide-activity"
             title="暂无动态"

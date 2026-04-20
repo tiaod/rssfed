@@ -77,7 +77,7 @@ const { data: feeds, error } = await useFetch<MinifluxFeed[]>('/api/miniflux/fee
             </UCard>
           </div>
 
-          <UEmptyState
+          <UEmpty
             v-else
             icon="i-lucide-rss"
             title="暂无订阅"

@@ -82,7 +82,7 @@ const colorMap: Record<string, string> = {
             </UCard>
           </div>
 
-          <UEmptyState
+          <UEmpty
             v-else
             icon="i-lucide-bell"
             title="暂无消息"
