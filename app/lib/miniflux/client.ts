@@ -444,21 +444,21 @@ export class MinifluxClient {
    * 获取所有 API Key
    */
   async getAPIKeys(): Promise<APIKey[]> {
-    return this.get('/keys')
+    return this.get('/api-keys')
   }
 
   /**
    * 创建 API Key
    */
   async createAPIKey(request: CreateAPIKeyRequest): Promise<APIKey> {
-    return this.post('/keys', request)
+    return this.post('/api-keys', request)
   }
 
   /**
    * 删除 API Key
    */
   async deleteAPIKey(keyId: number): Promise<void> {
-    await this.delete(`/keys/${keyId}`)
+    await this.delete(`/api-keys/${keyId}`)
   }
 
   // ==================== 集成状态端点 ====================

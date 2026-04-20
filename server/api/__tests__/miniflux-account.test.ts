@@ -1,12 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { H3Event } from 'h3'
-import type { Mock } from 'vitest'
 
 const mockGetSession = vi.fn()
-const mockSelect = vi.fn().mockReturnThis()
-const mockFrom = vi.fn().mockReturnThis()
-const mockWhere = vi.fn().mockReturnThis()
-const mockLimit = vi.fn().mockResolvedValue([])
+const mockQueryFindFirst = vi.fn().mockResolvedValue(null)
 
 const mockCreateMinifluxAccount = vi.fn().mockResolvedValue(undefined)
 
@@ -20,10 +16,11 @@ vi.mock('~/lib/auth', () => ({
 
 vi.mock('~/lib/db', () => ({
   db: {
-    select: mockSelect,
-    from: mockFrom,
-    where: mockWhere,
-    limit: mockLimit
+    query: {
+      minifluxAccount: {
+        findFirst: mockQueryFindFirst
+      }
+    }
   }
 }))
 
@@ -90,7 +87,7 @@ describe('GET /api/miniflux/account', () => {
     }
   })
 
-  it('已登录用户应该返回现有账户信息', async () => {
+  it('已登录用户应该返回现有账户信息（包含 apiKey）', async () => {
     mockGetSession.mockResolvedValue({
       user: {
         id: 'user-123',
@@ -98,16 +95,10 @@ describe('GET /api/miniflux/account', () => {
       }
     })
 
-    const mockAccount = {
+    mockQueryFindFirst.mockResolvedValue({
       minifluxUserId: 123,
-      minifluxUsername: 'user_abc123',
-      minifluxApiKey: 'test-api-key'
-    }
-    mockLimit.mockResolvedValue([mockAccount])
-
-    mockSelect.mockReturnValue({ from: mockFrom })
-    mockFrom.mockReturnValue({ where: mockWhere })
-    mockWhere.mockReturnValue({ limit: mockLimit })
+      minifluxUsername: 'user_abc123'
+    })
 
     const module = await import('../miniflux/account.get')
     const handler = module.default
@@ -118,9 +109,7 @@ describe('GET /api/miniflux/account', () => {
     expect(result.success).toBe(true)
     expect(result.data).toEqual({
       minifluxUserId: 123,
-      username: 'user_abc123',
-      apiKey: 'test-api-key',
-      endpoint: process.env.MINIFLUX_BASE_URL
+      username: 'user_abc123'
     })
   })
 
@@ -132,25 +121,16 @@ describe('GET /api/miniflux/account', () => {
       }
     })
 
-    const mockAccount = {
-      minifluxUserId: 456,
-      minifluxUsername: 'test_abc123',
-      minifluxApiKey: 'new-auto-created-key'
-    }
-
     let callCount = 0
-    mockSelect.mockImplementation(() => {
+    mockQueryFindFirst.mockImplementation(() => {
       callCount++
-      return { from: mockFrom }
-    })
-    mockFrom.mockReturnValue({ where: mockWhere })
-    mockWhere.mockReturnValue({
-      limit: () => {
-        if (callCount === 1) {
-          return Promise.resolve([])
-        }
-        return Promise.resolve([mockAccount])
+      if (callCount === 1) {
+        return Promise.resolve(null)
       }
+      return Promise.resolve({
+        minifluxUserId: 456,
+        minifluxUsername: 'test_abc123'
+      })
     })
 
     const module = await import('../miniflux/account.get')
@@ -161,7 +141,7 @@ describe('GET /api/miniflux/account', () => {
 
     expect(result.success).toBe(true)
     expect(result.data.minifluxUserId).toBe(456)
-    expect(result.data.apiKey).toBe('new-auto-created-key')
+    expect(result.data.username).toBe('test_abc123')
     expect(mockCreateMinifluxAccount).toHaveBeenCalledWith('user-123', 'test@example.com')
   })
 })

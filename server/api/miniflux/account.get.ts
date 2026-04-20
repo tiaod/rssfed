@@ -1,5 +1,3 @@
-import { pick } from 'es-toolkit/object'
-import { head } from 'es-toolkit/array'
 import { auth } from '~/lib/auth'
 import { db } from '~/lib/db'
 import { minifluxAccount } from '~/lib/schema/miniflux'
@@ -19,45 +17,40 @@ export default defineEventHandler(async (event) => {
   }
 
   try {
-    // 用 pick 选出需要的列，避免手动写重复的键值对
-    const selectedColumns = pick(minifluxAccount, ['minifluxUserId', 'minifluxUsername', 'minifluxApiKey'])
+    // 仅返回非敏感信息，apiKey 仅在服务端内部使用，永不暴露给客户端
+    const existing = await db.query.minifluxAccount.findFirst({
+      columns: {
+        minifluxUserId: true,
+        minifluxUsername: true
+      },
+      where: eq(minifluxAccount.userId, session.user.id)
+    })
 
-    const existing = await db
-      .select(selectedColumns)
-      .from(minifluxAccount)
-      .where(eq(minifluxAccount.userId, session.user.id))
-      .limit(1)
-
-    const account = head(existing)
-
-    if (account?.minifluxApiKey) {
+    if (existing) {
       return {
         success: true,
         data: {
-          minifluxUserId: account.minifluxUserId,
-          username: account.minifluxUsername,
-          apiKey: account.minifluxApiKey,
-          endpoint: process.env.MINIFLUX_BASE_URL
+          minifluxUserId: existing.minifluxUserId,
+          username: existing.minifluxUsername
         }
       }
     }
 
     await minifluxAccountService.createMinifluxAccount(session.user.id, session.user.email)
 
-    const created = head(await db
-      .select(selectedColumns)
-      .from(minifluxAccount)
-      .where(eq(minifluxAccount.userId, session.user.id))
-      .limit(1)
-    )
+    const created = await db.query.minifluxAccount.findFirst({
+      columns: {
+        minifluxUserId: true,
+        minifluxUsername: true
+      },
+      where: eq(minifluxAccount.userId, session.user.id)
+    })
 
     return {
       success: true,
       data: {
         minifluxUserId: created!.minifluxUserId,
-        username: created!.minifluxUsername,
-        apiKey: created!.minifluxApiKey,
-        endpoint: process.env.MINIFLUX_BASE_URL
+        username: created!.minifluxUsername
       }
     }
   } catch (error) {
