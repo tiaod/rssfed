@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import type { H3Event } from 'h3'
 import handler from '../[...all]'
+import { auth } from '~/lib/auth'
 
 // Mock auth
 vi.mock('~/lib/auth', () => ({
@@ -43,13 +44,22 @@ const createMockEvent = (path: string): H3Event => {
 describe('Miniflux Proxy', () => {
   beforeEach(() => {
     mockProxy.mockClear()
-    vi.mocked(require('~/lib/auth').auth.api.getSession).mockResolvedValue({
+    vi.mocked(auth.api.getSession).mockResolvedValue({
       user: {
+        id: 'test-user-id',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        email: 'test@example.com',
+        emailVerified: true,
+        name: 'Test User',
         miniflux: {
+          minifluxUserId: 123,
+          minifluxUsername: 'testuser',
           minifluxApiKey: 'test-api-key'
         }
       }
-    })
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)
   })
 
   it('should proxy normal path correctly', async () => {
@@ -68,7 +78,6 @@ describe('Miniflux Proxy', () => {
     const event = createMockEvent('/api/miniflux/../../etc/passwd')
 
     await expect(handler(event)).rejects.toThrow('无效的请求路径')
-
   })
 
   it('should block URL encoded path traversal attack', async () => {
@@ -97,7 +106,7 @@ describe('Miniflux Proxy', () => {
 
   it('should return 401 when user is not logged in', async () => {
     // Mock empty session
-    vi.mocked(require('~/lib/auth').auth.api.getSession).mockResolvedValueOnce(null)
+    vi.mocked(auth.api.getSession).mockResolvedValueOnce(null)
 
     const event = createMockEvent('/api/miniflux/entries')
 
@@ -106,9 +115,17 @@ describe('Miniflux Proxy', () => {
 
   it('should return 401 when miniflux api key is not set', async () => {
     // Mock session without miniflux key
-    vi.mocked(require('~/lib/auth').auth.api.getSession).mockResolvedValueOnce({
-      user: {}
-    })
+    vi.mocked(auth.api.getSession).mockResolvedValueOnce({
+      user: {
+        id: 'test-user-id',
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        email: 'test@example.com',
+        emailVerified: true,
+        name: 'Test User'
+      }
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any)
 
     const event = createMockEvent('/api/miniflux/entries')
 
@@ -147,4 +164,3 @@ describe('Miniflux Proxy', () => {
     )
   })
 })
-
