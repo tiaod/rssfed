@@ -164,16 +164,13 @@ onMounted(async () => {
           v-for="item in bottomNavItems"
           :key="item.to"
           :to="item.to"
-          class="flex flex-col items-center gap-1 rounded-lg px-3 py-2 transition-colors"
+          class="flex items-center rounded-lg px-3 py-2 transition-colors"
           :class="isBottomNavActive(item.to) ? 'text-primary' : 'text-muted'"
         >
           <UIcon
             :name="item.icon"
             class="size-6"
           />
-          <span class="text-xs font-medium">
-            {{ item.label }}
-          </span>
         </NuxtLink>
       </div>
     </nav>
