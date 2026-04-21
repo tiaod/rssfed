@@ -155,9 +155,7 @@ onMounted(async () => {
 
     <UDashboardSearch :groups="groups" />
 
-    <main class="pb-16 sm:pb-0">
-      <slot />
-    </main>
+    <slot />
 
     <!-- 手机端底部导航 -->
     <nav class="fixed bottom-0 left-0 right-0 z-50 border-t border-default bg-background/95 backdrop-blur sm:hidden">
