@@ -43,13 +43,12 @@ const navItems = [
   }
 ] satisfies NavigationMenuItem[]
 
-// 底部导航
-const bottomNavItems = [
-  { label: '主页', icon: 'i-lucide-house', to: '/' },
-  { label: '动态', icon: 'i-lucide-activity', to: '/timeline' },
-  { label: '消息', icon: 'i-lucide-bell', to: '/notifications' },
-  { label: '我的', icon: 'i-lucide-user', to: '/profile' }
-]
+// 底部导航 - 复用侧边栏navItems数据，避免重复定义
+const bottomNavItems = navItems.map(item => ({
+  label: item.label,
+  icon: item.icon,
+  to: item.to
+}))
 
 const isBottomNavActive = (to: string) => {
   if (to === '/') return route.path === '/'
@@ -159,18 +158,19 @@ onMounted(async () => {
 
     <!-- 手机端底部导航 -->
     <nav class="fixed bottom-0 left-0 right-0 z-50 border-t border-default bg-background/95 backdrop-blur sm:hidden">
-      <div class="flex items-center justify-around py-2">
+      <div class="flex items-center justify-around py-1.5">
         <NuxtLink
           v-for="item in bottomNavItems"
           :key="item.to"
           :to="item.to"
-          class="flex items-center rounded-lg px-3 py-2 transition-colors"
+          class="flex flex-row gap-1 items-center rounded-lg px-3 py-1.5 transition-colors"
           :class="isBottomNavActive(item.to) ? 'text-primary' : 'text-muted'"
         >
           <UIcon
             :name="item.icon"
-            class="size-6"
+            class="size-4"
           />
+          <span class="text-xs font-normal">{{ item.label }}</span>
         </NuxtLink>
       </div>
     </nav>

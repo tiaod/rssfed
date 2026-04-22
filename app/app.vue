@@ -59,7 +59,7 @@ if (import.meta.client) {
 <template>
   <UApp>
     <NuxtLoadingIndicator />
-    <UMain>    
+    <UMain>
       <NuxtLayout>
         <NuxtPage />
       </NuxtLayout>
