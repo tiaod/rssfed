@@ -20,10 +20,7 @@ const { data: feeds, error } = await useFetch<MinifluxFeed[]>('/api/miniflux/fee
 <template>
   <UDashboardPanel>
     <template #header>
-      <UDashboardNavbar
-        title="订阅源"
-        :ui="{ right: 'gap-3' }"
-      >
+      <UDashboardNavbar title="订阅源">
         <template #leading>
           <UDashboardSidebarCollapse />
         </template>
