@@ -118,6 +118,7 @@ onMounted(async () => {
           tooltip
           popover
         />
+        <FeedNavigation :collapsed="collapsed" />
       </template>
 
       <template #footer="{ collapsed }">

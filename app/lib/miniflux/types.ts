@@ -39,6 +39,7 @@ export interface Feed {
   ignore_http_cache: boolean
   fetch_via_proxy: boolean
   category_id?: number
+  category?: Category
 }
 
 export interface CreateFeedRequest {
