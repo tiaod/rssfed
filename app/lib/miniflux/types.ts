@@ -16,6 +16,11 @@ export interface DiscoverRequest {
   fetch_via_proxy?: boolean
 }
 
+export interface FeedIcon {
+  feed_id: number
+  icon_id: number
+}
+
 export interface Feed {
   id: number
   user_id: number
@@ -40,6 +45,7 @@ export interface Feed {
   fetch_via_proxy: boolean
   category_id?: number
   category?: Category
+  icon?: FeedIcon
 }
 
 export interface CreateFeedRequest {
@@ -86,14 +92,15 @@ export interface Entry {
   comments_url: string
   author: string
   content: string
-  summary: string
+  hash: string
   published_at: string
   created_at: string
   changed_at: string
+  share_code: string
   starred: boolean
   reading_time: number
-  feed: Feed
   enclosures?: Enclosure[]
+  feed: Feed
   tags?: string[]
 }
 

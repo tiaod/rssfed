@@ -29,16 +29,17 @@ export function useFeedNavigation(feeds: ComputedRef<Feed[] | null>): FeedNaviga
 
       groups.get(categoryId)!.push({
         label: feed.title,
-        to: `/feeds/${feed.id}`
+        to: `/rss/feed/${feed.id}`
       })
     }
 
-    // 每个分类作为一个可折叠的父菜单，children 包含该分类下所有 feeds
+    // 每个分类作为可折叠父菜单，点击分类跳转 /rss/category/:id，children 为该分类下所有 feeds
     for (const [categoryId, children] of groups.entries()) {
       const category = categoriesMap.get(categoryId)!
       categoryItems.push({
         label: category.title,
         icon: 'i-lucide-folder',
+        to: `/rss/category/${categoryId}`,
         children
       })
     }
@@ -48,7 +49,7 @@ export function useFeedNavigation(feeds: ComputedRef<Feed[] | null>): FeedNaviga
       .filter(feed => !feed.category?.id)
       .map(feed => ({
         label: feed.title,
-        to: `/feeds/${feed.id}`
+        to: `/rss/feed/${feed.id}`
       }))
 
     if (ungrouped.length > 0) {
@@ -59,7 +60,6 @@ export function useFeedNavigation(feeds: ComputedRef<Feed[] | null>): FeedNaviga
       })
     }
 
-    // 返回二维数组，第一组是订阅源标签 + 分类菜单
     if (categoryItems.length === 0) return []
 
     return [

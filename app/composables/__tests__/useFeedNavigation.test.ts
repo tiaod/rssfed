@@ -75,10 +75,8 @@ describe('useFeedNavigation', () => {
     const { menuItems, hasFeeds } = useFeedNavigation(feeds)
 
     expect(hasFeeds.value).toBe(true)
-    // 返回二维数组，第一组包含标签 + 分类菜单
     expect(menuItems.value).toHaveLength(1)
     const firstGroup = menuItems.value[0]!
-    // 第一个是标签项，后面是两个分类
     expect(firstGroup).toHaveLength(3)
     expect(firstGroup[0]!.label).toBe('订阅源')
     expect(firstGroup[0]!.type).toBe('label')
@@ -86,13 +84,28 @@ describe('useFeedNavigation', () => {
     const techGroup = findGroup(menuItems.value, '技术')
     expect(techGroup.children).toHaveLength(2)
     expect(techGroup.children![0]!.label).toBe('Tech Blog')
-    expect(techGroup.children![0]!.to).toBe('/feeds/1')
+    expect(techGroup.children![0]!.to).toBe('/rss/feed/1')
     expect(techGroup.children![1]!.label).toBe('AI News')
-    expect(techGroup.children![1]!.to).toBe('/feeds/3')
+    expect(techGroup.children![1]!.to).toBe('/rss/feed/3')
 
     const designGroup = findGroup(menuItems.value, '设计')
     expect(designGroup.children).toHaveLength(1)
     expect(designGroup.children![0]!.label).toBe('Design Blog')
+  })
+
+  it('分类菜单项的to指向 /category/:id', () => {
+    const feeds = computed(() => [
+      createFeed({
+        id: 1,
+        title: 'Tech Blog',
+        category: { id: 10, title: '技术', user_id: 1, hide_globally: false }
+      })
+    ])
+
+    const { menuItems } = useFeedNavigation(feeds)
+
+    const techGroup = findGroup(menuItems.value, '技术')
+    expect(techGroup.to).toBe('/rss/category/10')
   })
 
   it('没有分类的feeds归入"未分类"组', () => {
@@ -110,7 +123,7 @@ describe('useFeedNavigation', () => {
     const ungrouped = findGroup(menuItems.value, '未分类')
     expect(ungrouped.children).toHaveLength(1)
     expect(ungrouped.children![0]!.label).toBe('Orphan Feed')
-    expect(ungrouped.children![0]!.to).toBe('/feeds/1')
+    expect(ungrouped.children![0]!.to).toBe('/rss/feed/1')
   })
 
   it('所有feeds都没有分类时只显示"未分类"组', () => {

@@ -59,8 +59,9 @@ const { data: timeline } = await useFetch<MastodonPost[]>('/api/mastodon/timelin
                   </div>
                   <div
                     class="mt-2 text-sm prose prose-sm dark:prose-invert max-w-none"
-                    v-html="post.content"
-                  />
+                  >
+                    {{ post.content }}
+                  </div>
                   <div class="mt-3 flex items-center gap-4 text-muted">
                     <span class="flex items-center gap-1">
                       <UIcon
