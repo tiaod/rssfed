@@ -1,4 +1,6 @@
 <script setup>
+import { onMounted, onUnmounted } from 'vue'
+
 useHead({
   meta: [
     { name: 'viewport', content: 'width=device-width, initial-scale=1' }
@@ -7,25 +9,35 @@ useHead({
     { rel: 'icon', href: '/favicon.ico' }
   ],
   htmlAttrs: {
-    lang: 'en'
+    lang: 'zh-CN'
   }
 })
 
-const title = 'Nuxt Starter Template'
-const description = 'A production-ready starter template powered by Nuxt UI. Build beautiful, accessible, and performant applications in minutes, not hours.'
+const title = 'RSSFed'
+const description = 'RSS 阅读器'
 
 useSeoMeta({
   title,
   description,
   ogTitle: title,
-  ogDescription: description,
-  ogImage: 'https://ui.nuxt.com/assets/templates/nuxt/starter-light.png',
-  twitterImage: 'https://ui.nuxt.com/assets/templates/nuxt/starter-light.png',
-  twitterCard: 'summary_large_image'
+  ogDescription: description
 })
 
+// 注册 Service Worker（仅在客户端执行）
+if (import.meta.client && 'serviceWorker' in navigator) {
+  onMounted(async () => {
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js')
+      console.log('ServiceWorker 注册成功:', registration.scope)
+    } catch (err) {
+      console.error('ServiceWorker 注册失败:', err)
+    }
+  })
+}
+
+const { isOffline } = useOffline()
+
 // 修复 USlideover 在移动端打开时的 aria-hidden 可访问性警告
-// 当 #__nuxt 被设置 aria-hidden="true" 时，如果焦点仍在按钮上会导致浏览器警告
 if (import.meta.client) {
   let observer = null
 
@@ -38,9 +50,7 @@ if (import.meta.client) {
         if (mutation.attributeName === 'aria-hidden') {
           const isAriaHidden = nuxtRoot.getAttribute('aria-hidden') === 'true'
 
-          // 当 aria-hidden 被设置为 true 时，清空当前焦点
           if (isAriaHidden && document.activeElement && 'blur' in document.activeElement) {
-            // 如果当前焦点在某个元素上，将焦点移走
             document.activeElement.blur()
           }
         }
@@ -58,6 +68,12 @@ if (import.meta.client) {
 
 <template>
   <UApp>
+    <div
+      v-if="isOffline"
+      class="fixed top-0 left-0 right-0 z-[9999] bg-amber-500 text-white text-center text-xs py-1 font-medium"
+    >
+      离线模式 - 显示已缓存的内容
+    </div>
     <NuxtLoadingIndicator />
     <UMain>
       <NuxtLayout>

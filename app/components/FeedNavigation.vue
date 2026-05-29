@@ -1,13 +1,10 @@
 <script setup lang="ts">
-import type { Feed } from '~/lib/miniflux/types'
-
 defineProps<{
   collapsed?: boolean
 }>()
 
-const { data: feeds, error } = await useFetch<Feed[]>('/api/miniflux/feeds', {
-  server: false
-})
+const api = useApi()
+const { data: feeds, error } = await useAsyncData('feedNav', () => api.miniflux.getFeeds())
 
 const { menuItems, hasFeeds } = useFeedNavigation(computed(() => feeds.value ?? null))
 </script>

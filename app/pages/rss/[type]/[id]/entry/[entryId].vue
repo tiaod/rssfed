@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import type { Entry } from '~/lib/miniflux/types'
-
 definePageMeta({
   title: '文章 - RSSFed',
   validate: (route) => {
@@ -15,13 +13,22 @@ const id = route.params.id as string
 const entryId = Number(route.params.entryId)
 
 const open = ref(true)
+const api = useApi()
+const { isOffline } = useOffline()
+const cache = useCacheEntries()
 
-const { data: entry, error } = await useFetch<Entry>(
-  `/api/miniflux/entries/${entryId}`,
-  { server: false }
-)
+const { data: entry, error } = await useAsyncData('entry', async () => {
+  try {
+    const result = await api.miniflux.getEntry(entryId)
+    cache.saveEntry(result)
+    return result
+  } catch {
+    const cached = await cache.getEntry(entryId)
+    if (!cached) throw new Error('该文章未缓存，需要网络连接才能阅读')
+    return cached
+  }
+})
 
-// 当 open 变为 false 时（用户点击遮罩/关闭按钮），导航回列表
 watch(open, (newVal) => {
   if (!newVal) {
     navigateTo(`/rss/${type}/${id}`, { replace: true })
@@ -48,12 +55,30 @@ watch(open, (newVal) => {
           >
             请先登录账号
           </p>
+          <p
+            v-else
+            class="mt-2 text-sm text-muted"
+          >
+            {{ isOffline ? '该文章未缓存，需要网络连接才能阅读' : '请检查网络连接后重试' }}
+          </p>
         </div>
 
         <div
           v-else-if="entry"
           class="pb-8"
         >
+          <div
+            v-if="isOffline"
+            class="mb-4"
+          >
+            <UBadge
+              color="warning"
+              variant="soft"
+              size="sm"
+            >
+              离线模式 - 显示缓存内容
+            </UBadge>
+          </div>
           <EntryDetail :entry="entry" />
         </div>
 

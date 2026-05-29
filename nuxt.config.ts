@@ -1,4 +1,8 @@
-// https://nuxt.com/docs/api/configuration/nuxt-config
+import { resolve, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+
 export default defineNuxtConfig({
   modules: [
     '@pinia/nuxt',
@@ -15,6 +19,10 @@ export default defineNuxtConfig({
 
   ui: {
     fonts: false
+  },
+
+  alias: {
+    '~server': resolve(__dirname, 'server')
   },
 
   routeRules: {
@@ -37,6 +45,17 @@ export default defineNuxtConfig({
       include: [
         'better-auth/vue'
       ]
+    }
+  },
+
+  typescript: {
+    tsConfig: {
+      compilerOptions: {
+        paths: {
+          '~server': [resolve(__dirname, 'server')],
+          '~server/*': [resolve(__dirname, 'server/*')]
+        }
+      }
     }
   },
 

@@ -1,4 +1,2 @@
-export * from './types'
-export { MinifluxClient, MinifluxError } from './client'
-export type { MinifluxClientOptions } from './client'
+export type { Feed, Entry, Category, Enclosure, FeedIcon, User, CreateUserRequest, APIKey } from './types'
 export { MinifluxAccountService, MinifluxServiceError, minifluxAccountService } from './service'

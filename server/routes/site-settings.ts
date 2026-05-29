@@ -1,20 +1,20 @@
-import { db } from '~/lib/db'
+import { Hono } from 'hono'
+import { db } from '~server/lib/db'
 import { siteSettings } from '~/lib/schema/site-settings'
+import { eq } from 'drizzle-orm'
+import { requireAdmin } from './_auth'
 
-export default defineEventHandler(async (event) => {
-  // 验证管理员权限
-  const { user } = event.context
+const app = new Hono()
 
-  if (!user || user.role !== 'admin') {
-    throw createError({
-      statusCode: 403,
-      statusMessage: 'Forbidden'
-    })
-  }
+app.get('/', async (c) => {
+  const settings = await db.select().from(siteSettings).where(eq(siteSettings.id, 'main')).limit(1)
+  return c.json({ settings: settings[0] || null })
+})
 
-  const body = await readBody(event)
+app.put('/', async (c) => {
+  requireAdmin(c)
 
-  // 使用 upsert：如果不存在则插入，存在则更新
+  const body = await c.req.json()
   const result = await db
     .insert(siteSettings)
     .values({
@@ -48,8 +48,7 @@ export default defineEventHandler(async (event) => {
     })
     .returning()
 
-  return {
-    success: true,
-    settings: result[0]
-  }
+  return c.json({ success: true, settings: result[0] })
 })
+
+export default app

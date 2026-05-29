@@ -23,11 +23,6 @@ const menuItems = [
     to: '/profile/feeds'
   },
   {
-    label: 'Mastodon 账号',
-    icon: 'i-lucide-link',
-    to: '/profile/mastodon'
-  },
-  {
     label: '主题设置',
     icon: 'i-lucide-palette',
     to: '/profile/theme'

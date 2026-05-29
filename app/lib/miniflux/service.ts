@@ -1,8 +1,9 @@
 import { randomUUID } from 'crypto'
-import { db } from '../db'
+import { ofetch } from 'ofetch'
+import type { FetchError } from 'ofetch'
+import { db } from '~server/lib/db'
 import { minifluxAccount } from '../schema/miniflux'
-import { MinifluxClient, MinifluxError } from './client'
-import type { CreateUserRequest, User } from './types'
+import type { CreateUserRequest, User, APIKey } from './types'
 
 export class MinifluxServiceError extends Error {
   public override readonly cause?: unknown
@@ -15,7 +16,8 @@ export class MinifluxServiceError extends Error {
 }
 
 export class MinifluxAccountService {
-  private readonly client: MinifluxClient
+  private readonly baseUrl: string
+  private readonly authHeaders: Record<string, string>
 
   constructor() {
     const baseUrl = process.env.MINIFLUX_BASE_URL
@@ -26,7 +28,12 @@ export class MinifluxAccountService {
       throw new MinifluxServiceError('Miniflux 配置缺失，请检查环境变量')
     }
 
-    this.client = new MinifluxClient({ baseUrl, username, password })
+    this.baseUrl = `${baseUrl.replace(/\/$/, '')}/v1`
+    const credentials = btoa(`${username}:${password}`)
+    this.authHeaders = {
+      'Authorization': `Basic ${credentials}`,
+      'Content-Type': 'application/json'
+    }
   }
 
   private generateMinifluxUsername(email: string): string {
@@ -37,6 +44,38 @@ export class MinifluxAccountService {
 
   private generateSecurePassword(): string {
     return randomUUID().replace(/-/g, '')
+  }
+
+  private async apiPost<TResult>(path: string, body: unknown): Promise<TResult> {
+    try {
+      return await ofetch<TResult>(`${this.baseUrl}${path}`, {
+        method: 'POST',
+        headers: this.authHeaders,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        body: body as any
+      })
+    } catch (error) {
+      const fetchError = error as FetchError
+      throw new MinifluxServiceError(
+        fetchError.message || 'Miniflux API 请求失败',
+        error
+      )
+    }
+  }
+
+  private async apiDelete(path: string): Promise<void> {
+    try {
+      await ofetch(`${this.baseUrl}${path}`, {
+        method: 'DELETE',
+        headers: this.authHeaders
+      })
+    } catch (error) {
+      const fetchError = error as FetchError
+      throw new MinifluxServiceError(
+        fetchError.message || 'Miniflux API 请求失败',
+        error
+      )
+    }
   }
 
   async createMinifluxAccount(userId: string, userEmail: string): Promise<void> {
@@ -52,9 +91,9 @@ export class MinifluxAccountService {
         is_admin: false
       }
 
-      minifluxUser = await this.client.createUser(createUserRequest)
+      minifluxUser = await this.apiPost<User>('/users', createUserRequest)
 
-      const apiKey = await this.client.createAPIKey({
+      const apiKey = await this.apiPost<APIKey>('/api-keys', {
         description: `API Key for user ${userId}`
       })
 
@@ -70,17 +109,14 @@ export class MinifluxAccountService {
     } catch (error) {
       if (minifluxUser?.id) {
         try {
-          await this.client.deleteUser(minifluxUser.id)
+          await this.apiDelete(`/users/${minifluxUser.id}`)
         } catch (cleanupError) {
           console.error('清理 Miniflux 用户失败:', cleanupError)
         }
       }
 
-      if (error instanceof MinifluxError) {
-        throw new MinifluxServiceError(
-          `Miniflux API 错误: ${error.message}`,
-          error
-        )
+      if (error instanceof MinifluxServiceError) {
+        throw error
       }
 
       throw new MinifluxServiceError(

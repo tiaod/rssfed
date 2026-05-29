@@ -1,21 +1,3 @@
-export interface ErrorResponse {
-  error_message: string
-}
-
-export interface Subscription {
-  url: string
-  title: string
-  type: string
-}
-
-export interface DiscoverRequest {
-  url: string
-  username?: string
-  password?: string
-  user_agent?: string
-  fetch_via_proxy?: boolean
-}
-
 export interface FeedIcon {
   feed_id: number
   icon_id: number
@@ -48,40 +30,6 @@ export interface Feed {
   icon?: FeedIcon
 }
 
-export interface CreateFeedRequest {
-  feed_url: string
-  category_id?: number
-  crawler?: boolean
-  user_agent?: string
-  username?: string
-  password?: string
-  scraper_rules?: string
-  rewrite_rules?: string
-  blocklist_rules?: string
-  keeplist_rules?: string
-  disabled?: boolean
-  ignore_http_cache?: boolean
-  fetch_via_proxy?: boolean
-}
-
-export interface UpdateFeedRequest {
-  title?: string
-  site_url?: string
-  feed_url?: string
-  category_id?: number
-  crawler?: boolean
-  user_agent?: string
-  username?: string
-  password?: string
-  scraper_rules?: string
-  rewrite_rules?: string
-  blocklist_rules?: string
-  keeplist_rules?: string
-  disabled?: boolean
-  ignore_http_cache?: boolean
-  fetch_via_proxy?: boolean
-}
-
 export interface Entry {
   id: number
   user_id: number
@@ -104,29 +52,6 @@ export interface Entry {
   tags?: string[]
 }
 
-export interface EntriesRequest {
-  status?: 'unread' | 'read' | 'removed'
-  starred?: boolean
-  before?: number
-  after?: number
-  before_entry_id?: number
-  after_entry_id?: number
-  limit?: number
-  offset?: number
-  order?: 'id' | 'status' | 'published_at' | 'created_at' | 'changed_at'
-  direction?: 'asc' | 'desc'
-}
-
-export interface UpdateEntryRequest {
-  title?: string
-  content?: string
-}
-
-export interface UpdateEntriesStatusRequest {
-  entry_ids: number[]
-  status: 'unread' | 'read' | 'removed'
-}
-
 export interface Enclosure {
   id: number
   user_id: number
@@ -137,25 +62,11 @@ export interface Enclosure {
   media_progression: number
 }
 
-export interface UpdateEnclosureRequest {
-  media_progression: number
-}
-
 export interface Category {
   id: number
   title: string
   user_id: number
   hide_globally: boolean
-}
-
-export interface CreateCategoryRequest {
-  title: string
-  hide_globally?: boolean
-}
-
-export interface UpdateCategoryRequest {
-  title?: string
-  hide_globally?: boolean
 }
 
 export interface User {
@@ -176,31 +87,13 @@ export interface User {
   openid_connect_id: string
   last_login_at: string
   two_factor_auth_enabled: boolean
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extra: Record<string, any>
+  extra: Record<string, unknown>
 }
 
 export interface CreateUserRequest {
   username: string
   password: string
   is_admin?: boolean
-}
-
-export interface UpdateUserRequest {
-  username?: string
-  password?: string
-  theme?: string
-  language?: string
-  timezone?: string
-  entry_sorting_direction?: string
-  entry_sorting?: string
-  entries_per_page?: number
-  keyboard_shortcuts?: boolean
-  show_reading_time?: boolean
-  entry_swipe?: boolean
-  stylesheet?: string
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  extra?: Record<string, any>
 }
 
 export interface APIKey {
@@ -210,19 +103,4 @@ export interface APIKey {
   description: string
   last_used_at?: string
   created_at: string
-}
-
-export interface CreateAPIKeyRequest {
-  description: string
-}
-
-export interface UnreadReadCounters {
-  unread: number
-  read: number
-}
-
-export interface VersionInfo {
-  version: string
-  build_date: string
-  commit: string
 }

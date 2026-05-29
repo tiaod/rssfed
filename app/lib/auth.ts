@@ -3,7 +3,7 @@ import { admin, customSession } from 'better-auth/plugins'
 import { organization } from 'better-auth/plugins/organization'
 import { drizzleAdapter } from '@better-auth/drizzle-adapter'
 import { createAuthMiddleware } from 'better-auth/api'
-import { db } from './db'
+import { db } from '~server/lib/db'
 import { Redis } from 'ioredis'
 import { redisStorage } from '@better-auth/redis-storage'
 import { minifluxAccountService, MinifluxServiceError } from './miniflux'
@@ -57,6 +57,11 @@ export const auth = betterAuth({
       }
     })
   },
+
+  trustedOrigins: [
+    'http://127.0.0.1:3000',
+    'http://localhost:3000'
+  ],
 
   advanced: {
     useSecureCookies: process.env.NODE_ENV === 'production',

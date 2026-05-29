@@ -3,20 +3,19 @@ definePageMeta({
   title: '动态 - RSSFed'
 })
 
-interface MastodonPost {
+interface ActivityItem {
   id: string
+  type: string
   content: string
-  account: {
-    username: string
-    display_name: string
+  actor: {
+    name: string
     avatar: string
     url: string
   }
-  favourites_count: number
-  reblogs_count: number
+  published: string
 }
 
-const { data: timeline } = await useFetch<MastodonPost[]>('/api/mastodon/timeline')
+const { data: timeline } = await useFetch<ActivityItem[]>('/api/activitypub/timeline')
 </script>
 
 <template>
@@ -39,44 +38,28 @@ const { data: timeline } = await useFetch<MastodonPost[]>('/api/mastodon/timelin
             class="space-y-4 py-4"
           >
             <UCard
-              v-for="post in timeline"
-              :key="post.id"
+              v-for="item in timeline"
+              :key="item.id"
             >
               <div class="flex items-start gap-3">
                 <UAvatar
-                  :src="post.account.avatar"
-                  :alt="post.account.username"
+                  :src="item.actor.avatar"
+                  :alt="item.actor.name"
                   size="sm"
                 />
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-2">
                     <span class="font-medium">
-                      {{ post.account.display_name || post.account.username }}
+                      {{ item.actor.name }}
                     </span>
                     <span class="text-sm text-muted">
-                      @{{ post.account.username }}
+                      {{ item.type }}
                     </span>
                   </div>
                   <div
                     class="mt-2 text-sm prose prose-sm dark:prose-invert max-w-none"
                   >
-                    {{ post.content }}
-                  </div>
-                  <div class="mt-3 flex items-center gap-4 text-muted">
-                    <span class="flex items-center gap-1">
-                      <UIcon
-                        name="i-lucide-heart"
-                        class="size-4"
-                      />
-                      {{ post.favourites_count }}
-                    </span>
-                    <span class="flex items-center gap-1">
-                      <UIcon
-                        name="i-lucide-repeat"
-                        class="size-4"
-                      />
-                      {{ post.reblogs_count }}
-                    </span>
+                    {{ item.content }}
                   </div>
                 </div>
               </div>
@@ -87,7 +70,7 @@ const { data: timeline } = await useFetch<MastodonPost[]>('/api/mastodon/timelin
             v-else
             icon="i-lucide-activity"
             title="暂无动态"
-            description="连接 Mastodon 账号后将显示时间线"
+            description="活动推送功能即将上线，敬请期待"
             class="py-8"
           />
         </ClientOnly>

@@ -3,18 +3,8 @@ definePageMeta({
   title: '主页 - RSSFed'
 })
 
-interface MinifluxFeed {
-  id: number
-  title: string
-  site_url: string
-  feed_url: string
-  checked_at: string
-}
-
-// 调用Miniflux代理API获取订阅列表（只在客户端发起请求，带上认证Cookie）
-const { data: feeds, error } = await useFetch<MinifluxFeed[]>('/api/miniflux/feeds', {
-  server: false
-})
+const api = useApi()
+const { data: feeds, error } = await useAsyncData('feeds', () => api.miniflux.getFeeds())
 </script>
 
 <template>
