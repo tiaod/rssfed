@@ -1,30 +1,13 @@
-# Nuxt dev/build outputs
-.output
-.data
-.nuxt
-.nitro
-.cache
-dist
-
-# Node dependencies
-node_modules
-
-# Logs
-logs
-*.log
-
-# Misc
-.DS_Store
-.fleet
-.idea
-
-# Local env files
+node_modules/
+dist/
+.turbo/
+.nuxt/
+.output/
+.nitro/
+.cache/
+.data/
+*.tsbuildinfo
 .env
-.env.*
-!.env.example
-
-local.db
-
-# Test coverage
-coverage
-*.lcov
+.env.local
+*.db
+*.sqlite

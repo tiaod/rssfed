@@ -1,64 +1,25 @@
 {
   "name": "rssfed",
   "private": true,
-  "type": "module",
+  "version": "0.1.0",
+  "description": "RSS reader with ActivityPub support",
   "scripts": {
-    "build": "nuxt build",
-    "dev": "nuxt dev",
-    "preview": "nuxt preview",
-    "postinstall": "nuxt prepare",
-    "lint": "eslint .",
-    "typecheck": "nuxt typecheck",
-    "auth:generate": "auth generate --output lib/schema/auth.ts",
-    "db:push": "drizzle-kit push",
-    "create-test-users": "tsx scripts/create-test-users.ts",
-    "garage:keys": "tsx scripts/generate-garage-keys.ts",
-    "test": "vitest",
-    "test:run": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "dev": "pnpm --filter @rssfed/server dev",
+    "dev:nuxt": "pnpm --filter @rssfed/nuxt dev",
+    "dev:all": "pnpm --parallel -r run dev",
+    "build": "pnpm -r run build",
+    "typecheck": "pnpm -r run typecheck",
+    "db:generate": "pnpm --filter @rssfed/server generate",
+    "db:push": "pnpm --filter @rssfed/server push"
   },
-  "dependencies": {
-    "@aws-sdk/client-s3": "^3.1030.0",
-    "@better-auth/drizzle-adapter": "^1.6.2",
-    "@better-auth/redis-storage": "^1.6.2",
-    "@electric-sql/pglite": "^0.3.15",
-    "@fedify/fedify": "^2.2.3",
-    "@fedify/hono": "^2.2.3",
-    "@fedify/redis": "^2.2.3",
-    "@fedify/vocab": "^2.2.3",
-    "@iconify-json/lucide": "^1.2.95",
-    "@iconify-json/simple-icons": "^1.2.72",
-    "@libsql/client": "^0.17.0",
-    "@nuxt/ui": "^4.6.1",
-    "@pinia/nuxt": "^0.11.3",
-    "better-auth": "^1.6.2",
-    "dexie": "^4.4.2",
-    "dotenv": "^17.3.1",
-    "drizzle-orm": "^0.45.2",
-    "es-toolkit": "^1.45.1",
-    "hono": "^4.12.23",
-    "ioredis": "^5.10.1",
-    "nuxt": "^4.4.2",
-    "ofetch": "^1.5.1",
-    "pg": "^8.19.0",
-    "pinia": "^3.0.4",
-    "tailwindcss": "^4.2.1"
+  "engines": {
+    "node": ">=20"
   },
-  "devDependencies": {
-    "@hono/zod-validator": "^0.8.0",
-    "@nuxt/eslint": "^1.15.2",
-    "@nuxt/test-utils": "^4.0.2",
-    "@types/pg": "^8.18.0",
-    "@vitejs/plugin-vue": "^6.0.6",
-    "@vue/test-utils": "^2.4.6",
-    "drizzle-kit": "^0.31.10",
-    "eslint": "^9.39.4",
-    "jsdom": "^29.0.2",
-    "tsx": "^4.21.0",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.4",
-    "vue": "^3.5.32",
-    "vue-tsc": "^3.2.5"
-  },
-  "packageManager": "pnpm@10.30.3"
+  "pnpm": {
+    "overrides": {
+      "glob@<10.5.0": ">=10.5.0",
+      "esbuild@<0.25.0": ">=0.25.0",
+      "uuid@<11.1.1": ">=11.1.1"
+    }
+  }
 }
