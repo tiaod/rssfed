@@ -1,24 +1,39 @@
-import { defineNuxtConfig } from "nuxt/config"
-
+// https://nuxt.com/docs/api/configuration/nuxt-config
 export default defineNuxtConfig({
-  modules: ["@nuxt/ui"],
-  devtools: { enabled: true },
-  compatibilityDate: "2026-05-27",
+  modules: [
+    "@nuxt/eslint",
+    "@nuxt/ui",
+    "@vueuse/nuxt",
+  ],
+
+  devtools: {
+    enabled: true,
+  },
+
+  css: ["~/assets/css/main.css"],
 
   runtimeConfig: {
     public: {
       apiBaseUrl: process.env.API_BASE_URL ?? "http://localhost:3001",
-      couchdbUrl: process.env.COUCHDB_URL ?? "http://localhost:5984",
     },
   },
 
   nitro: {
     routeRules: {
-      "/api/**": { proxy: process.env.API_BASE_URL ?? "http://localhost:3001" },
+      "/api/**": {
+        proxy: process.env.API_BASE_URL ?? "http://localhost:3001",
+      },
     },
   },
 
-  typescript: {
-    strict: true,
+  compatibilityDate: "2024-07-11",
+
+  eslint: {
+    config: {
+      stylistic: {
+        commaDangle: "never",
+        braceStyle: "1tbs",
+      },
+    },
   },
 })
