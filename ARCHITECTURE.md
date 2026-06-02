@@ -12,21 +12,21 @@ RSSFed 是一个支持 ActivityPub 的 RSS 阅读器，核心功能：
 
 ## 技术栈
 
-| 层级 | 技术 | 版本 |
-|------|------|------|
-| 包管理 | pnpm workspace (monorepo) | >=10 |
-| 运行时 | Node.js | >=20 |
-| API 框架 | Hono | ^4.7 |
-| ActivityPub | Fedify (`@fedify/fedify`) | ^1.10 |
-| 身份认证 | Better Auth | ^1.2 |
-| ORM | Drizzle ORM (code-first) | ^0.45 |
-| 关系数据库 | PostgreSQL (prod) / pg (dev) | |
-| 文档数据库 | CouchDB 3.x | |
-| 客户端离线 | PouchDB | ^9.0 |
-| 任务队列 | BullMQ (Redis) | ^5.0 |
-| RSS 解析 | rss-parser | ^3.13 |
-| 前端框架 | Nuxt | ^4 |
-| UI 组件库 | Nuxt UI | ^4 |
+| 层级 | 技术 |
+|------|------|
+| 包管理 | pnpm workspace (monorepo) |
+| 运行时 | Node.js |
+| API 框架 | Hono |
+| ActivityPub | Fedify (`@fedify/fedify`) |
+| 身份认证 | Better Auth |
+| ORM | Drizzle ORM (code-first) |
+| 关系数据库 | PostgreSQL (prod) / pg (dev) |
+| 文档数据库 | CouchDB 3.x |
+| 客户端离线 | PouchDB |
+| 任务队列 | BullMQ (Redis) |
+| RSS 解析 | rss-parser |
+| 前端框架 | Nuxt |
+| UI 组件库 | Nuxt UI |
 
 
 

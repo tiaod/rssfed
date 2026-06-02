@@ -14,4 +14,5 @@ export const auth = betterAuth({
       enabled: true,
     },
   },
+  baseURL: process.env.BETTER_AUTH_URL ?? process.env.BOTS_BASE_URL ?? "http://localhost:3001",
 })
