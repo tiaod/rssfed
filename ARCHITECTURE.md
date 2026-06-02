@@ -59,7 +59,7 @@ Nuxt 的 Nitro 通过 routeRules 将 /api/* 代理到 Hono（开发模式）
 ### Hono 端配置
 
 ```typescript
-// apps/server/src/auth.ts
+// packages/server/src/auth.ts
 import { betterAuth } from "better-auth"
 import { drizzleAdapter } from "@better-auth/drizzle-adapter"
 import { db } from "./db"
@@ -72,7 +72,7 @@ export const auth = betterAuth({
   },
 })
 
-// apps/server/src/index.ts
+// packages/server/src/index.ts
 import { serve } from "@hono/node-server"
 import { Hono } from "hono"
 import { cors } from "hono/cors"
@@ -105,7 +105,7 @@ serve({ fetch: app.fetch, port: parseInt(process.env.PORT ?? "3001") })
 ### Nuxt 端配置
 
 ```typescript
-// apps/nuxt/app/lib/auth-client.ts
+// packages/app/lib/auth-client.ts
 import { createAuthClient } from "better-auth/vue"
 
 // 指向 Hono API 服务（通过 Nuxt Nitro proxy 转发）
@@ -117,7 +117,7 @@ export const authClient = createAuthClient({
 Nuxt 的 `nuxt.config.ts` 通过 Nitro 的 `routeRules` 代理 API 请求到 Hono:
 
 ```typescript
-// apps/nuxt/nuxt.config.ts
+// packages/app/nuxt.config.ts
 nitro: {
   routeRules: {
     "/api/**": { proxy: "http://localhost:3001" },
@@ -139,7 +139,7 @@ const { data: session } = await authClient.useSession(useFetch)
 ### 路由保护
 
 ```typescript
-// apps/nuxt/app/middleware/auth.ts
+// packages/app/middleware/auth.ts
 import { authClient } from "~/lib/auth-client"
 
 export default defineNuxtRouteMiddleware(async (to) => {
@@ -167,7 +167,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
 ### Drizzle ORM 数据模型
 
 ```typescript
-// apps/server/src/db/schema.ts （使用 pgTable, 非 sqliteTable）
+// packages/server/src/db/schema.ts （使用 pgTable, 非 sqliteTable）
 
 // Bot 表 - ActivityPub 机器人
 export const botsTable = pgTable("bots", {
@@ -375,7 +375,7 @@ PouchDB 自动同步到 User CouchDB（后台静默）
 ### 4. ActivityPub 转发流程
 
 ```
-`apps/server` 中 bots/index.ts 定时轮询（默认每 5 分钟）
+packages/server 中 bots/index.ts 定时轮询（默认每 5 分钟）
     │
     ├─ 从 Drizzle 查询所有 active 的 bots 及其关联的 feeds
     │
@@ -392,7 +392,7 @@ PouchDB 自动同步到 User CouchDB（后台静默）
 
 注意：ActivityPub 与 Hono API 运行在同一个进程（端口 3001），
 Fedify 通过 @fedify/hono 的 federation() 中间件集成。
-Bot 转发逻辑在 apps/server/src/bots/index.ts 中使用 setInterval 定期执行，
+Bot 转发逻辑在 packages/server/src/bots/index.ts 中使用 setInterval 定期执行，
 非独立服务，不需要额外端口。
 ```
 
@@ -425,7 +425,9 @@ Guide: 推荐热门 feeds / 搜索 / 导入 OPML
 | `BOTS_BASE_URL` | `http://localhost:3001` | `@rssfed/server` | Fedify Bot 公网地址（与 server 同进程） |
 | `CHECK_INTERVAL` | `300000` | `@rssfed/server` | Bot 轮询间隔 (ms) |
 | `FETCH_INTERVAL` | `900000` | `@rssfed/server` | RSS 抓取调度间隔 (ms, 默认 15 分钟) |
-| `API_BASE_URL` | `http://localhost:3001` | `@rssfed/nuxt` | Nuxt 代理的 API 地址 |
+| `BETTER_AUTH_URL` | `http://localhost:3001` | `@rssfed/server` | Better Auth 服务端基础 URL |
+| `COUCHDB_USER` | `admin` | `@rssfed/server` | CouchDB 用户名 |
+| `COUCHDB_PASSWORD` | `admin` | `@rssfed/server` | CouchDB 密码 |
 
 ---
 
@@ -433,53 +435,46 @@ Guide: 推荐热门 feeds / 搜索 / 导入 OPML
 
 ```
 rssfed/
-├── apps/
+├── packages/
 │   ├── server/              # Hono API 服务 (Auth + 业务 API + Fedify Bot)
 │   │   ├── src/
-│   │   │   ├── index.ts          # 入口：挂载 auth handler + 路由 + Fedify 中间件 + serve()
+│   │   │   ├── index.ts          # 入口：serve() 启动
+│   │   │   ├── app.ts            # Hono app 定义（可测试导入）
 │   │   │   ├── auth.ts           # Better Auth 服务端配置 (唯一实例)
-│   │   │   ├── db/               # Drizzle schema + 类型 + 常量 (本地模块)
-│   │   │   │   ├── index.ts          # re-export: db 实例 + schema + types + constants
-│   │   │   │   ├── schema.ts         # pgTable 定义 (bots, bot_feeds, subscriptions, etc.)
-│   │   │   │   ├── types.ts          # FeedDoc, EntryDoc, UserEntryDoc, BotConfig
-│   │   │   │   └── constants.ts      # COUCHDB_GLOBAL, SYNC_BATCH_SIZE, CLEANUP_DAYS
-│   │   │   ├── bots/             # ActivityPub Bot (Fedify, 已合并到 server)
-│   │   │   │   └── index.ts      # createFederation + Actor + Inbox + 轮询转发
+│   │   │   ├── db/               # Drizzle schema + 类型 + 常量
+│   │   │   ├── bots/             # ActivityPub Bot (Fedify)
 │   │   │   ├── couchdb/          # CouchDB 客户端 (nano + PouchDB)
-│   │   │   │   └── client.ts     # ensureGlobalDatabase, ensureUserDatabase
-│   │   │   ├── routes/
-│   │   │   │   ├── feeds.ts      # POST /discover, GET /:feedId
-│   │   │   │   ├── sync.ts       # POST / 触发同步, GET /status
-│   │   │   │   ├── bots.ts       # Bot CRUD + Feed 关联
-│   │   │   │   └── subscriptions.ts  # 订阅增删查
-│   │   │   ├── rss/
-│   │   │   │   └── parser.ts     # rss-parser 实例
-│   │   │   └── workers/
-│   │   │       └── index.ts      # BullMQ Queue + Worker + 定时调度
-│   │   ├── drizzle.config.ts        # drizzle-kit 配置
-│   │   ├── package.json             # hono, better-auth, @fedify/fedify, drizzle-orm, nano, bullmq
+│   │   │   ├── routes/           # feeds, sync, bots, subscriptions
+│   │   │   ├── rss/              # rss-parser 实例
+│   │   │   ├── workers/          # BullMQ Queue + Worker
+│   │   │   └── __tests__/        # vitest 集成测试
+│   │   │       └── health.test.ts
+│   │   ├── vitest.config.ts
+│   │   ├── drizzle.config.ts
+│   │   ├── package.json
 │   │   └── tsconfig.json
-│   └── nuxt/                   # Nuxt 前端 (SSR + Nuxt UI)
+│   └── app/                    # Nuxt 前端 (SSR + Nuxt UI)
 │       ├── app/
-│       │   ├── app.vue             # 根组件
-│       │   ├── lib/
-│       │   │   └── auth-client.ts   # Better Auth 客户端 (useRuntimeConfig)
+│       │   ├── app.vue             # 根组件（含登录状态）
+│       │   ├── assets/css/main.css # Tailwind CSS 入口
 │       │   ├── pages/
-│       │   │   ├── index.vue       # 首页（展示 session 状态）
+│       │   │   ├── index.vue       # 首页（登录/未登录双态）
 │       │   │   └── login.vue       # 登录/注册页
+│       │   ├── components/
+│       │   ├── lib/
+│       │   │   └── auth-client.ts   # Better Auth 客户端
 │       │   ├── middleware/
 │       │   │   └── auth.ts         # 路由保护中间件
-│       │   └── layouts/
-│       │       └── default.vue     # 默认布局
-│       ├── nuxt.config.ts          # @nuxt/ui 模块 + Nitro proxy
-│       ├── package.json            # nuxt, @nuxt/ui, better-auth/vue
+│       │   └── __tests__/
+│       │       └── smoke.test.ts   # 组件冒烟测试
+│       ├── vitest.config.ts
+│       ├── nuxt.config.ts          # @nuxt/ui + Nitro proxy
+│       ├── package.json
 │       └── tsconfig.json
-├── tsconfig.base.json              # 基础 tsconfig（根目录）
-├── .gitignore
-├── .npmrc
+├── tsconfig.base.json
 ├── pnpm-workspace.yaml
-├── package.json                    # root scripts: dev, dev:all, typecheck, db:push
-└── ARCHITECTURE.md                 # 本文件
+├── package.json
+└── ARCHITECTURE.md
 ```
 
 ---
@@ -554,7 +549,7 @@ async function cleanupUserDB(userId: string) {
 ### 创建用户数据库
 
 ```typescript
-// apps/server/src/couchdb/client.ts
+// packages/server/src/couchdb/client.ts
 export async function ensureUserDatabase(userId: string) {
   const dbName = `rssfed-user:${userId}`;
   try {
@@ -579,7 +574,7 @@ export async function ensureUserDatabase(userId: string) {
 ### 跨 DB 同步
 
 ```typescript
-// apps/server/src/routes/sync.ts 中的过滤复制
+// packages/server/src/routes/sync.ts 中的过滤复制
 async function syncUserFromGlobal(userId: string, feedIds: string[]) {
   const userPouch = getUserPouch(userId);
   const globalPouch = getGlobalPouch();
@@ -605,7 +600,7 @@ async function syncUserFromGlobal(userId: string, feedIds: string[]) {
                              @fedify/hono, nano, pouchdb-node, bullmq,
                              rss-parser, ioredis, @hono/node-server
     ↑
-@rssfed/nuxt             ← nuxt, @nuxt/ui, better-auth/vue
+app                      ← nuxt, @nuxt/ui
 ```
 
 ---
@@ -650,11 +645,44 @@ services:
 
 ---
 
+## 测试体系
+
+### 技术选择
+
+测试集中在 **`@rssfed/server`**（后端 API），Nuxt 前端因逻辑较薄暂不跑自动测试。
+
+| 包 | 测试框架 | 工具 |
+|------|-----------|-------|
+| `@rssfed/server` | Vitest | `app.request()` (Hono 内置测试) |
+
+### 关键设计
+
+`packages/server/src/app.ts` 导出 Hono app 实例，不启动服务器。`index.ts` 只负责 `serve()`。测试直接导入 `app` 调用 `app.request()`，零依赖，毫秒级运行。
+
+### 运行命令
+
+```bash
+pnpm test           # 运行 server 测试
+pnpm test:watch     # watch 模式（在 server 目录执行）
+```
+
+---
+
 ## 已知待办项
 
-1. ~~`apps/server` 启动问题 - `index.ts` 缺少 `serve()` 调用和 `@hono/node-server` 依赖~~ ✅ **已修复**
-2. ~~**CouchDB design document 安装** - 需要在 server 启动时自动安装 `_design/main` 到 Global DB~~ ✅ **已修复**
-3. ~~**BullMQ Worker 实现** - 当前只是占位，需要实现完整的 RSS 定时抓取逻辑~~ ✅ **已修复**
-4. **Fedify KV Store 替换** - 当前使用 `MemoryKvStore`，生产环境需换 `RedisKvStore` 或 `PostgresKvStore`
-5. **User CouchDB 定期清理** - 需要实现清理 cron job（删除 30 天前的已读旧条目，保留收藏条目 + compact）
-6. **Nuxt SSR cookie 传递** - 当前通过 Nitro proxy 解决，生产环境需确保正确
+### 已解决
+- `packages/server` 启动问题 - `index.ts` 缺少 `serve()` 调用和 `@hono/node-server` 依赖 ✅
+- CouchDB design document 安装 - 启动时自动安装 `_design/main` 到 Global DB ✅
+- BullMQ Worker 实现 - 完整的 RSS 定时抓取逻辑 ✅
+
+### 待处理
+1. **Fedify KV Store 替换** - 当前使用 `MemoryKvStore`，生产环境需换 `RedisKvStore` 或 `PostgresKvStore`
+2. **User CouchDB 定期清理** - 需要实现清理 cron job（删除 30 天前的已读旧条目，保留收藏条目 + compact）
+3. **Nuxt SSR cookie 传递** - 当前通过 Nitro proxy 解决，生产环境需确保正确
+4. **业务路由使用 session 提取用户身份** - 当前 subscriptions、bots 路由从请求体读取 userId，存在安全风险
+5. **PouchDB 同步改用服务端 filter** - 当前使用客户端过滤，性能不佳，应使用 `_design/main` 中的 filter 函数
+6. **CouchDB 连接支持认证** - 支持 COUCHDB_USER / COUCHDB_PASSWORD 环境变量
+7. **Bot 轮询改用 BullMQ repeatable job** - 当前使用 `setInterval`，缺少优雅关闭
+8. **Worker 优雅关闭** - 进程退出时未清理 Worker 和 Queue 连接
+9. **Bot ID 改用 UUID** - 当前使用 `bot:${userId}:${name}`，name 未 sanitize
+10. **处理 Undo Follow Activity** - 当前只处理了 Follow，未处理取消关注
