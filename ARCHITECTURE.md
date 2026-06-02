@@ -5,8 +5,30 @@
 RSSFed 是一个支持 ActivityPub 的 RSS 阅读器，核心功能：
 
 1. RSS 定时抓取与存储（自实现，不使用 Miniflux）
-2. 用户订阅管理与离线阅读（CouchDB + PouchDB 同步）
+2. 用户订阅管理与离线阅读（服务端 CouchDB 复制 + 客户端 PouchDB 同步）
 3. ActivityPub 机器人自动转发 RSS 内容到 Fediverse
+
+### 同步架构概览
+
+```
+┌─────────────────────────────────────────────────┐
+│                  服务端 (Hono)                    │
+│                                                   │
+│  CouchDB Global  ──── _replicate ────→ CouchDB   │
+│  (RSS 权威来源)     (服务端触发，      Per User   │
+│                     数据不经过 Node)   (用户私有)  │
+│                                                    │
+└──────────────────────┬────────────────────────────┘
+                       │ PouchDB 双向同步
+                       │ (浏览器 ↔ CouchDB)
+                       ▼
+┌─────────────────────────────────────────────────┐
+│             客户端 (Nuxt 浏览器)                  │
+│                                                   │
+│  PouchDB（IndexedDB 本地缓存）                      │
+│  离线可读，标记已读/收藏，联网自动推回              │
+└─────────────────────────────────────────────────┘
+```
 
 ---
 
@@ -17,12 +39,13 @@ RSSFed 是一个支持 ActivityPub 的 RSS 阅读器，核心功能：
 | 包管理 | pnpm workspace (monorepo) |
 | 运行时 | Node.js |
 | API 框架 | Hono |
-| ActivityPub | Fedify (`@fedify/fedify`) |
+| ActivityPub | Fedify (`@fedify/fedify`, `@fedify/redis`, `@fedify/hono`) |
 | 身份认证 | Better Auth |
 | ORM | Drizzle ORM (code-first) |
 | 关系数据库 | PostgreSQL (prod) / pg (dev) |
 | 文档数据库 | CouchDB 3.x |
-| 客户端离线 | PouchDB |
+| 服务端 CouchDB 客户端 | nano |
+| 客户端离线同步 | PouchDB (浏览器端) |
 | 任务队列 | BullMQ (Redis) |
 | RSS 解析 | rss-parser |
 | 前端框架 | Nuxt |
@@ -158,7 +181,7 @@ export default defineNuxtRouteMiddleware(async (to) => {
 |--------|----------|------|
 | **Drizzle ORM (PostgreSQL)** | 用户、bots、bot-feed 关系、用户订阅关系、同步元数据 | 核心业务逻辑、身份验证、ActivityPub 管理 |
 | **CouchDB Global** | feeds、entries（全局唯一） | RSS 内容权威来源 |
-| **CouchDB Per User** | 用户的订阅条目缓存 + read/saved 状态 | 离线阅读、PouchDB 同步 |
+| **CouchDB Per User** | 用户的订阅条目缓存 + read/saved 状态 | 离线阅读、客户端 PouchDB 同步 |
 
 ---
 
@@ -344,15 +367,18 @@ BullMQ Worker (定时调度 - 待实现)
     ↓
 2. 调用 sync API 触发同步 (POST /api/sync)
     ↓
-3. 服务端 PouchDB 过滤复制：Global DB → User DB
+3. 服务端请求 CouchDB _replicate API：Global DB → User DB
    - 只同步用户订阅的 feedId 对应的 entries
-   - 使用 CouchDB filter 函数过滤
-   - 分页拉取，batch_size = 500
+   - 使用 CouchDB filter 函数 (main/entries-by-feeds) 服务端过滤
+   - CouchDB 内部直接传输，数据不经过 Node 进程内存
     ↓
 4. 记录同步进度到 Drizzle user_feed_sync 表
     ↓
-5. 用户本地 PouchDB 同步 User CouchDB
-   - 双向实时同步（本地已读标记推回云端）
+5. 客户端 PouchDB 从 User CouchDB 拉取数据
+   - 自动同步，数据缓存在浏览器本地 IndexedDB
+   - 支持离线阅读（PouchDB 本地数据库）
+   - 用户在离线时标记已读/收藏 → 写入本地 PouchDB
+   - 联网后 PouchDB 自动推回 User CouchDB（双向同步）
 ```
 
 ### 3. 离线阅读流程
@@ -360,16 +386,18 @@ BullMQ Worker (定时调度 - 待实现)
 ```
 用户在线时
     ↓
-本地 PouchDB 同步 User CouchDB
+PouchDB 同步 User CouchDB（实时双向同步）
     ↓
 用户离线
     ↓
-读本地 PouchDB，所有数据可用
-标记已读 → 写入本地 PouchDB
+读本地 PouchDB（IndexedDB），所有已同步数据可用
+标记已读/收藏 → 写入本地 PouchDB
     ↓
 用户联网
     ↓
-PouchDB 自动同步到 User CouchDB（后台静默）
+PouchDB 自动将本地变更推回 User CouchDB（后台静默）
+    ↓
+服务端再将 read/saved 状态同步回 Global（可选跨用户统计）
 ```
 
 ### 4. ActivityPub 转发流程
@@ -442,8 +470,8 @@ rssfed/
 │   │   │   ├── app.ts            # Hono app 定义（可测试导入）
 │   │   │   ├── auth.ts           # Better Auth 服务端配置 (唯一实例)
 │   │   │   ├── db/               # Drizzle schema + 类型 + 常量
-│   │   │   ├── bots/             # ActivityPub Bot (Fedify)
-│   │   │   ├── couchdb/          # CouchDB 客户端 (nano + PouchDB)
+│   │   │   ├── bots/             # ActivityPub Bot (Fedify, RedisKvStore)
+│   │   │   ├── couchdb/          # CouchDB 客户端 (nano)
 │   │   │   ├── routes/           # feeds, sync, bots, subscriptions
 │   │   │   ├── rss/              # rss-parser 实例
 │   │   │   ├── workers/          # BullMQ Queue + Worker
@@ -465,9 +493,6 @@ rssfed/
 │       │   │   └── auth-client.ts   # Better Auth 客户端
 │       │   ├── middleware/
 │       │   │   └── auth.ts         # 路由保护中间件
-│       │   └── __tests__/
-│       │       └── smoke.test.ts   # 组件冒烟测试
-│       ├── vitest.config.ts
 │       ├── nuxt.config.ts          # @nuxt/ui + Nitro proxy
 │       ├── package.json
 │       └── tsconfig.json
@@ -528,17 +553,29 @@ rssfed/
 
 ```typescript
 async function cleanupUserDB(userId: string) {
-  const userDB = new PouchDB(`https://couch.example.com/rssfed-user:${userId}`);
-  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+  const dbName = `rssfed-user:${userId}`
+  const db = nano(authenticatedUrl).use(dbName)
+  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
 
-  const stale = await userDB.find({
-    selector: { type: 'entry', publishedAt: { $lt: cutoff }, saved: { $ne: true } },
-    fields: ['_id', '_rev'],
-  });
+  // 查询过期的已读条目（排除收藏的）
+  const result = await db.find({
+    selector: {
+      type: "entry",
+      publishedAt: { $lt: cutoff },
+      saved: { $ne: true },
+    },
+    fields: ["_id", "_rev"],
+  })
 
-  if (stale.docs.length === 0) return;
-  await userDB.bulkDocs(stale.docs.map(doc => ({ ...doc, _deleted: true })));
-  await userDB.compact();
+  if (result.docs.length === 0) return
+
+  // 批量标记删除
+  for (const doc of result.docs) {
+    await db.insert({ ...doc, _deleted: true } as any)
+  }
+
+  // 压缩回收空间
+  await nanoServer.db.replicate(dbName, `_compact_${dbName}`)
 }
 ```
 
@@ -551,22 +588,11 @@ async function cleanupUserDB(userId: string) {
 ```typescript
 // packages/server/src/couchdb/client.ts
 export async function ensureUserDatabase(userId: string) {
-  const dbName = `rssfed-user:${userId}`;
+  const dbName = `rssfed-user:${userId}`
   try {
-    await nanoServer.db.get(dbName);
+    await nanoServer.db.get(dbName)
   } catch {
-    await nanoServer.db.create(dbName);
-    // 上传 design document（过滤函数等）
-    await nanoServer.use(dbName).insert({
-      _id: "_design/main",
-      filters: {
-        "entries-by-feeds": `function(doc, req) {
-          if (doc.type !== 'entry') return false;
-          var feedIds = JSON.parse(req.query.feed_ids || '[]');
-          return feedIds.indexOf(doc.feedId) !== -1;
-        }`
-      }
-    });
+    await nanoServer.db.create(dbName)
   }
 }
 ```
@@ -574,22 +600,37 @@ export async function ensureUserDatabase(userId: string) {
 ### 跨 DB 同步
 
 ```typescript
-// packages/server/src/routes/sync.ts 中的过滤复制
-async function syncUserFromGlobal(userId: string, feedIds: string[]) {
-  const userPouch = getUserPouch(userId);
-  const globalPouch = getGlobalPouch();
-
-  await userPouch.replicate.from(globalPouch, {
-    filter: (doc: any) => {
-      if (doc.type !== "entry") return false;
-      return feedIds.includes(doc.feedId);
-    },
-    batch_size: SYNC_BATCH_SIZE,
-  });
-}
+// packages/server/src/routes/sync.ts — 利用 CouchDB 原生 _replicate API
+const response = await fetch(`${authenticatedUrl}/_replicate`, {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    source: `${authenticatedUrl}/rssfed-global`,
+    target: `${authenticatedUrl}/rssfed-user:${userId}`,
+    filter: "main/entries-by-feeds",
+    query_params: { feed_ids: JSON.stringify(feedIds) },
+    create_target: false,
+  }),
+})
 ```
 
-> 注意：这里使用的是 **客户端过滤** (PouchDB filter function)，与 CouchDB 的 `_design/main` 设计文档中的 `filters` 不同。两种方式都可以，后续可以统一为设计文档中的 filter。
+> CouchDB `_replicate` 内部直接完成数据传输，不经过 Node 进程内存，支持断点续传和自动批处理。
+
+### 客户端 PouchDB 同步
+
+```typescript
+// 浏览器端（Nuxt） — 连接用户专属 CouchDB
+const userDb = new PouchDB(`${couchUrl}/rssfed-user:${userId}`, {
+  auth: { username: "admin", password: process.env.NUXT_PUBLIC_COUCHDB_PASSWORD },
+})
+
+// 实时双向同步
+userDb.sync(remoteDb, { live: true, retry: true })
+  .on("change", () => { /* 更新 UI */ })
+  .on("error", () => { /* 处理离线 */ })
+```
+
+> 客户端 PouchDB 做的是 **用户 DB ↔ 浏览器本地** 的实时双向同步，与服务端的 `_replicate`（Global → 用户 DB）是两个独立层级。
 
 ---
 
@@ -597,7 +638,7 @@ async function syncUserFromGlobal(userId: string, feedIds: string[]) {
 
 ```
 @rssfed/server           ← drizzle-orm, postgres, hono, better-auth, @fedify/fedify,
-                             @fedify/hono, nano, pouchdb-node, bullmq,
+                             @fedify/hono, @fedify/redis, nano, bullmq,
                              rss-parser, ioredis, @hono/node-server
     ↑
 app                      ← nuxt, @nuxt/ui
@@ -674,15 +715,16 @@ pnpm test:watch     # watch 模式（在 server 目录执行）
 - `packages/server` 启动问题 - `index.ts` 缺少 `serve()` 调用和 `@hono/node-server` 依赖 ✅
 - CouchDB design document 安装 - 启动时自动安装 `_design/main` 到 Global DB ✅
 - BullMQ Worker 实现 - 完整的 RSS 定时抓取逻辑 ✅
+- **Fedify KV Store** - MemoryKvStore → `@fedify/redis` 的 RedisKvStore ✅
+- **业务路由 session 安全** - 全部改用 `auth.api.getSession()` 提取 userId ✅
+- **服务端 PouchDB** - 移除 pouchdb-node，Global → User 同步改用 CouchDB 原生 `_replicate` API（客户端 PouchDB 保留） ✅
+- **CouchDB 认证** - 支持 `COUCHDB_USER` / `COUCHDB_PASSWORD` 环境变量 ✅
+- **Bot 轮询优雅关闭** - SIGTERM/SIGINT 清理 Worker、Queue、Redis 连接 ✅
+- **Worker 优雅关闭** - 导出 `shutdownWorkers()`，`index.ts` 注册信号处理 ✅
+- **Bot ID 改用 UUID** - `crypto.randomUUID()` 替代 `bot:${userId}:${name}` ✅
+- **处理 Undo Follow** - 添加 Undo(Follow) 监听，删除 follower 记录 ✅
 
 ### 待处理
-1. **Fedify KV Store 替换** - 当前使用 `MemoryKvStore`，生产环境需换 `RedisKvStore` 或 `PostgresKvStore`
-2. **User CouchDB 定期清理** - 需要实现清理 cron job（删除 30 天前的已读旧条目，保留收藏条目 + compact）
-3. **Nuxt SSR cookie 传递** - 当前通过 Nitro proxy 解决，生产环境需确保正确
-4. **业务路由使用 session 提取用户身份** - 当前 subscriptions、bots 路由从请求体读取 userId，存在安全风险
-5. **PouchDB 同步改用服务端 filter** - 当前使用客户端过滤，性能不佳，应使用 `_design/main` 中的 filter 函数
-6. **CouchDB 连接支持认证** - 支持 COUCHDB_USER / COUCHDB_PASSWORD 环境变量
-7. **Bot 轮询改用 BullMQ repeatable job** - 当前使用 `setInterval`，缺少优雅关闭
-8. **Worker 优雅关闭** - 进程退出时未清理 Worker 和 Queue 连接
-9. **Bot ID 改用 UUID** - 当前使用 `bot:${userId}:${name}`，name 未 sanitize
-10. **处理 Undo Follow Activity** - 当前只处理了 Follow，未处理取消关注
+1. **User CouchDB 定期清理** - 需要实现清理 cron job（删除 30 天前的已读旧条目，保留收藏条目 + compact）
+2. **Nuxt SSR cookie 传递** - 当前通过 Nitro proxy 解决，生产环境需确保正确
+3. **Bot 轮询改用 BullMQ repeatable job** - 当前使用 `setInterval`，可改为更可靠的调度

@@ -1,10 +1,23 @@
 import nano from "nano"
-import PouchDB from "pouchdb-node"
 import { COUCHDB_GLOBAL } from "../db"
 
 const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
+const couchUser = process.env.COUCHDB_USER
+const couchPass = process.env.COUCHDB_PASSWORD
 
-export const nanoServer = nano(couchUrl)
+function couchUrlWithAuth(): string {
+  if (couchUser && couchPass) {
+    const url = new URL(couchUrl)
+    url.username = couchUser
+    url.password = couchPass
+    return url.toString()
+  }
+  return couchUrl
+}
+
+export const authenticatedUrl = couchUrlWithAuth()
+
+export const nanoServer = nano(authenticatedUrl)
 
 const GLOBAL_DESIGN_DOC = {
   _id: "_design/main",
@@ -57,12 +70,8 @@ export async function ensureUserDatabase(userId: string) {
   }
 }
 
-export function getUserPouch(userId: string): PouchDB.Database {
-  return new PouchDB(`${couchUrl}/rssfed-user:${userId}`)
-}
-
-export function getGlobalPouch(): PouchDB.Database {
-  return new PouchDB(`${couchUrl}/${COUCHDB_GLOBAL}`)
+export function createCouchDb(database: string): nano.DocumentScope<unknown> {
+  return nano(authenticatedUrl).use(database)
 }
 
 async function installDesignDoc(dbName: string) {

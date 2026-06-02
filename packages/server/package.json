@@ -7,6 +7,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "generate": "drizzle-kit generate",
     "push": "drizzle-kit push"
@@ -15,6 +17,7 @@
     "@better-auth/drizzle-adapter": "^1.2.0",
     "@fedify/fedify": "^2.2.3",
     "@fedify/hono": "^2.2.3",
+    "@fedify/redis": "^2.2.3",
     "@fedify/vocab": "^2.2.3",
     "@hono/node-server": "^1.14.0",
     "better-auth": "^1.2.0",
@@ -24,14 +27,13 @@
     "ioredis": "^5.4.0",
     "nano": "^11.0.0",
     "postgres": "^3.4.0",
-    "pouchdb-node": "^9.0.0",
     "rss-parser": "^3.13.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "@types/pouchdb-node": "^6.1.0",
     "drizzle-kit": "^0.31.9",
     "tsx": "^4.19.0",
-    "typescript": "^5.7.0"
+    "typescript": "^5.7.0",
+    "vitest": "^3.1.0"
   }
 }

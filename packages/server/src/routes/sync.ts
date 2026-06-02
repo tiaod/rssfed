@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { eq } from "drizzle-orm"
-import { ensureUserDatabase, getUserPouch, getGlobalPouch } from "../couchdb/client"
-import { db, userFeedSyncTable, SYNC_BATCH_SIZE } from "../db"
+import { ensureUserDatabase, authenticatedUrl } from "../couchdb/client"
+import { db, userFeedSyncTable, COUCHDB_GLOBAL } from "../db"
 import { auth } from "../auth"
 
 export const syncRouter = new Hono()
@@ -15,16 +15,23 @@ syncRouter.post("/", async (c) => {
   if (!feedIds?.length) return c.json({ error: "feedIds required" }, 400)
 
   await ensureUserDatabase(userId)
-  const globalPouch = getGlobalPouch()
-  const userPouch = getUserPouch(userId)
 
-  await userPouch.replicate.from(globalPouch, {
-    filter: (doc: any) => {
-      if (doc.type !== "entry") return false
-      return feedIds.includes(doc.feedId)
-    },
-    batch_size: SYNC_BATCH_SIZE,
+  const response = await fetch(`${authenticatedUrl}/_replicate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      source: `${authenticatedUrl}/${COUCHDB_GLOBAL}`,
+      target: `${authenticatedUrl}/rssfed-user:${userId}`,
+      filter: "main/entries-by-feeds",
+      query_params: { feed_ids: JSON.stringify(feedIds) },
+      create_target: false,
+    }),
   })
+
+  if (!response.ok) {
+    const err = await response.text()
+    return c.json({ error: `Replication failed: ${err}` }, 502)
+  }
 
   for (const feedId of feedIds) {
     await db.insert(userFeedSyncTable).values({

@@ -5,9 +5,10 @@
   "description": "RSS reader with ActivityPub support",
   "scripts": {
     "dev": "pnpm --filter @rssfed/server dev",
-    "dev:nuxt": "pnpm --filter @rssfed/nuxt dev",
+    "dev:nuxt": "pnpm --filter app dev",
     "dev:all": "pnpm --parallel -r run dev",
     "build": "pnpm -r run build",
+    "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",
     "db:generate": "pnpm --filter @rssfed/server generate",
     "db:push": "pnpm --filter @rssfed/server push"

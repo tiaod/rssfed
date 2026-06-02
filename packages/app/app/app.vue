@@ -1,26 +1,28 @@
-<script setup>
+<script setup lang="ts">
+import { authClient } from "~/lib/auth-client"
+
+const { data: session } = await authClient.useSession(useFetch)
+
+async function handleLogout() {
+  await authClient.signOut()
+  await navigateTo("/login")
+}
+
 useHead({
   meta: [
-    { name: 'viewport', content: 'width=device-width, initial-scale=1' }
+    { name: "viewport", content: "width=device-width, initial-scale=1" }
   ],
   link: [
-    { rel: 'icon', href: '/favicon.ico' }
+    { rel: "icon", href: "/favicon.ico" }
   ],
   htmlAttrs: {
-    lang: 'en'
+    lang: "zh-CN"
   }
 })
 
-const title = 'Nuxt Starter Template'
-const description = 'A production-ready starter template powered by Nuxt UI. Build beautiful, accessible, and performant applications in minutes, not hours.'
-
 useSeoMeta({
-  title,
-  description,
-  ogTitle: title,
-  ogDescription: description,
-  ogImage: 'https://ui.nuxt.com/assets/templates/nuxt/starter-light.png',
-  twitterCard: 'summary_large_image'
+  title: "RSSFed",
+  description: "支持 ActivityPub 的 RSS 阅读器",
 })
 </script>
 
@@ -28,24 +30,36 @@ useSeoMeta({
   <UApp>
     <UHeader>
       <template #left>
-        <NuxtLink to="/">
-          <AppLogo class="w-auto h-6 shrink-0" />
+        <NuxtLink to="/" class="font-bold text-lg">
+          RSSFed
         </NuxtLink>
-
-        <TemplateMenu />
       </template>
 
       <template #right>
         <UColorModeButton />
 
-        <UButton
-          to="https://github.com/nuxt-ui-templates/starter"
-          target="_blank"
-          icon="i-simple-icons-github"
-          aria-label="GitHub"
-          color="neutral"
-          variant="ghost"
-        />
+        <template v-if="session">
+          <span class="text-sm text-muted hidden sm:inline">
+            {{ session.user.name ?? session.user.email }}
+          </span>
+          <UButton
+            variant="ghost"
+            color="neutral"
+            @click="handleLogout"
+          >
+            退出
+          </UButton>
+        </template>
+
+        <template v-else>
+          <UButton
+            to="/login"
+            variant="subtle"
+            color="primary"
+          >
+            登录
+          </UButton>
+        </template>
       </template>
     </UHeader>
 
@@ -53,24 +67,13 @@ useSeoMeta({
       <NuxtPage />
     </UMain>
 
-    <USeparator icon="i-simple-icons-nuxtdotjs" />
+    <USeparator />
 
     <UFooter>
       <template #left>
         <p class="text-sm text-muted">
-          Built with Nuxt UI • © {{ new Date().getFullYear() }}
+          RSSFed &bull; {{ new Date().getFullYear() }}
         </p>
-      </template>
-
-      <template #right>
-        <UButton
-          to="https://github.com/nuxt-ui-templates/starter"
-          target="_blank"
-          icon="i-simple-icons-github"
-          aria-label="GitHub"
-          color="neutral"
-          variant="ghost"
-        />
       </template>
     </UFooter>
   </UApp>

@@ -1,16 +1,27 @@
-import { createFederation, MemoryKvStore } from "@fedify/fedify"
+import { createFederation } from "@fedify/fedify"
+import { RedisKvStore } from "@fedify/redis"
 import { federation } from "@fedify/hono"
-import { Service, Accept, Follow } from "@fedify/vocab"
+import { Service, Accept, Follow, Undo } from "@fedify/vocab"
 import { db, botsTable, botFeedsTable, botFollowersTable, COUCHDB_GLOBAL, type EntryDoc } from "../db"
 import { eq } from "drizzle-orm"
-import nano from "nano"
+import { createCouchDb } from "../couchdb/client"
+import IORedis from "ioredis"
 
-const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
 const baseUrl = process.env.BOTS_BASE_URL ?? "http://localhost:3001"
-const globalDb = nano(couchUrl).use(COUCHDB_GLOBAL)
+const globalDb = createCouchDb(COUCHDB_GLOBAL)
+
+const redis = new IORedis({
+  host: process.env.REDIS_HOST ?? "localhost",
+  port: parseInt(process.env.REDIS_PORT ?? "6379"),
+  maxRetriesPerRequest: null,
+})
+
+export function shutdownBots() {
+  return redis.quit()
+}
 
 const fedi = createFederation<void>({
-  kv: new MemoryKvStore(),
+  kv: new RedisKvStore(redis),
 })
 
 fedi.setActorDispatcher("/actor/{identifier}", async (ctx, identifier) => {
@@ -58,6 +69,21 @@ fedi.setInboxListeners("/actor/{identifier}/inbox")
       { identifier: botId },
       follower.href,
       new Accept({ actor: targetId, object: follow }),
+    )
+  })
+  .on(Undo, async (ctx: any, undo: any) => {
+    const object = undo.object
+    if (object?.type !== "Follow") return
+
+    const follower = object.actorId as URL | undefined
+    const targetId = object.objectId as URL | undefined
+    if (!targetId || !follower) return
+
+    const botId = targetId.href.split("/").pop()!
+    const followerId = follower.href
+
+    await db.delete(botFollowersTable).where(
+      eq(botFollowersTable.id, `${botId}:${followerId}`),
     )
   })
 

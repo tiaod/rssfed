@@ -98,4 +98,11 @@ export async function scheduleFeedFetches() {
 }
 
 const FETCH_INTERVAL = parseInt(process.env.FETCH_INTERVAL ?? "900000")
-setInterval(scheduleFeedFetches, FETCH_INTERVAL)
+const fetchInterval = setInterval(scheduleFeedFetches, FETCH_INTERVAL)
+
+export async function shutdownWorkers() {
+  clearInterval(fetchInterval)
+  await worker.close()
+  await fetchQueue.close()
+  await connection.quit()
+}
