@@ -2,14 +2,28 @@
 import { ref, computed } from "vue"
 import { authClient } from "~/lib/auth-client"
 
+/** 开发模式下可用的测试账号 */
+const TEST_ACCOUNTS = [
+  { label: "管理员", email: "admin@example.com", password: "Admin123!" },
+  { label: "用户 #1", email: "user1@test.com", password: "Password123!" },
+] as const
+
 const mode = ref<"login" | "register">("login")
-const email = ref("")
-const password = ref("")
+const email = ref(import.meta.dev ? TEST_ACCOUNTS[0].email : "")
+const password = ref(import.meta.dev ? TEST_ACCOUNTS[0].password : "")
 const name = ref("")
 const error = ref("")
 const loading = ref(false)
 
+const isDev = import.meta.dev
+
 const title = computed(() => (mode.value === "login" ? "登录" : "注册"))
+
+/** 快速填入指定测试账号 */
+function fillTestAccount(index: number) {
+  email.value = TEST_ACCOUNTS[index].email
+  password.value = TEST_ACCOUNTS[index].password
+}
 
 async function handleSubmit() {
   error.value = ""
@@ -58,6 +72,23 @@ async function handleSubmit() {
           </UButton>
         </div>
       </template>
+
+      <!-- 开发环境：测试账号快速填入 -->
+      <div v-if="isDev && mode === 'login'" class="px-4 -mt-2 mb-4">
+        <p class="text-xs text-gray-500 mb-1">测试账号一键填入</p>
+        <div class="flex gap-2">
+          <UButton
+            v-for="(acc, i) in TEST_ACCOUNTS"
+            :key="i"
+            variant="soft"
+            size="xs"
+            color="primary"
+            @click="fillTestAccount(i)"
+          >
+            {{ acc.label }}
+          </UButton>
+        </div>
+      </div>
 
       <UForm @submit="handleSubmit" class="space-y-4">
         <UFormField v-if="mode === 'register'" label="昵称" required>

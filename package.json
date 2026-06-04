@@ -11,7 +11,10 @@
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",
     "db:generate": "pnpm --filter @rssfed/server generate",
-    "db:push": "pnpm --filter @rssfed/server push"
+    "db:migrate": "pnpm --filter @rssfed/server migrate",
+    "db:push": "pnpm --filter @rssfed/server push",
+    "scripts:create-users": "pnpm --filter @rssfed/server tsx scripts/create-test-users.ts",
+    "scripts:test-redis": "pnpm --filter @rssfed/server tsx scripts/test-redis.ts"
   },
   "engines": {
     "node": ">=20"

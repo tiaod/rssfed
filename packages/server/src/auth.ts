@@ -1,4 +1,5 @@
 import { betterAuth } from "better-auth"
+import { admin } from "better-auth/plugins/admin"
 import { drizzleAdapter } from "@better-auth/drizzle-adapter"
 import { db } from "./db"
 
@@ -6,9 +7,13 @@ export const auth = betterAuth({
   database: drizzleAdapter(db, {
     provider: "pg",
   }),
+  plugins: [
+    admin(),
+  ],
   emailAndPassword: {
     enabled: true,
   },
+  trustedOrigins: [process.env.CORS_ORIGIN ?? "http://localhost:3000"],
   advanced: {
     crossSubDomainCookies: {
       enabled: true,

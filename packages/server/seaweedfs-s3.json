@@ -1,0 +1,14 @@
+{
+  "identities": [
+    {
+      "name": "dev-access",
+      "credentials": [
+        {
+          "accessKey": "rssfed-dev",
+          "secretKey": "rssfed-dev-secret"
+        }
+      ],
+      "actions": ["Read", "Write", "List", "Tagging", "Admin"]
+    }
+  ]
+}

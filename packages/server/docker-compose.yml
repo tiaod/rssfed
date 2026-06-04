@@ -1,0 +1,77 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: rssfed
+      POSTGRES_PASSWORD: rssfed
+      POSTGRES_DB: rssfed
+    volumes:
+      - rssfed-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "rssfed"]
+      interval: 10s
+      start_period: 30s
+    restart: always
+
+  couchdb:
+    image: couchdb:3
+    ports:
+      - "5984:5984"
+    environment:
+      COUCHDB_USER: admin
+      COUCHDB_PASSWORD: admin
+    volumes:
+      - rssfed-couchdb:/opt/couchdb/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5984/"]
+      interval: 10s
+      start_period: 30s
+    restart: always
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - rssfed-redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      start_period: 30s
+    restart: always
+
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    profiles: ["dev"]
+    ports:
+      - "5050:80"
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@rssfed.dev
+      PGADMIN_DEFAULT_PASSWORD: admin
+    volumes:
+      - rssfed-pgadmin:/var/lib/pgadmin
+    depends_on:
+      - postgres
+    restart: always
+
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    profiles: ["dev"]
+    ports:
+      - "8333:8333"       # S3 API
+      - "9333:9333"       # Master 通信端口
+      - "8081:8081"       # Web UI
+    command: "server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json"
+    volumes:
+      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+      - seaweedfs-data:/data
+    restart: always
+
+volumes:
+  rssfed-db:
+  rssfed-couchdb:
+  rssfed-redis:
+  rssfed-pgadmin:
+  seaweedfs-data:
