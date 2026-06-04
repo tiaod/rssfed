@@ -1,8 +1,8 @@
 import { defineStore } from 'pinia'
 import { computed } from 'vue'
-import { authClient } from '~/lib/auth-client'
 
 export const useUserStore = defineStore('user', () => {
+  const authClient = useAuthClient()
   const session = authClient.useSession()
 
   const user = computed(() => session.value.data?.user ?? null)

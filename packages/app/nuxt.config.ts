@@ -2,7 +2,8 @@
 export default defineNuxtConfig({
   modules: [
     '@nuxt/eslint',
-    '@nuxt/ui'
+    '@nuxt/ui',
+    '@pinia/nuxt'
   ],
 
   devtools: {
@@ -17,7 +18,16 @@ export default defineNuxtConfig({
 
   nitro: {
     routeRules: {
-      "/api/**": { proxy: process.env.NUXT_PUBLIC_API_BASE_URL ?? "http://localhost:3001" },
+      // 注意：不要在这里添加 /api/** 的全局代理规则，
+      // 否则会覆盖 @nuxt/icon 等模块的服务端路由。
+      // 代理逻辑已由 server/middleware/api-proxy.ts 处理。
+    },
+  },
+
+  runtimeConfig: {
+    public: {
+      authBaseUrl: '/api/auth',
+      apiBaseUrl: 'http://localhost:3001',
     },
   },
 

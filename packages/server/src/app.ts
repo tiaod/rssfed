@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { auth } from "./auth"
+import { allowedOrigins } from "./config"
 import { feedsRouter } from "./routes/feeds"
 import { botsRouter } from "./routes/bots"
 import { syncRouter } from "./routes/sync"
@@ -10,7 +11,7 @@ import { fediMiddleware } from "./bots"
 const app = new Hono()
 
 app.use("/api/*", cors({
-  origin: process.env.CORS_ORIGIN ?? "http://localhost:3000",
+  origin: allowedOrigins,
   credentials: true,
 }))
 

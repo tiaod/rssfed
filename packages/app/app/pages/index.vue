@@ -1,13 +1,13 @@
 <script setup lang="ts">
-import { authClient } from "~/lib/auth-client"
+import { useUserStore } from "~/stores/user"
 
-const { data: session } = await authClient.useSession(useFetch)
+const userStore = useUserStore()
 </script>
 
 <template>
-  <div v-if="session" class="p-6">
+  <div v-if="userStore.user" class="p-6">
     <h1 class="text-2xl font-bold mb-2">
-      欢迎回来，{{ session.user.name ?? session.user.email }}
+      欢迎回来，{{ userStore.user.name ?? userStore.user.email }}
     </h1>
     <p class="text-muted mb-6">
       你的 RSS 订阅和 ActivityPub 机器人面板

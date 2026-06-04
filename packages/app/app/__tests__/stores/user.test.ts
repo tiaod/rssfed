@@ -16,10 +16,11 @@ describe('useUserStore', () => {
 
   it('logout 调用 signOut', async () => {
     const store = useUserStore()
-    const { authClient } = await import('~/lib/auth-client')
+    // useAuthClient() 在 setup.ts 中已 mock，返回 mockAuthClient
+    const mockAuthClient = (globalThis as any).useAuthClient()
 
     await store.logout()
 
-    expect(authClient.signOut).toHaveBeenCalledOnce()
+    expect(mockAuthClient.signOut).toHaveBeenCalledOnce()
   })
 })

@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth"
 import { admin } from "better-auth/plugins/admin"
 import { drizzleAdapter } from "@better-auth/drizzle-adapter"
 import { db } from "./db"
+import { allowedOrigins } from "./config"
 
 export const auth = betterAuth({
   database: drizzleAdapter(db, {
@@ -13,7 +14,7 @@ export const auth = betterAuth({
   emailAndPassword: {
     enabled: true,
   },
-  trustedOrigins: [process.env.CORS_ORIGIN ?? "http://localhost:3000"],
+  trustedOrigins: allowedOrigins,
   advanced: {
     crossSubDomainCookies: {
       enabled: true,

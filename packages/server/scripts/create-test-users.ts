@@ -47,10 +47,12 @@ async function main() {
   for (const testUser of testUsers) {
     try {
       await auth.api.createUser({
-        email: testUser.email,
-        name: testUser.name,
-        password: testUser.password,
-        role: testUser.role || 'user',
+        body: {
+          email: testUser.email,
+          name: testUser.name,
+          password: testUser.password,
+          role: (testUser.role || 'user') as 'admin' | 'user',
+        },
       })
 
       if (successCount < 10 || successCount === testUsers.length - 1) {

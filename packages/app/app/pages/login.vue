@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from "vue"
-import { authClient } from "~/lib/auth-client"
+import { useUserStore } from "~/stores/user"
 
 /** 开发模式下可用的测试账号 */
 const TEST_ACCOUNTS = [
@@ -31,7 +31,7 @@ async function handleSubmit() {
 
   try {
     if (mode.value === "register") {
-      const { error: err } = await authClient.signUp.email({
+      const { error: err } = await useAuthClient().signUp.email({
         email: email.value,
         password: password.value,
         name: name.value,
@@ -41,7 +41,7 @@ async function handleSubmit() {
         return
       }
     } else {
-      const { error: err } = await authClient.signIn.email({
+      const { error: err } = await useAuthClient().signIn.email({
         email: email.value,
         password: password.value,
       })
@@ -50,6 +50,11 @@ async function handleSubmit() {
         return
       }
     }
+
+    // 登录成功后刷新 session 状态
+    const userStore = useUserStore()
+    await userStore.refresh()
+
     await navigateTo("/")
   } finally {
     loading.value = false

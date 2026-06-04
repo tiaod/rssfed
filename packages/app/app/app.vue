@@ -1,10 +1,17 @@
 <script setup lang="ts">
-import { authClient } from "~/lib/auth-client"
+import { useUserStore } from "~/stores/user"
 
-const { data: session } = await authClient.useSession(useFetch)
+const userStore = useUserStore()
+
+// SSR 友好的初始 session 加载
+const { data: initialSession } = await useAuthClient().useSession(useFetch)
+// 将 SSR 拿到的 session 同步到 store（仅首次加载时生效）
+if (initialSession.value?.user && !userStore.user) {
+  await userStore.refresh()
+}
 
 async function handleLogout() {
-  await authClient.signOut()
+  await userStore.logout()
   await navigateTo("/login")
 }
 
@@ -38,9 +45,9 @@ useSeoMeta({
       <template #right>
         <UColorModeButton />
 
-        <template v-if="session">
+        <template v-if="userStore.user">
           <span class="text-sm text-muted hidden sm:inline">
-            {{ session.user.name ?? session.user.email }}
+            {{ userStore.user.name ?? userStore.user.email }}
           </span>
           <UButton
             variant="ghost"

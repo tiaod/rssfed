@@ -14,8 +14,10 @@
     "@iconify-json/lucide": "^1.2.111",
     "@iconify-json/simple-icons": "^1.2.84",
     "@nuxt/ui": "^4.8.1",
+    "@pinia/nuxt": "^0.11.3",
     "better-auth": "^1.2.0",
     "nuxt": "^4.4.6",
+    "pinia": "^3.0.4",
     "tailwindcss": "^4.3.0"
   },
   "devDependencies": {
