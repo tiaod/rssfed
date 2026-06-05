@@ -1,7 +1,6 @@
 // Playwright 网页检查脚本
 // 使用系统已安装的 Chrome 浏览器，无需额外下载
 import { chromium } from 'playwright';
-import process from 'process';
 
 const TARGET_URL = process.env.CHECK_URL || 'http://localhost:3000';
 // 使用系统 Chrome，避免下载浏览器

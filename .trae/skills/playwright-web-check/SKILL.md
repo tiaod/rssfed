@@ -38,119 +38,9 @@ pnpm dev:nuxt       # 仅前端 Nuxt 应用
 pnpm dev            # 仅服务端
 ```
 
-### 2. 编写 Playwright 检查脚本
+### 2. 执行检查脚本
 
-在项目根目录创建临时脚本（用完可删除），内容如下：
-
-```javascript
-// .trae/skills/playwright-web-check/check.mjs
-import { chromium } from 'playwright';
-
-const TARGET_URL = process.env.CHECK_URL || 'http://localhost:3000';
-
-const results = {
-  consoleErrors: [],
-  networkErrors: [],
-  pageCrashed: false,
-  consoleWarnings: [],
-};
-
-const browser = await chromium.launch({ headless: true });
-const context = await browser.newContext({
-  viewport: { width: 1280, height: 720 },
-  ignoreHTTPSErrors: true,
-});
-
-// 收集控制台消息
-context.on('page', (page) => {
-  page.on('console', (msg) => {
-    if (msg.type() === 'error') {
-      results.consoleErrors.push({
-        text: msg.text(),
-        location: msg.location(),
-      });
-    } else if (msg.type() === 'warning') {
-      results.consoleWarnings.push({
-        text: msg.text(),
-        location: msg.location(),
-      });
-    }
-  });
-
-  // 监听网络请求失败
-  page.on('requestfailed', (request) => {
-    results.networkErrors.push({
-      url: request.url(),
-      failure: request.failure()?.errorText,
-      method: request.method(),
-    });
-  });
-
-  // 监听页面崩溃
-  page.on('crash', () => {
-    results.pageCrashed = true;
-  });
-});
-
-const page = await context.newPage();
-
-try {
-  console.log(`正在访问: ${TARGET_URL}`);
-  await page.goto(TARGET_URL, { waitUntil: 'networkidle', timeout: 30000 });
-
-  // 等待额外时间收集异步加载的日志
-  await page.waitForTimeout(3000);
-
-  // 如果有交互（如登录），可以在此处添加操作
-  // 例如：await page.click('button');
-  // 然后再次等待收集日志
-
-} catch (error) {
-  console.error('页面加载失败:', error.message);
-  results.pageCrashed = true;
-}
-
-// 输出结果
-console.log('\n========== Playwright 检查报告 ==========');
-
-if (results.pageCrashed) {
-  console.log('\n❌ 页面崩溃/加载失败');
-}
-
-if (results.consoleErrors.length > 0) {
-  console.log(`\n❌ 发现 ${results.consoleErrors.length} 个控制台错误:`);
-  results.consoleErrors.forEach((err, i) => {
-    console.log(`  ${i + 1}. ${err.text}`);
-    if (err.location?.url) {
-      console.log(`     位置: ${err.location.url}:${err.location.lineNumber}:${err.location.columnNumber}`);
-    }
-  });
-} else {
-  console.log('\n✅ 控制台无错误');
-}
-
-if (results.consoleWarnings.length > 0) {
-  console.log(`\n⚠️  发现 ${results.consoleWarnings.length} 个控制台警告:`);
-  results.consoleWarnings.forEach((warn, i) => {
-    console.log(`  ${i + 1}. ${warn.text}`);
-  });
-}
-
-if (results.networkErrors.length > 0) {
-  console.log(`\n❌ 发现 ${results.networkErrors.length} 个网络请求失败:`);
-  results.networkErrors.forEach((err, i) => {
-    console.log(`  ${i + 1}. ${err.method} ${err.url} - ${err.failure}`);
-  });
-} else {
-  console.log('\n✅ 网络请求全部成功');
-}
-
-console.log('\n========================================');
-
-await browser.close();
-```
-
-### 3. 执行检查
+检查脚本位于 `.trae/skills/playwright-web-check/check.mjs`，它使用系统 Chrome 浏览器（无需额外下载浏览器）：
 
 ```bash
 # 默认检查 localhost:3000
@@ -160,12 +50,25 @@ node .trae/skills/playwright-web-check/check.mjs
 CHECK_URL=http://localhost:5173 node .trae/skills/playwright-web-check/check.mjs
 ```
 
-### 4. 运行 Lighthouse 审计（可选）
+该脚本会检查以下项目：
+- 页面是否能正常加载
+- 控制台错误和警告
+- JS 运行时错误（未捕获异常）
+- 网络请求失败
+- 异常状态码响应（4xx/5xx）
+- Service Worker 状态
 
-如果需要运行 Lighthouse 审计：
+### 3. 运行 Lighthouse 审计（可选）
+
+Lighthouse 审计需要额外的 `lighthouse` 包，如需使用请先安装：
+
+```bash
+pnpm add -D lighthouse
+```
+
+然后在 `.trae/skills/playwright-web-check/` 目录下创建 `lighthouse.mjs` 文件：
 
 ```javascript
-// .trae/skills/playwright-web-check/lighthouse.mjs
 import { chromium } from 'playwright';
 import { play } from 'lighthouse';
 import fs from 'fs';
@@ -187,9 +90,13 @@ console.log('Lighthouse 报告已生成: lighthouse-report.html');
 await browser.close();
 ```
 
-> 注意：Lighthouse 需要额外安装 `lighthouse` 包：`pnpm add -D lighthouse`
+运行方式：
 
-### 5. 报告解读
+```bash
+node .trae/skills/playwright-web-check/lighthouse.mjs
+```
+
+### 4. 报告解读
 
 检查完成后，向用户呈现结果摘要：
 
