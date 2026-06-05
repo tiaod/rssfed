@@ -1,6 +1,6 @@
 # RSSFed 项目规则
 
-支持 ActivityPub 的 RSS 阅读器，monorepo（pnpm workspace），`packages/app`（Nuxt 前端）+ `packages/server`（Hono 后端）。
+支持 ActivityPub 的 RSS 阅读器，monorepo（pnpm workspace），`packages/nuxt-client`（Nuxt 前端）+ `packages/hono-server`（Hono 后端）。
 
 ## 编码规范
 

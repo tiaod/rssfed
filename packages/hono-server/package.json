@@ -1,5 +1,5 @@
 {
-  "name": "@rssfed/server",
+  "name": "@rssfed/hono-server",
   "type": "module",
   "version": "0.1.0",
   "private": true,

@@ -27,7 +27,7 @@ RSSFed 是一个支持 ActivityPub 的 RSS 阅读器。核心能力：
 
 ```
 rssfed/
-├── packages/server/     # Hono API 服务（认证、RSS 抓取、ActivityPub Bot）
+├── packages/hono-server/     # Hono API 服务（认证、RSS 抓取、ActivityPub Bot）
 │   ├── src/
 │   │   ├── app.ts          ← Hono app 定义（可测试导入）
 │   │   ├── auth.ts         ← Better Auth 服务端配置
@@ -41,7 +41,7 @@ rssfed/
 │   │
 │   └── src/index.ts        ← 入口，serve() 启动
 │
-└── packages/app/        # Nuxt 前端（SSR）
+└── packages/nuxt-client/        # Nuxt 前端（SSR）
     ├── app/
     │   ├── app.vue         ← 根组件（含顶部导航 + 登录态）
     │   ├── pages/          ← 路由页面

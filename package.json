@@ -4,15 +4,15 @@
   "version": "0.1.0",
   "description": "RSS reader with ActivityPub support",
   "scripts": {
-    "dev": "pnpm --filter @rssfed/server dev",
-    "dev:nuxt": "pnpm --filter app dev",
+    "dev": "pnpm --filter @rssfed/hono-server dev",
+    "dev:nuxt": "pnpm --filter @rssfed/nuxt-client dev",
     "dev:all": "pnpm --parallel -r run dev",
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",
-    "db:push": "pnpm --filter @rssfed/server push",
-    "scripts:create-users": "pnpm --filter @rssfed/server tsx scripts/create-test-users.ts",
-    "scripts:test-redis": "pnpm --filter @rssfed/server tsx scripts/test-redis.ts"
+    "db:push": "pnpm --filter @rssfed/hono-server push",
+    "scripts:create-users": "pnpm --filter @rssfed/hono-server tsx scripts/create-test-users.ts",
+    "scripts:test-redis": "pnpm --filter @rssfed/hono-server tsx scripts/test-redis.ts"
   },
   "engines": {
     "node": ">=20"
