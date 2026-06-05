@@ -26,7 +26,9 @@ export default defineNuxtConfig({
 
   runtimeConfig: {
     public: {
-      authBaseUrl: '/api/auth',
+      // better-auth 要求 baseURL 必须是绝对 URL
+      // 开发环境指向 Nuxt 自身端口，走 proxy 到后端
+      authBaseUrl: 'http://localhost:3000/api/auth',
       apiBaseUrl: 'http://localhost:3001',
     },
   },

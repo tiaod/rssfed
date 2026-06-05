@@ -1,8 +1,17 @@
 <script setup lang="ts">
 import type { NavigationMenuItem } from '@nuxt/ui'
+import { useUserStore } from "~/stores/user"
 
+const userStore = useUserStore()
 const route = useRoute()
 const toast = useToast()
+
+// 初始化用户 session
+const client = useAuthClient()
+const { data: session } = await client.useSession(useFetch)
+if (session.value?.user) {
+  await userStore.refresh()
+}
 
 const open = ref(false)
 const notificationsOpen = ref(false)
