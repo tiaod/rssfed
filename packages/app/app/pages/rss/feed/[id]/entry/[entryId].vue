@@ -16,20 +16,22 @@ const { data: entry, pending, error } = await useAsyncData(`entry-${entryId}`, (
 
 <template>
   <UDashboardPanel>
-    <UDashboardNavbar title="文章详情">
-      <template #right>
-        <UButton
-          variant="ghost"
-          color="neutral"
-          icon="i-lucide-arrow-left"
-          @click="router.back()"
-        >
-          返回
-        </UButton>
-      </template>
-    </UDashboardNavbar>
+    <template #header>
+      <UDashboardNavbar title="文章详情">
+        <template #right>
+          <UButton
+            variant="ghost"
+            color="neutral"
+            icon="i-lucide-arrow-left"
+            @click="router.back()"
+          >
+            返回
+          </UButton>
+        </template>
+      </UDashboardNavbar>
+    </template>
 
-    <UDashboardPanelContent>
+    <template #body>
       <UAlert
         v-if="error"
         color="error"
@@ -46,6 +48,6 @@ const { data: entry, pending, error } = await useAsyncData(`entry-${entryId}`, (
         v-else-if="entry"
         :entry="entry"
       />
-    </UDashboardPanelContent>
+    </template>
   </UDashboardPanel>
 </template>

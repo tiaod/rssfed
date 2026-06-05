@@ -9,21 +9,23 @@ const { data: entries, pending, error } = await useAsyncData('timeline', () => a
 
 <template>
   <UDashboardPanel>
-    <UDashboardNavbar title="时间线">
-      <template #right>
-        <UButton
-          v-if="pending"
-          loading
-          variant="ghost"
-          color="neutral"
-          size="sm"
-        >
-          加载中…
-        </UButton>
-      </template>
-    </UDashboardNavbar>
+    <template #header>
+      <UDashboardNavbar title="时间线">
+        <template #right>
+          <UButton
+            v-if="pending"
+            loading
+            variant="ghost"
+            color="neutral"
+            size="sm"
+          >
+            加载中…
+          </UButton>
+        </template>
+      </UDashboardNavbar>
+    </template>
 
-    <UDashboardPanelContent>
+    <template #body>
       <UAlert
         v-if="error"
         color="error"
@@ -49,6 +51,6 @@ const { data: entries, pending, error } = await useAsyncData('timeline', () => a
         :entries="entries"
         base-path="/rss/feed"
       />
-    </UDashboardPanelContent>
+    </template>
   </UDashboardPanel>
 </template>

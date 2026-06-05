@@ -11,9 +11,11 @@ const { isOnline } = useOffline()
 
 <template>
   <UDashboardPanel>
-    <UDashboardNavbar title="我的" />
+    <template #header>
+      <UDashboardNavbar title="我的" />
+    </template>
 
-    <UDashboardPanelContent>
+    <template #body>
       <div class="max-w-md mx-auto space-y-6">
         <UCard>
           <template #header>
@@ -56,6 +58,6 @@ const { isOnline } = useOffline()
           </template>
         </UCard>
       </div>
-    </UDashboardPanelContent>
+    </template>
   </UDashboardPanel>
 </template>

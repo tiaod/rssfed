@@ -15,21 +15,23 @@ const { data: entries, pending } = await useAsyncData(`feed-entries-${feedId}`, 
 
 <template>
   <UDashboardPanel>
-    <UDashboardNavbar :title="feed?.title || '订阅源'">
-      <template #right>
-        <UButton
-          v-if="pending"
-          loading
-          variant="ghost"
-          color="neutral"
-          size="sm"
-        >
-          加载中…
-        </UButton>
-      </template>
-    </UDashboardNavbar>
+    <template #header>
+      <UDashboardNavbar :title="feed?.title || '订阅源'">
+        <template #right>
+          <UButton
+            v-if="pending"
+            loading
+            variant="ghost"
+            color="neutral"
+            size="sm"
+          >
+            加载中…
+          </UButton>
+        </template>
+      </UDashboardNavbar>
+    </template>
 
-    <UDashboardPanelContent>
+    <template #body>
       <div v-if="feed" class="mb-6">
         <p class="text-sm text-muted">{{ feed.description }}</p>
         <UButton
@@ -55,6 +57,6 @@ const { data: entries, pending } = await useAsyncData(`feed-entries-${feedId}`, 
         :entries="entries || []"
         :base-path="`/rss/feed/${feedId}`"
       />
-    </UDashboardPanelContent>
+    </template>
   </UDashboardPanel>
 </template>
