@@ -18,6 +18,17 @@ const userStore = useUserStore()
           >
             登录
           </UButton>
+          <template v-else>
+            <span class="text-sm text-muted hidden sm:inline">
+              {{ userStore.user.name ?? userStore.user.email }}
+            </span>
+            <UAvatar
+              :text="(userStore.user.name ?? userStore.user.email)?.[0] ?? 'U'"
+              size="xs"
+              color="primary"
+              class="ml-2"
+            />
+          </template>
         </template>
       </UDashboardNavbar>
     </template>

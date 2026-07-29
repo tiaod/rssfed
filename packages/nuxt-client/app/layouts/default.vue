@@ -6,12 +6,11 @@ const userStore = useUserStore()
 const route = useRoute()
 const toast = useToast()
 
-// 初始化用户 session
+// 初始化用户 session — 在客户端挂载后刷新，确保登录/登出后状态正确
 const client = useAuthClient()
-const { data: session } = await client.useSession(useFetch)
-if (session.value?.user) {
+onMounted(async () => {
   await userStore.refresh()
-}
+})
 
 const open = ref(false)
 const notificationsOpen = ref(false)
