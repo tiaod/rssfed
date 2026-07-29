@@ -1,7 +1,7 @@
 import { createInstance, text } from "@fedify/botkit"
 import { RedisKvStore, RedisMessageQueue } from "@fedify/redis"
 import IORedis from "ioredis"
-import { db, botsTable, botFeedsTable, type EntryDoc, COUCHDB_GLOBAL } from "../db"
+import { db, bots as botsTable, botFeeds, type EntryDoc, COUCHDB_GLOBAL } from "../db"
 import { eq } from "drizzle-orm"
 import { createCouchDb } from "../couchdb/client"
 
@@ -24,7 +24,7 @@ const instance = createInstance<void>({
   behindProxy: true,
 })
 
-// 动态 Bot 组 — Bot 数据来源于 PostgreSQL botsTable
+// 动态 Bot 组 — Bot 数据来源于 PostgreSQL bots
 // 每个 Bot 的 preferredUsername 作为 ActivityPub 标识（@botname@domain）
 const bots = instance.createBot(async (_ctx, identifier) => {
   const [bot] = await db.select().from(botsTable)
@@ -55,9 +55,9 @@ async function pollFeeds() {
     const activeBots = await db.select().from(botsTable)
       .where(eq(botsTable.isActive, true))
     for (const bot of activeBots) {
-      const feedLinks = await db.select({ feedId: botFeedsTable.feedId })
-        .from(botFeedsTable)
-        .where(eq(botFeedsTable.botId, bot.id))
+      const feedLinks = await db.select({ feedId: botFeeds.feedId })
+        .from(botFeeds)
+        .where(eq(botFeeds.botId, bot.id))
       for (const { feedId } of feedLinks) {
         const result = await globalDb.view("main", "entries-by-feed", {
           key: feedId,
@@ -79,9 +79,9 @@ async function pollFeeds() {
     .where(eq(botsTable.isActive, true))
 
   for (const bot of activeBots) {
-    const feedLinks = await db.select({ feedId: botFeedsTable.feedId })
-      .from(botFeedsTable)
-      .where(eq(botFeedsTable.botId, bot.id))
+    const feedLinks = await db.select({ feedId: botFeeds.feedId })
+      .from(botFeeds)
+      .where(eq(botFeeds.botId, bot.id))
     if (feedLinks.length === 0) continue
 
     const feedIds = feedLinks.map(f => f.feedId)

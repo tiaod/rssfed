@@ -1,6 +1,6 @@
 import { Hono } from "hono"
 import crypto from "node:crypto"
-import { db, botsTable, botFeedsTable, botFollowersTable } from "../db"
+import { db, bots, botFeeds } from "../db"
 import { eq, and } from "drizzle-orm"
 import { auth } from "../auth"
 
@@ -11,7 +11,7 @@ botsRouter.post("/", async (c) => {
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
 
   const body = await c.req.json()
-  const bot = await db.insert(botsTable).values({
+  const bot = await db.insert(bots).values({
     id: crypto.randomUUID(),
     userId: session.user.id,
     name: body.name,
@@ -27,8 +27,8 @@ botsRouter.get("/", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
 
-  const bots = await db.select().from(botsTable).where(eq(botsTable.userId, session.user.id))
-  return c.json(bots)
+  const userBots = await db.select().from(bots).where(eq(bots.userId, session.user.id))
+  return c.json(userBots)
 })
 
 botsRouter.put("/:id", async (c) => {
@@ -38,10 +38,10 @@ botsRouter.put("/:id", async (c) => {
   const { id } = c.req.param()
   const body = await c.req.json()
 
-  const [bot] = await db.select().from(botsTable).where(and(eq(botsTable.id, id), eq(botsTable.userId, session.user.id))).limit(1)
+  const [bot] = await db.select().from(bots).where(and(eq(bots.id, id), eq(bots.userId, session.user.id))).limit(1)
   if (!bot) return c.json({ error: "not found" }, 404)
 
-  await db.update(botsTable).set(body).where(eq(botsTable.id, id))
+  await db.update(bots).set(body).where(eq(bots.id, id))
   return c.json({ success: true })
 })
 
@@ -51,10 +51,10 @@ botsRouter.delete("/:id", async (c) => {
 
   const { id } = c.req.param()
 
-  const [bot] = await db.select().from(botsTable).where(and(eq(botsTable.id, id), eq(botsTable.userId, session.user.id))).limit(1)
+  const [bot] = await db.select().from(bots).where(and(eq(bots.id, id), eq(bots.userId, session.user.id))).limit(1)
   if (!bot) return c.json({ error: "not found" }, 404)
 
-  await db.delete(botsTable).where(eq(botsTable.id, id))
+  await db.delete(bots).where(eq(bots.id, id))
   return c.json({ success: true })
 })
 
@@ -65,10 +65,10 @@ botsRouter.post("/:id/feeds", async (c) => {
   const { id } = c.req.param()
   const { feedId } = await c.req.json()
 
-  const [bot] = await db.select().from(botsTable).where(and(eq(botsTable.id, id), eq(botsTable.userId, session.user.id))).limit(1)
+  const [bot] = await db.select().from(bots).where(and(eq(bots.id, id), eq(bots.userId, session.user.id))).limit(1)
   if (!bot) return c.json({ error: "not found" }, 404)
 
-  await db.insert(botFeedsTable).values({
+  await db.insert(botFeeds).values({
     id: `${id}:${feedId}`,
     botId: id,
     feedId,
@@ -82,9 +82,9 @@ botsRouter.delete("/:id/feeds/:feedId", async (c) => {
 
   const { id, feedId } = c.req.param()
 
-  const [bot] = await db.select().from(botsTable).where(and(eq(botsTable.id, id), eq(botsTable.userId, session.user.id))).limit(1)
+  const [bot] = await db.select().from(bots).where(and(eq(bots.id, id), eq(bots.userId, session.user.id))).limit(1)
   if (!bot) return c.json({ error: "not found" }, 404)
 
-  await db.delete(botFeedsTable).where(eq(botFeedsTable.id, `${id}:${feedId}`))
+  await db.delete(botFeeds).where(eq(botFeeds.id, `${id}:${feedId}`))
   return c.json({ success: true })
 })

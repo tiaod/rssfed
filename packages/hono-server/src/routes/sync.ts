@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { eq } from "drizzle-orm"
 import { ensureUserDatabase, authenticatedUrl } from "../couchdb/client"
-import { db, userFeedSyncTable, COUCHDB_GLOBAL } from "../db"
+import { db, userFeedSync, COUCHDB_GLOBAL } from "../db"
 import { auth } from "../auth"
 
 export const syncRouter = new Hono()
@@ -34,13 +34,13 @@ syncRouter.post("/", async (c) => {
   }
 
   for (const feedId of feedIds) {
-    await db.insert(userFeedSyncTable).values({
+    await db.insert(userFeedSync).values({
       id: `${userId}:${feedId}`,
       userId,
       feedId,
       lastSyncAt: new Date(),
     }).onConflictDoUpdate({
-      target: userFeedSyncTable.id,
+      target: userFeedSync.id,
       set: { lastSyncAt: new Date() },
     })
   }
@@ -51,6 +51,6 @@ syncRouter.post("/", async (c) => {
 syncRouter.get("/status", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
-  const syncs = await db.select().from(userFeedSyncTable).where(eq(userFeedSyncTable.userId, session.user.id))
+  const syncs = await db.select().from(userFeedSync).where(eq(userFeedSync.userId, session.user.id))
   return c.json(syncs)
 })

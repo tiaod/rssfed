@@ -1,5 +1,5 @@
 import { Hono } from "hono"
-import { db, userSubscriptionsTable } from "../db"
+import { db, userSubscriptions } from "../db"
 import { eq } from "drizzle-orm"
 import { auth } from "../auth"
 
@@ -12,7 +12,7 @@ subscriptionsRouter.post("/", async (c) => {
   const { feedId, category } = await c.req.json()
   const userId = session.user.id
 
-  await db.insert(userSubscriptionsTable).values({
+  await db.insert(userSubscriptions).values({
     id: `${userId}:${feedId}`,
     userId,
     feedId,
@@ -28,7 +28,7 @@ subscriptionsRouter.delete("/", async (c) => {
   const { feedId } = await c.req.json()
   const userId = session.user.id
 
-  await db.delete(userSubscriptionsTable).where(eq(userSubscriptionsTable.id, `${userId}:${feedId}`))
+  await db.delete(userSubscriptions).where(eq(userSubscriptions.id, `${userId}:${feedId}`))
   return c.json({ success: true })
 })
 
@@ -36,6 +36,6 @@ subscriptionsRouter.get("/", async (c) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
 
-  const subs = await db.select().from(userSubscriptionsTable).where(eq(userSubscriptionsTable.userId, session.user.id))
+  const subs = await db.select().from(userSubscriptions).where(eq(userSubscriptions.userId, session.user.id))
   return c.json(subs)
 })
