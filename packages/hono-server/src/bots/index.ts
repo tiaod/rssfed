@@ -1,133 +1,138 @@
-import { createFederation } from "@fedify/fedify"
-import { RedisKvStore } from "@fedify/redis"
-import { federation } from "@fedify/hono"
-import { Service, Accept, Follow, Undo } from "@fedify/vocab"
-import { db, botsTable, botFeedsTable, botFollowersTable, COUCHDB_GLOBAL, type EntryDoc } from "../db"
+import { createInstance, text } from "@fedify/botkit"
+import { RedisKvStore, RedisMessageQueue } from "@fedify/redis"
+import IORedis from "ioredis"
+import { db, botsTable, botFeedsTable, type EntryDoc, COUCHDB_GLOBAL } from "../db"
 import { eq } from "drizzle-orm"
 import { createCouchDb } from "../couchdb/client"
-import IORedis from "ioredis"
 
-const baseUrl = process.env.BOTS_BASE_URL ?? "http://localhost:3001"
+const origin = process.env.BOTS_BASE_URL ?? "http://localhost:3001"
+const pollIntervalMs = parseInt(process.env.CHECK_INTERVAL ?? "300000")
 const globalDb = createCouchDb(COUCHDB_GLOBAL)
 
+// 共享 Redis 连接（BotKit KV + 消息队列共用）
 const redis = new IORedis({
   host: process.env.REDIS_HOST ?? "localhost",
   port: parseInt(process.env.REDIS_PORT ?? "6379"),
   maxRetriesPerRequest: null,
 })
 
-export function shutdownBots() {
-  return redis.quit()
-}
-
-const fedi = createFederation<void>({
+// 创建 BotKit Instance，可托管多个动态 Bot
+// BotKit 内部使用 Fedify，自动处理 Actor 分发、Inbox 路由等
+const instance = createInstance<void>({
   kv: new RedisKvStore(redis),
+  queue: new RedisMessageQueue(() => redis),
+  behindProxy: true,
 })
 
-fedi.setActorDispatcher("/actor/{identifier}", async (ctx, identifier) => {
+// 动态 Bot 组 — Bot 数据来源于 PostgreSQL botsTable
+// 每个 Bot 的 preferredUsername 作为 ActivityPub 标识（@botname@domain）
+const bots = instance.createBot(async (_ctx, identifier) => {
   const [bot] = await db.select().from(botsTable)
     .where(eq(botsTable.preferredUsername, identifier))
     .limit(1)
-  if (!bot) return null
-
-  const keyPairs = await ctx.getActorKeyPairs(bot.id)
-  const publicKey = keyPairs[0]
-
-  return new Service({
-    id: new URL(`/actor/${bot.id}`, baseUrl),
-    preferredUsername: bot.preferredUsername,
-    name: bot.name,
-    summary: bot.description,
-    inbox: ctx.getInboxUri(bot.id),
-    outbox: ctx.getOutboxUri(bot.id),
-    followers: ctx.getFollowersUri(bot.id),
-    publicKey: publicKey as any,
-    url: new URL(`/actor/${bot.id}`, baseUrl),
-  })
+  if (!bot || !bot.isActive) return null
+  return {
+    username: bot.preferredUsername,
+    name: bot.name ?? bot.preferredUsername,
+    summary: bot.description ? text`${bot.description}` : undefined,
+  }
 })
 
-fedi.setInboxListeners("/actor/{identifier}/inbox")
-  .on(Follow, async (ctx: any, follow: any) => {
-    const follower = follow.actorId as URL
-    const targetId = follow.objectId as URL | null
-    if (!targetId || !follower) return
+// BotKit 自动处理 Follow 请求的 Accept 响应
+bots.onFollow = async (_session, followRequest) => {
+  await followRequest.accept()
+}
 
-    const botId = targetId.href.split("/").pop()!
-    const actor = await ctx.findActor(follower) as any
-    if (!actor?.inboxId) return
+// ── RSS 发布轮询 ──
+// 用 Set 追踪已发布条目避免重复；重启后首次轮询建立基线
 
-    await db.insert(botFollowersTable).values({
-      id: `${botId}:${follower.href}`,
-      botId,
-      actorId: follower.href,
-      inboxUrl: actor.inboxId.href,
-      sharedInboxUrl: actor.endpoints?.sharedInbox?.href,
-      followCreatedAt: new Date(),
-    })
+const published = new Set<string>()
+let baselined = false
 
-    await ctx.sendActivity(
-      { identifier: botId },
-      follower.href,
-      new Accept({ actor: targetId, object: follow }),
-    )
-  })
-  .on(Undo, async (ctx: any, undo: any) => {
-    const object = undo.object
-    if (object?.type !== "Follow") return
+async function pollFeeds() {
+  // 第一步：首次运行建立基线，记录已有条目但不发布
+  if (!baselined) {
+    const activeBots = await db.select().from(botsTable)
+      .where(eq(botsTable.isActive, true))
+    for (const bot of activeBots) {
+      const feedLinks = await db.select({ feedId: botFeedsTable.feedId })
+        .from(botFeedsTable)
+        .where(eq(botFeedsTable.botId, bot.id))
+      for (const { feedId } of feedLinks) {
+        const result = await globalDb.view("main", "entries-by-feed", {
+          key: feedId,
+          limit: 50,
+        })
+        for (const row of result.rows) {
+          const entry = (row as any).value as { _id: string } | undefined
+          if (entry?._id) published.add(`${bot.id}:${entry._id}`)
+        }
+      }
+    }
+    baselined = true
+    console.log(`BotKit baseline: ${published.size} entries tracked`)
+    return
+  }
 
-    const follower = object.actorId as URL | undefined
-    const targetId = object.objectId as URL | undefined
-    if (!targetId || !follower) return
-
-    const botId = targetId.href.split("/").pop()!
-    const followerId = follower.href
-
-    await db.delete(botFollowersTable).where(
-      eq(botFollowersTable.id, `${botId}:${followerId}`),
-    )
-  })
-
-export const fediMiddleware = federation(fedi, () => null) as any
-
-async function checkAndPublish() {
-  const activeBots = await db.select().from(botsTable).where(eq(botsTable.isActive, true))
+  // 第二步：轮询新条目，用 BotKit Session.publish() 推送到所有关注者
+  const activeBots = await db.select().from(botsTable)
+    .where(eq(botsTable.isActive, true))
 
   for (const bot of activeBots) {
-    const feedIds = await db.select({ feedId: botFeedsTable.feedId })
-      .from(botFeedsTable).where(eq(botFeedsTable.botId, bot.id))
+    const feedLinks = await db.select({ feedId: botFeedsTable.feedId })
+      .from(botFeedsTable)
+      .where(eq(botFeedsTable.botId, bot.id))
+    if (feedLinks.length === 0) continue
 
-    if (feedIds.length === 0) continue
+    const feedIds = feedLinks.map(f => f.feedId)
+    let count = 0
 
-    const followers = await db.select()
-      .from(botFollowersTable).where(eq(botFollowersTable.botId, bot.id))
+    const session = await bots.getSession(origin, bot.preferredUsername)
 
-    if (followers.length === 0) continue
-
-    for (const { feedId } of feedIds) {
-      const result = await globalDb.view("main", "entries-by-feed", { key: feedId, limit: 5 })
+    for (const feedId of feedIds) {
+      const result = await globalDb.view("main", "entries-by-feed", {
+        key: feedId,
+        limit: 10,
+      })
       for (const row of result.rows) {
-        const entry = row as unknown as { value: { _id: string } }
-        if (!entry?.value?._id) continue
+        const entry = (row as any).value as { _id: string } | undefined
+        if (!entry?._id) continue
+        const key = `${bot.id}:${entry._id}`
+        if (published.has(key)) continue
 
-        const doc = await globalDb.get(entry.value._id) as unknown as EntryDoc
-        const note = {
-          type: "Note" as const,
-          id: `${baseUrl}/note/${doc._id}`,
-          attributedTo: `${baseUrl}/actor/${bot.id}`,
-          content: `${doc.title}\n\n${doc.url}`,
-          name: doc.title,
-          published: doc.publishedAt,
-        }
+        const doc = await globalDb.get(entry._id) as unknown as EntryDoc
+        const content = doc.url ? `${doc.title}\n${doc.url}` : doc.title
 
-        await (fedi as any).sendActivity(
-          { identifier: bot.id },
-          followers.map(f => f.actorId),
-          { type: "Create", actor: `${baseUrl}/actor/${bot.id}`, object: note },
-        )
+        await session.publish(text`${content}`)
+        published.add(key)
+        count++
       }
+    }
+
+    if (count > 0) {
+      console.log(`Bot ${bot.preferredUsername}: published ${count} new entry(s)`)
     }
   }
 }
 
-setInterval(checkAndPublish, parseInt(process.env.CHECK_INTERVAL ?? "300000"))
-console.log("Bot publisher started (check every 5 min)")
+let running = false
+async function pollOnce() {
+  if (running) return
+  running = true
+  try {
+    await pollFeeds()
+  } catch (err) {
+    console.error("BotKit poll failed:", err)
+  } finally {
+    running = false
+  }
+}
+
+pollOnce()
+setInterval(pollOnce, pollIntervalMs)
+
+export function shutdownBots() {
+  return redis.quit()
+}
+
+export { instance }
