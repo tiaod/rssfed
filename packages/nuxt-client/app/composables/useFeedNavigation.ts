@@ -1,9 +1,9 @@
 import { computed } from 'vue'
 import type { ComputedRef } from 'vue'
-import type { RssFeed } from '~/types/rss'
+import type { SubscriptionItem } from '~/composables/useCouchDb'
 import type { NavigationMenuItem } from '@nuxt/ui'
 
-export function useFeedNavigation(feeds: ComputedRef<RssFeed[] | null>) {
+export function useFeedNavigation(feeds: ComputedRef<SubscriptionItem[] | null>) {
   const menuItems = computed<NavigationMenuItem[][]>(() => {
     if (!feeds.value) return []
 

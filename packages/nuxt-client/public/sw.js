@@ -6,7 +6,6 @@ const STATIC_ASSETS = [
 
 const API_CACHE_PATTERNS = [
   /^\/api\/entries/,
-  /^\/api\/subscriptions/
 ]
 
 self.addEventListener('install', (event) => {

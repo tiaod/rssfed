@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { computed } from 'vue'
 import { useFeedNavigation } from '../../composables/useFeedNavigation'
-import type { RssFeed } from '../../types/rss'
+import type { SubscriptionItem } from '../../composables/useCouchDb'
 
 describe('useFeedNavigation', () => {
   it('feeds 为 null 时返回空数组', () => {
@@ -17,9 +17,9 @@ describe('useFeedNavigation', () => {
   })
 
   it('根据 feeds 生成导航菜单', () => {
-    const feeds: RssFeed[] = [
-      { id: '1', title: 'Feed A', siteUrl: '', feedUrl: '', lastFetchedAt: '' },
-      { id: '2', title: 'Feed B', siteUrl: '', feedUrl: '', lastFetchedAt: '' },
+    const feeds: SubscriptionItem[] = [
+      { id: '1', title: 'Feed A', siteUrl: '', createdAt: '' },
+      { id: '2', title: 'Feed B', siteUrl: '', createdAt: '' },
     ]
     const { menuItems, hasFeeds } = useFeedNavigation(computed(() => feeds))
 

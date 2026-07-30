@@ -33,17 +33,6 @@ export const botFeeds = pgTable("bot_feeds", {
   index("bot_feeds_feed_id_idx").on(table.feedId),
 ])
 
-export const userSubscriptions = pgTable("user_subscriptions", {
-  id: text("id").primaryKey(),
-  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
-  feedId: text("feed_id").notNull(),
-  category: text("category"),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-}, (table) => [
-  index("user_subscriptions_user_id_idx").on(table.userId),
-  index("user_subscriptions_feed_id_idx").on(table.feedId),
-])
-
 export const userFeedSync = pgTable("user_feed_sync", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
@@ -91,13 +80,6 @@ export const botFollowersRelations = relations(botFollowers, ({ one }) => ({
   }),
 }))
 
-export const userSubscriptionsRelations = relations(userSubscriptions, ({ one }) => ({
-  user: one(user, {
-    fields: [userSubscriptions.userId],
-    references: [user.id],
-  }),
-}))
-
 export const userFeedSyncRelations = relations(userFeedSync, ({ one }) => ({
   user: one(user, {
     fields: [userFeedSync.userId],
@@ -110,5 +92,4 @@ export const userFeedSyncRelations = relations(userFeedSync, ({ one }) => ({
 export type Bot = typeof bots.$inferSelect
 export type NewBot = typeof bots.$inferInsert
 export type BotFeed = typeof botFeeds.$inferSelect
-export type UserSubscription = typeof userSubscriptions.$inferSelect
 export type BotFollower = typeof botFollowers.$inferSelect

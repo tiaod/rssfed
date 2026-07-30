@@ -1,9 +1,16 @@
 import nano from "nano"
 import { COUCHDB_GLOBAL } from "../db"
 
-const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
-const couchUser = process.env.COUCHDB_USER
-const couchPass = process.env.COUCHDB_PASSWORD
+export const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
+export const couchUser = process.env.COUCHDB_USER ?? ""
+export const couchPass = process.env.COUCHDB_PASSWORD ?? ""
+
+/** Proxy Authentication 共享密钥，在 server 启动时设置 */
+export let proxySecret = process.env.COUCHDB_PROXY_SECRET ?? ""
+
+export function setProxySecret(s: string) {
+  proxySecret = s
+}
 
 function couchUrlWithAuth(): string {
   if (couchUser && couchPass) {
@@ -68,6 +75,12 @@ export async function ensureUserDatabase(userId: string) {
   } catch {
     await nanoServer.db.create(dbName)
   }
+  // 用户库创建 Mango index，支持按 type 快速查询订阅文档
+  await ensureSubscriptionIndex(dbName)
+}
+
+export function userDbName(userId: string): string {
+  return `rssfed-user:${userId}`
 }
 
 export function createCouchDb(database: string): nano.DocumentScope<unknown> {
@@ -81,5 +94,18 @@ async function installDesignDoc(dbName: string) {
     await db.insert({ ...GLOBAL_DESIGN_DOC, _rev: existing._rev })
   } catch {
     await db.insert(GLOBAL_DESIGN_DOC)
+  }
+}
+
+/** 为用户库创建 Mango index，加速按 type 查询 */
+async function ensureSubscriptionIndex(dbName: string) {
+  const db = nanoServer.use(dbName)
+  try {
+    await db.createIndex({
+      name: "subscription-type-index",
+      index: { fields: ["type"] },
+    })
+  } catch {
+    // index 已存在或创建失败，忽略
   }
 }

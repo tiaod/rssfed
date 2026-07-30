@@ -5,7 +5,7 @@ import { allowedOrigins } from "./config"
 import { feedsRouter } from "./routes/feeds"
 import { botsRouter } from "./routes/bots"
 import { syncRouter } from "./routes/sync"
-import { subscriptionsRouter } from "./routes/subscriptions"
+import { coucdbRouter } from "./routes/couchdb"
 import { instance } from "./bots"
 
 const app = new Hono()
@@ -22,7 +22,7 @@ app.use("/api/auth/*", async (c) => {
 app.route("/api/feeds", feedsRouter)
 app.route("/api/bots", botsRouter)
 app.route("/api/sync", syncRouter)
-app.route("/api/subscriptions", subscriptionsRouter)
+app.route("/api/couchdb", coucdbRouter)
 
 app.get("/api/health", (c) => c.json({ status: "ok" }))
 

@@ -53,6 +53,20 @@ export interface AttachmentModel {
   title?: string
 }
 
+export interface SubscriptionDoc {
+  _id: string
+  _rev?: string
+  type: "subscription"
+  feedId: string
+  category?: string
+  /** 从 FeedDoc 反范式的字段，方便离线展示 */
+  title: string
+  siteUrl?: string
+  description?: string
+  image?: string
+  createdAt: string
+}
+
 export interface BotConfig {
   id: string
   name: string
