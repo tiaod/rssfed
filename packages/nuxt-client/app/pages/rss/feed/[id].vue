@@ -7,10 +7,32 @@ const route = useRoute()
 const feedId = route.params.id as string
 
 const api = useApi()
-const { data: feed } = await useAsyncData(`feed-${feedId}`, () => api.feeds.get(feedId))
-const { data: entries, pending } = await useAsyncData(`feed-entries-${feedId}`, () =>
-  api.entries.list({ feedId, limit: 50 })
-)
+const pouch = usePouchDb()
+const feed = ref<any>(null)
+const entries = ref<any[]>([])
+const loading = ref(true)
+const feedLoading = ref(true)
+
+onMounted(async () => {
+  try {
+    // 加载订阅源信息
+    feed.value = await api.feeds.get(feedId)
+  } catch {
+    // feed 信息不要求强依赖
+  } finally {
+    feedLoading.value = false
+  }
+
+  // 启动 PouchDB 同步
+  pouch.syncFeed(feedId)
+
+  // 等待同步完成
+  await new Promise(resolve => setTimeout(resolve, 1000))
+
+  // 从本地 PouchDB 查询该订阅源的条目
+  entries.value = await pouch.queryEntries([feedId], 50)
+  loading.value = false
+})
 </script>
 
 <template>
@@ -19,7 +41,7 @@ const { data: entries, pending } = await useAsyncData(`feed-entries-${feedId}`, 
       <UDashboardNavbar :title="feed?.title || '订阅源'">
         <template #right>
           <UButton
-            v-if="pending"
+            v-if="loading"
             loading
             variant="ghost"
             color="neutral"
@@ -47,7 +69,7 @@ const { data: entries, pending } = await useAsyncData(`feed-entries-${feedId}`, 
         </UButton>
       </div>
 
-      <div v-if="!entries?.length && !pending" class="flex flex-col items-center py-12 gap-4">
+      <div v-if="!entries.length && !loading" class="flex flex-col items-center py-12 gap-4">
         <UIcon name="i-lucide-file-text" class="size-12 text-muted" />
         <p class="text-muted">暂无条目</p>
       </div>

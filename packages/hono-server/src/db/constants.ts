@@ -8,7 +8,6 @@ export enum FeedViewType {
   Notifications = 6,
 }
 
-export const COUCHDB_GLOBAL = "rssfed-global"
-export const COUCHDB_USER_PREFIX = "rssfed-user:"
-export const SYNC_BATCH_SIZE = 500
+export const COUCHDB_FEED_PREFIX = "feed:"
+export const COUCHDB_USER_STATE_PREFIX = "user-state:"
 export const CLEANUP_DAYS = 30

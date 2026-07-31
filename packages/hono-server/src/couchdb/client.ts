@@ -1,5 +1,5 @@
 import nano from "nano"
-import { COUCHDB_GLOBAL } from "../db"
+import { COUCHDB_FEED_PREFIX, COUCHDB_USER_STATE_PREFIX } from "../db"
 
 export const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
 export const couchUser = process.env.COUCHDB_USER ?? ""
@@ -26,86 +26,81 @@ export const authenticatedUrl = couchUrlWithAuth()
 
 export const nanoServer = nano(authenticatedUrl)
 
-const GLOBAL_DESIGN_DOC = {
+/** 每个 feed 库的设计文档：entries-by-date 视图 */
+const FEED_DESIGN_DOC = {
   _id: "_design/main",
   language: "javascript",
   views: {
-    "entries-by-feed": {
-      map: `function(doc) {
-        if (doc.type === 'entry' && doc.feedId) {
-          emit(doc.feedId, { _id: doc._id, publishedAt: doc.publishedAt });
-        }
-      }`,
-    },
     "entries-by-date": {
       map: `function(doc) {
         if (doc.type === 'entry') {
-          emit(doc.publishedAt, { _id: doc._id, feedId: doc.feedId });
+          emit(doc.publishedAt, { _id: doc._id });
         }
       }`,
     },
-    "feeds-all": {
-      map: `function(doc) {
-        if (doc.type === 'feed') emit(doc._id, { url: doc.url, title: doc.title });
-      }`,
-    },
-  },
-  filters: {
-    "entries-by-feeds": `function(doc, req) {
-      if (doc.type !== 'entry') return false;
-      var feedIds = JSON.parse(req.query.feed_ids || '[]');
-      return feedIds.indexOf(doc.feedId) !== -1;
-    }`,
   },
 }
 
-export async function ensureGlobalDatabase() {
-  try {
-    await nanoServer.db.get(COUCHDB_GLOBAL)
-  } catch {
-    await nanoServer.db.create(COUCHDB_GLOBAL)
-  }
-  await installDesignDoc(COUCHDB_GLOBAL)
+// ── Per-Feed 数据库 ──
+
+export function feedDbName(feedId: string): string {
+  return `${COUCHDB_FEED_PREFIX}${feedId}`
 }
 
-export async function ensureUserDatabase(userId: string) {
-  const dbName = `rssfed-user:${userId}`
+export async function ensureFeedDatabase(feedId: string) {
+  const dbName = feedDbName(feedId)
   try {
     await nanoServer.db.get(dbName)
   } catch {
     await nanoServer.db.create(dbName)
   }
-  // 用户库创建 Mango index，支持按 type 快速查询订阅文档
-  await ensureSubscriptionIndex(dbName)
+  await installFeedDesignDoc(dbName)
 }
 
-export function userDbName(userId: string): string {
-  return `rssfed-user:${userId}`
-}
-
-export function createCouchDb(database: string): nano.DocumentScope<unknown> {
-  return nano(authenticatedUrl).use(database)
-}
-
-async function installDesignDoc(dbName: string) {
+async function installFeedDesignDoc(dbName: string) {
   const db = nanoServer.use(dbName)
   try {
     const existing = await db.get("_design/main")
-    await db.insert({ ...GLOBAL_DESIGN_DOC, _rev: existing._rev })
+    await db.insert({ ...FEED_DESIGN_DOC, _rev: existing._rev })
   } catch {
-    await db.insert(GLOBAL_DESIGN_DOC)
+    await db.insert(FEED_DESIGN_DOC)
   }
 }
 
-/** 为用户库创建 Mango index，加速按 type 查询 */
-async function ensureSubscriptionIndex(dbName: string) {
-  const db = nanoServer.use(dbName)
+// ── User-State 数据库 ──
+
+export function userStateDbName(userId: string): string {
+  return `${COUCHDB_USER_STATE_PREFIX}${userId}`
+}
+
+export async function ensureUserStateDatabase(userId: string) {
+  const dbName = userStateDbName(userId)
   try {
-    await db.createIndex({
-      name: "subscription-type-index",
-      index: { fields: ["type"] },
-    })
+    await nanoServer.db.get(dbName)
   } catch {
-    // index 已存在或创建失败，忽略
+    await nanoServer.db.create(dbName)
   }
+  // 创建 Mango index，支持按 type 查询订阅和条目状态
+  await ensureUserStateIndexes(dbName)
+}
+
+async function ensureUserStateIndexes(dbName: string) {
+  const db = nanoServer.use(dbName)
+  const indexes = [
+    { name: "type-index", fields: ["type"] },
+    { name: "feedId-index", fields: ["feedId"] },
+    { name: "entryId-index", fields: ["entryId"] },
+  ]
+  for (const idx of indexes) {
+    try {
+      await db.createIndex({ name: idx.name, index: { fields: idx.fields } })
+    } catch {
+      // index 已存在，忽略
+    }
+  }
+}
+
+/** 创建指定数据库的 DocumentScope 实例 */
+export function createCouchDb(database: string): nano.DocumentScope<unknown> {
+  return nano(authenticatedUrl).use(database)
 }

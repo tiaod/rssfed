@@ -4,7 +4,6 @@ import { auth } from "./auth"
 import { allowedOrigins } from "./config"
 import { feedsRouter } from "./routes/feeds"
 import { botsRouter } from "./routes/bots"
-import { syncRouter } from "./routes/sync"
 import { coucdbRouter } from "./routes/couchdb"
 import { instance } from "./bots"
 
@@ -21,12 +20,11 @@ app.use("/api/auth/*", async (c) => {
 
 app.route("/api/feeds", feedsRouter)
 app.route("/api/bots", botsRouter)
-app.route("/api/sync", syncRouter)
 app.route("/api/couchdb", coucdbRouter)
 
 app.get("/api/health", (c) => c.json({ status: "ok" }))
 
-// BotKit ActivityPub 端点 — 处理非 /api/* 的 ActivityPub 请求（Actor、Inbox 等）
+// BotKit ActivityPub 端点
 app.all("*", async (c) => instance.fetch(c.req.raw))
 
 export { app }

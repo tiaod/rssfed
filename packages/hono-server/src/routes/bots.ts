@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import crypto from "node:crypto"
-import { db, bots, botFeeds } from "../db"
-import { eq, and } from "drizzle-orm"
+import { db, bots, botFeeds, botOutbox } from "../db"
+import { eq, and, desc } from "drizzle-orm"
 import { auth } from "../auth"
 
 export const botsRouter = new Hono()
@@ -87,4 +87,20 @@ botsRouter.delete("/:id/feeds/:feedId", async (c) => {
 
   await db.delete(botFeeds).where(eq(botFeeds.id, `${id}:${feedId}`))
   return c.json({ success: true })
+})
+
+/** 获取 Bot 的出站队列（ActivityPub outbox 内容） */
+botsRouter.get("/:id/outbox", async (c) => {
+  const { id } = c.req.param()
+  const limit = parseInt(c.req.query("limit") ?? "50")
+  const offset = parseInt(c.req.query("offset") ?? "0")
+
+  const items = await db.select()
+    .from(botOutbox)
+    .where(eq(botOutbox.botId, id))
+    .orderBy(desc(botOutbox.publishedAt))
+    .limit(limit)
+    .offset(offset)
+
+  return c.json(items)
 })

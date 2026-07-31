@@ -67,6 +67,19 @@ export interface SubscriptionDoc {
   createdAt: string
 }
 
+/** 用户对单条条目的操作状态，存放在 user-state 库中 */
+export interface EntryStateDoc {
+  _id: string
+  _rev?: string
+  type: "entry-state"
+  entryId: string
+  feedId: string
+  read: boolean
+  readAt?: string
+  saved: boolean
+  savedAt?: string
+}
+
 export interface BotConfig {
   id: string
   name: string

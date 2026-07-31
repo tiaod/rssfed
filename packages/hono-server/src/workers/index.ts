@@ -1,9 +1,10 @@
 import { Worker, Queue } from "bullmq"
 import IORedis from "ioredis"
 import crypto from "node:crypto"
-import { nanoServer } from "../couchdb/client"
+import { eq } from "drizzle-orm"
+import { ensureFeedDatabase, createCouchDb, feedDbName } from "../couchdb/client"
 import { rssParser } from "../rss/parser"
-import { COUCHDB_GLOBAL, type FeedDoc, type EntryDoc } from "../db"
+import { db, feeds, botFeeds, botOutbox, type EntryDoc, type NewBotOutbox } from "../db"
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST ?? "localhost",
@@ -17,32 +18,58 @@ export const worker = new Worker("rss-fetch", async (job) => {
   const { feedId, url } = job.data
 
   try {
-    const feed = await rssParser.parseURL(url)
-    const db = nanoServer.use(COUCHDB_GLOBAL)
+    // 确保 per-feed CouchDB 库存在
+    await ensureFeedDatabase(feedId)
+    const feedDb = createCouchDb(feedDbName(feedId))
 
+    const parsed = await rssParser.parseURL(url)
+
+    // 更新 FeedDoc 元数据
     try {
-      const existing = await db.get(feedId) as FeedDoc
-      await db.insert({
+      const existing = await feedDb.get(feedId) as any
+      await feedDb.insert({
         ...existing,
-        title: feed.title ?? existing.title,
-        description: feed.description ?? existing.description,
-        siteUrl: feed.link ?? existing.siteUrl,
-        image: feed.image?.url ?? existing.image,
+        title: parsed.title ?? existing.title,
+        description: parsed.description ?? existing.description,
+        siteUrl: parsed.link ?? existing.siteUrl,
+        image: parsed.image?.url ?? existing.image,
         lastFetchedAt: new Date().toISOString(),
         errorMessage: undefined,
       } as any)
     } catch {
+      // FeedDoc 不存在，首次插入
+      await feedDb.insert({
+        _id: feedId,
+        type: "feed",
+        url,
+        title: parsed.title ?? url,
+        description: parsed.description,
+        siteUrl: parsed.link,
+        lastFetchedAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+      } as any)
     }
 
-    let newCount = 0
-    for (const item of feed.items ?? []) {
+    // 更新 PostgreSQL feed 注册表
+    await db.update(feeds).set({
+      title: parsed.title ?? url,
+      description: parsed.description,
+      siteUrl: parsed.link,
+      errorMessage: undefined,
+      lastFetchedAt: new Date(),
+    }).where(eq(feeds.id, feedId))
+
+    // 写入新条目到 per-feed CouchDB 库
+    const newEntries: EntryDoc[] = []
+    for (const item of parsed.items ?? []) {
       const guid = item.guid ?? item.link ?? item.title ?? ""
       const entryId = `entry:${feedId}:${crypto.createHash("sha256").update(guid).digest("hex").slice(0, 12)}`
 
       try {
-        await db.get(entryId)
-        continue
+        await feedDb.get(entryId)
+        continue // 已存在，跳过
       } catch {
+        // 不存在，继续写入
       }
 
       const entry: EntryDoc = {
@@ -60,37 +87,59 @@ export const worker = new Worker("rss-fetch", async (job) => {
         categories: item.categories,
       }
 
-      await db.insert(entry as any)
-      newCount++
+      await feedDb.insert(entry as any)
+      newEntries.push(entry)
     }
 
-    return { feedId, newEntries: newCount, totalItems: feed.items?.length ?? 0 }
-  } catch (err) {
-    try {
-      const db = nanoServer.use(COUCHDB_GLOBAL)
-      const existing = await db.get(feedId) as FeedDoc
-      await db.insert({
-        ...existing,
-        errorMessage: String(err),
-        lastFetchedAt: new Date().toISOString(),
-      } as any)
-    } catch {
+    // 如果有新条目，写入引用了该 feed 的 Bot 的 outbox
+    if (newEntries.length > 0) {
+      const relatedBots = await db.select({ botId: botFeeds.botId })
+        .from(botFeeds)
+        .where(eq(botFeeds.feedId, feedId))
+
+      if (relatedBots.length > 0) {
+        const outboxEntries: NewBotOutbox[] = []
+        for (const entry of newEntries) {
+          for (const { botId } of relatedBots) {
+            outboxEntries.push({
+              id: `${botId}:${entry._id}`,
+              botId,
+              entryId: entry._id!,
+              feedId,
+              title: entry.title,
+              url: entry.url,
+              publishedAt: new Date(entry.publishedAt),
+            })
+          }
+        }
+        // 批量写入，冲突跳过（已有记录的不重复写入）
+        for (const out of outboxEntries) {
+          await db.insert(botOutbox).values(out).onConflictDoNothing()
+        }
+      }
     }
+
+    return { feedId, newEntries: newEntries.length, totalItems: parsed.items?.length ?? 0 }
+  } catch (err) {
+    // 抓取失败，更新 feed 注册表的 errorMessage
+    await db.update(feeds).set({
+      errorMessage: String(err),
+      lastFetchedAt: new Date(),
+    }).where(eq(feeds.id, feedId))
 
     throw err
   }
 }, { connection })
 
+/** 定时调度所有已知 feed 的抓取任务 */
 export async function scheduleFeedFetches() {
-  const db = nanoServer.use(COUCHDB_GLOBAL)
-  const result = await db.view("main", "feeds-all")
+  const allFeeds = await db.select({ id: feeds.id, url: feeds.url })
+    .from(feeds)
 
-  const jobs = result.rows
-    .filter(row => row.value)
-    .map(row => ({
-      name: `fetch:${row.key}`,
-      data: { feedId: row.key, url: (row.value as any).url },
-    }))
+  const jobs = allFeeds.map(f => ({
+    name: `fetch:${f.id}`,
+    data: { feedId: f.id, url: f.url },
+  }))
 
   if (jobs.length > 0) {
     await fetchQueue.addBulk(jobs)

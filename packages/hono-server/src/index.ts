@@ -2,7 +2,7 @@ import 'dotenv/config'
 import { serve } from "@hono/node-server"
 import { randomUUID } from "node:crypto"
 import { app } from "./app"
-import { ensureGlobalDatabase, couchUrl, setProxySecret } from "./couchdb/client"
+import { couchUrl, setProxySecret } from "./couchdb/client"
 import { shutdownWorkers } from "./workers"
 import { shutdownBots } from "./bots"
 
@@ -48,13 +48,10 @@ async function configureProxyAuth() {
 
 const server = serve({ fetch: app.fetch, port })
 
-Promise.all([
-  ensureGlobalDatabase(),
-  configureProxyAuth(),
-]).then(() => {
-  console.log("CouchDB ready")
+configureProxyAuth().then(() => {
+  console.log("CouchDB proxy auth ready")
 }).catch((err) => {
-  console.error("Failed to initialize CouchDB:", err)
+  console.error("Failed to configure CouchDB proxy auth:", err)
 })
 
 console.log(`Server running on http://localhost:${port}`)

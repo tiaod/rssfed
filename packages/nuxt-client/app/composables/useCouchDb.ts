@@ -9,13 +9,13 @@ export interface SubscriptionItem {
 }
 
 /**
- * 通过 Hono 代理直连 CouchDB 用户库。
- * 走 /api/couchdb/proxy/*，Hono 自动 Proxy Auth 签名。
+ * 通过 Hono 代理直连 CouchDB 用户状态库。
+ * 走 /api/couchdb/proxy/user-state/*，Hono 自动 Proxy Auth 签名。
  */
 export function useCouchDb() {
   const { public: { apiBaseUrl } } = useRuntimeConfig()
   const base = apiBaseUrl.replace(/\/+$/, '')
-  const proxyBase = `${base}/api/couchdb/proxy`
+  const proxyBase = `${base}/api/couchdb/proxy/user-state`
 
   /** 获取当前用户库的订阅列表（Mango 查询） */
   async function listSubscriptions(): Promise<SubscriptionItem[]> {
