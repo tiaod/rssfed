@@ -1,9 +1,13 @@
 import { Hono } from "hono"
+import type { Context, Next } from "hono"
 import { createHmac } from "node:crypto"
 import { couchUrl, proxySecret, userStateDbName, feedDbName, ensureUserStateDatabase } from "../couchdb/client"
 import { auth } from "../auth"
 
-export const coucdbRouter = new Hono()
+/** 中间件写入的请求级变量 */
+type Variables = { userId: string }
+
+export const coucdbRouter = new Hono<{ Variables: Variables }>()
 
 /**
  * CouchDB 反向代理（Proxy Authentication）。
@@ -15,31 +19,30 @@ export const coucdbRouter = new Hono()
  * Hono 自动添加 Proxy Auth header 后转发到 CouchDB。
  * 这样浏览器端 PouchDB 可以通过同源请求同步 feed 库和用户状态库。
  */
-coucdbRouter.all("/proxy/user-state/*", async (c) => {
+
+// 认证中间件：校验 session，并把 userId 写入 context
+coucdbRouter.use("/proxy/*", async (c: Context<{ Variables: Variables }>, next: Next) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
+  c.set("userId", session.user.id)
+  await next()
+})
 
-  const dbName = userStateDbName(session.user.id)
+coucdbRouter.all("/proxy/user-state/*", async (c) => {
+  const userId = c.get("userId")
   // 自动创建用户状态库（幂等）
-  await ensureUserStateDatabase(session.user.id)
-  return proxyToCouchDb(c, dbName)
+  await ensureUserStateDatabase(userId)
+  return proxyToCouchDb(c, userStateDbName(userId))
 })
 
 coucdbRouter.all("/proxy/feed/:feedId/*", async (c) => {
-  const session = await auth.api.getSession({ headers: c.req.raw.headers })
-  if (!session?.user) return c.json({ error: "unauthorized" }, 401)
-
   const { feedId } = c.req.param()
-  const dbName = feedDbName(feedId)
-  return proxyToCouchDb(c, dbName)
+  return proxyToCouchDb(c, feedDbName(feedId))
 })
 
-/** 通用 CouchDB 代理转发逻辑 */
-async function proxyToCouchDb(c: any, dbName: string) {
-  const session = await auth.api.getSession({ headers: c.req.raw.headers })
-  if (!session?.user) return c.json({ error: "unauthorized" }, 401)
-
-  const userId = session.user.id
+/** 通用 CouchDB 代理转发逻辑（认证已在中间件完成） */
+async function proxyToCouchDb(c: Context<{ Variables: Variables }>, dbName: string) {
+  const userId = c.get("userId")
 
   // 提取剩余路径
   // /api/couchdb/proxy/user-state/<rest> 或 /api/couchdb/proxy/feed/:feedId/<rest>
