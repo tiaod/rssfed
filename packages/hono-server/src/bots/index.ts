@@ -38,9 +38,7 @@ const instance = createInstance<void>({
 
 // 动态 Bot 组
 const bots = instance.createBot(async (_ctx, identifier) => {
-  const [bot] = await db.select().from(botsTable)
-    .where(eq(botsTable.preferredUsername, identifier))
-    .limit(1)
+  const bot = await findBotByUsername(identifier)
   if (!bot || !bot.isActive) return null
   return {
     username: bot.preferredUsername,
@@ -55,12 +53,19 @@ bots.onFollow = async (_session, followRequest) => {
 
 // ── 出站关注（bot 关注其他联邦宇宙用户）──
 
-/** 从 Bot 的 preferredUsername 反查 botId（动态 Bot 组的 identifier 即 preferredUsername） */
+/** 从 Bot 的 preferredUsername 反查 bot 行（动态 Bot 组的 identifier 即 preferredUsername） */
 async function findBotByUsername(preferredUsername: string) {
   const [bot] = await db.select().from(botsTable)
     .where(eq(botsTable.preferredUsername, preferredUsername))
     .limit(1)
   return bot ?? null
+}
+
+/** 查询 Bot 并校验其处于启用状态，否则抛错 */
+async function getActiveBot(botId: string) {
+  const [bot] = await db.select().from(botsTable).where(eq(botsTable.id, botId)).limit(1)
+  if (!bot || !bot.isActive) throw new Error("bot not found or inactive")
+  return bot
 }
 
 /** 将 actor 的 name / preferredUsername 归一化为可读的显示名 */
@@ -91,8 +96,7 @@ function pendingFollowMatch(botId: string, handle: string | null, actorId: strin
 
 /** Bot 关注联邦宇宙用户：发送 Follow 并记录 pending 状态 */
 export async function followActor(botId: string, handle: string) {
-  const [bot] = await db.select().from(botsTable).where(eq(botsTable.id, botId)).limit(1)
-  if (!bot || !bot.isActive) throw new Error("bot not found or inactive")
+  const bot = await getActiveBot(botId)
 
   const session = await bots.getSession(origin, bot.preferredUsername)
   await session.follow(handle) // 幂等，发送 Follow Activity
@@ -106,8 +110,7 @@ export async function followActor(botId: string, handle: string) {
 
 /** Bot 取消关注：发送 Undo Follow 并删除本地记录 */
 export async function unfollowActor(botId: string, handle: string) {
-  const [bot] = await db.select().from(botsTable).where(eq(botsTable.id, botId)).limit(1)
-  if (!bot || !bot.isActive) throw new Error("bot not found or inactive")
+  const bot = await getActiveBot(botId)
 
   const session = await bots.getSession(origin, bot.preferredUsername)
   await session.unfollow(handle)
@@ -129,20 +132,20 @@ bots.onAcceptFollow = async (session, accepter) => {
     actorAvatar: accepter.iconId?.href ?? null,
   }
   const where = pendingFollowMatch(bot.id, handle, actorId)
-  if (where) {
-    const updated = await db.update(botFollowing)
-      .set(values)
-      .where(where)
-      .returning({ id: botFollowing.id })
-    // 找不到 pending 行（例如非本服务发起的关注）时兜底落一条 accepted 记录
-    if (updated.length === 0 && handle && actorId) {
-      await db.insert(botFollowing).values({
-        id: `${bot.id}:${handle}`,
-        botId: bot.id,
-        handle,
-        ...values,
-      }).onConflictDoNothing()
-    }
+  if (!where) return
+
+  const updated = await db.update(botFollowing)
+    .set(values)
+    .where(where)
+    .returning({ id: botFollowing.id })
+  // 找不到 pending 行（例如非本服务发起的关注）时兜底落一条 accepted 记录
+  if (updated.length === 0 && handle && actorId) {
+    await db.insert(botFollowing).values({
+      id: `${bot.id}:${handle}`,
+      botId: bot.id,
+      handle,
+      ...values,
+    }).onConflictDoNothing()
   }
 }
 
@@ -152,11 +155,10 @@ bots.onRejectFollow = async (session, rejecter) => {
   if (!bot) return
   const actorId = rejecter.id?.href ?? null
   const where = pendingFollowMatch(bot.id, actorHandleOf(rejecter), actorId)
-  if (where) {
-    await db.update(botFollowing)
-      .set({ status: "rejected" })
-      .where(where)
-  }
+  if (!where) return
+  await db.update(botFollowing)
+    .set({ status: "rejected" })
+    .where(where)
 }
 
 // 收到时间线消息 → 持久化到 bot_inbox（只保留已关注用户的原创帖，按 activityId 去重）

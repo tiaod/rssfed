@@ -7,7 +7,7 @@ import { auth } from "../auth"
 /** 中间件写入的请求级变量 */
 type Variables = { userId: string }
 
-export const coucdbRouter = new Hono<{ Variables: Variables }>()
+export const couchdbRouter = new Hono<{ Variables: Variables }>()
 
 /**
  * CouchDB 反向代理（Proxy Authentication）。
@@ -21,46 +21,55 @@ export const coucdbRouter = new Hono<{ Variables: Variables }>()
  */
 
 // 认证中间件：校验 session，并把 userId 写入 context
-coucdbRouter.use("/proxy/*", async (c: Context<{ Variables: Variables }>, next: Next) => {
+couchdbRouter.use("/proxy/*", async (c: Context<{ Variables: Variables }>, next: Next) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
   c.set("userId", session.user.id)
   await next()
 })
 
-coucdbRouter.all("/proxy/user-state/*", async (c) => {
+couchdbRouter.all("/proxy/user-state/*", async (c) => {
   const userId = c.get("userId")
   // 自动创建用户状态库（幂等），并返回其库名
   const dbName = await ensureUserStateDatabase(userId)
-  return proxyToCouchDb(c, dbName)
+  return proxyToCouchDb(c, dbName, "/api/couchdb/proxy/user-state")
 })
 
-coucdbRouter.all("/proxy/feed/:feedId/*", async (c) => {
+couchdbRouter.all("/proxy/feed/:feedId/*", async (c) => {
   const { feedId } = c.req.param()
-  return proxyToCouchDb(c, await ensureFeedDatabase(feedId))
+  const dbName = await ensureFeedDatabase(feedId)
+  return proxyToCouchDb(c, dbName, `/api/couchdb/proxy/feed/${feedId}`)
 })
 
 /** 通用 CouchDB 代理转发逻辑（认证已在中间件完成） */
-async function proxyToCouchDb(c: Context<{ Variables: Variables }>, dbName: string) {
+async function proxyToCouchDb(c: Context<{ Variables: Variables }>, dbName: string, stripPrefix: string) {
   const userId = c.get("userId")
 
-  // 提取剩余路径
-  // /api/couchdb/proxy/user-state/<rest> 只去掉 user-state 一段
-  // /api/couchdb/proxy/feed/:feedId/<rest> 去掉 feed/{feedId} 两段
-  const prefix = "/api/couchdb/proxy/"
-  const rest = c.req.path.slice(prefix.length)
-  let restPath: string
-  if (rest.startsWith("user-state")) {
-    restPath = rest.slice("user-state".length)
-  } else if (rest.startsWith("feed/")) {
-    restPath = rest.slice("feed/".length).replace(/^[^/]+/, "")
-  } else {
-    restPath = rest
-  }
-  restPath = restPath || "/"
+  // 剥离代理前缀，得到目标库内的相对路径（如 /doc-id 或 /）
+  const restPath = c.req.path.slice(stripPrefix.length) || "/"
   const queryString = new URL(c.req.url).search
   const targetUrl = `${couchUrl.replace(/\/+$/, "")}/${dbName}${restPath}${queryString}`
 
+  const resp = await fetch(targetUrl, {
+    method: c.req.method,
+    headers: buildProxyHeaders(c, userId),
+    body: c.req.method === "GET" || c.req.method === "HEAD"
+      ? undefined
+      : await c.req.text(),
+  })
+
+  // 透传响应体与关键头
+  return new Response(await resp.text(), {
+    status: resp.status,
+    statusText: resp.statusText,
+    headers: {
+      "Content-Type": resp.headers.get("Content-Type") || "application/json",
+    },
+  })
+}
+
+/** 构造带 Proxy Auth 签名的转发请求头 */
+function buildProxyHeaders(c: Context<{ Variables: Variables }>, userId: string): Record<string, string> {
   // HMAC-SHA1 签名
   const token = createHmac("sha1", proxySecret).update(userId).digest("hex")
 
@@ -73,23 +82,5 @@ async function proxyToCouchDb(c: Context<{ Variables: Variables }>, dbName: stri
   }
   const accept = c.req.header("Accept")
   if (accept) headers["Accept"] = accept
-
-  const body = c.req.method === "GET" || c.req.method === "HEAD"
-    ? undefined
-    : await c.req.text()
-
-  const resp = await fetch(targetUrl, {
-    method: c.req.method,
-    headers,
-    body,
-  })
-
-  const respBody = await resp.text()
-  return new Response(respBody, {
-    status: resp.status,
-    statusText: resp.statusText,
-    headers: {
-      "Content-Type": resp.headers.get("Content-Type") || "application/json",
-    },
-  })
+  return headers
 }
