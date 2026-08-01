@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { NavigationMenuItem } from '@nuxt/ui'
-import { useUserStore } from "~/stores/user"
+import { useUserStore } from '~/stores/user'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -29,11 +29,17 @@ const navItems = [
     onSelect: () => { open.value = false }
   },
   {
+    label: '机器人',
+    icon: 'i-lucide-bot',
+    to: '/bots',
+    onSelect: () => { open.value = false }
+  },
+  {
     label: '我的',
     icon: 'i-lucide-user',
     to: '/profile',
     onSelect: () => { open.value = false }
-  },
+  }
 ] satisfies NavigationMenuItem[]
 
 const bottomNavItems = navItems.map(item => ({

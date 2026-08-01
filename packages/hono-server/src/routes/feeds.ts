@@ -1,10 +1,12 @@
 import { Hono } from "hono"
 import { rssParser } from "../rss/parser"
-import { createCouchDb, feedDbName, ensureFeedDatabase } from "../couchdb/client"
+import { createCouchDb, ensureFeedDatabase } from "../couchdb/client"
 import { db, feeds } from "../db"
 import { fetchQueue } from "../workers"
 
 export const feedsRouter = new Hono()
+
+type ParsedFeed = Awaited<ReturnType<typeof rssParser.parseURL>>
 
 /** 发现并订阅一个新 RSS 订阅源 */
 feedsRouter.post("/discover", async (c) => {
@@ -15,36 +17,8 @@ feedsRouter.post("/discover", async (c) => {
     const parsed = await rssParser.parseURL(url)
     const feedId = `feed:${Buffer.from(url).toString("base64").slice(0, 12)}`
 
-    // 写入 PostgreSQL feed 注册表
-    await db.insert(feeds).values({
-      id: feedId,
-      url,
-      title: parsed.title ?? url,
-      description: parsed.description,
-      siteUrl: parsed.link,
-    }).onConflictDoNothing()
-
-    // 确保 per-feed CouchDB 库存在
-    await ensureFeedDatabase(feedId)
-    const feedDb = createCouchDb(feedDbName(feedId))
-
-    // 写入 FeedDoc
-    try {
-      await feedDb.get(feedId)
-    } catch {
-      await feedDb.insert({
-        _id: feedId,
-        type: "feed",
-        url,
-        title: parsed.title ?? url,
-        description: parsed.description,
-        siteUrl: parsed.link,
-        lastFetchedAt: new Date().toISOString(),
-        createdAt: new Date().toISOString(),
-      } as any)
-      // 首次发现，立即加入抓取队列
-      await fetchQueue.add(`fetch:${feedId}`, { feedId, url })
-    }
+    await registerFeed(feedId, url, parsed)
+    await seedFeedDoc(feedId, url, parsed)
 
     return c.json({ feedId, title: parsed.title, items: parsed.items.length })
   } catch (err) {
@@ -52,10 +26,44 @@ feedsRouter.post("/discover", async (c) => {
   }
 })
 
+/** 写入 PostgreSQL feed 注册表（已存在则跳过） */
+async function registerFeed(feedId: string, url: string, parsed: ParsedFeed) {
+  await db.insert(feeds).values({
+    id: feedId,
+    url,
+    title: parsed.title ?? url,
+    description: parsed.description,
+    siteUrl: parsed.link,
+  }).onConflictDoNothing()
+}
+
+/** 首次发现时写入 FeedDoc 并立即加入抓取队列 */
+async function seedFeedDoc(feedId: string, url: string, parsed: ParsedFeed) {
+  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
+
+  // FeedDoc 已存在则跳过
+  try {
+    await feedDb.get(feedId)
+  } catch {
+    await feedDb.insert({
+      _id: feedId,
+      type: "feed",
+      url,
+      title: parsed.title ?? url,
+      description: parsed.description,
+      siteUrl: parsed.link,
+      lastFetchedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    } as any)
+    // 首次发现，立即加入抓取队列
+    await fetchQueue.add(`fetch:${feedId}`, { feedId, url })
+  }
+}
+
 /** 获取单个订阅源信息 */
 feedsRouter.get("/:feedId", async (c) => {
   const { feedId } = c.req.param()
-  const feedDb = createCouchDb(feedDbName(feedId))
+  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
 
   try {
     const feed = await feedDb.get(feedId)

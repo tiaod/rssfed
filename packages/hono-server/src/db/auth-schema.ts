@@ -16,6 +16,8 @@ export const user = pgTable("user", {
   banned: boolean("banned").default(false),
   banReason: text("ban_reason"),
   banExpires: timestamp("ban_expires"),
+  /** 关联的 CouchDB 用户状态库名（首次 ensure 时生成随机库名并回写） */
+  couchDbName: text("couch_db_name").unique(),
 });
 
 export const session = pgTable(

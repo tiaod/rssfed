@@ -1,5 +1,7 @@
 import nano from "nano"
-import { COUCHDB_FEED_PREFIX, COUCHDB_USER_STATE_PREFIX } from "../db"
+import { customAlphabet } from "nanoid"
+import { eq } from "drizzle-orm"
+import { db, feeds, user, COUCHDB_FEED_PREFIX, COUCHDB_USER_STATE_PREFIX } from "../db"
 
 export const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
 export const couchUser = process.env.COUCHDB_USER ?? ""
@@ -41,20 +43,94 @@ const FEED_DESIGN_DOC = {
   },
 }
 
-// ── Per-Feed 数据库 ──
+// ── 库名解析与创建 ──
 
-export function feedDbName(feedId: string): string {
-  return `${COUCHDB_FEED_PREFIX}${feedId}`
+// 全小写字母+数字字符集：生成的库名满足 CouchDB 库名规则（小写、以字母开头、无非法字符）
+const generateDbNameSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 24)
+
+/** 库名映射对象类型 */
+type DbKind = "feed" | "user"
+
+/**
+ * 解析（或创建）业务对象对应的 CouchDB 库名。
+ * 库名保存在业务表的新增列上（feeds.couch_db_name / user.couch_db_name），
+ * 首次 ensure 时生成随机库名、建库并回写该列；库名不直接由业务 id 派生，
+ * 避免非法字符/撞名问题，且 id 变更不影响已建库。
+ */
+async function resolveDatabase(kind: DbKind, refId: string, prefix: string): Promise<string> {
+  const existing = await getCouchDbName(kind, refId)
+  if (existing) {
+    await ensureDbExists(existing, kind, refId)
+    return existing
+  }
+
+  const dbName = `${prefix}${generateDbNameSuffix()}`
+  await ensureDbExists(dbName, kind, refId)
+  await saveCouchDbName(kind, refId, dbName)
+  return dbName
 }
 
-export async function ensureFeedDatabase(feedId: string) {
-  const dbName = feedDbName(feedId)
+/** 读取业务表上的库名列；行不存在时返回 null */
+async function getCouchDbName(kind: DbKind, refId: string): Promise<string | null> {
+  if (kind === "feed") {
+    const row = await db.query.feeds.findFirst({
+      where: eq(feeds.id, refId),
+      columns: { couchDbName: true },
+    })
+    return row?.couchDbName ?? null
+  }
+  const row = await db.query.user.findFirst({
+    where: eq(user.id, refId),
+    columns: { couchDbName: true },
+  })
+  return row?.couchDbName ?? null
+}
+
+/** 将库名回写到业务表；对象未注册（行不存在）时无法持久化，仅告警 */
+async function saveCouchDbName(kind: DbKind, refId: string, dbName: string) {
+  let saved = false
+  if (kind === "feed") {
+    saved = (await db.update(feeds).set({ couchDbName: dbName }).where(eq(feeds.id, refId)).returning({ id: feeds.id })).length > 0
+  } else {
+    saved = (await db.update(user).set({ couchDbName: dbName }).where(eq(user.id, refId)).returning({ id: user.id })).length > 0
+  }
+  if (!saved) {
+    console.warn(`[CouchDB] ${kind} ${refId} 未注册，库名 ${dbName} 未持久化`)
+  }
+}
+
+/** 建库（幂等）并按类型设置库级授权 */
+async function ensureDbExists(dbName: string, kind: DbKind, refId: string) {
   try {
     await nanoServer.db.get(dbName)
   } catch {
     await nanoServer.db.create(dbName)
   }
+  await setDatabaseSecurity(dbName, kind === "feed" ? { roles: ["user"] } : { names: [refId] })
+}
+
+/** 设置库级 _security：新库默认仅 admin 可读写，需显式授权 */
+async function setDatabaseSecurity(
+  dbName: string,
+  members: { names?: string[]; roles?: string[] },
+) {
+  await nanoServer.request({
+    db: dbName,
+    doc: "_security",
+    method: "PUT",
+    body: {
+      members: { names: members.names ?? [], roles: members.roles ?? [] },
+    },
+  })
+}
+
+// ── Per-Feed 数据库 ──
+
+/** 确保 feed 库存在并返回库名（首次调用时生成随机库名并持久化映射） */
+export async function ensureFeedDatabase(feedId: string): Promise<string> {
+  const dbName = await resolveDatabase("feed", feedId, COUCHDB_FEED_PREFIX)
   await installFeedDesignDoc(dbName)
+  return dbName
 }
 
 async function installFeedDesignDoc(dbName: string) {
@@ -69,19 +145,11 @@ async function installFeedDesignDoc(dbName: string) {
 
 // ── User-State 数据库 ──
 
-export function userStateDbName(userId: string): string {
-  return `${COUCHDB_USER_STATE_PREFIX}${userId}`
-}
-
-export async function ensureUserStateDatabase(userId: string) {
-  const dbName = userStateDbName(userId)
-  try {
-    await nanoServer.db.get(dbName)
-  } catch {
-    await nanoServer.db.create(dbName)
-  }
-  // 创建 Mango index，支持按 type 查询订阅和条目状态
+/** 确保用户状态库存在并返回库名（首次调用时生成随机库名并持久化映射） */
+export async function ensureUserStateDatabase(userId: string): Promise<string> {
+  const dbName = await resolveDatabase("user", userId, COUCHDB_USER_STATE_PREFIX)
   await ensureUserStateIndexes(dbName)
+  return dbName
 }
 
 async function ensureUserStateIndexes(dbName: string) {
@@ -103,4 +171,15 @@ async function ensureUserStateIndexes(dbName: string) {
 /** 创建指定数据库的 DocumentScope 实例 */
 export function createCouchDb(database: string): nano.DocumentScope<unknown> {
   return nano(authenticatedUrl).use(database)
+}
+
+/** 确保 _users 系统库存在（消除 CouchDB 监听器报错噪音） */
+export async function ensureSystemDatabases() {
+  for (const name of ["_users"]) {
+    try {
+      await nanoServer.db.get(name)
+    } catch {
+      await nanoServer.db.create(name)
+    }
+  }
 }

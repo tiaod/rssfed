@@ -21,6 +21,7 @@ export function useCouchDb() {
   async function listSubscriptions(): Promise<SubscriptionItem[]> {
     const res = await fetch(`${proxyBase}/_find`, {
       method: 'POST',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         selector: { type: 'subscription' },
@@ -64,6 +65,7 @@ export function useCouchDb() {
 
     const res = await fetch(`${proxyBase}/${encodeURIComponent(doc._id)}`, {
       method: 'PUT',
+      credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(doc),
     })
@@ -77,12 +79,13 @@ export function useCouchDb() {
   async function removeSubscription(feedId: string) {
     const docId = `subscription:${feedId}`
 
-    const getRes = await fetch(`${proxyBase}/${encodeURIComponent(docId)}`)
+    const getRes = await fetch(`${proxyBase}/${encodeURIComponent(docId)}`, { credentials: 'include' })
     if (!getRes.ok) throw new Error('subscription not found')
     const doc = await getRes.json()
 
     const delRes = await fetch(`${proxyBase}/${encodeURIComponent(docId)}?rev=${doc._rev}`, {
       method: 'DELETE',
+      credentials: 'include',
     })
     if (!delRes.ok) throw new Error(`CouchDB delete failed: ${delRes.statusText}`)
   }

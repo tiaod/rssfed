@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import type { Context, Next } from "hono"
 import { createHmac } from "node:crypto"
-import { couchUrl, proxySecret, userStateDbName, feedDbName, ensureUserStateDatabase } from "../couchdb/client"
+import { couchUrl, proxySecret, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
 import { auth } from "../auth"
 
 /** 中间件写入的请求级变量 */
@@ -13,8 +13,8 @@ export const coucdbRouter = new Hono<{ Variables: Variables }>()
  * CouchDB 反向代理（Proxy Authentication）。
  *
  * 支持两种目标库：
- *   /api/couchdb/proxy/user-state/<剩余路径>  →  user-state:{userId}
- *   /api/couchdb/proxy/feed/:feedId/<剩余路径> →  feed:{feedId}
+ *   /api/couchdb/proxy/user-state/<剩余路径>  →  user-state-{userId}
+ *   /api/couchdb/proxy/feed/:feedId/<剩余路径> →  feed-{feedId}
  *
  * Hono 自动添加 Proxy Auth header 后转发到 CouchDB。
  * 这样浏览器端 PouchDB 可以通过同源请求同步 feed 库和用户状态库。
@@ -30,14 +30,14 @@ coucdbRouter.use("/proxy/*", async (c: Context<{ Variables: Variables }>, next: 
 
 coucdbRouter.all("/proxy/user-state/*", async (c) => {
   const userId = c.get("userId")
-  // 自动创建用户状态库（幂等）
-  await ensureUserStateDatabase(userId)
-  return proxyToCouchDb(c, userStateDbName(userId))
+  // 自动创建用户状态库（幂等），并返回其库名
+  const dbName = await ensureUserStateDatabase(userId)
+  return proxyToCouchDb(c, dbName)
 })
 
 coucdbRouter.all("/proxy/feed/:feedId/*", async (c) => {
   const { feedId } = c.req.param()
-  return proxyToCouchDb(c, feedDbName(feedId))
+  return proxyToCouchDb(c, await ensureFeedDatabase(feedId))
 })
 
 /** 通用 CouchDB 代理转发逻辑（认证已在中间件完成） */
@@ -45,10 +45,19 @@ async function proxyToCouchDb(c: Context<{ Variables: Variables }>, dbName: stri
   const userId = c.get("userId")
 
   // 提取剩余路径
-  // /api/couchdb/proxy/user-state/<rest> 或 /api/couchdb/proxy/feed/:feedId/<rest>
-  // 需要去掉 /api/couchdb/proxy/ 前缀后的第一段（user-state 或 feed/{id}）
+  // /api/couchdb/proxy/user-state/<rest> 只去掉 user-state 一段
+  // /api/couchdb/proxy/feed/:feedId/<rest> 去掉 feed/{feedId} 两段
   const prefix = "/api/couchdb/proxy/"
-  const restPath = c.req.path.slice(prefix.length).replace(/^[^/]+(?:\/[^/]+)?/, "") || "/"
+  const rest = c.req.path.slice(prefix.length)
+  let restPath: string
+  if (rest.startsWith("user-state")) {
+    restPath = rest.slice("user-state".length)
+  } else if (rest.startsWith("feed/")) {
+    restPath = rest.slice("feed/".length).replace(/^[^/]+/, "")
+  } else {
+    restPath = rest
+  }
+  restPath = restPath || "/"
   const queryString = new URL(c.req.url).search
   const targetUrl = `${couchUrl.replace(/\/+$/, "")}/${dbName}${restPath}${queryString}`
 
@@ -58,6 +67,8 @@ async function proxyToCouchDb(c: Context<{ Variables: Variables }>, dbName: stri
   const headers: Record<string, string> = {
     "X-Auth-CouchDB-UserName": userId,
     "X-Auth-CouchDB-Token": token,
+    // 授予 user 角色，满足 feed 库 members.roles 授权（roles 完全来自此头）
+    "X-Auth-CouchDB-Roles": "user",
     "Content-Type": c.req.header("Content-Type") || "application/json",
   }
   const accept = c.req.header("Accept")
