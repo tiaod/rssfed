@@ -15,7 +15,13 @@ export function useApi() {
     bots: {
       list: () => apiFetch<any[]>(`${base}/api/bots`),
       create: (body: any) => apiFetch(`${base}/api/bots`, { method: 'POST', body }),
+      update: (id: string, body: any) => apiFetch(`${base}/api/bots/${id}`, { method: 'PUT', body }),
       remove: (id: string) => apiFetch(`${base}/api/bots/${id}`, { method: 'DELETE' }),
+      feeds: (id: string) => apiFetch<any[]>(`${base}/api/bots/${id}/feeds`),
+      attachFeed: (id: string, feedId: string) =>
+        apiFetch(`${base}/api/bots/${id}/feeds`, { method: 'POST', body: { feedId } }),
+      detachFeed: (id: string, feedId: string) =>
+        apiFetch(`${base}/api/bots/${id}/feeds/${feedId}`, { method: 'DELETE' }),
       outbox: (id: string, params?: { limit?: number, offset?: number }) =>
         apiFetch(`${base}/api/bots/${id}/outbox`, { params }),
       follow: (id: string, handle: string) =>

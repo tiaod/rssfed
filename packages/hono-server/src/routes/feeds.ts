@@ -15,7 +15,8 @@ feedsRouter.post("/discover", async (c) => {
 
   try {
     const parsed = await rssParser.parseURL(url)
-    const feedId = `feed:${Buffer.from(url).toString("base64").slice(0, 12)}`
+    // feedId 由 URL 确定性派生；base64url 编码保证 URL 路径安全（不含 / + = 等特殊字符）
+    const feedId = Buffer.from(url).toString("base64url").slice(0, 12)
 
     await registerFeed(feedId, url, parsed)
     await seedFeedDoc(feedId, url, parsed)

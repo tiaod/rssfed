@@ -1,6 +1,6 @@
 import { Hono, type Context, type Next } from "hono"
 import crypto from "node:crypto"
-import { db, bots, botFeeds, botOutbox, botFollowing, botInbox, type Bot } from "../db"
+import { db, bots, feeds, botFeeds, botOutbox, botFollowing, botInbox, type Bot } from "../db"
 import { eq, and, desc } from "drizzle-orm"
 import { auth } from "../auth"
 import { followActor, unfollowActor } from "../bots"
@@ -71,8 +71,24 @@ botsRouter.post("/:id/feeds", requireOwnedBot, async (c) => {
     id: `${id}:${feedId}`,
     botId: id,
     feedId,
-  })
+  }).onConflictDoNothing() // 重复关联时幂等跳过
   return c.json({ success: true }, 201)
+})
+
+/** 获取 Bot 已关联的订阅源列表（join feeds 表带出标题与 URL） */
+botsRouter.get("/:id/feeds", requireOwnedBot, async (c) => {
+  const id = c.req.param("id")!
+
+  const rows = await db.select({
+    feedId: botFeeds.feedId,
+    title: feeds.title,
+    url: feeds.url,
+  })
+    .from(botFeeds)
+    .innerJoin(feeds, eq(feeds.id, botFeeds.feedId))
+    .where(eq(botFeeds.botId, id))
+
+  return c.json(rows)
 })
 
 botsRouter.delete("/:id/feeds/:feedId", requireOwnedBot, async (c) => {

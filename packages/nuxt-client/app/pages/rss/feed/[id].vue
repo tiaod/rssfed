@@ -7,11 +7,30 @@ const route = useRoute()
 const feedId = route.params.id as string
 
 const api = useApi()
+const db = useCouchDb()
 const pouch = usePouchDb()
+const toast = useToast()
 const feed = ref<any>(null)
 const entries = ref<any[]>([])
 const loading = ref(true)
 const feedLoading = ref(true)
+
+// 取消订阅
+const unsubscribeOpen = ref(false)
+const unsubscribing = ref(false)
+
+async function unsubscribe() {
+  unsubscribing.value = true
+  try {
+    await db.removeSubscription(feedId)
+    toast.add({ title: '已取消订阅', color: 'success' })
+    await navigateTo('/')
+  } catch (e: any) {
+    toast.add({ title: '取消订阅失败', description: e?.message ?? '未知错误', color: 'error' })
+  } finally {
+    unsubscribing.value = false
+  }
+}
 
 onMounted(async () => {
   try {
@@ -49,6 +68,16 @@ onMounted(async () => {
           >
             加载中…
           </UButton>
+          <UButton
+            v-else
+            icon="i-lucide-bell-off"
+            variant="ghost"
+            color="error"
+            size="sm"
+            @click="unsubscribeOpen = true"
+          >
+            取消订阅
+          </UButton>
         </template>
       </UDashboardNavbar>
     </template>
@@ -79,6 +108,38 @@ onMounted(async () => {
         :entries="entries || []"
         :base-path="`/rss/feed/${feedId}`"
       />
+
+      <!-- 取消订阅确认弹窗 -->
+      <UModal
+        v-model:open="unsubscribeOpen"
+        title="取消订阅"
+        :ui="{ footer: 'justify-end' }"
+      >
+        <template #body>
+          <p class="text-sm">
+            确定要取消订阅
+            <span class="font-semibold">{{ feed?.title ?? '该订阅源' }}</span>
+            吗？本地已缓存的条目仍可阅读。
+          </p>
+        </template>
+
+        <template #footer="{ close }">
+          <UButton
+            variant="outline"
+            color="neutral"
+            @click="close"
+          >
+            取消
+          </UButton>
+          <UButton
+            color="error"
+            :loading="unsubscribing"
+            @click="unsubscribe"
+          >
+            取消订阅
+          </UButton>
+        </template>
+      </UModal>
     </template>
   </UDashboardPanel>
 </template>

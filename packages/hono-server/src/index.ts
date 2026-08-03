@@ -11,6 +11,7 @@ import {
 } from "./couchdb/client"
 import { shutdownWorkers } from "./workers"
 import { shutdownBots } from "./bots"
+import { bootstrapAdminFromEnv } from "./bootstrap-admin"
 
 const port = parseInt(process.env.PORT ?? "3001")
 
@@ -53,10 +54,10 @@ async function setCouchConfig(base: string, basic: string, key: string, value: s
   }
 }
 
-/** PUT 配置值到 CouchDB；请求抛出网络异常时返回 false（不校验 HTTP 状态码，与原有行为一致） */
+/** PUT 配置值到 CouchDB；HTTP 状态码非 2xx 或网络异常时返回 false */
 async function putCouchConfig(endpoint: string, basic: string, value: string): Promise<boolean> {
   try {
-    await fetch(endpoint, {
+    const res = await fetch(endpoint, {
       method: "PUT",
       headers: {
         "Content-Type": "application/json",
@@ -64,8 +65,13 @@ async function putCouchConfig(endpoint: string, basic: string, value: string): P
       },
       body: JSON.stringify(value),
     })
+    if (!res.ok) {
+      console.warn(`[CouchDB Config] PUT ${endpoint} -> ${res.status} ${res.statusText}`)
+      return false
+    }
     return true
-  } catch {
+  } catch (err) {
+    console.warn(`[CouchDB Config] PUT ${endpoint} failed:`, err)
     return false
   }
 }
@@ -78,6 +84,11 @@ configureProxyAuth().then(() => {
   console.log("CouchDB proxy auth ready")
 }).catch((err) => {
   console.error("Failed to configure CouchDB proxy auth:", err)
+})
+
+// 环境变量引导创建管理员（幂等：已存在则跳过），失败不影响服务启动
+bootstrapAdminFromEnv().catch((err) => {
+  console.error("Failed to bootstrap admin:", err)
 })
 
 console.log(`Server running on http://localhost:${port}`)
