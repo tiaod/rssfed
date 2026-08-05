@@ -45,6 +45,10 @@ watch(
 const unsubscribeOpen = ref(false)
 const unsubscribing = ref(false)
 
+function openUnsubscribe() {
+  unsubscribeOpen.value = true
+}
+
 async function unsubscribe() {
   unsubscribing.value = true
   try {
@@ -79,7 +83,7 @@ async function unsubscribe() {
             variant="ghost"
             color="error"
             size="sm"
-            @click="unsubscribeOpen = true"
+            @click="openUnsubscribe"
           >
             取消订阅
           </UButton>

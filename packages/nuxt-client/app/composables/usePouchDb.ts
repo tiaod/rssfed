@@ -1,4 +1,5 @@
 import PouchDB from 'pouchdb'
+import { reactive } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
 
@@ -11,6 +12,21 @@ export interface SyncStatus {
 }
 
 /**
+ * PouchDB 共享状态：通过 nuxtApp 单例化，确保所有组件使用同一份实例与同步状态。
+ *
+ * 之前每次调用 usePouchDb() 都会创建新的 dbs/syncHandles/syncStatuses，
+ * 导致页面切换后 watch 监听的 syncStatuses 是空对象，已同步的数据无法触发刷新。
+ */
+interface PouchDbState {
+  /** 当前已激活的 PouchDB 实例集合 */
+  dbs: Map<string, PouchDB.Database>
+  /** 同步句柄集合 */
+  syncHandles: Map<string, PouchDB.Replication.Sync<{}>>
+  /** 同步状态（响应式，供组件 watch） */
+  syncStatuses: Record<string, SyncStatus>
+}
+
+/**
  * 管理 PouchDB 多库同步，提供跨源条目查询能力。
  *
  * 每个订阅源对应一个 PouchDB 实例，通过 Hono 代理同步 CouchDB。
@@ -20,10 +36,16 @@ export function usePouchDb() {
   const { public: { apiBaseUrl } } = useRuntimeConfig()
   const base = apiBaseUrl.replace(/\/+$/, '')
 
-  /** 当前已激活的 PouchDB 实例集合 */
-  const dbs = new Map<string, PouchDB.Database>()
-  const syncHandles = new Map<string, PouchDB.Replication.Sync<{}>>()
-  const syncStatuses = reactive<Record<string, SyncStatus>>({})
+  // 通过 nuxtApp 单例化共享状态，避免每次组件挂载都创建新实例
+  const nuxtApp = useNuxtApp()
+  if (!(nuxtApp as any).$pouchDbState) {
+    ;(nuxtApp as any).$pouchDbState = {
+      dbs: new Map<string, PouchDB.Database>(),
+      syncHandles: new Map<string, PouchDB.Replication.Sync<{}>>(),
+      syncStatuses: reactive<Record<string, SyncStatus>>({}),
+    } as PouchDbState
+  }
+  const { dbs, syncHandles, syncStatuses } = (nuxtApp as any).$pouchDbState as PouchDbState
 
   /**
    * 获取或创建某个 feed 的 PouchDB 实例并开始同步
@@ -132,7 +154,7 @@ export function usePouchDb() {
    * 获取单条条目的完整内容
    */
   async function getEntry(entryId: string): Promise<RssEntry | null> {
-    for (const [feedId, db] of dbs.entries()) {
+    for (const [, db] of dbs.entries()) {
       try {
         const doc = await db.get(entryId) as any
         if (doc && doc.type === 'entry') {
@@ -248,7 +270,7 @@ export function usePouchDb() {
    * 清理所有 PouchDB 实例
    */
   function destroyAll() {
-    for (const [key, handle] of syncHandles.entries()) {
+    for (const [, handle] of syncHandles.entries()) {
       handle.cancel?.()
     }
     syncHandles.clear()

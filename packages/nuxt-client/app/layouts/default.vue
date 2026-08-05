@@ -150,5 +150,6 @@ const isBottomNavActive = (to: string) => {
     </nav>
 
     <NotificationsSlideover v-model:open="notificationsOpen" />
+    <EntryDetailModal />
   </UDashboardGroup>
 </template>
