@@ -15,7 +15,8 @@ const tabs = [
   { label: '订阅管理', icon: 'i-lucide-rss' },
   { label: '通用', icon: 'i-lucide-settings' }
 ]
-const activeTab = ref(0)
+// 注意：UTabs 的 tab 值内部为字符串（String(index)），需用字符串初始值才能默认激活第一个 tab
+const activeTab = ref('0')
 
 // 条目详情模态宽度选项
 const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
