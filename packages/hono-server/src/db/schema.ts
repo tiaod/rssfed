@@ -20,6 +20,8 @@ export const feeds = pgTable("feeds", {
   errorMessage: text("error_message"),
   lastFetchedAt: timestamp("last_fetched_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
+  /** 抓取状态：active 正常抓取 / paused 用户暂停（worker 跳过） */
+  status: text("status").notNull().default("active"),
   /** 关联的 CouchDB 库名（首次 ensure 时生成随机库名并回写） */
   couchDbName: text("couch_db_name").unique(),
 })

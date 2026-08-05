@@ -23,6 +23,8 @@
     "bullmq": "^5.0.0",
     "drizzle-orm": "^0.45.1",
     "hono": "^4.7.0",
+    "http-proxy-agent": "^9.1.0",
+    "https-proxy-agent": "^9.1.0",
     "ioredis": "^5.4.0",
     "nano": "^11.0.0",
     "nanoid": "^6.0.0",

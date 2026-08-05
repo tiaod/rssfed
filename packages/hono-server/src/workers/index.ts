@@ -3,7 +3,7 @@ import IORedis from "ioredis"
 import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
 import { ensureFeedDatabase, createCouchDb } from "../couchdb/client"
-import { rssParser } from "../rss/parser"
+import { rssParser, formatFeedError } from "../rss/parser"
 import { db, feeds, botFeeds, botOutbox, type EntryDoc, type NewBotOutbox } from "../db"
 
 const connection = new IORedis({
@@ -33,7 +33,7 @@ export const worker = new Worker("rss-fetch", async (job) => {
     return { feedId, newEntries: newEntries.length, totalItems: parsed.items?.length ?? 0 }
   } catch (err) {
     // 抓取失败，更新 feed 注册表的 errorMessage
-    await markFeedError(feedId, err)
+    await markFeedError(feedId, url, err)
     throw err
   }
 }, { connection })
@@ -142,17 +142,18 @@ async function notifyRelatedBots(feedId: string, newEntries: EntryDoc[]) {
 }
 
 /** 抓取失败时记录错误到 feed 注册表 */
-async function markFeedError(feedId: string, err: unknown) {
+async function markFeedError(feedId: string, url: string, err: unknown) {
   await db.update(feeds).set({
-    errorMessage: String(err),
+    errorMessage: formatFeedError(url, err),
     lastFetchedAt: new Date(),
   }).where(eq(feeds.id, feedId))
 }
 
-/** 定时调度所有已知 feed 的抓取任务 */
+/** 定时调度所有已知 feed 的抓取任务（跳过用户暂停的源） */
 export async function scheduleFeedFetches() {
-  const allFeeds = await db.select({ id: feeds.id, url: feeds.url })
+  const allFeeds = await db.select({ id: feeds.id, url: feeds.url, status: feeds.status })
     .from(feeds)
+    .where(eq(feeds.status, "active"))
 
   const jobs = allFeeds.map(f => ({
     name: `fetch:${f.id}`,

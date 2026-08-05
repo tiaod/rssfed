@@ -1,5 +1,5 @@
 export interface SubscriptionItem {
-  id: string       // feedId
+  id: string // feedId
   title: string
   siteUrl?: string
   description?: string
@@ -26,8 +26,8 @@ export function useCouchDb() {
       body: JSON.stringify({
         selector: { type: 'subscription' },
         fields: ['feedId', 'title', 'siteUrl', 'description', 'image', 'category', 'createdAt'],
-        limit: 100,
-      }),
+        limit: 100
+      })
     })
 
     if (!res.ok) {
@@ -36,20 +36,20 @@ export function useCouchDb() {
     }
 
     const data = await res.json()
-    return (data.docs ?? []).map((doc: any) => ({
+    return (data.docs ?? []).map((doc: { feedId: string, title: string, siteUrl?: string, description?: string, image?: string, category?: string, createdAt?: string }) => ({
       id: doc.feedId,
       title: doc.title,
       siteUrl: doc.siteUrl,
       description: doc.description,
       image: doc.image,
       category: doc.category ?? undefined,
-      createdAt: doc.createdAt,
+      createdAt: doc.createdAt
     }))
   }
 
   /** 添加订阅：先通过 API 获取 FeedDoc 信息，再写入 CouchDB */
   async function addSubscription(feedId: string, category?: string) {
-    const feed = await $fetch<{ title: string; siteUrl?: string; description?: string; image?: string }>(`${base}/api/feeds/${feedId}`)
+    const feed = await $fetch<{ title: string, siteUrl?: string, description?: string, image?: string }>(`${base}/api/feeds/${feedId}`)
 
     const doc = {
       _id: `subscription:${feedId}`,
@@ -60,14 +60,14 @@ export function useCouchDb() {
       siteUrl: feed.siteUrl,
       description: feed.description,
       image: feed.image,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date().toISOString()
     }
 
     const res = await fetch(`${proxyBase}/${encodeURIComponent(doc._id)}`, {
       method: 'PUT',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(doc),
+      body: JSON.stringify(doc)
     })
 
     if (!res.ok && res.status !== 409) {
@@ -85,14 +85,38 @@ export function useCouchDb() {
 
     const delRes = await fetch(`${proxyBase}/${encodeURIComponent(docId)}?rev=${doc._rev}`, {
       method: 'DELETE',
-      credentials: 'include',
+      credentials: 'include'
     })
     if (!delRes.ok) throw new Error(`CouchDB delete failed: ${delRes.statusText}`)
+  }
+
+  /** 更新订阅元信息（显示名/分类），直接读写 CouchDB 文档 */
+  async function updateSubscription(feedId: string, patch: { title?: string, category?: string }) {
+    const docId = `subscription:${feedId}`
+
+    const getRes = await fetch(`${proxyBase}/${encodeURIComponent(docId)}`, { credentials: 'include' })
+    if (!getRes.ok) throw new Error('subscription not found')
+    const doc = await getRes.json()
+
+    const updated = {
+      ...doc,
+      ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.category !== undefined ? { category: patch.category } : {})
+    }
+
+    const putRes = await fetch(`${proxyBase}/${encodeURIComponent(docId)}`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated)
+    })
+    if (!putRes.ok) throw new Error(`CouchDB update failed: ${putRes.statusText}`)
   }
 
   return {
     listSubscriptions,
     addSubscription,
     removeSubscription,
+    updateSubscription
   }
 }

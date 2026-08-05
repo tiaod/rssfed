@@ -101,10 +101,16 @@ async function saveCouchDbName(kind: DbKind, refId: string, dbName: string) {
 
 /** 建库（幂等）并按类型设置库级授权 */
 async function ensureDbExists(dbName: string, kind: DbKind, refId: string) {
+  let created = false
   try {
     await nanoServer.db.get(dbName)
   } catch {
     await nanoServer.db.create(dbName)
+    created = true
+  }
+  // 新建 feed 库时一次性安装设计文档；已有库不再重写，避免每次请求重装导致的并发 409 冲突
+  if (created && kind === "feed") {
+    await installFeedDesignDoc(dbName)
   }
   await setDatabaseSecurity(dbName, kind === "feed" ? { roles: ["user"] } : { names: [refId] })
 }
@@ -129,17 +135,16 @@ async function setDatabaseSecurity(
 /** 确保 feed 库存在并返回库名（首次调用时生成随机库名并持久化映射） */
 export async function ensureFeedDatabase(feedId: string): Promise<string> {
   const dbName = await resolveDatabase("feed", feedId, COUCHDB_FEED_PREFIX)
-  await installFeedDesignDoc(dbName)
   return dbName
 }
 
+/** 安装 feed 设计文档（仅在库新建时调用，幂等；并发冲突时忽略） */
 async function installFeedDesignDoc(dbName: string) {
   const db = nanoServer.use(dbName)
   try {
-    const existing = await db.get("_design/main")
-    await db.insert({ ...FEED_DESIGN_DOC, _rev: existing._rev })
-  } catch {
     await db.insert(FEED_DESIGN_DOC)
+  } catch {
+    // 并发创建时另一个请求可能已安装，忽略冲突
   }
 }
 

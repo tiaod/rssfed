@@ -38,3 +38,20 @@ export interface RssCategory {
   id: string
   title: string
 }
+
+/** 订阅抓取状态：全部由注册表真实字段判定（status / errorMessage） */
+export type FeedStatus = 'active' | 'paused' | 'error'
+
+/** 订阅管理列表项：用户订阅信息 + 注册表抓取状态 */
+export interface FeedSubscriptionItem {
+  feedId: string
+  title: string
+  siteUrl?: string
+  image?: string
+  description?: string
+  category?: string
+  createdAt: string
+  status: FeedStatus
+  errorMessage?: string
+  lastFetchedAt?: string
+}

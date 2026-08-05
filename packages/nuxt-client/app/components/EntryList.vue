@@ -1,9 +1,8 @@
 <script setup lang="ts">
 import type { RssEntry } from '~/types/rss'
 
-const props = defineProps<{
+defineProps<{
   entries: RssEntry[]
-  basePath: string
 }>()
 
 function formatDate(dateStr: string): Date {
@@ -21,8 +20,9 @@ function getExcerpt(entry: RssEntry): string {
     : plainText
 }
 
+// 条目详情路由为 /rss/feed/:feedId/entry/:entryId，按条目自身 feedId 构造
 function getEntryTo(entry: RssEntry): string {
-  return `${props.basePath}/entry/${entry.id}`
+  return `/rss/feed/${entry.feedId}/entry/${entry.id}`
 }
 </script>
 

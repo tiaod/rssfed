@@ -40,7 +40,7 @@ interface TimelineItem {
 }
 
 const api = useApi()
-const db = useCouchDb()
+const pouch = usePouchDb()
 const toast = useToast()
 const route = useRoute()
 const botId = String(route.params.id)
@@ -99,7 +99,7 @@ async function loadData() {
   }
   // 订阅列表用于"添加订阅源"选择，加载失败不阻塞主流程
   try {
-    subscriptions.value = await db.listSubscriptions()
+    subscriptions.value = await pouch.listSubscriptions()
   } catch {
     subscriptions.value = []
   }
@@ -109,7 +109,7 @@ async function loadData() {
 async function loadFeeds() {
   const [feedList, subs] = await Promise.all([
     api.bots.feeds(botId),
-    db.listSubscriptions().catch(() => [] as SubscriptionItem[])
+    pouch.listSubscriptions().catch(() => [] as SubscriptionItem[])
   ])
   attachedFeeds.value = feedList
   subscriptions.value = subs

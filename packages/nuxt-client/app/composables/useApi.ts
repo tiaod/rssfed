@@ -1,4 +1,6 @@
 // 统一 API 请求：跨源访问 Hono 后端时必须携带会话 Cookie（ofetch 默认 same-origin）
+import type { FeedSubscriptionItem } from '~/types/rss'
+
 function apiFetch<T>(url: string, options: Parameters<typeof $fetch<T>>[1] = {}) {
   return $fetch<T>(url, { credentials: 'include', ...options })
 }
@@ -10,7 +12,18 @@ export function useApi() {
   return {
     feeds: {
       discover: (url: string) => apiFetch<any>(`${base}/api/feeds/discover`, { method: 'POST', body: { url } }),
-      get: (id: string) => apiFetch<any>(`${base}/api/feeds/${id}`)
+      get: (id: string) => apiFetch<any>(`${base}/api/feeds/${id}`),
+      subscriptions: () => apiFetch<FeedSubscriptionItem[]>(`${base}/api/feeds/subscriptions`),
+      /** 管理员：获取全部 feed 注册表 */
+      listAll: () => apiFetch<any[]>(`${base}/api/feeds`),
+      /** 管理员：暂停/恢复抓取 */
+      updateStatus: (id: string, status: 'active' | 'paused') =>
+        apiFetch(`${base}/api/feeds/${id}`, { method: 'PATCH', body: { status } }),
+      /** 管理员：修改订阅源信息 */
+      update: (id: string, body: Partial<{ title: string, url: string, description: string, siteUrl: string, image: string }>) =>
+        apiFetch(`${base}/api/feeds/${id}`, { method: 'PUT', body }),
+      /** 管理员：触发重新抓取 */
+      refetch: (id: string) => apiFetch(`${base}/api/feeds/${id}/refetch`, { method: 'POST' })
     },
     bots: {
       list: () => apiFetch<any[]>(`${base}/api/bots`),

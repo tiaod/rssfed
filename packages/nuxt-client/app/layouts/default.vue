@@ -15,38 +15,58 @@ onMounted(async () => {
 const open = ref(false)
 const notificationsOpen = ref(false)
 
-const navItems = [
-  {
-    label: '主页',
-    icon: 'i-lucide-house',
-    to: '/',
-    onSelect: () => { open.value = false }
-  },
-  {
-    label: '时间线',
-    icon: 'i-lucide-activity',
-    to: '/timeline',
-    onSelect: () => { open.value = false }
-  },
-  {
-    label: '机器人',
-    icon: 'i-lucide-bot',
-    to: '/bots',
-    onSelect: () => { open.value = false }
-  },
-  {
-    label: '我的',
-    icon: 'i-lucide-user',
-    to: '/profile',
-    onSelect: () => { open.value = false }
-  }
-] satisfies NavigationMenuItem[]
+const navItems = computed<NavigationMenuItem[]>(() => {
+  const items: NavigationMenuItem[] = [
+    {
+      label: '主页',
+      icon: 'i-lucide-house',
+      to: '/',
+      onSelect: () => { open.value = false }
+    },
+    {
+      label: '时间线',
+      icon: 'i-lucide-activity',
+      to: '/timeline',
+      onSelect: () => { open.value = false }
+    },
+    {
+      label: '机器人',
+      icon: 'i-lucide-bot',
+      to: '/bots',
+      onSelect: () => { open.value = false }
+    },
+    {
+      label: '我的',
+      icon: 'i-lucide-user',
+      to: '/profile',
+      onSelect: () => { open.value = false }
+    },
+    {
+      label: '设置',
+      icon: 'i-lucide-settings',
+      to: '/settings',
+      onSelect: () => { open.value = false }
+    }
+  ]
 
-const bottomNavItems = navItems.map(item => ({
-  label: item.label,
-  icon: item.icon,
-  to: item.to
-}))
+  // 管理员额外入口
+  if (userStore.isAdmin) {
+    items.push({
+      label: '订阅源管理',
+      icon: 'i-lucide-shield',
+      to: '/admin/feeds',
+      onSelect: () => { open.value = false }
+    })
+  }
+
+  return items
+})
+
+const bottomNavItems = computed(() => navItems.value.map(item => ({
+  label: item.label as string,
+  icon: item.icon as string,
+  to: item.to as string
+})))
 
 const isBottomNavActive = (to: string) => {
   if (to === '/') return route.path === '/'
@@ -91,7 +111,7 @@ const isBottomNavActive = (to: string) => {
               :class="[
                 collapsed ? 'px-0 w-full justify-center' : 'square'
               ]"
-              @click="notificationsOpen = !notificationsOpen"
+              @click="() => { notificationsOpen = !notificationsOpen }"
             >
               <UChip
                 color="error"

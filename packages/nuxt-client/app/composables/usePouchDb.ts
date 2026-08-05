@@ -1,9 +1,12 @@
 import PouchDB from 'pouchdb'
 import type { RssEntry } from '~/types/rss'
+import type { SubscriptionItem } from '~/composables/useCouchDb'
 
 export interface SyncStatus {
   feedId: string
   status: 'syncing' | 'idle' | 'error'
+  /** 同步版本号：每次有数据变化时递增，页面可 watch 后重新查询条目 */
+  version: number
   error?: string
 }
 
@@ -30,7 +33,7 @@ export function usePouchDb() {
 
     const db = new PouchDB(`rssfed-feed-${feedId}`)
     dbs.set(feedId, db)
-    syncStatuses[feedId] = { feedId, status: 'syncing' }
+    syncStatuses[feedId] = { feedId, status: 'syncing', version: 0 }
 
     const remoteUrl = `${base}/api/couchdb/proxy/feed/${encodeURIComponent(feedId)}`
     const sync = PouchDB.sync(db, remoteUrl, {
@@ -38,10 +41,20 @@ export function usePouchDb() {
       retry: true,
     })
       .on('change', () => {
-        syncStatuses[feedId] = { feedId, status: 'idle' }
+        // 每次同步到新数据都递增版本号，触发页面重新查询
+        syncStatuses[feedId] = {
+          feedId,
+          status: 'idle',
+          version: (syncStatuses[feedId]?.version ?? 0) + 1,
+        }
       })
       .on('error', (err) => {
-        syncStatuses[feedId] = { feedId, status: 'error', error: String(err) }
+        syncStatuses[feedId] = {
+          feedId,
+          status: 'error',
+          version: syncStatuses[feedId]?.version ?? 0,
+          error: String(err),
+        }
       })
 
     syncHandles.set(feedId, sync)
@@ -245,6 +258,78 @@ export function usePouchDb() {
     dbs.clear()
   }
 
+  // ── 订阅管理（离线优先，读写本地 PouchDB，自动同步远端） ──
+
+  /**
+   * 获取本地订阅列表（离线可用，从 PouchDB 读取）
+   */
+  async function listSubscriptions(): Promise<SubscriptionItem[]> {
+    const stateDb = getUserStateDb()
+    const result = await stateDb.allDocs({
+      include_docs: true,
+      startkey: 'subscription:',
+      endkey: 'subscription:\uffff',
+    })
+    return result.rows
+      .map(r => r.doc as any)
+      .filter(doc => doc?.type === 'subscription')
+      .map(doc => ({
+        id: doc.feedId,
+        title: doc.title ?? '',
+        siteUrl: doc.siteUrl,
+        description: doc.description,
+        image: doc.image,
+        category: doc.category,
+        createdAt: doc.createdAt ?? new Date().toISOString(),
+      }))
+  }
+
+  /**
+   * 添加订阅（写入本地 PouchDB，自动同步到远端 CouchDB）
+   */
+  async function addSubscription(feedId: string, info: { title: string, siteUrl?: string, description?: string, image?: string }, category?: string) {
+    const stateDb = getUserStateDb()
+    await stateDb.put({
+      _id: `subscription:${feedId}`,
+      type: 'subscription',
+      feedId,
+      title: info.title,
+      siteUrl: info.siteUrl,
+      description: info.description,
+      image: info.image,
+      category,
+      createdAt: new Date().toISOString(),
+    })
+  }
+
+  /**
+   * 删除订阅（移除本地文档，自动同步删除到远端）
+   */
+  async function removeSubscription(feedId: string) {
+    const stateDb = getUserStateDb()
+    const docId = `subscription:${feedId}`
+    try {
+      const doc = await stateDb.get(docId)
+      await stateDb.remove(doc)
+    } catch {
+      // 文档不存在，忽略
+    }
+  }
+
+  /**
+   * 更新订阅元信息（显示名/分类）
+   */
+  async function updateSubscription(feedId: string, patch: { title?: string, category?: string }) {
+    const stateDb = getUserStateDb()
+    const docId = `subscription:${feedId}`
+    const doc = await stateDb.get(docId)
+    await stateDb.put({
+      ...doc,
+      ...(patch.title !== undefined ? { title: patch.title } : {}),
+      ...(patch.category !== undefined ? { category: patch.category } : {}),
+    })
+  }
+
   return {
     syncFeed,
     unsyncFeed,
@@ -255,5 +340,9 @@ export function usePouchDb() {
     toggleSaved,
     destroyAll,
     syncStatuses: syncStatuses as Readonly<Record<string, SyncStatus>>,
+    listSubscriptions,
+    addSubscription,
+    removeSubscription,
+    updateSubscription,
   }
 }

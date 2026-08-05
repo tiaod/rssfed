@@ -7,7 +7,6 @@ const route = useRoute()
 const feedId = route.params.id as string
 
 const api = useApi()
-const db = useCouchDb()
 const pouch = usePouchDb()
 const toast = useToast()
 const feed = ref<any>(null)
@@ -15,21 +14,9 @@ const entries = ref<any[]>([])
 const loading = ref(true)
 const feedLoading = ref(true)
 
-// 取消订阅
-const unsubscribeOpen = ref(false)
-const unsubscribing = ref(false)
-
-async function unsubscribe() {
-  unsubscribing.value = true
-  try {
-    await db.removeSubscription(feedId)
-    toast.add({ title: '已取消订阅', color: 'success' })
-    await navigateTo('/')
-  } catch (e: any) {
-    toast.add({ title: '取消订阅失败', description: e?.message ?? '未知错误', color: 'error' })
-  } finally {
-    unsubscribing.value = false
-  }
+// 从本地 PouchDB 查询该订阅源的条目
+async function refreshEntries() {
+  entries.value = await pouch.queryEntries([feedId], 50)
 }
 
 onMounted(async () => {
@@ -42,16 +29,34 @@ onMounted(async () => {
     feedLoading.value = false
   }
 
-  // 启动 PouchDB 同步
+  // 启动 PouchDB 同步；首次查询可能为空，同步完成后通过 watch 自动刷新
   pouch.syncFeed(feedId)
-
-  // 等待同步完成
-  await new Promise(resolve => setTimeout(resolve, 1000))
-
-  // 从本地 PouchDB 查询该订阅源的条目
-  entries.value = await pouch.queryEntries([feedId], 50)
+  await refreshEntries()
   loading.value = false
 })
+
+// 同步过程中有新数据到达时重新查询，避免刚订阅后条目尚未同步完成的空列表
+watch(
+  () => pouch.syncStatuses[feedId]?.version ?? 0,
+  () => refreshEntries()
+)
+
+// 取消订阅
+const unsubscribeOpen = ref(false)
+const unsubscribing = ref(false)
+
+async function unsubscribe() {
+  unsubscribing.value = true
+  try {
+    await pouch.removeSubscription(feedId)
+    toast.add({ title: '已取消订阅', color: 'success' })
+    await navigateTo('/')
+  } catch (e: any) {
+    toast.add({ title: '取消订阅失败', description: e?.message ?? '未知错误', color: 'error' })
+  } finally {
+    unsubscribing.value = false
+  }
+}
 </script>
 
 <template>
@@ -106,7 +111,6 @@ onMounted(async () => {
       <EntryList
         v-else
         :entries="entries || []"
-        :base-path="`/rss/feed/${feedId}`"
       />
 
       <!-- 取消订阅确认弹窗 -->

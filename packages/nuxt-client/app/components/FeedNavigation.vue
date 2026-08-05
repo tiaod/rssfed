@@ -8,7 +8,7 @@ defineProps<{
 
 const api = useApi()
 const toast = useToast()
-const db = useCouchDb()
+const pouch = usePouchDb()
 const feeds = ref<SubscriptionItem[] | null>(null)
 const error = ref<string | null>(null)
 
@@ -20,7 +20,7 @@ const addError = ref<string | null>(null)
 
 onMounted(async () => {
   try {
-    feeds.value = await db.listSubscriptions()
+    feeds.value = await pouch.listSubscriptions()
   } catch (e: any) {
     error.value = e?.message ?? '加载订阅失败'
   }
@@ -36,12 +36,12 @@ async function addFeed() {
   try {
     // 1. 后端解析并注册该订阅源，写入 per-feed 库并触发首轮抓取
     const { feedId, title } = await api.feeds.discover(url)
-    // 2. 在用户状态库写入订阅关系（出现在侧边栏）
-    await db.addSubscription(feedId)
+    // 2. 在本地 PouchDB 写入订阅关系（自动同步到远端，出现在侧边栏）
+    await pouch.addSubscription(feedId, { title })
     toast.add({ title: '订阅成功', description: title, color: 'success' })
     addOpen.value = false
     feedUrl.value = ''
-    feeds.value = await db.listSubscriptions()
+    feeds.value = await pouch.listSubscriptions()
   } catch (e: any) {
     const err = e as { data?: { error?: string }, message?: string }
     addError.value = err.data?.error ?? err.message ?? '订阅失败'
