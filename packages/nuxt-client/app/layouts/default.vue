@@ -40,24 +40,8 @@ const navItems = computed<NavigationMenuItem[]>(() => {
       icon: 'i-lucide-user',
       to: '/profile',
       onSelect: () => { open.value = false }
-    },
-    {
-      label: '设置',
-      icon: 'i-lucide-settings',
-      to: '/settings',
-      onSelect: () => { open.value = false }
     }
   ]
-
-  // 管理员额外入口
-  if (userStore.isAdmin) {
-    items.push({
-      label: '订阅源管理',
-      icon: 'i-lucide-shield',
-      to: '/admin/feeds',
-      onSelect: () => { open.value = false }
-    })
-  }
 
   return items
 })
