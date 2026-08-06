@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import SubscriptionManager from '~/components/settings/SubscriptionManager.vue'
-import type { EntryModalSize } from '~/composables/useSettings'
+import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 
 definePageMeta({
   layout: 'default'
@@ -9,7 +9,16 @@ definePageMeta({
 const userStore = useUserStore()
 const user = userStore.user
 const { isOnline } = useOffline()
-const { settings } = useSettings()
+const { settings, updateSettings } = useSettings()
+const toast = useToast()
+
+// 设置草稿：修改后需点击“保存”按钮才生效并持久化
+const draftSettings = ref<AppSettings>({ ...settings.value })
+
+const saveSettings = () => {
+  updateSettings({ ...draftSettings.value })
+  toast.add({ title: '设置已保存', color: 'success' })
+}
 
 const tabs = [
   { label: '订阅管理', icon: 'i-lucide-rss' },
@@ -20,10 +29,11 @@ const activeTab = ref('0')
 
 // 条目详情模态宽度选项
 const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
-  { label: '标准', value: '4xl' },
-  { label: '较宽', value: '5xl' },
-  { label: '宽', value: '6xl' },
-  { label: '很宽', value: '7xl' },
+  { label: '标准', value: 'sm:max-w-xl' },
+  { label: '较宽', value: 'sm:max-w-2xl' },
+  { label: '宽', value: 'sm:max-w-4xl' },
+  { label: '很宽', value: 'sm:max-w-6xl' },
+  { label: '全屏', value: 'fullscreen' },
 ]
 </script>
 
@@ -34,7 +44,7 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
     </template>
 
     <template #body>
-      <div class="max-w-3xl mx-auto w-full px-4 py-6 space-y-6">
+      <div class="w-full px-4 py-6 space-y-6">
         <UTabs
           v-model="activeTab"
           :items="tabs"
@@ -51,7 +61,7 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
             <!-- 通用 -->
             <div
               v-else
-              class="pt-6 space-y-8 max-w-xl"
+              class="pt-6 space-y-8"
             >
               <!-- 账户 -->
               <section class="space-y-3">
@@ -94,11 +104,18 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
                   description="控制点击条目时弹出的详情窗口宽度"
                 >
                   <USelect
-                    v-model="settings.entryModalSize"
+                    v-model="draftSettings.entryModalSize"
                     :items="modalSizeOptions"
                     value-key="value"
                     class="w-48"
                   />
+                </UFormField>
+
+                <UFormField
+                  label="固定顶部栏和底部栏"
+                  description="全屏时固定顶栏与底栏、仅正文滚动；关闭后随文章一起滚动"
+                >
+                  <USwitch v-model="draftSettings.fixedBars" />
                 </UFormField>
               </section>
 
@@ -118,6 +135,19 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
                   <span>{{ isOnline ? '在线' : '离线' }}</span>
                 </div>
               </section>
+
+              <USeparator />
+
+              <!-- 保存 -->
+              <div class="flex justify-start">
+                <UButton
+                  color="primary"
+                  icon="i-lucide-save"
+                  @click="saveSettings"
+                >
+                  保存设置
+                </UButton>
+              </div>
             </div>
           </template>
         </UTabs>

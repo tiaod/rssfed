@@ -59,15 +59,5 @@ function formatDate(dateStr: string): string {
       </ul>
     </footer>
 
-    <div class="mt-6 flex gap-2">
-      <UButton
-        :to="entry.url"
-        target="_blank"
-        label="阅读原文"
-        icon="i-lucide-external-link"
-        variant="outline"
-        size="sm"
-      />
-    </div>
   </article>
 </template>
