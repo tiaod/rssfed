@@ -24,7 +24,7 @@ function getExcerpt(entry: RssEntry): string {
 </script>
 
 <template>
-  <UPageColumns>
+  <UPageColumns class="gap-4 space-y-4">
     <UBlogPost
       v-for="entry in entries"
       :key="entry.id"
