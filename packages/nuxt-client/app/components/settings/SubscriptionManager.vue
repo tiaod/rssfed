@@ -2,6 +2,7 @@
 import type { FeedSubscriptionItem, FeedStatus } from '~/types/rss'
 import SubscriptionItem from '~/components/settings/SubscriptionItem.vue'
 import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.vue'
+import OpmlImportModal from '~/components/settings/OpmlImportModal.vue'
 
 const api = useApi()
 const toast = useToast()
@@ -31,6 +32,9 @@ function toggleGroup(name: string) {
 const pendingRemove = ref<FeedSubscriptionItem | null>(null)
 const confirming = ref(false)
 const confirmError = ref<string | null>(null)
+
+// ── OPML 导入 ──
+const importOpen = ref(false)
 
 // ── 编辑弹窗 ──
 const editingItem = ref<FeedSubscriptionItem | null>(null)
@@ -149,6 +153,19 @@ function onEdited() {
   load()
 }
 
+/**
+ * OPML 导入由后端直接写入远端 CouchDB，本地 PouchDB 通过实时同步拉取。
+ * 提交后轮询刷新，等新增订阅同步到本地后再展示。
+ */
+async function reloadAfterImport() {
+  const before = subscriptions.value.length
+  for (let i = 0; i < 6; i++) {
+    await new Promise((r) => setTimeout(r, 800))
+    await load()
+    if (subscriptions.value.length > before) return
+  }
+}
+
 onMounted(load)
 </script>
 
@@ -195,6 +212,16 @@ onMounted(load)
             :aria-label="grouped ? '分组视图' : '平铺视图'"
             @click="grouped = !grouped"
           />
+          <UButton
+            color="neutral"
+            variant="soft"
+            size="xs"
+            icon="i-lucide-file-up"
+            aria-label="导入 OPML"
+            @click="importOpen = true"
+          >
+            导入 OPML
+          </UButton>
         </div>
         <UInput
           v-model="keyword"
@@ -337,6 +364,12 @@ onMounted(load)
       :subscription="editingItem"
       @close="editingItem = null"
       @saved="onEdited"
+    />
+
+    <!-- OPML 导入弹窗 -->
+    <OpmlImportModal
+      v-model:open="importOpen"
+      @imported="reloadAfterImport"
     />
   </div>
 </template>

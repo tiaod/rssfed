@@ -1,6 +1,8 @@
 import { Hono, type Context, type Next } from "hono"
+import crypto from "node:crypto"
 import { inArray, eq } from "drizzle-orm"
-import { rssParser, formatFeedError } from "../rss/parser"
+import { parseFeedUrl, parseFeedContent, formatFeedError, type ParsedFeed } from "../rss/parser"
+import { parseOpml, type OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
 import { db, feeds } from "../db"
 import { fetchQueue } from "../workers"
@@ -27,7 +29,27 @@ async function requireAdmin(c: Context<{ Variables: FeedsVariables }>, next: Nex
 
 export const feedsRouter = new Hono<{ Variables: FeedsVariables }>()
 
-type ParsedFeed = Awaited<ReturnType<typeof rssParser.parseURL>>
+/**
+ * 由 URL 确定性派生 feedId：对完整 URL 做 sha256 后取 base64url 前 16 位。
+ * 历史实现取 base64url(URL).slice(0,12)，只编码了前 9 字节，
+ * 导致 https://www.a.com 与 https://www.b.com 这类前缀相同的 URL 撞 ID；
+ * 改用完整 URL 哈希可彻底避免冲突（base64url 保证路径安全，不含 / + =）。
+ */
+export function deriveFeedId(url: string): string {
+  return crypto.createHash("sha256").update(url).digest("base64url").slice(0, 16)
+}
+
+/**
+ * 解析 feedId：URL 已注册时复用其现有 ID（兼容历史短 ID 数据），
+ * 否则按完整 URL 哈希派生新 ID。
+ */
+async function resolveFeedId(url: string): Promise<string> {
+  const existing = await db.query.feeds.findFirst({
+    where: eq(feeds.url, url),
+    columns: { id: true },
+  })
+  return existing?.id ?? deriveFeedId(url)
+}
 
 /** 获取全部订阅源注册表（仅管理员） */
 feedsRouter.get("/", requireAdmin, async (c) => {
@@ -52,9 +74,9 @@ feedsRouter.post("/discover", async (c) => {
   if (!url) return c.json({ error: "url required" }, 400)
 
   try {
-    const parsed = await rssParser.parseURL(url)
-    // feedId 由 URL 确定性派生；base64url 编码保证 URL 路径安全（不含 / + = 等特殊字符）
-    const feedId = Buffer.from(url).toString("base64url").slice(0, 12)
+    const parsed = await parseFeedUrl(url)
+    // feedId 由完整 URL 哈希确定性派生（已注册过的 URL 复用其现有 ID）
+    const feedId = await resolveFeedId(url)
 
     await registerFeed(feedId, url, parsed)
     await seedFeedDoc(feedId, url, parsed)
@@ -64,6 +86,151 @@ feedsRouter.post("/discover", async (c) => {
     return c.json({ error: `Failed to parse feed: ${formatFeedError(url, err)}` }, 422)
   }
 })
+
+/** 导入 OPML：批量注册订阅源并按 OPML 分组结构为当前用户创建订阅 */
+feedsRouter.post("/import-opml", requireAuth, async (c) => {
+  const userId = c.get("userId")
+  const { opml } = await c.req.json()
+  if (!opml || typeof opml !== "string") {
+    return c.json({ error: "opml content required" }, 400)
+  }
+
+  // 1. 解析 OPML 为订阅源列表（含分组信息）
+  let items: OpmlFeed[]
+  try {
+    items = parseOpml(opml)
+  } catch (err) {
+    return c.json({ error: err instanceof Error ? err.message : String(err) }, 422)
+  }
+  if (!items.length) {
+    return c.json({ error: "OPML 中未发现任何订阅源" }, 422)
+  }
+
+  // 2. 按 URL 去重（同一订阅源可能在文件中出现多次）
+  const unique = [...new Map(items.map((i) => [i.url, i])).values()]
+
+  const userDb = createCouchDb(await ensureUserStateDatabase(userId))
+  const failed: { url: string, error: string }[] = []
+  let imported = 0
+  let skipped = 0
+
+  // 3. 有限并发处理：注册 feed + 写入用户订阅，单个失败不影响其余
+  await mapWithConcurrency(unique, 5, async (item) => {
+    try {
+      const meta = await ensureFeedRegistered(item)
+      const subscribed = await addSubscriptionIfAbsent(userDb, item, meta)
+      if (subscribed) imported++
+      else skipped++
+    } catch (err) {
+      failed.push({ url: item.url, error: formatFeedError(item.url, err) })
+    }
+  })
+
+  return c.json({ total: unique.length, imported, skipped, failed })
+})
+
+/** 注册后的 feed 元信息，用于写入订阅文档 */
+interface FeedMeta {
+  feedId: string
+  title: string
+  siteUrl?: string
+  description?: string
+}
+
+/**
+ * 确保 feed 已登记：PostgreSQL 注册表 + per-feed CouchDB 库。
+ * 首轮解析失败不阻塞导入（用 OPML 自带标题兜底注册），
+ * 统一入队抓取（jobId 去重），由 Worker 更新元数据或标记错误。
+ */
+async function ensureFeedRegistered(item: OpmlFeed): Promise<FeedMeta> {
+  // 已注册过的 URL 复用现有 ID，避免与历史短 ID 数据分裂；新 URL 按完整 URL 哈希派生
+  const feedId = await resolveFeedId(item.url)
+
+  let parsed: ParsedFeed | null = null
+  try {
+    parsed = await parseFeedUrl(item.url)
+  } catch {
+    // 忽略：用 OPML 标题兜底，错误状态留给 Worker 抓取时标记
+  }
+
+  const title = parsed?.title ?? item.title ?? item.url
+  await db.insert(feeds).values({
+    id: feedId,
+    url: item.url,
+    title,
+    description: parsed?.description,
+    siteUrl: parsed?.link,
+  }).onConflictDoNothing()
+
+  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
+  try {
+    await feedDb.get(feedId)
+  } catch {
+    await feedDb.insert({
+      _id: feedId,
+      type: "feed",
+      url: item.url,
+      title,
+      description: parsed?.description,
+      siteUrl: parsed?.link,
+      lastFetchedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    } as any)
+  }
+
+  // 无论首轮解析成败都入队一次抓取（jobId 去重，避免重复入队）
+  await fetchQueue.add(`fetch:${feedId}`, { feedId, url: item.url }, { jobId: feedId })
+
+  return {
+    feedId,
+    title,
+    siteUrl: parsed?.link,
+    description: parsed?.description,
+  }
+}
+
+/** 为用户写入订阅文档；已订阅过（_id 冲突 409）则跳过并返回 false */
+async function addSubscriptionIfAbsent(
+  userDb: ReturnType<typeof createCouchDb>,
+  item: OpmlFeed,
+  meta: FeedMeta,
+): Promise<boolean> {
+  try {
+    await userDb.insert({
+      _id: `subscription:${meta.feedId}`,
+      type: "subscription",
+      feedId: meta.feedId,
+      title: meta.title,
+      siteUrl: meta.siteUrl,
+      description: meta.description,
+      category: item.category,
+      createdAt: new Date().toISOString(),
+    } as any)
+    return true
+  } catch (err: any) {
+    // CouchDB 文档冲突 = 该用户已订阅过，跳过
+    if (err?.statusCode === 409 || err?.error === "conflict") return false
+    throw err
+  }
+}
+
+/** 有限并发处理任务（批量导入时避免并发打爆目标站点 / 数据库） */
+async function mapWithConcurrency<T>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+) {
+  let index = 0
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const current = index++
+      const item = items[current]
+      if (item === undefined) break
+      await fn(item)
+    }
+  })
+  await Promise.all(workers)
+}
 
 /** 写入 PostgreSQL feed 注册表（已存在则跳过） */
 async function registerFeed(feedId: string, url: string, parsed: ParsedFeed) {

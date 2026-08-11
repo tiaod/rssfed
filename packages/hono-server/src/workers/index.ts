@@ -3,7 +3,7 @@ import IORedis from "ioredis"
 import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
 import { ensureFeedDatabase, createCouchDb } from "../couchdb/client"
-import { rssParser, formatFeedError } from "../rss/parser"
+import { parseFeedUrl, formatFeedError, type ParsedFeed, type ParsedItem } from "../rss/parser"
 import { db, feeds, botFeeds, botOutbox, type EntryDoc, type NewBotOutbox } from "../db"
 
 const connection = new IORedis({
@@ -14,14 +14,13 @@ const connection = new IORedis({
 
 export const fetchQueue = new Queue("rss-fetch", { connection })
 
-type ParsedFeed = Awaited<ReturnType<typeof rssParser.parseURL>>
 type FeedDb = ReturnType<typeof createCouchDb>
 
 export const worker = new Worker("rss-fetch", async (job) => {
   const { feedId, url } = job.data
 
   try {
-    const parsed = await rssParser.parseURL(url)
+    const parsed = await parseFeedUrl(url)
     const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
 
     // 依次更新 FeedDoc 元数据、PostgreSQL 注册表，再写入新条目并通知相关 Bot
@@ -78,7 +77,7 @@ async function updateFeedRegistry(feedId: string, url: string, parsed: ParsedFee
 }
 
 /** 写入新条目到 per-feed CouchDB 库，返回本次新增的条目列表 */
-async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedFeed["items"]) {
+async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedItem[]) {
   const newEntries: EntryDoc[] = []
   for (const item of items) {
     const guid = item.guid ?? item.link ?? item.title ?? ""
@@ -100,7 +99,7 @@ async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedFee
 }
 
 /** 由 RSS item 构造 EntryDoc */
-function buildEntry(feedId: string, item: ParsedFeed["items"][number], guid: string, entryId: string): EntryDoc {
+function buildEntry(feedId: string, item: ParsedItem, guid: string, entryId: string): EntryDoc {
   return {
     _id: entryId,
     type: "entry",
@@ -110,7 +109,7 @@ function buildEntry(feedId: string, item: ParsedFeed["items"][number], guid: str
     content: item.content ?? item.contentSnippet,
     description: item.summary ?? item.contentSnippet,
     guid,
-    author: item.creator ?? item.author,
+    author: item.creator,
     publishedAt: item.pubDate ?? item.isoDate ?? new Date().toISOString(),
     insertedAt: new Date().toISOString(),
     categories: item.categories,

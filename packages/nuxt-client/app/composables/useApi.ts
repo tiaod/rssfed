@@ -23,7 +23,12 @@ export function useApi() {
       update: (id: string, body: Partial<{ title: string, url: string, description: string, siteUrl: string, image: string }>) =>
         apiFetch(`${base}/api/feeds/${id}`, { method: 'PUT', body }),
       /** 管理员：触发重新抓取 */
-      refetch: (id: string) => apiFetch(`${base}/api/feeds/${id}/refetch`, { method: 'POST' })
+      refetch: (id: string) => apiFetch(`${base}/api/feeds/${id}/refetch`, { method: 'POST' }),
+      /** 导入 OPML：批量注册订阅源并创建订阅，返回导入汇总 */
+      importOpml: (opml: string) => apiFetch<{ total: number, imported: number, skipped: number, failed: { url: string, error: string }[] }>(
+        `${base}/api/feeds/import-opml`,
+        { method: 'POST', body: { opml } }
+      )
     },
     bots: {
       list: () => apiFetch<any[]>(`${base}/api/bots`),

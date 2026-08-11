@@ -1,4 +1,6 @@
-import Parser from "rss-parser"
+import http from "node:http"
+import https from "node:https"
+import { parseFeed } from "feedsmith"
 import { HttpProxyAgent } from "http-proxy-agent"
 import { HttpsProxyAgent } from "https-proxy-agent"
 
@@ -28,30 +30,210 @@ function shouldProxy(url: string): boolean {
   })
 }
 
-/**
- * 支持代理的 Parser：每次请求（含重定向）按当前 URL 独立决定是否走代理，
- * 不修改共享的 options.requestOptions，避免并发请求之间互相污染。
- */
-class ProxyAwareParser extends Parser {
-  /** rss-parser 构造时把 options 挂到实例上，但其类型声明未暴露该字段 */
-  declare options: Parser.ParserOptions<any, any>
+// ── 归一化后的 feed / item 类型（供 routes 和 workers 消费） ──
 
-  parseURL(feedUrl: string, callback?: (err: Error, feed: any) => void, redirectCount = 0) {
-    const agent = shouldProxy(feedUrl)
-      ? (feedUrl.startsWith("https") ? httpsAgent : httpAgent)
-      : undefined
-    // parseURL 在同步阶段读取 this.options，此处整体替换成新对象即可安全生效
-    this.options = { ...this.options, requestOptions: { ...this.options.requestOptions, agent } }
-    return super.parseURL(feedUrl, callback as any, redirectCount)
+export interface ParsedFeed {
+  title: string
+  /** 站点链接 */
+  link?: string
+  description?: string
+  image?: { url?: string }
+  items: ParsedItem[]
+}
+
+export interface ParsedItem {
+  title?: string
+  link?: string
+  guid?: string
+  /** 完整正文（content:encoded 或 atom content） */
+  content?: string
+  /** 纯文本摘要（去除 HTML 标签） */
+  contentSnippet?: string
+  /** 摘要（RSS description / Atom summary） */
+  summary?: string
+  creator?: string
+  pubDate?: string
+  isoDate?: string
+  categories?: string[]
+}
+
+/**
+ * 抓取 URL 并解析为归一化的 feed 对象。
+ * 支持 HTTP/HTTPS 代理、自动跟随重定向（最多 5 次）。
+ */
+export async function parseFeedUrl(url: string): Promise<ParsedFeed> {
+  const xml = await fetchUrl(url)
+  return parseFeedContent(xml)
+}
+
+/** 解析 feed 字符串内容（RSS/Atom/RDF/JSON 自动识别并归一化） */
+export function parseFeedContent(content: string): ParsedFeed {
+  const result = parseFeed(content)
+  switch (result.format) {
+    case "rss": return normalizeRss(result.feed)
+    case "atom": return normalizeAtom(result.feed)
+    case "rdf": return normalizeRss(result.feed) // RDF 结构与 RSS 类似，复用归一化
+    case "json": return normalizeJson(result.feed)
+    default: throw new Error(`Unsupported feed format: ${(result as { format: string }).format}`)
   }
 }
 
-export const rssParser = new ProxyAwareParser({
-  timeout: 10000,
-  headers: {
-    "User-Agent": "RSSFed/0.1.0",
-  },
-})
+// ── 格式归一化 ──
+
+/** RSS / RDF → ParsedFeed */
+function normalizeRss(feed: any): ParsedFeed {
+  return {
+    title: feed.title ?? "",
+    link: feed.link,
+    description: feed.description,
+    image: feed.image ? { url: feed.image.url } : undefined,
+    items: (feed.items ?? []).map(normalizeRssItem),
+  }
+}
+
+function normalizeRssItem(item: any): ParsedItem {
+  const content = item.content?.encoded ?? item.description ?? ""
+  return {
+    title: item.title,
+    link: item.link,
+    guid: typeof item.guid === "string" ? item.guid : item.guid?.value,
+    content,
+    contentSnippet: stripHtml(content),
+    summary: item.description,
+    creator: item.dc?.creator ?? item.authors?.[0],
+    pubDate: toIso(item.pubDate),
+    isoDate: toIso(item.pubDate),
+    categories: item.categories?.map((c: any) => typeof c === "string" ? c : c.name),
+  }
+}
+
+/** Atom → ParsedFeed */
+function normalizeAtom(feed: any): ParsedFeed {
+  const siteLink = findAtomLink(feed.links, "alternate") ?? findAtomLink(feed.links)
+  return {
+    title: feed.title ?? "",
+    link: siteLink,
+    description: feed.subtitle,
+    image: feed.logo ? { url: feed.logo } : feed.icon ? { url: feed.icon } : undefined,
+    items: (feed.entries ?? []).map(normalizeAtomEntry),
+  }
+}
+
+function normalizeAtomEntry(entry: any): ParsedItem {
+  const link = findAtomLink(entry.links, "alternate") ?? findAtomLink(entry.links)
+  const pubDate = entry.published ?? entry.updated
+  const authors = entry.authors?.map((a: any) => typeof a === "string" ? a : a.name).filter(Boolean)
+  return {
+    title: entry.title,
+    link,
+    guid: entry.id,
+    content: entry.content,
+    contentSnippet: stripHtml(entry.content ?? entry.summary ?? ""),
+    summary: entry.summary,
+    creator: authors?.[0],
+    pubDate: toIso(pubDate),
+    isoDate: toIso(pubDate),
+    categories: entry.categories?.map((c: any) => c.term),
+  }
+}
+
+/** JSON Feed → ParsedFeed */
+function normalizeJson(feed: any): ParsedFeed {
+  return {
+    title: feed.title ?? "",
+    link: feed.home_page_url,
+    description: feed.description,
+    image: feed.icon ? { url: feed.icon } : undefined,
+    items: (feed.items ?? []).map((item: any) => ({
+      title: item.title,
+      link: item.url,
+      guid: item.id,
+      content: item.content_html ?? item.content_text,
+      contentSnippet: item.content_text ?? stripHtml(item.content_html ?? ""),
+      summary: item.summary,
+      creator: item.authors?.map((a: any) => typeof a === "string" ? a : a.name)[0],
+      pubDate: toIso(item.date_published),
+      isoDate: toIso(item.date_published),
+      categories: item.tags,
+    })),
+  }
+}
+
+/** 从 Atom links 数组中按 rel 查找 href */
+function findAtomLink(links: any[] | undefined, rel?: string): string | undefined {
+  if (!links?.length) return undefined
+  const link = rel
+    ? links.find((l) => l.rel === rel)
+    : links[0]
+  return link?.href
+}
+
+/** 将日期值统一转为 ISO 字符串 */
+function toIso(date: unknown): string | undefined {
+  if (!date) return undefined
+  if (date instanceof Date) return date.toISOString()
+  if (typeof date === "string") {
+    const d = new Date(date)
+    return isNaN(d.getTime()) ? date : d.toISOString()
+  }
+  return undefined
+}
+
+/** 去除 HTML 标签，返回纯文本 */
+function stripHtml(html: string): string {
+  return html
+    ?.replace(/<[^>]*>/g, "")
+    .replace(/&[a-z]+;/gi, " ")
+    .trim() || ""
+}
+
+// ── HTTP 抓取 ──
+
+/**
+ * 抓取 URL 返回文本内容，支持代理和重定向。
+ * 超时 10 秒，最多跟随 5 次重定向。
+ */
+function fetchUrl(url: string, redirects = 0): Promise<string> {
+  if (redirects > 5) return Promise.reject(new Error("Too many redirects"))
+
+  const isHttps = url.startsWith("https")
+  const agent = shouldProxy(url)
+    ? (isHttps ? httpsAgent : httpAgent)
+    : undefined
+
+  return new Promise((resolve, reject) => {
+    const mod = isHttps ? https : http
+    const req = mod.get(url, {
+      agent,
+      headers: { "User-Agent": "RSSFed/0.1.0" },
+      timeout: 10000,
+    }, (res) => {
+      // 3xx 重定向
+      if ([301, 302, 307, 308].includes(res.statusCode ?? 0)) {
+        const location = res.headers.location
+        res.resume()
+        if (location) {
+          const next = new URL(location, url).href
+          fetchUrl(next, redirects + 1).then(resolve, reject)
+        } else {
+          reject(new Error(`Redirect without location: ${res.statusCode}`))
+        }
+        return
+      }
+      if (res.statusCode !== 200) {
+        res.resume()
+        reject(new Error(`HTTP ${res.statusCode}`))
+        return
+      }
+      const chunks: Buffer[] = []
+      res.on("data", (chunk: Buffer) => chunks.push(chunk))
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")))
+      res.on("error", reject)
+    })
+    req.on("error", reject)
+    req.on("timeout", () => req.destroy(new Error("Request timeout")))
+  })
+}
 
 /**
  * 将抓取/解析 feed 的错误格式化为可读信息。
