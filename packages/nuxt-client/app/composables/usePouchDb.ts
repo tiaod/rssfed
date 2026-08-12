@@ -39,7 +39,7 @@ interface PouchDbState {
   /** 同步状态（响应式，供组件 watch） */
   syncStatuses: Record<string, SyncStatus>
   /** 复制任务队列（限制并发，避免大量订阅源同时复制挤爆连接与 IndexedDB） */
-  replicateWaiting: Array<{ id: string, resolve: (r: { ok: boolean, error?: string }) => void }>
+  replicateWaiting: Array<{ id: string, full?: boolean, resolve: (r: { ok: boolean, error?: string }) => void }>
   /** 当前正在执行的复制数 */
   activeReplicates: number
 }
@@ -148,7 +148,7 @@ export function usePouchDb() {
     while (pouchState.activeReplicates < MAX_CONCURRENT_REPLICATE && pouchState.replicateWaiting.length > 0) {
       const item = pouchState.replicateWaiting.shift()!
       pouchState.activeReplicates++
-      void replicateDb(item.id).then(item.resolve).finally(() => {
+      void replicateDb(item.id, item.full).then(item.resolve).finally(() => {
         pouchState.activeReplicates--
         pumpReplicateQueue()
       })
@@ -156,8 +156,10 @@ export function usePouchDb() {
   }
 
   /** 将一次复制加入队列执行（限制并发，返回该库的复制结果）。
-   *  入队即标记为 queued，供进度条统计剩余数量；成功完成后记录同步时间。 */
-  function enqueueReplicate(id: string): Promise<{ ok: boolean, error?: string }> {
+   *  入队即标记为 queued，供进度条统计剩余数量；成功完成后记录同步时间。
+   *  full=true 时强制全量同步（since: 0），用于手动同步按钮——库被删重建后
+   *  checkpoint 的 seq 会大于远端（旧 seq 残留），增量同步会误判"无新变更"。 */
+  function enqueueReplicate(id: string, full = false): Promise<{ ok: boolean, error?: string }> {
     // 标记排队中（若尚未有状态记录）
     if (!syncStatuses[id]) {
       syncStatuses[id] = { feedId: id, status: 'queued', version: 0 }
@@ -165,6 +167,7 @@ export function usePouchDb() {
     return new Promise((resolve) => {
       pouchState.replicateWaiting.push({
         id,
+        full,
         resolve: (r) => {
           if (r.ok) markSynced(id)
           resolve(r)
@@ -176,9 +179,10 @@ export function usePouchDb() {
 
   /**
    * 对指定订阅源执行一次性单向复制（远端 per-feed CouchDB → 本地集中库），
-   * 并更新同步状态。增量由 PouchDB checkpoint 保证（每源独立记录同步位置）。
+   * 并更新同步状态。增量由 PouchDB checkpoint 保证（每源独立记录同步位置）；
+   * full=true 时强制全量（since: 0），见 enqueueReplicate 说明。
    */
-  async function replicateDb(id: string): Promise<{ ok: boolean, error?: string }> {
+  async function replicateDb(id: string, full = false): Promise<{ ok: boolean, error?: string }> {
     const db = id === '__user_state__' ? getUserStateDb() : getEntriesDb()
     const remoteUrl = id === '__user_state__'
       ? `${base}/api/couchdb/proxy/user-state`
@@ -191,7 +195,7 @@ export function usePouchDb() {
     }
 
     try {
-      const res = await db.replicate.from(remoteUrl)
+      const res = await db.replicate.from(remoteUrl, full ? { since: 0 } : undefined)
       if (!res.ok) {
         throw new Error(`同步失败（HTTP ${res.status}）`)
       }
@@ -283,10 +287,15 @@ export function usePouchDb() {
    * 复制统一走并发受限队列（见 enqueueReplicate），订阅源很多时不会挤爆连接。
    */
   async function syncNow(feedIds?: string[]): Promise<{ ok: string[], failed: { id: string, error: string }[] }> {
-    // 目标集合：显式传入的 feed，或当前所有已激活的订阅源 + 用户状态库
-    const targets = feedIds?.length
-      ? [...new Set(feedIds)]
-      : [...Object.keys(syncStatuses).filter(id => id !== '__user_state__'), '__user_state__']
+    // 目标集合：显式传入的 feed，或当前已订阅的全部源 + 用户状态库。
+    // 订阅列表从 user-state 库读取（syncStatuses 是会话状态，刷新后为空，不能作为依据）
+    let targets: string[]
+    if (feedIds?.length) {
+      targets = [...new Set(feedIds)]
+    } else {
+      const subs = await listSubscriptions()
+      targets = [...new Set(subs.map(s => s.id)), '__user_state__']
+    }
 
     // ① 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用
     const pausedUserState = syncHandles.has('__user_state__')
@@ -295,8 +304,9 @@ export function usePouchDb() {
       syncHandles.delete('__user_state__')
     }
 
-    // ② 入队执行一次性复制（队列内部限制并发），等待全部完成
-    const results = await Promise.all(targets.map(id => enqueueReplicate(id)))
+    // ② 入队执行一次性复制（队列内部限制并发，等待全部完成）。
+    // 手动同步强制全量（since: 0）：库重建后 checkpoint 残留旧 seq 会误判无变更
+    const results = await Promise.all(targets.map(id => enqueueReplicate(id, true)))
     const ok: string[] = []
     const failed: { id: string, error: string }[] = []
     targets.forEach((id, i) => {
@@ -318,7 +328,81 @@ export function usePouchDb() {
 
   // ── 集中库查询（Mango 索引，一次查询） ──
 
-  /** 将集中库文档映射为 RssEntry（列表展示用，feed 元信息由页面订阅列表补全） */
+  /**
+   * feed 图标 blob 缓存（按 feedId + _rev 失效；FeedDoc 更新后自动重新生成）。
+   * blob 数量与 feed 数相当，会话内不回收。
+   */
+  const feedIconBlobs = new Map<string, { rev: string, url: string }>()
+
+  /** 从集中库 FeedDoc 解析 feed 图标：AVIF 附件 blob 优先，回退原始 URL；无图标返回 null */
+  async function resolveFeedImage(feedDoc: any): Promise<string | null> {
+    if (!feedDoc) return null
+    const cached = feedDoc.imageCached as { attachment?: string } | undefined
+    if (cached?.attachment) {
+      const hit = feedIconBlobs.get(feedDoc._id)
+      if (hit && hit.rev === feedDoc._rev) return hit.url
+      try {
+        const blob = await getEntriesDb().getAttachment(feedDoc._id, cached.attachment) as any as Blob
+        const url = URL.createObjectURL(blob)
+        if (hit) URL.revokeObjectURL(hit.url) // 附件更新后回收旧 blob
+        feedIconBlobs.set(feedDoc._id, { rev: feedDoc._rev, url })
+        return url
+      } catch {
+        // 附件尚未同步到本地：回退原始 URL
+      }
+    }
+    return feedDoc.image ?? null
+  }
+
+  /**
+   * 补全条目的 feed 元信息（源名/站点/图标）。
+   * FeedDoc 随库同步到集中库（replicate 无 filter），一次 allDocs 读取全部所需文档；
+   * 图标优先本地缓存的 AVIF 附件（blob URL），离线可用；无缓存回退原始 URL。
+   */
+  async function enrichEntries(entries: RssEntry[]): Promise<RssEntry[]> {
+    if (entries.length === 0) return entries
+    const feedIds = [...new Set(entries.map(e => e.feedId))]
+    let docs: any[] = []
+    try {
+      const res = await getEntriesDb().allDocs({ include_docs: true, keys: feedIds })
+      docs = (res.rows as any[]).filter(r => r.doc).map(r => r.doc)
+    } catch {
+      return entries
+    }
+    const byId = new Map(docs.map(d => [d._id, d]))
+    for (const entry of entries) {
+      const doc = byId.get(entry.feedId) as any
+      if (!doc) continue
+      entry.feed = {
+        id: doc._id,
+        title: doc.title ?? '',
+        siteUrl: doc.siteUrl ?? '',
+        feedUrl: doc.url ?? '',
+        image: (await resolveFeedImage(doc)) ?? undefined,
+        lastFetchedAt: doc.lastFetchedAt ?? '',
+      }
+    }
+    return entries
+  }
+
+  /**
+   * 获取 feed 图标的可展示 URL（AVIF 附件 blob 优先，回退原始 URL），
+   * 供订阅管理页等未走条目查询的场景使用。
+   */
+  async function getFeedImageUrl(feedId: string, fallback?: string): Promise<string | null> {
+    try {
+      const doc = await getEntriesDb().get(feedId) as any
+      if (doc?.type === 'feed') {
+        const url = await resolveFeedImage(doc)
+        if (url) return url
+      }
+    } catch {
+      // FeedDoc 尚未同步，走回退
+    }
+    return fallback ?? null
+  }
+
+  /** 将集中库文档映射为 RssEntry（列表展示用，feed 元信息由 enrichEntries 补全） */
   function docToEntry(doc: any): RssEntry {
     return {
       id: doc._id,
@@ -331,6 +415,7 @@ export function usePouchDb() {
       publishedAt: doc.publishedAt,
       insertedAt: doc.insertedAt,
       categories: doc.categories,
+      images: doc.images,
       feed: {
         id: doc.feedId,
         title: '',
@@ -370,7 +455,7 @@ export function usePouchDb() {
         fields: ENTRY_FIELDS,
         limit: 10000, // 上限足够覆盖当前规模的条目数
       })
-      return sortEntries(result.docs, limit)
+      return await enrichEntries(sortEntries(result.docs, limit))
     } catch {
       return []
     }
@@ -386,7 +471,7 @@ export function usePouchDb() {
         fields: ENTRY_FIELDS,
         limit: 10000,
       })
-      return sortEntries(result.docs, limit)
+      return await enrichEntries(sortEntries(result.docs, limit))
     } catch {
       return []
     }
@@ -403,7 +488,7 @@ export function usePouchDb() {
         fields: ENTRY_FIELDS,
         limit: 10000,
       })
-      return sortEntries(result.docs, limit)
+      return await enrichEntries(sortEntries(result.docs, limit))
     } catch {
       return []
     }
@@ -416,12 +501,22 @@ export function usePouchDb() {
     try {
       const doc = await getEntriesDb().get(entryId) as any
       if (doc && doc.type === 'entry') {
-        return docToEntry(doc)
+        const entry = docToEntry(doc)
+        return (await enrichEntries([entry]))[0] ?? entry
       }
     } catch {
       // 条目不存在
     }
     return null
+  }
+
+  /**
+   * 获取条目缓存的图片附件（AVIF）二进制，用于生成 blob URL 直接展示。
+   * 附件随文档同步到本地库，离线可用；不存在时抛出，调用方回退原 URL。
+   * 注：PouchDB 类型声明为 Blob | Buffer，浏览器环境实际为 Blob，这里按 Blob 处理。
+   */
+  async function getEntryAttachment(entryId: string, attachmentName: string): Promise<Blob> {
+    return await getEntriesDb().getAttachment(entryId, attachmentName) as Blob
   }
 
   // ── 用户状态库（已读/收藏/订阅，live 双向同步） ──
@@ -641,6 +736,8 @@ export function usePouchDb() {
     queryFeedEntries,
     queryGroupEntries,
     getEntry,
+    getEntryAttachment,
+    getFeedImageUrl,
     getUserStateDb,
     markRead,
     toggleSaved,

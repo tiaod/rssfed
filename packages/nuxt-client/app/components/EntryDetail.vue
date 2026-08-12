@@ -1,9 +1,15 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import type { RssEntry } from '~/types/rss'
+import { useEntryContent } from '~/composables/useEntryContent'
 
-defineProps<{
+const props = defineProps<{
   entry: RssEntry
 }>()
+
+// 将已缓存为 AVIF 附件的正文图片替换为本地 blob URL 直接展示（离线可用，失败回退原 URL）
+const contentEl = ref<HTMLElement>()
+useEntryContent(() => props.entry, contentEl)
 
 function formatDate(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString('zh-CN', {
@@ -31,6 +37,7 @@ function formatDate(dateStr: string): string {
     </header>
 
     <div
+      ref="contentEl"
       class="entry-content"
       v-html="entry.content"
     />

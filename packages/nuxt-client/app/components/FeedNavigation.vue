@@ -18,15 +18,25 @@ const feedUrl = ref('')
 const submitting = ref(false)
 const addError = ref<string | null>(null)
 
+// feed 图标（本地缓存 blob 优先），侧边栏菜单项 avatar 用
+const iconSrcs = ref<Record<string, string>>({})
+
 onMounted(async () => {
   try {
     feeds.value = await pouch.listSubscriptions()
+    // 异步解析各源图标：附件 blob 优先，回退原始 URL；无图标保持纯文字
+    const map: Record<string, string> = {}
+    await Promise.all(feeds.value.map(async (f) => {
+      const url = await pouch.getFeedImageUrl(f.id)
+      if (url) map[f.id] = url
+    }))
+    iconSrcs.value = map
   } catch (e: any) {
     error.value = e?.message ?? '加载订阅失败'
   }
 })
 
-const { menuItems, hasFeeds } = useFeedNavigation(computed(() => feeds.value))
+const { menuItems, hasFeeds } = useFeedNavigation(computed(() => feeds.value), computed(() => iconSrcs.value))
 
 async function addFeed() {
   const url = feedUrl.value.trim()

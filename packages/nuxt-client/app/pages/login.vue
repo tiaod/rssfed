@@ -21,8 +21,10 @@ const title = computed(() => (mode.value === "login" ? "登录" : "注册"))
 
 /** 快速填入指定测试账号 */
 function fillTestAccount(index: number) {
-  email.value = TEST_ACCOUNTS[index].email
-  password.value = TEST_ACCOUNTS[index].password
+  const account = TEST_ACCOUNTS[index]
+  if (!account) return
+  email.value = account.email
+  password.value = account.password
 }
 
 async function handleSubmit() {

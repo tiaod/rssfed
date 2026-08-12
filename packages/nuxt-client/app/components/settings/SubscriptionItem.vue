@@ -1,11 +1,20 @@
 <script setup lang="ts">
+import { ref } from 'vue'
 import type { FeedSubscriptionItem, FeedStatus } from '~/types/rss'
+import { usePouchDb } from '~/composables/usePouchDb'
 
 const props = defineProps<{ subscription: FeedSubscriptionItem }>()
 const emit = defineEmits<{
   remove: []
   edit: []
 }>()
+
+// feed 图标：本地缓存（AVIF 附件 blob）优先，回退订阅文档里的原始 URL
+const iconSrc = ref<string | undefined>(props.subscription.image)
+onMounted(async () => {
+  const url = await usePouchDb().getFeedImageUrl(props.subscription.feedId, props.subscription.image)
+  if (url) iconSrc.value = url
+})
 
 const statusMeta: Record<FeedStatus, { label: string, color: 'success' | 'neutral' | 'error', icon: string }> = {
   active: { label: '活跃', color: 'success', icon: 'i-lucide-circle-check' },
@@ -45,10 +54,10 @@ function suggestion(msg?: string): string {
     :ui="subscription.status === 'error' ? { root: 'border-red-500/60' } : {}"
   >
     <div class="flex items-start gap-3">
-      <!-- 图标 -->
+      <!-- 图标（本地缓存 blob 优先，回退原始 URL/文字） -->
       <UAvatar
-        v-if="subscription.image"
-        :src="subscription.image"
+        v-if="iconSrc"
+        :src="iconSrc"
         :alt="subscription.title"
         size="lg"
       />

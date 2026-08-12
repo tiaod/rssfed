@@ -26,6 +26,19 @@ export interface RssEntry {
   read: boolean
   readingTime: number
   enclosures?: RssEnclosure[]
+  /** 已缓存为本地附件的正文图片（AVIF），渲染时替换 <img src> */
+  images?: RssCachedImage[]
+}
+
+/** 缓存到 entry 附件的正文图片（AVIF） */
+export interface RssCachedImage {
+  /** 原始图片 URL（解析为绝对地址，用于匹配 <img src>） */
+  url: string
+  /** PouchDB attachment 名（如 img-0.avif） */
+  attachment: string
+  /** 压缩后尺寸 */
+  width?: number
+  height?: number
 }
 
 export interface RssEnclosure {

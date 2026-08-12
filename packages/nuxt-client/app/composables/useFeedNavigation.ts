@@ -3,7 +3,14 @@ import type { ComputedRef } from 'vue'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
 import type { NavigationMenuItem } from '@nuxt/ui'
 
-export function useFeedNavigation(feeds: ComputedRef<SubscriptionItem[] | null>) {
+/**
+ * 生成侧边栏导航菜单。
+ * @param icons feedId → 图标 URL（本地缓存 blob 优先），用于菜单项 avatar
+ */
+export function useFeedNavigation(
+  feeds: ComputedRef<SubscriptionItem[] | null>,
+  icons?: ComputedRef<Record<string, string>>,
+) {
   const menuItems = computed<NavigationMenuItem[][]>(() => {
     if (!feeds.value || feeds.value.length === 0) return []
 
@@ -22,6 +29,19 @@ export function useFeedNavigation(feeds: ComputedRef<SubscriptionItem[] | null>)
       return a.localeCompare(b, 'zh-CN')
     })
 
+    /** 菜单项公共字段：feed 图标（有缓存/URL 显示图片，否则文字首字母占位） */
+    const itemFor = (feed: SubscriptionItem) => {
+      const src = icons?.value?.[feed.id]
+      return {
+        label: feed.title,
+        to: `/rss/feed/${feed.id}`,
+        // 尺寸由 UNavigationMenu 的 linkLeadingAvatarSize 控制（默认 sm）
+        avatar: src
+          ? { src }
+          : { text: feed.title?.trim()[0] ?? 'R', color: 'neutral' as const },
+      }
+    }
+
     const sections: NavigationMenuItem[] = [{ label: '订阅源', type: 'label' }]
 
     for (const cat of sortedCats) {
@@ -29,7 +49,7 @@ export function useFeedNavigation(feeds: ComputedRef<SubscriptionItem[] | null>)
       if (!cat) {
         // 未分类的直接展开为顶层项
         for (const feed of items) {
-          sections.push({ label: feed.title, to: `/rss/feed/${feed.id}` })
+          sections.push(itemFor(feed))
         }
       } else {
         // 有分类的作为可折叠分组：点击分组名跳转到聚合条目页，点击箭头展开/收起
@@ -37,10 +57,7 @@ export function useFeedNavigation(feeds: ComputedRef<SubscriptionItem[] | null>)
           label: cat,
           defaultOpen: true,
           to: `/rss/group/${encodeURIComponent(cat)}`,
-          children: items.map(feed => ({
-            label: feed.title,
-            to: `/rss/feed/${feed.id}`,
-          })),
+          children: items.map(itemFor),
         })
       }
     }

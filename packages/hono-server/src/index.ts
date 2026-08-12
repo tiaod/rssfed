@@ -32,6 +32,8 @@ async function configureProxyAuth() {
     "chttpd_auth/secret": secret,
     // 启用 proxy 认证 handler；term 格式：逗号分隔、不带方括号
     "chttpd/authentication_handlers": "{chttpd_auth, cookie_authentication_handler}, {chttpd_auth, proxy_authentication_handler}, {chttpd_auth, default_authentication_handler}",
+    // 放宽附件大小上限（默认 1MB），容纳压缩后的 AVIF 正文图片
+    "couchdb/max_attachment_size": "8388608",
   }
 
   for (const [key, value] of Object.entries(configs)) {

@@ -11,11 +11,11 @@ const NO_PROXY = (process.env.NO_PROXY || process.env.no_proxy || "")
   .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
 
 // 连接级代理可复用，创建一次即可（内部有连接池）
-const httpAgent = PROXY_HTTP ? new HttpProxyAgent(PROXY_HTTP) : undefined
-const httpsAgent = PROXY_HTTPS ? new HttpsProxyAgent(PROXY_HTTPS) : undefined
+export const httpAgent = PROXY_HTTP ? new HttpProxyAgent(PROXY_HTTP) : undefined
+export const httpsAgent = PROXY_HTTPS ? new HttpsProxyAgent(PROXY_HTTPS) : undefined
 
 /** 按 NO_PROXY 规则判断该 URL 是否应走代理（支持 *.example.com / .example.com / host 写法） */
-function shouldProxy(url: string): boolean {
+export function shouldProxy(url: string): boolean {
   let host: string
   try {
     host = new URL(url).hostname.toLowerCase()
