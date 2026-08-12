@@ -1,5 +1,6 @@
 // 统一 API 请求：跨源访问 Hono 后端时必须携带会话 Cookie（ofetch 默认 same-origin）
 import type { FeedSubscriptionItem } from '~/types/rss'
+import { resolveApiBase } from '~/utils/apiBase'
 
 function apiFetch<T>(url: string, options: Parameters<typeof $fetch<T>>[1] = {}) {
   return $fetch<T>(url, { credentials: 'include', ...options })
@@ -7,7 +8,7 @@ function apiFetch<T>(url: string, options: Parameters<typeof $fetch<T>>[1] = {})
 
 export function useApi() {
   const { public: { apiBaseUrl } } = useRuntimeConfig()
-  const base = apiBaseUrl.replace(/\/+$/, '')
+  const base = resolveApiBase(apiBaseUrl)
 
   return {
     feeds: {

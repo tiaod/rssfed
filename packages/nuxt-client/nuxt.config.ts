@@ -6,6 +6,11 @@ export default defineNuxtConfig({
     '@pinia/nuxt'
   ],
 
+  // 监听 0.0.0.0，方便局域网（手机）访问开发服务器
+  devServer: {
+    host: '0.0.0.0',
+  },
+
   devtools: {
     enabled: true
   },

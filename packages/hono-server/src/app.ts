@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { auth } from "./auth"
-import { allowedOrigins } from "./config"
+import { isOriginAllowed } from "./config"
 import { feedsRouter } from "./routes/feeds"
 import { botsRouter } from "./routes/bots"
 import { couchdbRouter } from "./routes/couchdb"
@@ -10,7 +10,8 @@ import { instance } from "./bots"
 const app = new Hono()
 
 app.use("/api/*", cors({
-  origin: allowedOrigins,
+  // 回调形式：允许白名单 + 局域网私有网段（手机调试）；拒绝时返回 null（不带 CORS 头）
+  origin: (origin) => (origin && isOriginAllowed(origin) ? origin : null),
   credentials: true,
 }))
 

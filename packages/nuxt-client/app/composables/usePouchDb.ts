@@ -3,6 +3,7 @@ import * as PouchDBFindNS from 'pouchdb-find'
 import { reactive } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
+import { resolveApiBase } from '~/utils/apiBase'
 
 // 注册 Mango 查询插件（db.find / createIndex）。
 // pouchdb-find 是 CJS 模块，兼容 Vite 的 default interop 嵌套
@@ -55,7 +56,7 @@ const ENTRIES_DB_NAME = 'rssfed-entries'
  */
 export function usePouchDb() {
   const { public: { apiBaseUrl } } = useRuntimeConfig()
-  const base = apiBaseUrl.replace(/\/+$/, '')
+  const base = resolveApiBase(apiBaseUrl)
 
   // 通过 nuxtApp 单例化共享状态，避免每次组件挂载都创建新实例
   const nuxtApp = useNuxtApp()
