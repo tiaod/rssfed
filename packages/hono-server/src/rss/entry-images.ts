@@ -193,5 +193,17 @@ export async function cacheEntryImages(
     }
   }
   await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, urls.length) }, worker))
+
+  // 选封面：正文图片中面积最大且足够大的一张（过滤小 logo/图标），作为列表缩略图
+  // 微信类文章的头图通常就是最大图，代表性较好；无合格图则不标记
+  const MIN_COVER_AREA = 200 * 150
+  let cover: CachedImage | undefined
+  for (const img of images) {
+    const area = (img.width ?? 0) * (img.height ?? 0)
+    if (area < MIN_COVER_AREA) continue
+    if (!cover || area > (cover.width ?? 0) * (cover.height ?? 0)) cover = img
+  }
+  if (cover) cover.cover = true
+
   return { attachments, images }
 }

@@ -31,6 +31,9 @@ function getExcerpt(entry: RssEntry): string {
       :title="entry.title"
       :description="getExcerpt(entry)"
       :date="formatDate(entry.publishedAt)"
+      :image="entry.coverUrl
+        ? { src: entry.coverUrl, alt: entry.title }
+        : undefined"
       :authors="[{
         name: entry.author || entry.feed?.title || '未知来源',
         to: entry.feed?.siteUrl

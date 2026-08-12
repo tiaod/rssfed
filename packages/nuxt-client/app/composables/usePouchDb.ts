@@ -355,7 +355,13 @@ export function usePouchDb() {
   }
 
   /**
-   * 补全条目的 feed 元信息（源名/站点/图标）。
+   * 条目封面图 blob 缓存（按 entryId + 附件名失效），列表缩略图用。
+   * 与 feed 图标一样，会话内不回收（数量与条目数相当，均为小体积 AVIF）。
+   */
+  const entryCoverBlobs = new Map<string, string>()
+
+  /**
+   * 补全条目的 feed 元信息（源名/站点/图标）与封面图 blob。
    * FeedDoc 随库同步到集中库（replicate 无 filter），一次 allDocs 读取全部所需文档；
    * 图标优先本地缓存的 AVIF 附件（blob URL），离线可用；无缓存回退原始 URL。
    */
@@ -371,6 +377,24 @@ export function usePouchDb() {
     }
     const byId = new Map(docs.map(d => [d._id, d]))
     for (const entry of entries) {
+      // 封面图：images 中 cover 标记的附件 → 本地 blob
+      const cover = entry.images?.find(i => i.cover)
+      if (cover?.attachment) {
+        const cacheKey = `${entry.id}:${cover.attachment}`
+        const hit = entryCoverBlobs.get(cacheKey)
+        if (hit) {
+          entry.coverUrl = hit
+        } else {
+          try {
+            const blob = await getEntriesDb().getAttachment(entry.id, cover.attachment) as any as Blob
+            const url = URL.createObjectURL(blob)
+            entryCoverBlobs.set(cacheKey, url)
+            entry.coverUrl = url
+          } catch {
+            // 附件未同步：不显示缩略图
+          }
+        }
+      }
       const doc = byId.get(entry.feedId) as any
       if (!doc) continue
       entry.feed = {
@@ -436,7 +460,7 @@ export function usePouchDb() {
    * 说明：PouchDB 9 的 Mango sort 与自建索引的自动匹配不可靠（会回退默认索引报错），
    * 故不带 sort；字段裁剪避免把全文读入内存（列表不需要 content，详情走 getEntry）。
    */
-  const ENTRY_FIELDS = ['_id', 'feedId', 'title', 'url', 'publishedAt', 'insertedAt', 'author', 'categories', 'description']
+  const ENTRY_FIELDS = ['_id', 'feedId', 'title', 'url', 'publishedAt', 'insertedAt', 'author', 'categories', 'description', 'images']
 
   /** 对 find 结果按 publishedAt 倒序排序并截取 */
   function sortEntries(docs: any[], limit: number): RssEntry[] {

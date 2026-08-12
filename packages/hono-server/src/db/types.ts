@@ -47,6 +47,8 @@ export interface CachedImage {
   /** 压缩后尺寸（前端可作占位） */
   width?: number
   height?: number
+  /** 是否为封面图（正文中面积最大的一张，列表缩略图用） */
+  cover?: boolean
 }
 
 export interface UserEntryDoc extends EntryDoc {

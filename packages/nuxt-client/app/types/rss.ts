@@ -28,6 +28,8 @@ export interface RssEntry {
   enclosures?: RssEnclosure[]
   /** 已缓存为本地附件的正文图片（AVIF），渲染时替换 <img src> */
   images?: RssCachedImage[]
+  /** 封面图 blob URL（images 中 cover 标记的一张，列表缩略图用；无则 undefined） */
+  coverUrl?: string
 }
 
 /** 缓存到 entry 附件的正文图片（AVIF） */
@@ -39,6 +41,8 @@ export interface RssCachedImage {
   /** 压缩后尺寸 */
   width?: number
   height?: number
+  /** 是否为封面图（正文中面积最大的一张） */
+  cover?: boolean
 }
 
 export interface RssEnclosure {

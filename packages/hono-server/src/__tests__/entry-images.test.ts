@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest"
 import http from "node:http"
 import sharp from "sharp"
-import { extractImageUrls, compressToAvif, cacheSingleImage } from "../rss/entry-images"
+import { extractImageUrls, compressToAvif, cacheSingleImage, cacheEntryImages } from "../rss/entry-images"
 
 describe("extractImageUrls", () => {
   const html = [
@@ -109,5 +109,48 @@ describe("cacheSingleImage", () => {
     expect(a!.image.url).toBe(url)
     expect(a!.image.attachment).toBe("feed-image.avif")
     expect(a!.data.subarray(4, 12).toString("ascii")).toBe("ftypavif")
+  })
+})
+
+describe("cacheEntryImages 封面选择", () => {
+  it("选正文中面积最大的图片作为封面，过滤小图", async () => {
+    // 三张图：小图标(100x100) / 中图(400x300) / 大图(800x600)
+    const mk = (w: number, h: number) => sharp({
+      create: { width: w, height: h, channels: 3, background: { r: 10, g: 20, b: 30 } },
+    }).png().toBuffer()
+    const [small, mid, big] = await Promise.all([mk(100, 100), mk(400, 300), mk(800, 600)])
+
+    const server = http.createServer((req, res) => {
+      res.setHeader("Content-Type", "image/png")
+      if (req.url === "/small.png") res.end(small)
+      else if (req.url === "/mid.png") res.end(mid)
+      else res.end(big)
+    })
+    await new Promise<void>((r) => server.listen(0, r))
+    const port = (server.address() as { port: number }).port
+    const content = `<img src="http://127.0.0.1:${port}/small.png"><img src="http://127.0.0.1:${port}/big.png"><img src="http://127.0.0.1:${port}/mid.png">`
+
+    const { images } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`)
+    server.close()
+
+    const covers = images.filter((i) => i.cover)
+    expect(covers).toHaveLength(1)
+    expect(covers[0]!.url).toContain("/big.png") // 最大图被选中
+    expect(images[0]!.width).toBeLessThan(200) // 小图保留但非封面
+  })
+
+  it("全部是小图时不标记封面", async () => {
+    const tiny = await sharp({
+      create: { width: 50, height: 50, channels: 3, background: { r: 1, g: 2, b: 3 } },
+    }).png().toBuffer()
+    const server = http.createServer((_req, res) => {
+      res.setHeader("Content-Type", "image/png")
+      res.end(tiny)
+    })
+    await new Promise<void>((r) => server.listen(0, r))
+    const port = (server.address() as { port: number }).port
+    const { images } = await cacheEntryImages(`<img src="http://127.0.0.1:${port}/a.png">`, `http://127.0.0.1:${port}/`)
+    server.close()
+    expect(images.every((i) => !i.cover)).toBe(true)
   })
 })
