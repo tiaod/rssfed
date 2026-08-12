@@ -12,14 +12,14 @@ function formatDate(dateStr: string): Date {
 }
 
 function getExcerpt(entry: RssEntry): string {
-  if (!entry.content) return ''
-  const plainText = entry.content
+  // 列表查询裁剪了 content（全文）字段，摘要优先用 description（列表查询仍包含）
+  const text = (entry.description || entry.content || '')
     .replace(/<[^>]*>/g, '')
     .replace(/\s+/g, ' ')
     .trim()
-  return plainText.length > 150
-    ? plainText.slice(0, 150) + '…'
-    : plainText
+  return text.length > 150
+    ? text.slice(0, 150) + '…'
+    : text
 }
 </script>
 

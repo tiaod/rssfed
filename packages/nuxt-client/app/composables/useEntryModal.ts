@@ -14,6 +14,18 @@ export function useEntryModal() {
   function openEntry(entry: RssEntry) {
     currentEntry.value = entry
     isOpen.value = true
+    // 列表查询裁剪了 content 字段（避免全文入内存），打开时异步拉取完整条目（含正文）补充
+    void loadFullEntry(entry)
+  }
+
+  async function loadFullEntry(entry: RssEntry) {
+    try {
+      const pouch = usePouchDb()
+      const full = await pouch.getEntry(entry.id)
+      if (full) currentEntry.value = full
+    } catch {
+      // 拉取失败时保持列表数据（标题等仍可读）
+    }
   }
 
   function closeEntry() {
