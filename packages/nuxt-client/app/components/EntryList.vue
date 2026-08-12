@@ -33,11 +33,7 @@ function getExcerpt(entry: RssEntry): string {
       :date="formatDate(entry.publishedAt)"
       :authors="[{
         name: entry.author || entry.feed?.title || '未知来源',
-        to: entry.feed?.siteUrl,
-        size: '2xs',
-        avatar: entry.feed?.image
-          ? { src: entry.feed.image }
-          : { text: entry.feed?.title?.trim()[0] || 'R' }
+        to: entry.feed?.siteUrl
       }]"
       class="cursor-pointer"
       @click="openEntry(entry)"
