@@ -55,6 +55,25 @@ export interface ParsedItem {
   pubDate?: string
   isoDate?: string
   categories?: string[]
+  /**
+   * 协议封面图（优先用于列表缩略图）：
+   * media:thumbnail → media:content 图片 → 图片 enclosure → JSON Feed image。
+   * 无协议字段时为 undefined（前端回退正文选图）。
+   */
+  coverUrl?: string
+}
+
+/**
+ * 从 feedsmith 的 item 中提取协议封面图 URL（Media RSS thumbnail/content → 图片 enclosure）。
+ * RSS/Atom/RDF 通用；JSON Feed 的 image 字段在 normalizeJson 单独处理。
+ */
+function extractProtocolCover(item: any): string | undefined {
+  const mediaThumb = item.media?.thumbnails?.[0]?.url
+  if (mediaThumb) return mediaThumb
+  const mediaContent = (item.media?.contents ?? []).find((c: any) => c.type?.startsWith("image/"))?.url
+  if (mediaContent) return mediaContent
+  const imageEnclosure = (item.enclosures ?? []).find((e: any) => e.type?.startsWith("image/"))?.url
+  return imageEnclosure
 }
 
 /**
@@ -104,6 +123,7 @@ function normalizeRssItem(item: any): ParsedItem {
     pubDate: toIso(item.pubDate),
     isoDate: toIso(item.pubDate),
     categories: item.categories?.map((c: any) => typeof c === "string" ? c : c.name),
+    coverUrl: extractProtocolCover(item),
   }
 }
 
@@ -134,6 +154,8 @@ function normalizeAtomEntry(entry: any): ParsedItem {
     pubDate: toIso(pubDate),
     isoDate: toIso(pubDate),
     categories: entry.categories?.map((c: any) => c.term),
+    // Atom 无 media 扩展：封面取 rel="enclosure" 且类型为图片的链接
+    coverUrl: entry.links?.find((l: any) => l.rel === "enclosure" && l.type?.startsWith("image/"))?.href,
   }
 }
 
@@ -155,6 +177,8 @@ function normalizeJson(feed: any): ParsedFeed {
       pubDate: toIso(item.date_published),
       isoDate: toIso(item.date_published),
       categories: item.tags,
+      // JSON Feed 1.1 标准字段：条目封面图
+      coverUrl: item.image,
     })),
   }
 }

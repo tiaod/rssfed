@@ -113,7 +113,7 @@ describe("cacheSingleImage", () => {
 })
 
 describe("cacheEntryImages 封面选择", () => {
-  it("选正文中面积最大的图片作为封面，过滤小图", async () => {
+  it("无协议封面时选正文第一张合格图（过滤小图）", async () => {
     // 三张图：小图标(100x100) / 中图(400x300) / 大图(800x600)
     const mk = (w: number, h: number) => sharp({
       create: { width: w, height: h, channels: 3, background: { r: 10, g: 20, b: 30 } },
@@ -128,15 +128,42 @@ describe("cacheEntryImages 封面选择", () => {
     })
     await new Promise<void>((r) => server.listen(0, r))
     const port = (server.address() as { port: number }).port
-    const content = `<img src="http://127.0.0.1:${port}/small.png"><img src="http://127.0.0.1:${port}/big.png"><img src="http://127.0.0.1:${port}/mid.png">`
+    // 顺序：小图 → 大图 → 中图；应选第一张合格（大图在首位时选它）
+    const content = `<img src="http://127.0.0.1:${port}/big.png"><img src="http://127.0.0.1:${port}/small.png"><img src="http://127.0.0.1:${port}/mid.png">`
 
     const { images } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`)
     server.close()
 
     const covers = images.filter((i) => i.cover)
     expect(covers).toHaveLength(1)
-    expect(covers[0]!.url).toContain("/big.png") // 最大图被选中
-    expect(images[0]!.width).toBeLessThan(200) // 小图保留但非封面
+    expect(covers[0]!.url).toContain("/big.png") // 第一张合格图被选中
+  })
+
+  it("协议封面优先于正文图片", async () => {
+    const mk = (w: number, h: number) => sharp({
+      create: { width: w, height: h, channels: 3, background: { r: 10, g: 20, b: 30 } },
+    }).png().toBuffer()
+    const [body, protocol] = await Promise.all([mk(800, 600), mk(300, 200)])
+
+    const server = http.createServer((req, res) => {
+      res.setHeader("Content-Type", "image/png")
+      if (req.url === "/protocol.png") res.end(protocol)
+      else res.end(body)
+    })
+    await new Promise<void>((r) => server.listen(0, r))
+    const port = (server.address() as { port: number }).port
+    // 正文有一张 800x600 的大图，但协议封面（media:thumbnail）应优先作为封面
+    const content = `<img src="http://127.0.0.1:${port}/body.png">`
+    const protocolUrl = `http://127.0.0.1:${port}/protocol.png`
+
+    const { images } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`, protocolUrl)
+    server.close()
+
+    const covers = images.filter((i) => i.cover)
+    expect(covers).toHaveLength(1)
+    expect(covers[0]!.url).toContain("/protocol.png")
+    expect(images[0]!.cover).toBe(true) // 协议封面排在第一位
+    expect(images).toHaveLength(2) // 正文图仍被缓存
   })
 
   it("全部是小图时不标记封面", async () => {

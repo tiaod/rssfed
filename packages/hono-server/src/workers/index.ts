@@ -125,9 +125,10 @@ async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedIte
 
     const entry = buildEntry(feedId, item, guid, entryId)
     // 下载并压缩正文图片为 AVIF 附件，与条目一次写入（multipart）；
+    // 协议封面（media:thumbnail/图片 enclosure）优先作为封面，正文图回退；
     // 图片缓存失败不阻塞抓取，回退为无图条目（前端保留原 URL 直链）
     try {
-      const { attachments, images } = await cacheEntryImages(entry.content, entry.url)
+      const { attachments, images } = await cacheEntryImages(entry.content, entry.url, item.coverUrl)
       if (images.length > 0) {
         // nano 的 multipart.insert 需在 params 中显式传入 docName
         await feedDb.multipart.insert({ ...entry, images } as any, attachments, { docName: entryId })

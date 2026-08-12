@@ -167,43 +167,69 @@ export function cacheSingleImage(url: string): Promise<{ image: CachedImage, dat
 /**
  * 下载并压缩正文图片，产出 nano multipart 写入所需的 attachments 与 CachedImage 元数据。
  * 单张图片失败不影响其他图片；全部失败返回空数组（调用方回退为无图 entry）。
+ *
+ * @param protocolCoverUrl 协议封面（media:thumbnail / 图片 enclosure / JSON Feed image）。
+ *   存在且可缓存时作为封面图（cover: true），正文图片仅作内容图；
+ *   无协议封面时从正文图中选第一张合格图作为封面。
  */
 export async function cacheEntryImages(
   content: string | undefined,
   baseUrl: string,
+  protocolCoverUrl?: string,
 ): Promise<{ attachments: ImageAttachment[], images: CachedImage[] }> {
   const urls = extractImageUrls(content, baseUrl)
   const attachments: ImageAttachment[] = []
   const images: CachedImage[] = []
-  if (urls.length === 0) return { attachments, images }
 
-  // 受限并发下载+压缩，避免同一 feed 的大量图片请求压垮连接
+  // 协议封面优先：下载压缩为第一张图并标记 cover（失败则静默回退正文选图）
+  if (protocolCoverUrl) {
+    const raw = await downloadImage(protocolCoverUrl)
+    if (raw) {
+      const result = await compressToAvif(raw)
+      if (result) {
+        const name = `img-${images.length}.avif`
+        attachments.push({ name, data: result.buffer, content_type: "image/avif" })
+        images.push({
+          url: protocolCoverUrl, attachment: name,
+          width: result.width, height: result.height,
+          cover: true,
+        })
+      }
+    }
+  }
+
+  // 受限并发下载+压缩，避免同一 feed 的大量图片请求压垮连接；
+  // 结果按正文出现顺序收集（并发完成顺序不定，封面选择依赖稳定顺序）
+  const results: Array<{ url: string, result: { buffer: Buffer, width: number, height: number } } | null> =
+    new Array(urls.length).fill(null)
   let cursor = 0
   const worker = async (): Promise<void> => {
     while (cursor < urls.length) {
       const i = cursor++
       const url = urls[i]!
+      // 协议封面已在上面缓存，正文里重复的 URL 跳过
+      if (url === protocolCoverUrl) continue
       const raw = await downloadImage(url)
       if (!raw) continue
       const result = await compressToAvif(raw)
       if (!result) continue
-      const name = `img-${images.length}.avif`
-      attachments.push({ name, data: result.buffer, content_type: "image/avif" })
-      images.push({ url, attachment: name, width: result.width, height: result.height })
+      results[i] = { url, result }
     }
   }
   await Promise.all(Array.from({ length: Math.min(DOWNLOAD_CONCURRENCY, urls.length) }, worker))
-
-  // 选封面：正文图片中面积最大且足够大的一张（过滤小 logo/图标），作为列表缩略图
-  // 微信类文章的头图通常就是最大图，代表性较好；无合格图则不标记
-  const MIN_COVER_AREA = 200 * 150
-  let cover: CachedImage | undefined
-  for (const img of images) {
-    const area = (img.width ?? 0) * (img.height ?? 0)
-    if (area < MIN_COVER_AREA) continue
-    if (!cover || area > (cover.width ?? 0) * (cover.height ?? 0)) cover = img
+  for (const r of results) {
+    if (!r) continue
+    const name = `img-${images.length}.avif`
+    attachments.push({ name, data: r.result.buffer, content_type: "image/avif" })
+    images.push({ url: r.url, attachment: name, width: r.result.width, height: r.result.height })
   }
-  if (cover) cover.cover = true
+
+  // 无协议封面时，从正文图中选第一张合格图（过滤小 logo/图标）作为封面
+  if (!images.some((img) => img.cover)) {
+    const MIN_COVER_AREA = 200 * 150
+    const cover = images.find((img) => (img.width ?? 0) * (img.height ?? 0) >= MIN_COVER_AREA)
+    if (cover) cover.cover = true
+  }
 
   return { attachments, images }
 }
