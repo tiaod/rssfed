@@ -1,20 +1,38 @@
 <script setup lang="ts">
 /**
- * 全局同步进度条：任一 feed/用户状态库处于同步中（手动同步或首次进入页面时的
- * live 同步）时，在页面顶部显示一条不确定进度动画，同步完成或失败后自动消失。
- *
- * 放置于 app.vue 根组件，所有页面共享。
+ * 全局同步进度条：任一 feed/用户状态库处于同步中（排队/进行中）时，
+ * 在页面顶部显示真实进度条与统计信息（正在同步几个、剩余几个），
+ * 全部完成后自动消失。放置于 app.vue 根组件，所有页面共享。
  */
 const pouch = usePouchDb()
 
-// 任一库同步中则显示进度条
-const isSyncing = computed(() =>
-  Object.values(pouch.syncStatuses).some(s => s.status === 'syncing')
+/** 本轮所有待同步的库数量（含排队中/进行中/已完成） */
+const total = computed(() => Object.keys(pouch.syncStatuses).length)
+
+/** 已完成的库数量（成功或失败） */
+const doneCount = computed(() =>
+  Object.values(pouch.syncStatuses).filter(s => s.status === 'idle' || s.status === 'error').length
 )
 
-// 当前同步中的库数量（live 初始同步可能多个并发，手动同步为串行）
+/** 当前正在同步的库数量 */
 const syncingCount = computed(() =>
   Object.values(pouch.syncStatuses).filter(s => s.status === 'syncing').length
+)
+
+/** 排队等待中的库数量 */
+const queuedCount = computed(() =>
+  Object.values(pouch.syncStatuses).filter(s => s.status === 'queued').length
+)
+
+/** 剩余（排队 + 进行中） */
+const remainingCount = computed(() => queuedCount.value + syncingCount.value)
+
+/** 有同步活动时显示进度条 */
+const isSyncing = computed(() => remainingCount.value > 0)
+
+/** 真实进度（0-100） */
+const progress = computed(() =>
+  total.value === 0 ? 0 : Math.round(doneCount.value / total.value * 100)
 )
 </script>
 
@@ -25,10 +43,14 @@ const syncingCount = computed(() =>
     aria-hidden="true"
   >
     <UProgress
-      :model-value="null"
-      animation="carousel"
+      :model-value="progress"
       size="xs"
       color="primary"
     />
+    <div class="flex justify-center">
+      <span class="mt-1 rounded-full bg-background/85 px-2.5 py-1 text-xs text-muted shadow-sm backdrop-blur">
+        正在同步 {{ syncingCount }} 个 · 剩余 {{ remainingCount }} 个（{{ progress }}%）
+      </span>
+    </div>
   </div>
 </template>

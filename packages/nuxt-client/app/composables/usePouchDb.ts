@@ -5,7 +5,7 @@ import type { SubscriptionItem } from '~/composables/useCouchDb'
 
 export interface SyncStatus {
   feedId: string
-  status: 'syncing' | 'idle' | 'error'
+  status: 'syncing' | 'idle' | 'error' | 'queued'
   /** 同步版本号：每次有数据变化时递增，页面可 watch 后重新查询条目 */
   version: number
   error?: string
@@ -73,8 +73,13 @@ export function usePouchDb() {
     }
   }
 
-  /** 将一次复制加入队列执行（限制并发，返回该库的复制结果） */
+  /** 将一次复制加入队列执行（限制并发，返回该库的复制结果）。
+   *  入队即标记为 queued，供进度条统计剩余数量。 */
   function enqueueReplicate(id: string): Promise<{ ok: boolean, error?: string }> {
+    // 标记排队中（若尚未有状态记录）
+    if (!syncStatuses[id]) {
+      syncStatuses[id] = { feedId: id, status: 'queued', version: 0 }
+    }
     return new Promise((resolve) => {
       pouchState.replicateWaiting.push({ id, resolve })
       pumpReplicateQueue()
