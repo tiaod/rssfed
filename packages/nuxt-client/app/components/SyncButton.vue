@@ -22,10 +22,9 @@ const relatedIds = computed(() => {
   return Object.keys(pouch.syncStatuses)
 })
 
-// 任一相关库同步中则按钮转圈
-const isSyncing = computed(() =>
-  syncing.value || relatedIds.value.some(id => pouch.syncStatuses[id]?.status === 'syncing')
-)
+// 仅在手动同步进行中禁用按钮；live 同步的 syncing 状态只驱动全局进度条，
+// 否则初始同步因连接竞争卡住时按钮也会禁用，用户将无法重试。
+const isSyncing = computed(() => syncing.value)
 
 const hasError = computed(() =>
   relatedIds.value.some(id => pouch.syncStatuses[id]?.status === 'error')

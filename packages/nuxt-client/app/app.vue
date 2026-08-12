@@ -19,6 +19,7 @@ useSeoMeta({
 
 <template>
   <UApp>
+    <SyncProgressBar />
     <NuxtLayout>
       <NuxtPage />
     </NuxtLayout>

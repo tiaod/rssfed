@@ -51,11 +51,11 @@ async function handleSubmit() {
       }
     }
 
-    // 登录成功后刷新 session 状态
+    // 登录成功后刷新 session 状态，并直接进入时间线（聚合所有订阅源内容）
     const userStore = useUserStore()
     await userStore.refresh()
 
-    await navigateTo("/")
+    await navigateTo("/timeline")
   } finally {
     loading.value = false
   }

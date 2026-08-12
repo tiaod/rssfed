@@ -26,6 +26,10 @@ interface PouchDbState {
   syncHandles: Map<string, PouchDB.Replication.Sync<{}>>
   /** 同步状态（响应式，供组件 watch） */
   syncStatuses: Record<string, SyncStatus>
+  /** 复制任务队列（限制并发，避免大量订阅源同时复制挤爆连接与 IndexedDB） */
+  replicateWaiting: Array<{ id: string, resolve: (r: { ok: boolean, error?: string }) => void }>
+  /** 当前正在执行的复制数 */
+  activeReplicates: number
 }
 
 /**
@@ -45,70 +49,91 @@ export function usePouchDb() {
       dbs: new Map<string, PouchDB.Database>(),
       syncHandles: new Map<string, PouchDB.Replication.Sync<{}>>(),
       syncStatuses: reactive<Record<string, SyncStatus>>({}),
+      replicateWaiting: [],
+      activeReplicates: 0,
     } as PouchDbState
   }
   const { dbs, syncHandles, syncStatuses } = (nuxtApp as any).$pouchDbState as PouchDbState
+  // 队列字段需通过对象引用读写（解构 number 会丢失状态）
+  const pouchState = (nuxtApp as any).$pouchDbState as PouchDbState
 
-  /**
-   * 启动某个 feed 的 live 双向同步（db 必须已创建）。
-   * 与 syncFeed 分离，便于手动同步（syncNow）暂停后恢复实时同步。
-   */
-  function startFeedLiveSync(feedId: string) {
-    const db = dbs.get(feedId)
-    if (!db) return
+  /** 复制并发上限：浏览器对同一主机的并发连接有限（约 6），订阅源很多时
+   * （OPML 批量导入可达数百个）并发复制会挤爆连接与 IndexedDB 事务导致卡死。 */
+  const MAX_CONCURRENT_REPLICATE = 3
 
-    syncStatuses[feedId] = {
-      feedId,
-      status: 'syncing',
-      version: syncStatuses[feedId]?.version ?? 0,
+  /** 消费复制队列：空闲时从等待队列取出任务执行 */
+  function pumpReplicateQueue() {
+    while (pouchState.activeReplicates < MAX_CONCURRENT_REPLICATE && pouchState.replicateWaiting.length > 0) {
+      const item = pouchState.replicateWaiting.shift()!
+      pouchState.activeReplicates++
+      void replicateDb(item.id).then(item.resolve).finally(() => {
+        pouchState.activeReplicates--
+        pumpReplicateQueue()
+      })
     }
+  }
 
-    const remoteUrl = `${base}/api/couchdb/proxy/feed/${encodeURIComponent(feedId)}`
-    const sync = PouchDB.sync(db, remoteUrl, {
-      live: true,
-      retry: true,
+  /** 将一次复制加入队列执行（限制并发，返回该库的复制结果） */
+  function enqueueReplicate(id: string): Promise<{ ok: boolean, error?: string }> {
+    return new Promise((resolve) => {
+      pouchState.replicateWaiting.push({ id, resolve })
+      pumpReplicateQueue()
     })
-      .on('change', () => {
-        // 每次同步到新数据都递增版本号，触发页面重新查询
-        syncStatuses[feedId] = {
-          feedId,
-          status: 'idle',
-          version: (syncStatuses[feedId]?.version ?? 0) + 1,
-          lastSyncedAt: new Date().toISOString(),
-        }
-      })
-      .on('paused', (err) => {
-        // live 同步没有 complete 事件：初始复制完成、进入等待变化时触发 paused，
-        // err 为空表示正常暂停，此时标记为 idle（同步通道已建立）
-        if (!err && syncStatuses[feedId]?.status !== 'idle') {
-          syncStatuses[feedId] = {
-            feedId,
-            status: 'idle',
-            version: syncStatuses[feedId]?.version ?? 0,
-            lastSyncedAt: new Date().toISOString(),
-          }
-        }
-      })
-      .on('error', (err) => {
-        syncStatuses[feedId] = {
-          feedId,
-          status: 'error',
-          version: syncStatuses[feedId]?.version ?? 0,
-          error: String(err),
-        }
-      })
-
-    syncHandles.set(feedId, sync)
   }
 
   /**
-   * 获取或创建某个 feed 的 PouchDB 实例并开始同步
+   * 对指定库执行一次性复制（拉取远端最新数据到本地），并更新同步状态。
+   *
+   * 订阅源（feed 库）统一走一次性同步而非 live 长轮询：浏览器对同一主机的
+   * 并发连接数有限（HTTP/1.1 约 6 个），多个 live 长轮询会互相饿死；且订阅源
+   * 数据由后端抓取写入、实时推送意义不大，页面进入时拉取 + 手动同步即可。
+   * 用户状态库（已读/收藏）仍保留 live 同步，见 startUserStateLiveSync。
+   */
+  async function replicateDb(id: string): Promise<{ ok: boolean, error?: string }> {
+    const db = dbs.get(id)
+    if (!db) return { ok: true }
+
+    const remoteUrl = id === '__user_state__'
+      ? `${base}/api/couchdb/proxy/user-state`
+      : `${base}/api/couchdb/proxy/feed/${encodeURIComponent(id)}`
+
+    syncStatuses[id] = {
+      feedId: id,
+      status: 'syncing',
+      version: syncStatuses[id]?.version ?? 0,
+    }
+
+    try {
+      const res = await db.replicate.from(remoteUrl)
+      if (!res.ok) {
+        throw new Error(`同步失败（HTTP ${res.status}）`)
+      }
+      syncStatuses[id] = {
+        feedId: id,
+        status: 'idle',
+        version: (syncStatuses[id]?.version ?? 0) + 1,
+        lastSyncedAt: new Date().toISOString(),
+      }
+      return { ok: true }
+    } catch (e: any) {
+      syncStatuses[id] = {
+        feedId: id,
+        status: 'error',
+        version: syncStatuses[id]?.version ?? 0,
+        error: String(e?.message ?? e),
+      }
+      return { ok: false, error: e?.message ?? String(e) }
+    }
+  }
+
+  /**
+   * 获取或创建某个 feed 的 PouchDB 实例并执行一次性同步（入队，限制并发）
    */
   function syncFeed(feedId: string) {
     if (dbs.has(feedId)) return
     const db = new PouchDB(`rssfed-feed-${feedId}`)
     dbs.set(feedId, db)
-    startFeedLiveSync(feedId)
+    void enqueueReplicate(feedId)
   }
 
   /**
@@ -123,12 +148,12 @@ export function usePouchDb() {
   }
 
   /**
-   * 手动触发一次性同步：从远端拉取最新数据（live 同步之外的即时刷新）。
+   * 手动触发一次性同步：从远端拉取最新数据（feed 为一次性同步之外的即时刷新）。
    *
    * 不传 feedIds 时同步所有已激活的 feed 与用户状态库；返回成功/失败清单供 UI 提示。
-   * 实现要点：浏览器对同一主机（HTTP/1.1）并发连接数有限（约 6 个），
-   * 多个 live 长轮询已占满连接，直接并发一次性复制会让请求饿死而挂起，
-   * 因此先临时暂停相关库的 live 同步、串行复制，结束后再恢复实时同步。
+   * 订阅源本身无 live 长轮询，无需暂停；仅需临时暂停用户状态库的 live 同步
+   * （避免与一次性复制抢连接），复制完成后恢复实时同步。
+   * 复制统一走并发受限队列（见 enqueueReplicate），订阅源很多时不会挤爆连接。
    */
   async function syncNow(feedIds?: string[]): Promise<{ ok: string[], failed: { id: string, error: string }[] }> {
     // 目标集合：显式传入的 feed，或当前已激活的所有库
@@ -136,116 +161,92 @@ export function usePouchDb() {
       ? [...new Set(feedIds)]
       : Array.from(dbs.keys())
 
+    // ① 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用
+    const pausedUserState = syncHandles.has('__user_state__')
+    if (pausedUserState) {
+      syncHandles.get('__user_state__')!.cancel()
+      syncHandles.delete('__user_state__')
+    }
+
+    // ② 入队执行一次性复制（队列内部限制并发），等待全部完成
+    const results = await Promise.all(targets.map(id => enqueueReplicate(id)))
     const ok: string[] = []
     const failed: { id: string, error: string }[] = []
-
-    // ① 临时暂停目标库的 live 同步，释放长轮询连接给一次性复制使用
-    const pausedIds: string[] = []
-    for (const id of targets) {
-      const handle = syncHandles.get(id)
-      if (handle && typeof handle.cancel === 'function') {
-        handle.cancel()
-        syncHandles.delete(id)
-        pausedIds.push(id)
-      }
-    }
-
-    // ② 串行执行一次性复制（每个库只占用一个连接）
-    for (const id of targets) {
-      const db = dbs.get(id)
-      if (!db) continue
-
-      const remoteUrl = id === '__user_state__'
-        ? `${base}/api/couchdb/proxy/user-state`
-        : `${base}/api/couchdb/proxy/feed/${encodeURIComponent(id)}`
-
-      syncStatuses[id] = {
-        feedId: id,
-        status: 'syncing',
-        version: syncStatuses[id]?.version ?? 0,
-      }
-
-      try {
-        const res = await db.replicate.from(remoteUrl)
-        if (!res.ok) {
-          throw new Error(`复制失败（HTTP ${res.status}）`)
-        }
-        syncStatuses[id] = {
-          feedId: id,
-          status: 'idle',
-          version: (syncStatuses[id]?.version ?? 0) + 1,
-          lastSyncedAt: new Date().toISOString(),
-        }
+    targets.forEach((id, i) => {
+      const r = results[i]!
+      if (r.ok) {
         ok.push(id)
-      } catch (e: any) {
-        syncStatuses[id] = {
-          feedId: id,
-          status: 'error',
-          version: syncStatuses[id]?.version ?? 0,
-          error: String(e?.message ?? e),
-        }
-        failed.push({ id, error: e?.message ?? String(e) })
-      }
-    }
-
-    // ③ 恢复被暂停的 live 同步，保持实时同步的持续能力
-    for (const id of pausedIds) {
-      if (id === '__user_state__') {
-        startUserStateLiveSync()
       } else {
-        startFeedLiveSync(id)
+        failed.push({ id, error: r.error ?? '未知错误' })
       }
+    })
+
+    // ③ 恢复用户状态库的 live 同步，保持已读/收藏的实时双向同步
+    if (pausedUserState) {
+      startUserStateLiveSync()
     }
 
     return { ok, failed }
   }
 
   /**
-   * 从本地 PouchDB 查询条目，按时间倒序
+   * 从本地 PouchDB 查询条目，按时间倒序。
+   * 订阅源较多时分批并发查询（每批 20 个库），避免串行全查过慢。
    */
   async function queryEntries(feedIds: string[], limit = 50): Promise<RssEntry[]> {
     const allEntries: RssEntry[] = []
+    const BATCH = 20
 
-    for (const feedId of feedIds) {
-      const db = dbs.get(feedId)
-      if (!db) continue
+    for (let i = 0; i < feedIds.length; i += BATCH) {
+      const batch = feedIds.slice(i, i + BATCH)
+      const batchResults = await Promise.all(batch.map(async (feedId) => {
+        const db = dbs.get(feedId)
+        if (!db) return []
 
-      try {
-        const result = await db.allDocs({
-          include_docs: true,
-          startkey: 'entry:',
-          endkey: 'entry:\uffff',
-          limit,
-        })
-
-        for (const row of result.rows) {
-          const doc = row.doc as any
-          if (!doc || doc.type !== 'entry') continue
-          allEntries.push({
-            id: doc._id,
-            feedId: doc.feedId,
-            title: doc.title ?? '',
-            url: doc.url ?? '',
-            content: doc.content,
-            description: doc.description,
-            author: doc.author,
-            publishedAt: doc.publishedAt,
-            insertedAt: doc.insertedAt,
-            categories: doc.categories,
-            feed: {
-              id: doc.feedId,
-              title: '',
-              siteUrl: '',
-              feedUrl: '',
-              lastFetchedAt: '',
-            },
-            starred: false,
-            read: false,
-            readingTime: 0,
+        try {
+          const result = await db.allDocs({
+            include_docs: true,
+            startkey: 'entry:',
+            endkey: 'entry:\uffff',
+            limit,
           })
+
+          const entries: RssEntry[] = []
+          for (const row of result.rows) {
+            const doc = row.doc as any
+            if (!doc || doc.type !== 'entry') continue
+            entries.push({
+              id: doc._id,
+              feedId: doc.feedId,
+              title: doc.title ?? '',
+              url: doc.url ?? '',
+              content: doc.content,
+              description: doc.description,
+              author: doc.author,
+              publishedAt: doc.publishedAt,
+              insertedAt: doc.insertedAt,
+              categories: doc.categories,
+              feed: {
+                id: doc.feedId,
+                title: '',
+                siteUrl: '',
+                feedUrl: '',
+                lastFetchedAt: '',
+              },
+              starred: false,
+              read: false,
+              readingTime: 0,
+            })
+          }
+          return entries
+        } catch {
+          // DB may not have synced yet
+          return []
         }
-      } catch {
-        // DB may not have synced yet
+      }))
+
+      for (const entries of batchResults) {
+        allEntries.push(...entries)
       }
     }
 

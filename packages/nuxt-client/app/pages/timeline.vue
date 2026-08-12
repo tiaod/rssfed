@@ -40,10 +40,18 @@ onMounted(async () => {
   }
 })
 
-// 任一订阅源同步到新数据时自动刷新，避免刚订阅后条目尚未同步完成的空列表
+// 任一订阅源同步到新数据时自动刷新，避免刚订阅后条目尚未同步完成的空列表。
+// 防抖：订阅源很多时逐个完成同步会频繁触发全量重查，合并为一次刷新。
+let refreshTimer: ReturnType<typeof setTimeout> | null = null
 watch(
-  () => feedIds.value.map(id => pouch.syncStatuses[id]?.version ?? 0),
-  () => refreshEntries()
+  () => feedIds.value.map(id => pouch.syncStatuses[id]?.version ?? 0).join(','),
+  () => {
+    if (refreshTimer) clearTimeout(refreshTimer)
+    refreshTimer = setTimeout(() => {
+      refreshTimer = null
+      void refreshEntries()
+    }, 200)
+  }
 )
 </script>
 

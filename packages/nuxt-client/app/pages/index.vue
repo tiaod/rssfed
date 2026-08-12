@@ -19,6 +19,7 @@ const userStore = useUserStore()
             登录
           </UButton>
           <template v-else>
+            <SyncButton />
             <span class="text-sm text-muted hidden sm:inline">
               {{ userStore.user.name ?? userStore.user.email }}
             </span>

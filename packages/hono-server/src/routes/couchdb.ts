@@ -58,8 +58,11 @@ async function proxyToCouchDb(c: Context<{ Variables: Variables }>, dbName: stri
       : await c.req.text(),
   })
 
-  // 透传响应体与关键头
-  return new Response(await resp.text(), {
+  // 流式透传响应体与关键头。
+  // 不能用 await resp.text() 缓冲：live 长轮询（_changes?feed=longpoll）会一直挂起等待
+  // 心跳，浏览器刷新/断开后这里仍占着一个到 CouchDB 的连接，反复刷新会堆积残留连接，
+  // 最终击穿 CouchDB 并发上限导致所有同步请求饿死。流式转发让上游连接随浏览器断开而释放。
+  return new Response(resp.body, {
     status: resp.status,
     statusText: resp.statusText,
     headers: {
