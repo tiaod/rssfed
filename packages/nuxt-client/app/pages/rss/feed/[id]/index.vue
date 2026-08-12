@@ -14,9 +14,9 @@ const entries = ref<any[]>([])
 const loading = ref(true)
 const feedLoading = ref(true)
 
-// 从本地 PouchDB 查询该订阅源的条目
+// 从集中库查询该订阅源的条目
 async function refreshEntries() {
-  entries.value = await pouch.queryEntries([feedId], 50)
+  entries.value = await pouch.queryFeedEntries(feedId, 50)
 }
 
 onMounted(async () => {

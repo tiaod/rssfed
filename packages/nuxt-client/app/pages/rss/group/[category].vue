@@ -24,9 +24,9 @@ const feedTitleMap = computed(() =>
   Object.fromEntries(groupFeeds.value.map(feed => [feed.id, feed.title]))
 )
 
-// 从本地 PouchDB 查询该分组所有订阅源的条目
+// 从集中库查询该分组所有订阅源的条目
 async function refreshEntries() {
-  const result = await pouch.queryEntries(groupFeeds.value.map(feed => feed.id), 50)
+  const result = await pouch.queryGroupEntries(groupFeeds.value.map(feed => feed.id), 50)
   // 补充分组内 feed 标题，便于条目列表展示来源
   entries.value = result.map(entry => ({
     ...entry,

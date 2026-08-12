@@ -1,7 +1,13 @@
 import PouchDB from 'pouchdb'
+import * as PouchDBFindNS from 'pouchdb-find'
 import { reactive } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
+
+// 注册 Mango 查询插件（db.find / createIndex）。
+// pouchdb-find 是 CJS 模块，兼容 Vite 的 default interop 嵌套
+const PouchDBFind = (PouchDBFindNS as any).default ?? PouchDBFindNS
+PouchDB.plugin(PouchDBFind)
 
 export interface SyncStatus {
   feedId: string
@@ -16,13 +22,18 @@ export interface SyncStatus {
 /**
  * PouchDB 共享状态：通过 nuxtApp 单例化，确保所有组件使用同一份实例与同步状态。
  *
- * 之前每次调用 usePouchDb() 都会创建新的 dbs/syncHandles/syncStatuses，
- * 导致页面切换后 watch 监听的 syncStatuses 是空对象，已同步的数据无法触发刷新。
+ * 集中库架构：所有订阅源的条目单向同步到一个本地库（rssfed-entries），
+ * 时间线只需一次索引查询（publishedAt 倒序），避免 per-feed 多库的
+ * N 次查询与大量 PouchDB 实例常驻。已读/收藏等用户状态仍在独立库（live 双向同步）。
  */
 interface PouchDbState {
-  /** 当前已激活的 PouchDB 实例集合 */
-  dbs: Map<string, PouchDB.Database>
-  /** 同步句柄集合 */
+  /** 集中条目库（所有订阅源条目的单向同步目标） */
+  entriesDb: PouchDB.Database | null
+  /** 用户状态库（已读/收藏/订阅，live 双向同步） */
+  userStateDb: PouchDB.Database | null
+  /** 集中库索引是否已确保（避免每次重复 createIndex） */
+  entriesIndexed: boolean
+  /** 同步句柄集合（用户状态库 live 同步） */
   syncHandles: Map<string, PouchDB.Replication.Sync<{}>>
   /** 同步状态（响应式，供组件 watch） */
   syncStatuses: Record<string, SyncStatus>
@@ -32,11 +43,15 @@ interface PouchDbState {
   activeReplicates: number
 }
 
+/** 集中条目库名称 */
+const ENTRIES_DB_NAME = 'rssfed-entries'
+
 /**
- * 管理 PouchDB 多库同步，提供跨源条目查询能力。
+ * 管理 PouchDB 集中库同步，提供跨源条目查询能力。
  *
- * 每个订阅源对应一个 PouchDB 实例，通过 Hono 代理同步 CouchDB。
- * 用户状态库（已读/收藏）也通过 PouchDB 双向同步。
+ * 每个订阅源通过单向复制（replicate.from）把条目同步到本地集中库，
+ * 时间线/单源/分组查询走 Mango 索引（publishedAt 倒序）一次查询。
+ * 用户状态库（已读/收藏/订阅）通过 live 双向同步。
  */
 export function usePouchDb() {
   const { public: { apiBaseUrl } } = useRuntimeConfig()
@@ -46,16 +61,82 @@ export function usePouchDb() {
   const nuxtApp = useNuxtApp()
   if (!(nuxtApp as any).$pouchDbState) {
     ;(nuxtApp as any).$pouchDbState = {
-      dbs: new Map<string, PouchDB.Database>(),
+      entriesDb: null,
+      userStateDb: null,
+      entriesIndexed: false,
       syncHandles: new Map<string, PouchDB.Replication.Sync<{}>>(),
       syncStatuses: reactive<Record<string, SyncStatus>>({}),
       replicateWaiting: [],
       activeReplicates: 0,
     } as PouchDbState
   }
-  const { dbs, syncHandles, syncStatuses } = (nuxtApp as any).$pouchDbState as PouchDbState
-  // 队列字段需通过对象引用读写（解构 number 会丢失状态）
+  const { syncHandles, syncStatuses } = (nuxtApp as any).$pouchDbState as PouchDbState
+  // 队列与集中库字段需通过对象引用读写（解构 number 会丢失状态）
   const pouchState = (nuxtApp as any).$pouchDbState as PouchDbState
+
+  /** 迁移清理的幂等 Promise（避免并发重复执行） */
+  let cleanupPromise: Promise<void> | null = null
+
+  function ensureCleanup() {
+    if (!cleanupPromise) cleanupPromise = cleanupLegacyFeedDbs()
+    return cleanupPromise
+  }
+
+  /** 获取集中条目库（惰性创建，并顺带清理旧的 per-feed 本地库） */
+  function getEntriesDb(): PouchDB.Database {
+    if (!pouchState.entriesDb) {
+      pouchState.entriesDb = new PouchDB(ENTRIES_DB_NAME)
+      void ensureCleanup()
+    }
+    return pouchState.entriesDb
+  }
+
+  /**
+   * 确保集中库的 Mango 查询索引（pouchdb-find）：
+   * 时间线按 publishedAt 倒序；单源/分组按 feedId 过滤 + publishedAt 倒序。
+   */
+  async function ensureEntriesIndex() {
+    if (pouchState.entriesIndexed) return
+    const db = getEntriesDb()
+    // 临时调试：不吞错，暴露 createIndex 失败原因
+    await db.createIndex({ index: { fields: ['type', 'publishedAt'] } })
+    await db.createIndex({ index: { fields: ['type', 'feedId', 'publishedAt'] } })
+    pouchState.entriesIndexed = true
+  }
+
+  /**
+   * 迁移清理：删除旧的 per-feed 本地库（rssfed-feed-*）。
+   * 集中库方案废弃多库结构，旧数据由集中库重新同步；一次性执行（localStorage 标记）。
+   */
+  /**
+   * 迁移清理：删除旧的 per-feed 本地库（rssfed-feed-*）并重置增量记录。
+   * 集中库方案废弃多库结构，旧数据由集中库重新同步；一次性执行（localStorage 标记）。
+   * 注意：多标签页持有旧库连接时 destroy 可能被 blocked（永不返回），因此
+   * 增量记录先清、删库限时放弃——保证集中库必定全量同步一次，删库失败只是残留磁盘。
+   */
+  async function cleanupLegacyFeedDbs() {
+    try {
+      // v2：集中库架构的迁移标记（与 per-feed 时代的 v1 区分，强制重新迁移一次）
+      if (localStorage.getItem('rssfed-central-migrated-v2')) return
+      // 先清增量记录：集中库全新，必须全量同步一次（无论删库是否成功）
+      try { localStorage.removeItem(SYNCED_FEEDS_KEY) } catch { /* 忽略 */ }
+      // 尝试删除旧 per-feed 库（限时 3 秒，超时放弃）
+      try {
+        const pouchStatic = PouchDB as any
+        const dbs: string[] = await pouchStatic.allDbs()
+        const legacy = dbs.filter(name => name.startsWith('rssfed-feed-'))
+        await Promise.race([
+          Promise.all(legacy.map(name => pouchStatic.destroy(name).catch(() => {}))),
+          new Promise(resolve => setTimeout(resolve, 3000)),
+        ])
+      } catch {
+        // 删库失败不影响主流程
+      }
+      localStorage.setItem('rssfed-central-migrated-v2', '1')
+    } catch {
+      // 清理失败不影响主流程（旧库残留只是占磁盘）
+    }
+  }
 
   /** 复制并发上限：浏览器对同一主机的并发连接有限（约 6），订阅源很多时
    * （OPML 批量导入可达数百个）并发复制会挤爆连接与 IndexedDB 事务导致卡死。 */
@@ -93,17 +174,11 @@ export function usePouchDb() {
   }
 
   /**
-   * 对指定库执行一次性复制（拉取远端最新数据到本地），并更新同步状态。
-   *
-   * 订阅源（feed 库）统一走一次性同步而非 live 长轮询：浏览器对同一主机的
-   * 并发连接数有限（HTTP/1.1 约 6 个），多个 live 长轮询会互相饿死；且订阅源
-   * 数据由后端抓取写入、实时推送意义不大，页面进入时拉取 + 手动同步即可。
-   * 用户状态库（已读/收藏）仍保留 live 同步，见 startUserStateLiveSync。
+   * 对指定订阅源执行一次性单向复制（远端 per-feed CouchDB → 本地集中库），
+   * 并更新同步状态。增量由 PouchDB checkpoint 保证（每源独立记录同步位置）。
    */
   async function replicateDb(id: string): Promise<{ ok: boolean, error?: string }> {
-    const db = dbs.get(id)
-    if (!db) return { ok: true }
-
+    const db = id === '__user_state__' ? getUserStateDb() : getEntriesDb()
     const remoteUrl = id === '__user_state__'
       ? `${base}/api/couchdb/proxy/user-state`
       : `${base}/api/couchdb/proxy/feed/${encodeURIComponent(id)}`
@@ -138,12 +213,9 @@ export function usePouchDb() {
   }
 
   /**
-   * 获取或创建某个 feed 的 PouchDB 实例并执行一次性同步（入队，限制并发）
+   * 将某个订阅源加入复制队列（同步到集中库）
    */
   function syncFeed(feedId: string) {
-    if (dbs.has(feedId)) return
-    const db = new PouchDB(`rssfed-feed-${feedId}`)
-    dbs.set(feedId, db)
     void enqueueReplicate(feedId)
   }
 
@@ -185,13 +257,12 @@ export function usePouchDb() {
   }
 
   async function syncFeedsIfChanged(feeds: Array<{ feedId: string, lastNewEntryAt?: string }>) {
+    // 等待迁移清理完成：首次迁移时旧增量记录会导致误跳过，需清空后全量同步一次
+    await ensureCleanup()
+
     const needSync: string[] = []
 
     for (const f of feeds) {
-      if (dbs.has(f.feedId)) continue // 本会话已激活（已同步或已入队）
-      // 无论是否需要复制都要创建本地 db：queryEntries 依赖本地实例读取已缓存的数据
-      const db = new PouchDB(`rssfed-feed-${f.feedId}`)
-      dbs.set(f.feedId, db)
       if (!needsSync(f.feedId, f.lastNewEntryAt)) continue
       needSync.push(f.feedId)
     }
@@ -203,18 +274,7 @@ export function usePouchDb() {
   }
 
   /**
-   * 停止同步某个 feed
-   */
-  function unsyncFeed(feedId: string) {
-    syncHandles.get(feedId)?.cancel()
-    syncHandles.delete(feedId)
-    dbs.get(feedId)?.close()
-    dbs.delete(feedId)
-    delete syncStatuses[feedId]
-  }
-
-  /**
-   * 手动触发一次性同步：从远端拉取最新数据（feed 为一次性同步之外的即时刷新）。
+   * 手动触发一次性同步：同步所有订阅源（或指定源）到集中库。
    *
    * 不传 feedIds 时同步所有已激活的 feed 与用户状态库；返回成功/失败清单供 UI 提示。
    * 订阅源本身无 live 长轮询，无需暂停；仅需临时暂停用户状态库的 live 同步
@@ -222,10 +282,10 @@ export function usePouchDb() {
    * 复制统一走并发受限队列（见 enqueueReplicate），订阅源很多时不会挤爆连接。
    */
   async function syncNow(feedIds?: string[]): Promise<{ ok: string[], failed: { id: string, error: string }[] }> {
-    // 目标集合：显式传入的 feed，或当前已激活的所有库
+    // 目标集合：显式传入的 feed，或当前所有已激活的订阅源 + 用户状态库
     const targets = feedIds?.length
       ? [...new Set(feedIds)]
-      : Array.from(dbs.keys())
+      : [...Object.keys(syncStatuses).filter(id => id !== '__user_state__'), '__user_state__']
 
     // ① 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用
     const pausedUserState = syncHandles.has('__user_state__')
@@ -255,112 +315,115 @@ export function usePouchDb() {
     return { ok, failed }
   }
 
-  /**
-   * 从本地 PouchDB 查询条目，按时间倒序。
-   * 订阅源较多时分批并发查询（每批 20 个库），避免串行全查过慢。
-   */
-  async function queryEntries(feedIds: string[], limit = 50): Promise<RssEntry[]> {
-    const allEntries: RssEntry[] = []
-    const BATCH = 20
+  // ── 集中库查询（Mango 索引，一次查询） ──
 
-    for (let i = 0; i < feedIds.length; i += BATCH) {
-      const batch = feedIds.slice(i, i + BATCH)
-      const batchResults = await Promise.all(batch.map(async (feedId) => {
-        const db = dbs.get(feedId)
-        if (!db) return []
-
-        try {
-          const result = await db.allDocs({
-            include_docs: true,
-            startkey: 'entry:',
-            endkey: 'entry:\uffff',
-            limit,
-          })
-
-          const entries: RssEntry[] = []
-          for (const row of result.rows) {
-            const doc = row.doc as any
-            if (!doc || doc.type !== 'entry') continue
-            entries.push({
-              id: doc._id,
-              feedId: doc.feedId,
-              title: doc.title ?? '',
-              url: doc.url ?? '',
-              content: doc.content,
-              description: doc.description,
-              author: doc.author,
-              publishedAt: doc.publishedAt,
-              insertedAt: doc.insertedAt,
-              categories: doc.categories,
-              feed: {
-                id: doc.feedId,
-                title: '',
-                siteUrl: '',
-                feedUrl: '',
-                lastFetchedAt: '',
-              },
-              starred: false,
-              read: false,
-              readingTime: 0,
-            })
-          }
-          return entries
-        } catch {
-          // DB may not have synced yet
-          return []
-        }
-      }))
-
-      for (const entries of batchResults) {
-        allEntries.push(...entries)
-      }
+  /** 将集中库文档映射为 RssEntry（列表展示用，feed 元信息由页面订阅列表补全） */
+  function docToEntry(doc: any): RssEntry {
+    return {
+      id: doc._id,
+      feedId: doc.feedId,
+      title: doc.title ?? '',
+      url: doc.url ?? '',
+      content: doc.content,
+      description: doc.description,
+      author: doc.author,
+      publishedAt: doc.publishedAt,
+      insertedAt: doc.insertedAt,
+      categories: doc.categories,
+      feed: {
+        id: doc.feedId,
+        title: '',
+        siteUrl: '',
+        feedUrl: '',
+        lastFetchedAt: '',
+      },
+      starred: false,
+      read: false,
+      readingTime: 0,
     }
+  }
 
-    // 按 publishedAt 降序排序
-    allEntries.sort((a, b) =>
-      new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime()
-    )
+  /**
+   * 集中库查询：一次 find 取全部条目（fields 裁剪，不含 content 全文），
+   * 内存按 publishedAt 排序后取前 limit 条。
+   *
+   * 说明：PouchDB 9 的 Mango sort 与自建索引的自动匹配不可靠（会回退默认索引报错），
+   * 故不带 sort；字段裁剪避免把全文读入内存（列表不需要 content，详情走 getEntry）。
+   */
+  const ENTRY_FIELDS = ['_id', 'feedId', 'title', 'url', 'publishedAt', 'insertedAt', 'author', 'categories', 'description']
 
-    return allEntries.slice(0, limit)
+  /** 对 find 结果按 publishedAt 倒序排序并截取 */
+  function sortEntries(docs: any[], limit: number): RssEntry[] {
+    const entries = docs.map(docToEntry)
+    entries.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
+    return entries.slice(0, limit)
+  }
+
+  /** 时间线：一次查询所有订阅源的最新条目 */
+  async function queryTimeline(limit = 50): Promise<RssEntry[]> {
+    const db = getEntriesDb()
+    await ensureEntriesIndex()
+    try {
+      const result = await db.find({
+        selector: { type: 'entry' },
+        fields: ENTRY_FIELDS,
+        limit: 10000, // 上限足够覆盖当前规模的条目数
+      })
+      return sortEntries(result.docs, limit)
+    } catch {
+      return []
+    }
+  }
+
+  /** 单个订阅源的最新条目 */
+  async function queryFeedEntries(feedId: string, limit = 50): Promise<RssEntry[]> {
+    const db = getEntriesDb()
+    await ensureEntriesIndex()
+    try {
+      const result = await db.find({
+        selector: { type: 'entry', feedId },
+        fields: ENTRY_FIELDS,
+        limit: 10000,
+      })
+      return sortEntries(result.docs, limit)
+    } catch {
+      return []
+    }
+  }
+
+  /** 分组（多个订阅源）的最新条目 */
+  async function queryGroupEntries(feedIds: string[], limit = 50): Promise<RssEntry[]> {
+    if (feedIds.length === 0) return []
+    const db = getEntriesDb()
+    await ensureEntriesIndex()
+    try {
+      const result = await db.find({
+        selector: { type: 'entry', feedId: { $in: feedIds } },
+        fields: ENTRY_FIELDS,
+        limit: 10000,
+      })
+      return sortEntries(result.docs, limit)
+    } catch {
+      return []
+    }
   }
 
   /**
    * 获取单条条目的完整内容
    */
   async function getEntry(entryId: string): Promise<RssEntry | null> {
-    for (const [, db] of dbs.entries()) {
-      try {
-        const doc = await db.get(entryId) as any
-        if (doc && doc.type === 'entry') {
-          return {
-            id: doc._id,
-            feedId: doc.feedId,
-            title: doc.title ?? '',
-            url: doc.url ?? '',
-            content: doc.content,
-            description: doc.description,
-            author: doc.author,
-            publishedAt: doc.publishedAt,
-            insertedAt: doc.insertedAt,
-            categories: doc.categories,
-            feed: {
-              id: doc.feedId,
-              title: '',
-              siteUrl: '',
-              feedUrl: '',
-              lastFetchedAt: '',
-            },
-            starred: false,
-            read: false,
-            readingTime: 0,
-          }
-        }
-      } catch {
-        // continue searching
+    try {
+      const doc = await getEntriesDb().get(entryId) as any
+      if (doc && doc.type === 'entry') {
+        return docToEntry(doc)
       }
+    } catch {
+      // 条目不存在
     }
     return null
   }
+
+  // ── 用户状态库（已读/收藏/订阅，live 双向同步） ──
 
   /**
    * 启动用户状态库的 live 双向同步（db 必须已创建）。
@@ -368,7 +431,7 @@ export function usePouchDb() {
    */
   function startUserStateLiveSync() {
     const key = '__user_state__'
-    const db = dbs.get(key)
+    const db = pouchState.userStateDb
     if (!db) return
 
     // 启动双向同步；错误写入 syncStatuses，供 UI 展示
@@ -418,13 +481,11 @@ export function usePouchDb() {
    * 获取用户状态库 PouchDB 实例（用于已读/收藏标记）
    */
   function getUserStateDb(): PouchDB.Database {
-    const key = '__user_state__'
-    if (!dbs.has(key)) {
-      const db = new PouchDB('rssfed-user-state')
-      dbs.set(key, db)
+    if (!pouchState.userStateDb) {
+      pouchState.userStateDb = new PouchDB('rssfed-user-state')
       startUserStateLiveSync()
     }
-    return dbs.get(key)!
+    return pouchState.userStateDb
   }
 
   /**
@@ -489,10 +550,14 @@ export function usePouchDb() {
       handle.cancel?.()
     }
     syncHandles.clear()
-    for (const [, db] of dbs.entries()) {
-      db.close()
+    if (pouchState.entriesDb) {
+      pouchState.entriesDb.close()
+      pouchState.entriesDb = null
     }
-    dbs.clear()
+    if (pouchState.userStateDb) {
+      pouchState.userStateDb.close()
+      pouchState.userStateDb = null
+    }
   }
 
   // ── 订阅管理（离线优先，读写本地 PouchDB，自动同步远端） ──
@@ -570,9 +635,10 @@ export function usePouchDb() {
   return {
     syncFeed,
     syncFeedsIfChanged,
-    unsyncFeed,
     syncNow,
-    queryEntries,
+    queryTimeline,
+    queryFeedEntries,
+    queryGroupEntries,
     getEntry,
     getUserStateDb,
     markRead,

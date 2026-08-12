@@ -14,10 +14,10 @@ const entries = ref<any[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 
-// 从本地 PouchDB 查询所有订阅源的条目
+// 从集中库一次查询所有订阅源的最新条目
 async function refreshEntries() {
   if (feedIds.value.length === 0) return
-  entries.value = await pouch.queryEntries(feedIds.value, 50)
+  entries.value = await pouch.queryTimeline(50)
 }
 
 onMounted(async () => {
