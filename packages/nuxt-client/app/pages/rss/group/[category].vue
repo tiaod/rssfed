@@ -63,6 +63,7 @@ watch(
     <template #header>
       <UDashboardNavbar :title="category">
         <template #right>
+          <SyncButton :feed-ids="groupFeeds.map(f => f.id)" />
           <UButton
             v-if="loading"
             loading

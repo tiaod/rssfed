@@ -68,6 +68,7 @@ async function unsubscribe() {
     <template #header>
       <UDashboardNavbar :title="feed?.title || '订阅源'">
         <template #right>
+          <SyncButton :feed-ids="[feedId]" />
           <UButton
             v-if="loading"
             loading

@@ -52,6 +52,7 @@ watch(
     <template #header>
       <UDashboardNavbar title="时间线">
         <template #right>
+          <SyncButton />
           <UButton
             v-if="loading"
             loading

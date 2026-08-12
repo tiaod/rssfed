@@ -9,6 +9,8 @@ export interface SyncStatus {
   /** 同步版本号：每次有数据变化时递增，页面可 watch 后重新查询条目 */
   version: number
   error?: string
+  /** 最近一次成功同步的时间，供 UI 展示 */
+  lastSyncedAt?: string
 }
 
 /**
@@ -48,14 +50,18 @@ export function usePouchDb() {
   const { dbs, syncHandles, syncStatuses } = (nuxtApp as any).$pouchDbState as PouchDbState
 
   /**
-   * 获取或创建某个 feed 的 PouchDB 实例并开始同步
+   * 启动某个 feed 的 live 双向同步（db 必须已创建）。
+   * 与 syncFeed 分离，便于手动同步（syncNow）暂停后恢复实时同步。
    */
-  function syncFeed(feedId: string) {
-    if (dbs.has(feedId)) return
+  function startFeedLiveSync(feedId: string) {
+    const db = dbs.get(feedId)
+    if (!db) return
 
-    const db = new PouchDB(`rssfed-feed-${feedId}`)
-    dbs.set(feedId, db)
-    syncStatuses[feedId] = { feedId, status: 'syncing', version: 0 }
+    syncStatuses[feedId] = {
+      feedId,
+      status: 'syncing',
+      version: syncStatuses[feedId]?.version ?? 0,
+    }
 
     const remoteUrl = `${base}/api/couchdb/proxy/feed/${encodeURIComponent(feedId)}`
     const sync = PouchDB.sync(db, remoteUrl, {
@@ -68,6 +74,19 @@ export function usePouchDb() {
           feedId,
           status: 'idle',
           version: (syncStatuses[feedId]?.version ?? 0) + 1,
+          lastSyncedAt: new Date().toISOString(),
+        }
+      })
+      .on('paused', (err) => {
+        // live 同步没有 complete 事件：初始复制完成、进入等待变化时触发 paused，
+        // err 为空表示正常暂停，此时标记为 idle（同步通道已建立）
+        if (!err && syncStatuses[feedId]?.status !== 'idle') {
+          syncStatuses[feedId] = {
+            feedId,
+            status: 'idle',
+            version: syncStatuses[feedId]?.version ?? 0,
+            lastSyncedAt: new Date().toISOString(),
+          }
         }
       })
       .on('error', (err) => {
@@ -83,6 +102,16 @@ export function usePouchDb() {
   }
 
   /**
+   * 获取或创建某个 feed 的 PouchDB 实例并开始同步
+   */
+  function syncFeed(feedId: string) {
+    if (dbs.has(feedId)) return
+    const db = new PouchDB(`rssfed-feed-${feedId}`)
+    dbs.set(feedId, db)
+    startFeedLiveSync(feedId)
+  }
+
+  /**
    * 停止同步某个 feed
    */
   function unsyncFeed(feedId: string) {
@@ -91,6 +120,84 @@ export function usePouchDb() {
     dbs.get(feedId)?.close()
     dbs.delete(feedId)
     delete syncStatuses[feedId]
+  }
+
+  /**
+   * 手动触发一次性同步：从远端拉取最新数据（live 同步之外的即时刷新）。
+   *
+   * 不传 feedIds 时同步所有已激活的 feed 与用户状态库；返回成功/失败清单供 UI 提示。
+   * 实现要点：浏览器对同一主机（HTTP/1.1）并发连接数有限（约 6 个），
+   * 多个 live 长轮询已占满连接，直接并发一次性复制会让请求饿死而挂起，
+   * 因此先临时暂停相关库的 live 同步、串行复制，结束后再恢复实时同步。
+   */
+  async function syncNow(feedIds?: string[]): Promise<{ ok: string[], failed: { id: string, error: string }[] }> {
+    // 目标集合：显式传入的 feed，或当前已激活的所有库
+    const targets = feedIds?.length
+      ? [...new Set(feedIds)]
+      : Array.from(dbs.keys())
+
+    const ok: string[] = []
+    const failed: { id: string, error: string }[] = []
+
+    // ① 临时暂停目标库的 live 同步，释放长轮询连接给一次性复制使用
+    const pausedIds: string[] = []
+    for (const id of targets) {
+      const handle = syncHandles.get(id)
+      if (handle && typeof handle.cancel === 'function') {
+        handle.cancel()
+        syncHandles.delete(id)
+        pausedIds.push(id)
+      }
+    }
+
+    // ② 串行执行一次性复制（每个库只占用一个连接）
+    for (const id of targets) {
+      const db = dbs.get(id)
+      if (!db) continue
+
+      const remoteUrl = id === '__user_state__'
+        ? `${base}/api/couchdb/proxy/user-state`
+        : `${base}/api/couchdb/proxy/feed/${encodeURIComponent(id)}`
+
+      syncStatuses[id] = {
+        feedId: id,
+        status: 'syncing',
+        version: syncStatuses[id]?.version ?? 0,
+      }
+
+      try {
+        const res = await db.replicate.from(remoteUrl)
+        if (!res.ok) {
+          throw new Error(`复制失败（HTTP ${res.status}）`)
+        }
+        syncStatuses[id] = {
+          feedId: id,
+          status: 'idle',
+          version: (syncStatuses[id]?.version ?? 0) + 1,
+          lastSyncedAt: new Date().toISOString(),
+        }
+        ok.push(id)
+      } catch (e: any) {
+        syncStatuses[id] = {
+          feedId: id,
+          status: 'error',
+          version: syncStatuses[id]?.version ?? 0,
+          error: String(e?.message ?? e),
+        }
+        failed.push({ id, error: e?.message ?? String(e) })
+      }
+    }
+
+    // ③ 恢复被暂停的 live 同步，保持实时同步的持续能力
+    for (const id of pausedIds) {
+      if (id === '__user_state__') {
+        startUserStateLiveSync()
+      } else {
+        startFeedLiveSync(id)
+      }
+    }
+
+    return { ok, failed }
   }
 
   /**
@@ -189,6 +296,58 @@ export function usePouchDb() {
   }
 
   /**
+   * 启动用户状态库的 live 双向同步（db 必须已创建）。
+   * 与 getUserStateDb 分离，便于手动同步（syncNow）暂停后恢复实时同步。
+   */
+  function startUserStateLiveSync() {
+    const key = '__user_state__'
+    const db = dbs.get(key)
+    if (!db) return
+
+    // 启动双向同步；错误写入 syncStatuses，供 UI 展示
+    const remoteUrl = `${base}/api/couchdb/proxy/user-state`
+    syncStatuses[key] = {
+      feedId: key,
+      status: 'syncing',
+      version: syncStatuses[key]?.version ?? 0,
+    }
+    const sync = PouchDB.sync(db, remoteUrl, {
+      live: true,
+      retry: true,
+    })
+      .on('change', () => {
+        syncStatuses[key] = {
+          feedId: key,
+          status: 'idle',
+          version: (syncStatuses[key]?.version ?? 0) + 1,
+          lastSyncedAt: new Date().toISOString(),
+        }
+      })
+      .on('paused', (err) => {
+        // 初始复制完成、进入等待变化时置为 idle（err 为空表示正常暂停）
+        if (!err && syncStatuses[key]?.status !== 'idle') {
+          syncStatuses[key] = {
+            feedId: key,
+            status: 'idle',
+            version: syncStatuses[key]?.version ?? 0,
+            lastSyncedAt: new Date().toISOString(),
+          }
+        }
+      })
+      .on('error', (err) => {
+        syncStatuses[key] = {
+          feedId: key,
+          status: 'error',
+          version: syncStatuses[key]?.version ?? 0,
+          error: String(err),
+        }
+      })
+
+    // 存入 handle，便于 syncNow 暂停/恢复
+    syncHandles.set(key, sync)
+  }
+
+  /**
    * 获取用户状态库 PouchDB 实例（用于已读/收藏标记）
    */
   function getUserStateDb(): PouchDB.Database {
@@ -196,18 +355,7 @@ export function usePouchDb() {
     if (!dbs.has(key)) {
       const db = new PouchDB('rssfed-user-state')
       dbs.set(key, db)
-
-      // 启动双向同步
-      const remoteUrl = `${base}/api/couchdb/proxy/user-state`
-      PouchDB.sync(db, remoteUrl, {
-        live: true,
-        retry: true,
-      }).on('error', (err) => {
-        console.error('User state sync error:', err)
-      })
-
-      // 将 handle 存入以便清理
-      syncHandles.set(key, {} as any) // placeholder
+      startUserStateLiveSync()
     }
     return dbs.get(key)!
   }
@@ -355,6 +503,7 @@ export function usePouchDb() {
   return {
     syncFeed,
     unsyncFeed,
+    syncNow,
     queryEntries,
     getEntry,
     getUserStateDb,
