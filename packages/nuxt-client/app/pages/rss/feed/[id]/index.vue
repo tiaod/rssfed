@@ -29,13 +29,12 @@ onMounted(async () => {
     feedLoading.value = false
   }
 
-  // 启动 PouchDB 同步；首次查询可能为空，同步完成后通过 watch 自动刷新
-  pouch.syncFeed(feedId)
+  // 不自动同步：数据来自集中库（时间线页已增量同步），需要最新时点导航栏同步按钮
   await refreshEntries()
   loading.value = false
 })
 
-// 同步过程中有新数据到达时重新查询，避免刚订阅后条目尚未同步完成的空列表
+// 手动同步（syncNow）完成或有新数据时重新查询
 watch(
   () => pouch.syncStatuses[feedId]?.version ?? 0,
   () => refreshEntries()

@@ -43,15 +43,12 @@ onMounted(async () => {
     return
   }
 
-  // 同步分组内所有 feed；首次查询可能为空，同步完成后通过 watch 自动刷新
-  for (const feed of groupFeeds.value) {
-    pouch.syncFeed(feed.id)
-  }
+  // 不自动同步：数据来自集中库（时间线页已增量同步），需要最新时点导航栏同步按钮
   await refreshEntries()
   loading.value = false
 })
 
-// 同步过程中有新数据到达时重新查询
+// 手动同步（syncNow）完成或有新数据时重新查询
 watch(
   () => groupFeeds.value.map(feed => pouch.syncStatuses[feed.id]?.version ?? 0).join(','),
   () => refreshEntries()
