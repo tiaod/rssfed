@@ -54,4 +54,6 @@ export interface FeedSubscriptionItem {
   status: FeedStatus
   errorMessage?: string
   lastFetchedAt?: string
+  /** 最后抓到新条目的时间：前端据此只同步「上次同步后有过新内容」的源 */
+  lastNewEntryAt?: string
 }

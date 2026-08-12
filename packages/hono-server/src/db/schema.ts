@@ -19,6 +19,8 @@ export const feeds = pgTable("feeds", {
   image: text("image"),
   errorMessage: text("error_message"),
   lastFetchedAt: timestamp("last_fetched_at"),
+  /** 最后抓到新条目的时间：Worker 抓取到新条目时更新，供前端增量同步判断 */
+  lastNewEntryAt: timestamp("last_new_entry_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   /** 抓取状态：active 正常抓取 / paused 用户暂停（worker 跳过） */
   status: text("status").notNull().default("active"),

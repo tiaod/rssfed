@@ -74,14 +74,20 @@ export function usePouchDb() {
   }
 
   /** 将一次复制加入队列执行（限制并发，返回该库的复制结果）。
-   *  入队即标记为 queued，供进度条统计剩余数量。 */
+   *  入队即标记为 queued，供进度条统计剩余数量；成功完成后记录同步时间。 */
   function enqueueReplicate(id: string): Promise<{ ok: boolean, error?: string }> {
     // 标记排队中（若尚未有状态记录）
     if (!syncStatuses[id]) {
       syncStatuses[id] = { feedId: id, status: 'queued', version: 0 }
     }
     return new Promise((resolve) => {
-      pouchState.replicateWaiting.push({ id, resolve })
+      pouchState.replicateWaiting.push({
+        id,
+        resolve: (r) => {
+          if (r.ok) markSynced(id)
+          resolve(r)
+        },
+      })
       pumpReplicateQueue()
     })
   }
@@ -139,6 +145,61 @@ export function usePouchDb() {
     const db = new PouchDB(`rssfed-feed-${feedId}`)
     dbs.set(feedId, db)
     void enqueueReplicate(feedId)
+  }
+
+  /**
+   * 增量同步：根据每个源「最后抓到新条目的时间」（后端 feeds.lastNewEntryAt）
+   * 只同步「上次同步后有过新内容」或「从未同步过」的源，其余直接跳过（连复制
+   * 请求都不发）。订阅源很多（OPML 批量导入可达数百个）时避免每次进入时间线
+   * 都对所有源发起复制请求。
+   *
+   * 每个源上次同步完成时间持久化在 localStorage，跨会话生效。
+   */
+  const SYNCED_FEEDS_KEY = 'rssfed-synced-feeds'
+
+  function loadSyncedFeeds(): Record<string, string> {
+    try {
+      return JSON.parse(localStorage.getItem(SYNCED_FEEDS_KEY) ?? '{}') as Record<string, string>
+    } catch {
+      return {}
+    }
+  }
+
+  /** 记录某个源本次同步完成时间（仅同步成功时） */
+  function markSynced(feedId: string) {
+    try {
+      const map = loadSyncedFeeds()
+      map[feedId] = new Date().toISOString()
+      localStorage.setItem(SYNCED_FEEDS_KEY, JSON.stringify(map))
+    } catch {
+      // localStorage 不可用时忽略（同步本身不受影响）
+    }
+  }
+
+  /** 判断某个源是否需要同步：从未同步过（首次/新订阅）或上次同步后有过新内容 */
+  function needsSync(feedId: string, lastNewEntryAt?: string): boolean {
+    if (!lastNewEntryAt) return false // 服务器从未抓到新条目，没有可拉取的内容
+    const lastSynced = loadSyncedFeeds()[feedId]
+    if (!lastSynced) return true
+    return lastNewEntryAt > lastSynced
+  }
+
+  async function syncFeedsIfChanged(feeds: Array<{ feedId: string, lastNewEntryAt?: string }>) {
+    const needSync: string[] = []
+
+    for (const f of feeds) {
+      if (dbs.has(f.feedId)) continue // 本会话已激活（已同步或已入队）
+      // 无论是否需要复制都要创建本地 db：queryEntries 依赖本地实例读取已缓存的数据
+      const db = new PouchDB(`rssfed-feed-${f.feedId}`)
+      dbs.set(f.feedId, db)
+      if (!needsSync(f.feedId, f.lastNewEntryAt)) continue
+      needSync.push(f.feedId)
+    }
+
+    for (const id of needSync) {
+      void enqueueReplicate(id)
+    }
+    return needSync.length
   }
 
   /**
@@ -508,6 +569,7 @@ export function usePouchDb() {
 
   return {
     syncFeed,
+    syncFeedsIfChanged,
     unsyncFeed,
     syncNow,
     queryEntries,

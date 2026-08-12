@@ -27,6 +27,10 @@ export const worker = new Worker("rss-fetch", async (job) => {
     await updateFeedDoc(feedDb, feedId, url, parsed)
     await updateFeedRegistry(feedId, url, parsed)
     const newEntries = await insertNewEntries(feedDb, feedId, parsed.items ?? [])
+    // 抓到新条目时记录时间，供前端增量同步判断（只同步有新内容的源）
+    if (newEntries.length > 0) {
+      await db.update(feeds).set({ lastNewEntryAt: new Date() }).where(eq(feeds.id, feedId))
+    }
     await notifyRelatedBots(feedId, newEntries)
 
     return { feedId, newEntries: newEntries.length, totalItems: parsed.items?.length ?? 0 }

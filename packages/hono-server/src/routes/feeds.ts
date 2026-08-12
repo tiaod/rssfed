@@ -271,11 +271,14 @@ feedsRouter.get("/subscriptions", requireAuth, async (c) => {
   const userId = c.get("userId")
   const userDb = createCouchDb(await ensureUserStateDatabase(userId))
 
-  const { docs } = await userDb.find({
-    selector: { type: "subscription" },
-    fields: ["feedId", "title", "siteUrl", "image", "description", "category", "createdAt"],
-    limit: 100,
+  // 用 allDocs 主键范围查询订阅文档（find 的 limit 默认 25/上限 100，
+  // 订阅源很多（如 OPML 批量导入数百个）时会被截断）
+  const { rows } = await userDb.list({
+    startkey: "subscription:",
+    endkey: "subscription:\uffff",
+    include_docs: true,
   })
+  const docs = rows.map((r) => r.doc).filter(Boolean) as any[]
 
   const feedIds = docs.map((d: any) => d.feedId).filter(Boolean)
   const registry = feedIds.length
@@ -300,6 +303,8 @@ feedsRouter.get("/subscriptions", requireAuth, async (c) => {
       status,
       errorMessage: reg?.errorMessage ?? undefined,
       lastFetchedAt: reg?.lastFetchedAt?.toISOString() ?? undefined,
+      // 最后抓到新条目的时间：前端据此只同步「上次同步后有过新内容」的源
+      lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
     }
   }))
 })

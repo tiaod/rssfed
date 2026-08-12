@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import type { SubscriptionItem } from '~/composables/useCouchDb'
+import type { FeedSubscriptionItem } from '~/types/rss'
 
 definePageMeta({
   layout: 'default'
 })
 
+const api = useApi()
 const pouch = usePouchDb()
 const subs = ref<SubscriptionItem[]>([])
 const feedIds = computed(() => subs.value.map(s => s.id))
@@ -20,17 +22,44 @@ async function refreshEntries() {
 
 onMounted(async () => {
   try {
-    // 获取用户订阅列表
-    subs.value = await pouch.listSubscriptions()
+    // 获取订阅列表：优先远端（含 lastNewEntryAt，用于增量同步判断），失败回退本地
+    let remoteSubs: FeedSubscriptionItem[] | null = null
+    try {
+      remoteSubs = await api.feeds.subscriptions()
+    } catch {
+      // 离线：回退本地订阅列表
+    }
+
+    if (remoteSubs) {
+      subs.value = remoteSubs.map(s => ({
+        id: s.feedId,
+        title: s.title,
+        siteUrl: s.siteUrl,
+        description: s.description,
+        image: s.image,
+        category: s.category,
+        createdAt: s.createdAt,
+      }))
+    } else {
+      subs.value = await pouch.listSubscriptions()
+    }
 
     if (feedIds.value.length === 0) {
       loading.value = false
       return
     }
 
-    // 启动所有订阅源的 PouchDB 同步；首次查询可能为空，同步完成后通过 watch 自动刷新
-    for (const feedId of feedIds.value) {
-      pouch.syncFeed(feedId)
+    // 增量同步：只同步「上次同步后有过新内容」或「从未同步过」的源；
+    // 离线时回退为全量同步本地缓存的源
+    if (remoteSubs) {
+      await pouch.syncFeedsIfChanged(remoteSubs.map(s => ({
+        feedId: s.feedId,
+        lastNewEntryAt: s.lastNewEntryAt,
+      })))
+    } else {
+      for (const feedId of feedIds.value) {
+        pouch.syncFeed(feedId)
+      }
     }
     await refreshEntries()
   } catch (e: any) {
