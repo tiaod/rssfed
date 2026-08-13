@@ -50,6 +50,32 @@ const handleLogout = async () => {
   await userStore.logout()
   await navigateTo('/login')
 }
+
+// 重置本地缓存：清空本地 PouchDB 并全量重同步（双击确认防误触）
+const pouch = usePouchDb()
+const resetting = ref(false)
+const confirmReset = ref(false)
+let confirmTimer: ReturnType<typeof setTimeout> | null = null
+const handleReset = async () => {
+  if (resetting.value) return
+  if (!confirmReset.value) {
+    confirmReset.value = true
+    confirmTimer = setTimeout(() => { confirmReset.value = false }, 4000)
+    return
+  }
+  if (confirmTimer) clearTimeout(confirmTimer)
+  confirmReset.value = false
+  resetting.value = true
+  try {
+    await pouch.resetLocalData()
+    await pouch.syncNow()
+    toast.add({ title: '本地缓存已重置，正在重新同步', color: 'success' })
+  } catch (e: any) {
+    toast.add({ title: '重置失败', description: String(e?.message ?? e), color: 'error' })
+  } finally {
+    resetting.value = false
+  }
+}
 </script>
 
 <template>
@@ -158,6 +184,34 @@ const handleLogout = async () => {
                     保存设置
                   </UButton>
                 </div>
+
+                <USeparator />
+
+                <!-- 数据管理：低频操作，低调放置 -->
+                <section class="space-y-2">
+                  <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
+                    数据
+                  </h3>
+                  <div class="flex items-center justify-between gap-4">
+                    <div class="min-w-0">
+                      <p class="text-sm font-medium">
+                        重置本地缓存
+                      </p>
+                      <p class="text-xs text-muted">
+                        清空本地缓存的条目与图片并从服务器重新同步（不影响服务器数据）。本地数据异常（如图片/封面缺失）时使用。
+                      </p>
+                    </div>
+                    <UButton
+                      color="neutral"
+                      variant="outline"
+                      size="sm"
+                      :icon="confirmReset ? 'i-lucide-triangle-alert' : 'i-lucide-rotate-ccw'"
+                      :label="confirmReset ? '确认重置' : '重置'"
+                      :loading="resetting"
+                      @click="handleReset"
+                    />
+                  </div>
+                </section>
               </div>
 
               <!-- 订阅源管理（管理员） -->
