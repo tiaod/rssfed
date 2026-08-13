@@ -1,6 +1,7 @@
 import {
   pgTable,
   text,
+  integer,
   boolean,
   timestamp,
   index,
@@ -8,6 +9,22 @@ import {
 } from "drizzle-orm/pg-core"
 import { relations } from "drizzle-orm"
 import { user } from "./auth-schema"
+
+/**
+ * 附件元数据表 — 二进制存 S3，这里只存引用与元数据。
+ * storageKey 为 S3 对象 key（手填外链 URL 的附件为 null，无文件可删）；
+ * 业务表（bots/user）通过外键引用本表，改头像时读旧外键定位 storageKey 再删旧文件。
+ */
+export const attachments = pgTable("attachments", {
+  id: text("id").primaryKey(),
+  /** S3 对象 key；手填外链附件为 null（无文件可删） */
+  storageKey: text("storage_key"),
+  /** 公开访问 URL：上传=S3 public URL，手填=原样保存 */
+  url: text("url").notNull(),
+  mimeType: text("mime_type"),
+  sizeBytes: integer("size_bytes"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+})
 
 /** Feed 注册表 — 记录所有已知订阅源的元数据，供 Worker 定时抓取 */
 export const feeds = pgTable("feeds", {
@@ -34,7 +51,10 @@ export const bots = pgTable("bots", {
   name: text("name").notNull(),
   description: text("description"),
   preferredUsername: text("preferred_username").notNull(),
+  /** 头像公开 URL（冗余展示列，同步自附件表，BotKit icon / 前端直出用） */
   avatarUrl: text("avatar_url"),
+  /** 头像附件外键（定位 attachments 行以删除旧 S3 文件） */
+  avatarAttachmentId: text("avatar_attachment_id").references(() => attachments.id, { onDelete: "set null" }),
   isActive: boolean("is_active").notNull().default(true),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
@@ -119,10 +139,19 @@ export const botInbox = pgTable("bot_inbox", {
 
 // ── Relations 定义（支持 db.query.* 关系查询）──
 
+export const attachmentsRelations = relations(attachments, ({ many }) => ({
+  bots: many(bots),
+  users: many(user),
+}))
+
 export const botsRelations = relations(bots, ({ one, many }) => ({
   user: one(user, {
     fields: [bots.userId],
     references: [user.id],
+  }),
+  avatarAttachment: one(attachments, {
+    fields: [bots.avatarAttachmentId],
+    references: [attachments.id],
   }),
   feeds: many(botFeeds),
   followers: many(botFollowers),
@@ -162,6 +191,8 @@ export const botInboxRelations = relations(botInbox, ({ one }) => ({
 
 export type Feed = typeof feeds.$inferSelect
 export type NewFeed = typeof feeds.$inferInsert
+export type Attachment = typeof attachments.$inferSelect
+export type NewAttachment = typeof attachments.$inferInsert
 export type Bot = typeof bots.$inferSelect
 export type NewBot = typeof bots.$inferInsert
 export type BotFeed = typeof botFeeds.$inferSelect

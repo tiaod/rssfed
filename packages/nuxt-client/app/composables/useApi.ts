@@ -36,6 +36,12 @@ export function useApi() {
       create: (body: any) => apiFetch(`${base}/api/bots`, { method: 'POST', body }),
       update: (id: string, body: any) => apiFetch(`${base}/api/bots/${id}`, { method: 'PUT', body }),
       remove: (id: string) => apiFetch(`${base}/api/bots/${id}`, { method: 'DELETE' }),
+      /** 上传 Bot 头像（multipart），返回 { avatarUrl } */
+      uploadAvatar: (id: string, file: File) => {
+        const form = new FormData()
+        form.append('file', file)
+        return apiFetch<{ avatarUrl: string }>(`${base}/api/bots/${id}/avatar`, { method: 'POST', body: form })
+      },
       feeds: (id: string) => apiFetch<any[]>(`${base}/api/bots/${id}/feeds`),
       attachFeed: (id: string, feedId: string) =>
         apiFetch(`${base}/api/bots/${id}/feeds`, { method: 'POST', body: { feedId } }),
@@ -50,6 +56,14 @@ export function useApi() {
       following: (id: string) => apiFetch<any[]>(`${base}/api/bots/${id}/following`),
       timeline: (id: string, params?: { limit?: number, offset?: number }) =>
         apiFetch<any[]>(`${base}/api/bots/${id}/timeline`, { params })
+    },
+    user: {
+      /** 上传当前用户头像（multipart），返回 { avatarUrl } */
+      uploadAvatar: (file: File) => {
+        const form = new FormData()
+        form.append('file', file)
+        return apiFetch<{ avatarUrl: string }>(`${base}/api/user/avatar`, { method: 'POST', body: form })
+      }
     }
   }
 }

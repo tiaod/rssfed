@@ -15,4 +15,8 @@
   --color-green-800: #016538;
   --color-green-900: #0A5331;
   --color-green-950: #052E16;
+
+  /* 超出 2xl 的大屏断点（Tailwind 默认只到 1536px），用于时间线更多列 */
+  --breakpoint-3xl: 112rem; /* 1792px */
+  --breakpoint-4xl: 160rem; /* 2560px */
 }

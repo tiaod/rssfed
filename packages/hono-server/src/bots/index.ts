@@ -44,6 +44,8 @@ const bots = instance.createBot(async (_ctx, identifier) => {
     username: bot.preferredUsername,
     name: bot.name ?? bot.preferredUsername,
     summary: bot.description ? text`${bot.description}` : undefined,
+    // 头像：S3 公开 URL（或手填外链），供 ActivityPub actor 的 icon 字段对外展示
+    icon: bot.avatarUrl ? new URL(bot.avatarUrl) : undefined,
   }
 })
 

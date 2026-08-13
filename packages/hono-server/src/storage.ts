@@ -63,6 +63,25 @@ export class S3Storage {
     return Buffer.concat(chunks)
   }
 
+  /** 读取对象并携带 Content-Type（文件代理路由用，避免按扩展名猜类型） */
+  async readWithMeta(key: string): Promise<{ content: Buffer; contentType: string }> {
+    const fullKey = this.getFullKey(key)
+    const response = await this.client.send(new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: fullKey,
+    }))
+
+    const stream = response.Body as Readable
+    const chunks: Buffer[] = []
+    for await (const chunk of stream) {
+      chunks.push(Buffer.from(chunk))
+    }
+    return {
+      content: Buffer.concat(chunks),
+      contentType: response.ContentType ?? "application/octet-stream",
+    }
+  }
+
   async delete(key: string): Promise<void> {
     const fullKey = this.getFullKey(key)
     await this.client.send(new DeleteObjectCommand({

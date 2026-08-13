@@ -13,6 +13,27 @@ const { isOnline } = useOffline()
 const { settings, updateSettings } = useSettings()
 const toast = useToast()
 
+// 头像上传：选择文件后立即上传并刷新 session（S3 存储，URL 落 user.image）
+const api = useApi()
+const uploadingAvatar = ref(false)
+const avatarInput = ref<HTMLInputElement | null>(null)
+const handleAvatarChange = async (e: Event) => {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  uploadingAvatar.value = true
+  try {
+    await api.user.uploadAvatar(file)
+    await userStore.refresh()
+    toast.add({ title: '头像已更新', color: 'success' })
+  } catch (err: any) {
+    toast.add({ title: '头像上传失败', description: String(err?.data?.error ?? err?.message ?? err), color: 'error' })
+  } finally {
+    uploadingAvatar.value = false
+    input.value = ''
+  }
+}
+
 // 设置草稿：修改后需点击“保存”按钮才生效并持久化
 const draftSettings = ref<AppSettings>({ ...settings.value })
 
@@ -125,6 +146,22 @@ const handleReset = async () => {
                     :class="isOnline ? 'text-green-500' : 'text-red-500'"
                   />
                   <span>{{ isOnline ? '在线' : '离线' }}</span>
+                  <UButton
+                    size="xs"
+                    variant="outline"
+                    icon="i-lucide-camera"
+                    :loading="uploadingAvatar"
+                    @click="avatarInput?.click()"
+                  >
+                    更换头像
+                  </UButton>
+                  <input
+                    ref="avatarInput"
+                    type="file"
+                    accept="image/*"
+                    class="hidden"
+                    @change="handleAvatarChange"
+                  />
                 </div>
               </div>
             </div>

@@ -180,12 +180,37 @@ async function deleteBot() {
   }
 }
 
+// ── 头像上传 ──
+const uploadingAvatar = ref(false)
+const avatarInput = ref<HTMLInputElement | null>(null)
+const handleAvatarChange = async (e: Event) => {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  uploadingAvatar.value = true
+  try {
+    const { avatarUrl } = await api.bots.uploadAvatar(botId, file)
+    if (bot.value) bot.value = { ...bot.value, avatarUrl }
+    toast.add({ title: '头像已更新', color: 'success' })
+  } catch (e) {
+    toast.add({ title: '头像上传失败', description: errorMessage(e), color: 'error' })
+  } finally {
+    uploadingAvatar.value = false
+    input.value = ''
+  }
+}
+
 const botMenuItems = computed<DropdownMenuItem[][]>(() => [
   [
     {
       label: bot.value?.isActive ? '停用' : '启用',
       icon: bot.value?.isActive ? 'i-lucide-pause' : 'i-lucide-play',
       onSelect: toggleActive
+    },
+    {
+      label: '更换头像',
+      icon: 'i-lucide-camera',
+      onSelect: () => avatarInput.value?.click()
     }
   ],
   [
@@ -260,6 +285,13 @@ function formatTime(iso: string): string {
             color="neutral"
             to="/bots"
           />
+          <UAvatar
+            v-if="bot"
+            :src="bot.avatarUrl"
+            :text="bot.name?.[0] ?? 'B'"
+            size="sm"
+            class="shrink-0"
+          />
         </template>
         <div class="min-w-0">
           <div class="text-sm font-semibold truncate">
@@ -272,6 +304,13 @@ function formatTime(iso: string): string {
             @{{ bot.preferredUsername }} · {{ bot.isActive ? '运行中' : '已停用' }}
           </div>
         </div>
+        <input
+          ref="avatarInput"
+          type="file"
+          accept="image/*"
+          class="hidden"
+          @change="handleAvatarChange"
+        />
 
         <template #right>
           <UDropdownMenu :items="botMenuItems">

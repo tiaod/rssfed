@@ -1,9 +1,10 @@
 import { Hono, type Context, type Next } from "hono"
 import crypto from "node:crypto"
-import { db, bots, feeds, botFeeds, botOutbox, botFollowing, botInbox, type Bot } from "../db"
+import { db, bots, feeds, attachments, botFeeds, botOutbox, botFollowing, botInbox, type Bot } from "../db"
 import { eq, and, desc } from "drizzle-orm"
 import { auth } from "../auth"
 import { followActor, unfollowActor } from "../bots"
+import { ApiError, cleanupAttachment, handleAvatarUpload } from "../avatar"
 
 type BotVariables = { bot: Bot; userId: string }
 
@@ -33,13 +34,26 @@ async function requireAuth(c: Context<{ Variables: BotVariables }>, next: Next) 
 
 botsRouter.post("/", requireAuth, async (c) => {
   const body = await c.req.json()
+
+  // 手填外链头像：同步建一条 storageKey=null 的附件行（无文件可删），业务表只留冗余 URL + 外键
+  let avatarAttachmentId: string | null = null
+  if (body.avatarUrl) {
+    const [attachment] = await db.insert(attachments).values({
+      id: crypto.randomUUID(),
+      storageKey: null,
+      url: body.avatarUrl,
+    }).returning()
+    avatarAttachmentId = attachment?.id ?? null
+  }
+
   const bot = await db.insert(bots).values({
     id: crypto.randomUUID(),
     userId: c.get("userId"),
     name: body.name,
     description: body.description,
     preferredUsername: body.preferredUsername,
-    avatarUrl: body.avatarUrl,
+    avatarUrl: body.avatarUrl ?? null,
+    avatarAttachmentId,
     isActive: body.isActive ?? true,
   }).returning()
   return c.json(bot[0], 201)
@@ -58,9 +72,31 @@ botsRouter.put("/:id", requireOwnedBot, async (c) => {
 })
 
 botsRouter.delete("/:id", requireOwnedBot, async (c) => {
-  const id = c.req.param("id")!
-  await db.delete(bots).where(eq(bots.id, id))
+  const bot = c.get("bot")
+  await db.delete(bots).where(eq(bots.id, bot.id))
+  // 清理头像附件（S3 文件 + 元数据行），避免孤儿
+  await cleanupAttachment(bot.avatarAttachmentId)
   return c.json({ success: true })
+})
+
+/** 上传 Bot 头像（multipart: file 字段），S3 存储 + attachments 表外键 */
+botsRouter.post("/:id/avatar", requireOwnedBot, async (c) => {
+  const bot = c.get("bot")
+  try {
+    const attachment = await handleAvatarUpload(c, bot.id, async (newAttachmentId, url) => {
+      // 先读旧外键再更新：RETURNING 返回的是更新后值，不能用来定位旧附件
+      const [before] = await db.select({ oldAttachmentId: bots.avatarAttachmentId })
+        .from(bots).where(eq(bots.id, bot.id)).limit(1)
+      await db.update(bots)
+        .set({ avatarUrl: url, avatarAttachmentId: newAttachmentId })
+        .where(eq(bots.id, bot.id))
+      return { oldAttachmentId: before?.oldAttachmentId ?? null }
+    })
+    return c.json({ success: true, avatarUrl: attachment.url })
+  } catch (err) {
+    if (err instanceof ApiError) return c.json({ error: err.message }, err.status)
+    throw err
+  }
 })
 
 botsRouter.post("/:id/feeds", requireOwnedBot, async (c) => {
