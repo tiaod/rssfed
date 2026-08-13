@@ -410,6 +410,33 @@ export function usePouchDb() {
   }
 
   /**
+   * 清空本地缓存并重置同步状态（不删除远端数据）。
+   *
+   * 适用场景：本地库数据与服务端冲突/损坏（如服务端库重建后本地 rev 冲突
+   * 导致旧数据残留），清空后下次同步会全量重建本地库。
+   */
+  async function resetLocalData() {
+    // 销毁集中条目库（旧数据/冲突分支一并清除），下次访问自动重建空库
+    if (pouchState.entriesDb) {
+      await pouchState.entriesDb.destroy().catch(() => {})
+      pouchState.entriesDb = null
+    }
+    pouchState.entriesIndexed = false
+    feedIconBlobs.clear()
+    entryCoverBlobs.clear()
+    // 清掉增量同步记录，确保下次同步不因「已同步过」而跳过
+    try {
+      localStorage.removeItem(SYNCED_FEEDS_KEY)
+    } catch {
+      // localStorage 不可用时忽略
+    }
+    // 同步状态重置为未同步（relatedIds 依赖它判断全量同步目标）
+    for (const key of Object.keys(syncStatuses)) {
+      delete syncStatuses[key]
+    }
+  }
+
+  /**
    * 获取 feed 图标的可展示 URL（AVIF 附件 blob 优先，回退原始 URL），
    * 供订阅管理页等未走条目查询的场景使用。
    */
@@ -762,6 +789,7 @@ export function usePouchDb() {
     getEntry,
     getEntryAttachment,
     getFeedImageUrl,
+    resetLocalData,
     getUserStateDb,
     markRead,
     toggleSaved,

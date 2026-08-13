@@ -78,18 +78,62 @@ async function handleSync() {
     syncing.value = false
   }
 }
+
+/**
+ * 重置本地缓存：清空本地 PouchDB 并全量重新同步。
+ * 用于本地数据与服务端冲突/损坏（如服务端库重建后旧数据残留、封面缺失）的场景。
+ * 采用双击确认（第一次点击进入确认态，4 秒内再点执行），避免误触。
+ */
+const resetting = ref(false)
+const confirmReset = ref(false)
+let confirmTimer: ReturnType<typeof setTimeout> | null = null
+async function handleReset() {
+  if (resetting.value) return
+  if (!confirmReset.value) {
+    // 第一次点击：进入确认态
+    confirmReset.value = true
+    confirmTimer = setTimeout(() => { confirmReset.value = false }, 4000)
+    return
+  }
+  // 第二次点击：确认执行
+  if (confirmTimer) clearTimeout(confirmTimer)
+  confirmReset.value = false
+  resetting.value = true
+  try {
+    await pouch.resetLocalData()
+    await pouch.syncNow(props.feedIds)
+    toast.add({ title: '本地缓存已重置，正在重新同步', color: 'success' })
+  } catch (e: any) {
+    toast.add({ title: '重置失败', description: String(e?.message ?? e), color: 'error' })
+  } finally {
+    resetting.value = false
+  }
+}
 </script>
 
 <template>
-  <UTooltip :text="tooltipText">
-    <UButton
-      :icon="hasError ? 'i-lucide-alert-circle' : 'i-lucide-refresh-cw'"
-      :loading="isSyncing"
-      :color="hasError ? 'error' : 'neutral'"
-      variant="ghost"
-      size="sm"
-      aria-label="同步"
-      @click="handleSync"
-    />
-  </UTooltip>
+  <div class="flex items-center gap-1">
+    <UTooltip :text="tooltipText">
+      <UButton
+        :icon="hasError ? 'i-lucide-alert-circle' : 'i-lucide-refresh-cw'"
+        :loading="isSyncing"
+        :color="hasError ? 'error' : 'neutral'"
+        variant="ghost"
+        size="sm"
+        aria-label="同步"
+        @click="handleSync"
+      />
+    </UTooltip>
+    <UTooltip :text="confirmReset ? '再次点击确认重置' : '重置本地缓存并重新同步（本地数据异常时使用）'">
+      <UButton
+        :icon="confirmReset ? 'i-lucide-triangle-alert' : 'i-lucide-rotate-ccw'"
+        :loading="resetting"
+        :color="confirmReset ? 'error' : 'neutral'"
+        variant="ghost"
+        size="sm"
+        aria-label="重置本地缓存"
+        @click="handleReset"
+      />
+    </UTooltip>
+  </div>
 </template>
