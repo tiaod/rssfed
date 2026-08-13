@@ -204,13 +204,38 @@ export async function scheduleFeedFetches() {
     name: `fetch:${f.id}`,
     // jobId 固定为 feedId：同一 feed 已在排队/执行时跳过，避免抓取慢时任务堆积
     // （BullMQ 不允许 jobId 含冒号，故用纯 feedId）
-    opts: { jobId: f.id },
+    // 任务结果保留有限条数供看板（/admin/queues）查看；入队前会清掉已结束的旧 job，
+    // 因此 jobId 不会因残留被 BullMQ 判定 duplicated 拒绝（曾导致 21 小时无抓取）
+    opts: { jobId: f.id, removeOnComplete: { count: 200 }, removeOnFail: { count: 50 } },
     data: { feedId: f.id, url: f.url },
   }))
 
   if (jobs.length > 0) {
+    // 先清理各 feed 已结束（完成/失败）的旧 job，确保 jobId 可复用；
+    // 执行中/排队中的 job 不动，避免打断在跑的任务
+    await Promise.all(allFeeds.map(f => removeFinishedJob(f.id)))
     await fetchQueue.addBulk(jobs)
   }
+}
+
+/** 清理 feed 已结束的旧 job（completed/failed）；active/waiting 等未结束的不动 */
+async function removeFinishedJob(feedId: string) {
+  const job = await fetchQueue.getJob(feedId)
+  if (!job) return
+  const state = await job.getState()
+  if (state === "completed" || state === "failed") {
+    await job.remove()
+  }
+}
+
+/** 入队一次抓取（单 feed 场景）：先清理旧 job 再入队，与调度器逻辑一致 */
+export async function enqueueFetch(feedId: string, url: string) {
+  await removeFinishedJob(feedId)
+  await fetchQueue.add(`fetch:${feedId}`, { feedId, url }, {
+    jobId: feedId,
+    removeOnComplete: { count: 200 },
+    removeOnFail: { count: 50 },
+  })
 }
 
 const FETCH_INTERVAL = parseInt(process.env.FETCH_INTERVAL ?? "900000")

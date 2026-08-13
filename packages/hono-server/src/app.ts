@@ -8,6 +8,7 @@ import { userRouter } from "./routes/user"
 import { couchdbRouter } from "./routes/couchdb"
 import { instance } from "./bots"
 import { storage } from "./storage"
+import { bullBoardApp } from "./bullboard"
 
 const app = new Hono()
 
@@ -43,6 +44,8 @@ app.get("/api/files/*", async (c) => {
   }
 })
 
+// BullMQ 任务看板（须在 app.all("*") 兜底之前注册，否则被 BotKit 截胡）
+app.route("/admin/queues", bullBoardApp)
 
 // BotKit ActivityPub 端点
 app.all("*", async (c) => instance.fetch(c.req.raw))

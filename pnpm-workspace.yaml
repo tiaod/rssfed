@@ -11,3 +11,7 @@ allowBuilds:
   msgpackr-extract: false
   unrs-resolver: false
   vue-demi: false
+minimumReleaseAgeExclude:
+  - '@bull-board/api@8.6.1'
+  - '@bull-board/ui@8.6.1'
+  - '@bull-board/hono@8.6.1'

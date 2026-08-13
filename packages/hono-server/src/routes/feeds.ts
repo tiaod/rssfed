@@ -5,7 +5,7 @@ import { parseFeedUrl, parseFeedContent, formatFeedError, type ParsedFeed } from
 import { parseOpml, type OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
 import { db, feeds } from "../db"
-import { fetchQueue } from "../workers"
+import { enqueueFetch } from "../workers"
 import { auth } from "../auth"
 
 type FeedsVariables = { userId: string }
@@ -178,8 +178,8 @@ async function ensureFeedRegistered(item: OpmlFeed): Promise<FeedMeta> {
     } as any)
   }
 
-  // 无论首轮解析成败都入队一次抓取（jobId 去重，避免重复入队）
-  await fetchQueue.add(`fetch:${feedId}`, { feedId, url: item.url }, { jobId: feedId })
+  // 无论首轮解析成败都入队一次抓取（enqueueFetch 内含 jobId 去重与旧记录清理）
+  await enqueueFetch(feedId, item.url)
 
   return {
     feedId,
@@ -261,8 +261,8 @@ async function seedFeedDoc(feedId: string, url: string, parsed: ParsedFeed) {
       lastFetchedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
     } as any)
-    // 首次发现，立即加入抓取队列
-    await fetchQueue.add(`fetch:${feedId}`, { feedId, url })
+    // 首次发现，立即加入抓取队列（enqueueFetch 内含 jobId 去重与旧记录清理）
+    await enqueueFetch(feedId, url)
   }
 }
 
@@ -350,8 +350,8 @@ feedsRouter.post("/:feedId/refetch", requireAdmin, async (c) => {
   if (!feed) return c.json({ error: "feed not found" }, 404)
 
   await db.update(feeds).set({ errorMessage: null }).where(eq(feeds.id, feedId))
-  // jobId 用 feedId 本身做去重键（BullMQ 不允许 jobId 含冒号）
-  await fetchQueue.add(`fetch:${feedId}`, { feedId, url: feed.url }, { jobId: feedId })
+  // enqueueFetch：jobId 用 feedId 去重（BullMQ 不允许 jobId 含冒号），并清理旧记录
+  await enqueueFetch(feedId, feed.url)
 
   return c.json({ feedId, queued: true })
 })

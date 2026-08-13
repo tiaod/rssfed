@@ -34,6 +34,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@bull-board/api": "8.6.1",
+    "@bull-board/hono": "8.6.1",
+    "@bull-board/ui": "8.6.1",
     "@types/node": "^22.0.0",
     "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.9",
