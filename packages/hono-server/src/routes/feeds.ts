@@ -4,7 +4,7 @@ import { inArray, eq } from "drizzle-orm"
 import { parseFeedUrl, parseFeedContent, formatFeedError, type ParsedFeed } from "../rss/parser"
 import { parseOpml, type OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
-import { db, feeds } from "../db"
+import { db, feeds, bots } from "../db"
 import { enqueueFetch } from "../workers"
 import { auth } from "../auth"
 
@@ -266,7 +266,7 @@ async function seedFeedDoc(feedId: string, url: string, parsed: ParsedFeed) {
   }
 }
 
-/** 获取当前用户的订阅列表，合并注册表抓取状态（active/paused/error） */
+/** 获取当前用户的订阅列表（feed + bot），合并注册表抓取状态（active/paused/error） */
 feedsRouter.get("/subscriptions", requireAuth, async (c) => {
   const userId = c.get("userId")
   const userDb = createCouchDb(await ensureUserStateDatabase(userId))
@@ -280,33 +280,61 @@ feedsRouter.get("/subscriptions", requireAuth, async (c) => {
   })
   const docs = rows.map((r) => r.doc).filter(Boolean) as any[]
 
-  const feedIds = docs.map((d: any) => d.feedId).filter(Boolean)
-  const registry = feedIds.length
-    ? await db.select().from(feeds).where(inArray(feeds.id, feedIds))
-    : []
-  const byId = new Map(registry.map((f) => [f.id, f]))
+  // 按 kind 分流：feed 订阅查 feeds 注册表，bot 订阅查 bots 表
+  const feedDocs = docs.filter((d: any) => d.kind !== "bot")
+  const botDocs = docs.filter((d: any) => d.kind === "bot")
+  const feedIds = feedDocs.map((d: any) => d.feedId).filter(Boolean)
+  const botIds = botDocs.map((d: any) => String(d.feedId).replace(/^bot:/, "")).filter(Boolean)
 
-  return c.json(docs.map((d: any) => {
-    const reg = byId.get(d.feedId)
-    // 状态由真实字段判定：暂停优先，其次错误，其余为活跃
-    const status = reg?.status === "paused" ? "paused"
-      : reg?.errorMessage ? "error"
-      : "active"
-    return {
-      feedId: d.feedId,
-      title: d.title,
-      siteUrl: d.siteUrl,
-      image: d.image,
-      description: d.description,
-      category: d.category,
-      createdAt: d.createdAt,
-      status,
-      errorMessage: reg?.errorMessage ?? undefined,
-      lastFetchedAt: reg?.lastFetchedAt?.toISOString() ?? undefined,
-      // 最后抓到新条目的时间：前端据此只同步「上次同步后有过新内容」的源
-      lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
-    }
-  }))
+  const [feedRegistry, botRegistry] = await Promise.all([
+    feedIds.length ? db.select().from(feeds).where(inArray(feeds.id, feedIds)) : [],
+    botIds.length ? db.select().from(bots).where(inArray(bots.id, botIds)) : [],
+  ])
+  const feedById = new Map(feedRegistry.map((f) => [f.id, f]))
+  const botById = new Map(botRegistry.map((b) => [b.id, b]))
+
+  return c.json([
+    ...feedDocs.map((d: any) => {
+      const reg = feedById.get(d.feedId)
+      // 状态由真实字段判定：暂停优先，其次错误，其余为活跃
+      const status = reg?.status === "paused" ? "paused"
+        : reg?.errorMessage ? "error"
+        : "active"
+      return {
+        feedId: d.feedId,
+        kind: "feed" as const,
+        title: d.title,
+        siteUrl: d.siteUrl,
+        image: d.image,
+        description: d.description,
+        category: d.category,
+        createdAt: d.createdAt,
+        status,
+        errorMessage: reg?.errorMessage ?? undefined,
+        lastFetchedAt: reg?.lastFetchedAt?.toISOString() ?? undefined,
+        // 最后抓到新条目的时间：前端据此只同步「上次同步后有过新内容」的源
+        lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
+      }
+    }),
+    ...botDocs.map((d: any) => {
+      const botId = String(d.feedId).replace(/^bot:/, "")
+      const reg = botById.get(botId)
+      return {
+        feedId: d.feedId,
+        kind: "bot" as const,
+        title: d.title ?? reg?.name,
+        siteUrl: undefined,
+        image: d.image ?? reg?.avatarUrl,
+        description: d.description ?? reg?.description,
+        category: d.category,
+        createdAt: d.createdAt,
+        // bot 无暂停概念：停用视作暂停，其余为活跃
+        status: reg?.isActive === false ? "paused" : "active",
+        // 最后写入产出的时间：前端据此只同步「上次同步后有过新内容」的 bot
+        lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
+      }
+    }),
+  ])
 })
 
 /** 暂停/恢复订阅抓取（仅管理员） */

@@ -1,38 +1,22 @@
 import { createInstance, text } from "@fedify/botkit"
-import { RedisKvStore, RedisMessageQueue } from "@fedify/redis"
-import IORedis from "ioredis"
+import { PostgresKvStore, PostgresMessageQueue } from "@fedify/postgres"
+import postgres from "postgres"
 import crypto from "node:crypto"
-import { db, bots as botsTable, botFeeds, botOutbox, botFollowing, botInbox, type EntryDoc } from "../db"
+import { db, bots as botsTable, botFollowing, botInbox, type EntryDoc } from "../db"
 import { and, eq, or } from "drizzle-orm"
-import { createCouchDb, ensureFeedDatabase } from "../couchdb/client"
+import { createCouchDb, ensureBotDatabase } from "../couchdb/client"
 
 const origin = process.env.BOTS_BASE_URL ?? "http://localhost:3001"
 const pollIntervalMs = parseInt(process.env.CHECK_INTERVAL ?? "300000")
 
-// Redis 连接配置（KV 存储与消息队列共用配置，但必须使用独立连接）
-const redisOptions = {
-  host: process.env.REDIS_HOST ?? "localhost",
-  port: parseInt(process.env.REDIS_PORT ?? "6379"),
-  maxRetriesPerRequest: null,
-}
-
-// BotKit KV 存储连接
-const redis = new IORedis(redisOptions)
-
-// 消息队列订阅者连接：进入 pub/sub 模式后无法执行普通命令，
-// 因此 RedisMessageQueue 的工厂必须每次返回新连接，不能复用 redis
-const redisConnections = new Set<IORedis>()
-function createRedisConnection() {
-  const conn = new IORedis(redisOptions)
-  redisConnections.add(conn)
-  conn.on("close", () => redisConnections.delete(conn))
-  return conn
-}
+// BotKit KV 存储与消息队列：PostgreSQL（@fedify/postgres 官方实现，表由包自动管理）。
+// 使用独立 postgres.js 连接，与 drizzle 业务连接分离，避免 KV 高频读写干扰业务查询。
+const botkitSql = postgres(process.env.DATABASE_URL ?? "postgres://localhost:5432/rssfed")
 
 // 创建 BotKit Instance
 const instance = createInstance<void>({
-  kv: new RedisKvStore(redis),
-  queue: new RedisMessageQueue(createRedisConnection),
+  kv: new PostgresKvStore(botkitSql),
+  queue: new PostgresMessageQueue(botkitSql),
   behindProxy: true,
 })
 
@@ -196,7 +180,7 @@ bots.onMessage = async (session, message) => {
   }).onConflictDoNothing() // activityId 唯一索引兜底去重
 }
 
-// ── RSS 发布轮询 ──
+// ── RSS 产出发布轮询（内容源：per-bot CouchDB 产出库）──
 
 const published = new Set<string>()
 let baselined = false
@@ -214,100 +198,87 @@ async function pollFeeds() {
   await pollNewEntries()
 }
 
-/** 首次运行：将各 feed 已有条目加入发布基线，避免重复发布历史条目 */
+/** 首次运行：将各 bot 产出库已有条目加入发布基线，避免重复发布历史条目 */
 async function baselinePublishedEntries() {
-  await forEachBotFeed(async (bot, feedId) => {
-    const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
+  await forEachBot(async (bot) => {
+    const botDb = createCouchDb(await ensureBotDatabase(bot.id))
     try {
-      const result = await feedDb.view("main", "entries-by-date", { limit: 50 })
+      const result = await botDb.view("main", "entries-by-date", { limit: 50 })
       for (const row of result.rows) {
         const val = row.value as { _id: string } | undefined
         if (val?._id) published.add(`${bot.id}:${val._id}`)
       }
     } catch {
-      // feed 库可能还不存在，跳过
+      // bot 库可能还不存在，跳过
     }
   })
   baselined = true
   console.log(`BotKit baseline: ${published.size} entries tracked`)
 }
 
-/** 遍历所有启用 Bot 及其关联的 feed */
-async function forEachBotFeed(fn: (bot: BotRow, feedId: string) => Promise<void>) {
+/** 遍历所有启用 Bot */
+async function forEachBot(fn: (bot: BotRow) => Promise<void>) {
   const activeBots = await db.select().from(botsTable)
     .where(eq(botsTable.isActive, true))
   for (const bot of activeBots) {
-    const feedLinks = await db.select({ feedId: botFeeds.feedId })
-      .from(botFeeds)
-      .where(eq(botFeeds.botId, bot.id))
-    for (const { feedId } of feedLinks) {
-      await fn(bot, feedId)
-    }
+    await fn(bot)
   }
 }
 
-/** 轮询所有 Bot 的 feed，抓取新条目并发布到 ActivityPub */
+/** 轮询所有 Bot 的产出库，发布新条目到 ActivityPub */
 async function pollNewEntries() {
   const activeBots = await db.select().from(botsTable)
     .where(eq(botsTable.isActive, true))
 
   for (const bot of activeBots) {
-    const feedLinks = await db.select({ feedId: botFeeds.feedId })
-      .from(botFeeds)
-      .where(eq(botFeeds.botId, bot.id))
-    if (feedLinks.length === 0) continue
-
-    // 每个 Bot 只建立一次会话，供其所有 feed 发布使用
+    // 每个 Bot 只建立一次会话，供其产出发布使用
     const session = await bots.getSession(origin, bot.preferredUsername)
-    let botCount = 0
-    for (const { feedId } of feedLinks) {
-      botCount += await publishFeedEntries(bot, session, feedId)
-    }
-
-    if (botCount > 0) {
-      console.log(`Bot ${bot.preferredUsername}: total ${botCount} new entry(s) published`)
+    const count = await publishBotEntries(bot, session)
+    if (count > 0) {
+      console.log(`Bot ${bot.preferredUsername}: total ${count} new entry(s) published`)
     }
   }
 }
 
-/** 抓取单个 feed 的新条目并发布到 ActivityPub，返回发布数量 */
-async function publishFeedEntries(bot: BotRow, session: BotSession, feedId: string): Promise<number> {
-  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
+/** 抓取单个 bot 产出库的新条目并发布到 ActivityPub，返回发布数量 */
+async function publishBotEntries(bot: BotRow, session: BotSession): Promise<number> {
+  const botDb = createCouchDb(await ensureBotDatabase(bot.id))
   let count = 0
 
   try {
-    const result = await feedDb.view("main", "entries-by-date", { limit: 10 })
+    const result = await botDb.view("main", "entries-by-date", { limit: 10 })
     for (const row of result.rows) {
       const val = row.value as { _id: string } | undefined
       if (!val?._id) continue
       const key = `${bot.id}:${val._id}`
       if (published.has(key)) continue
 
-      await publishEntry(bot, session, feedDb, val._id)
+      await publishEntry(bot, session, botDb, val._id)
       published.add(key)
       count++
     }
   } catch {
-    // feed 库不存在或无条目，跳过
+    // bot 库不存在或无条目，跳过
   }
 
   if (count > 0) {
-    console.log(`Bot ${bot.preferredUsername}: ${count} new entry(s) from ${feedId}`)
+    console.log(`Bot ${bot.preferredUsername}: ${count} new entry(s) published`)
   }
   return count
 }
 
-/** 发布单条 entry 到 ActivityPub，并回写 outbox 的 activityId */
-async function publishEntry(bot: BotRow, session: BotSession, feedDb: FeedDb, entryId: string) {
-  const doc = await feedDb.get(entryId) as unknown as EntryDoc
+/** 发布单条产出到 ActivityPub，并把 activityId 持久化回写产出 doc（重启后也不会重复发布） */
+async function publishEntry(bot: BotRow, session: BotSession, botDb: FeedDb, entryId: string) {
+  const doc = await botDb.get(entryId) as unknown as EntryDoc & { activityId?: string }
+  // doc 已回写过 activityId → 已发布，跳过
+  if (doc.activityId) return
   const content = doc.url ? `${doc.title}\n${doc.url}` : doc.title
 
   const activity = await session.publish(text`${content}`)
   const activityId = activity?.id?.toString?.() ?? activity?.id?.href ?? null
   if (activityId) {
-    await db.update(botOutbox)
-      .set({ activityId: String(activityId) })
-      .where(eq(botOutbox.entryId, entryId))
+    // get 返回的 doc 自带 _rev，insert 即更新
+    await botDb.insert({ ...doc, activityId: String(activityId) } as any)
   }
 }
 
@@ -328,7 +299,7 @@ pollOnce()
 setInterval(pollOnce, pollIntervalMs)
 
 export function shutdownBots() {
-  return redis.quit()
+  return botkitSql.end()
 }
 
 export { instance }

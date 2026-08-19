@@ -1,7 +1,7 @@
 import nano from "nano"
 import { customAlphabet } from "nanoid"
 import { eq } from "drizzle-orm"
-import { db, feeds, user, COUCHDB_FEED_PREFIX, COUCHDB_USER_STATE_PREFIX } from "../db"
+import { db, feeds, user, bots, COUCHDB_FEED_PREFIX, COUCHDB_USER_STATE_PREFIX, COUCHDB_BOT_PREFIX } from "../db"
 
 export const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
 export const couchUser = process.env.COUCHDB_USER ?? ""
@@ -49,7 +49,7 @@ const FEED_DESIGN_DOC = {
 const generateDbNameSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 24)
 
 /** 库名映射对象类型 */
-type DbKind = "feed" | "user"
+type DbKind = "feed" | "user" | "bot"
 
 /**
  * 解析（或创建）业务对象对应的 CouchDB 库名。
@@ -79,6 +79,13 @@ async function getCouchDbName(kind: DbKind, refId: string): Promise<string | nul
     })
     return row?.couchDbName ?? null
   }
+  if (kind === "bot") {
+    const row = await db.query.bots.findFirst({
+      where: eq(bots.id, refId),
+      columns: { couchDbName: true },
+    })
+    return row?.couchDbName ?? null
+  }
   const row = await db.query.user.findFirst({
     where: eq(user.id, refId),
     columns: { couchDbName: true },
@@ -91,6 +98,8 @@ async function saveCouchDbName(kind: DbKind, refId: string, dbName: string) {
   let saved = false
   if (kind === "feed") {
     saved = (await db.update(feeds).set({ couchDbName: dbName }).where(eq(feeds.id, refId)).returning({ id: feeds.id })).length > 0
+  } else if (kind === "bot") {
+    saved = (await db.update(bots).set({ couchDbName: dbName }).where(eq(bots.id, refId)).returning({ id: bots.id })).length > 0
   } else {
     saved = (await db.update(user).set({ couchDbName: dbName }).where(eq(user.id, refId)).returning({ id: user.id })).length > 0
   }
@@ -108,11 +117,11 @@ async function ensureDbExists(dbName: string, kind: DbKind, refId: string) {
     await nanoServer.db.create(dbName)
     created = true
   }
-  // 新建 feed 库时一次性安装设计文档；已有库不再重写，避免每次请求重装导致的并发 409 冲突
-  if (created && kind === "feed") {
+  // 新建 feed / bot 库时一次性安装设计文档；已有库不再重写，避免每次请求重装导致的并发 409 冲突
+  if (created && (kind === "feed" || kind === "bot")) {
     await installFeedDesignDoc(dbName)
   }
-  await setDatabaseSecurity(dbName, kind === "feed" ? { roles: ["user"] } : { names: [refId] })
+  await setDatabaseSecurity(dbName, kind === "user" ? { names: [refId] } : { roles: ["user"] })
 }
 
 /** 设置库级 _security：新库默认仅 admin 可读写，需显式授权 */
@@ -154,6 +163,14 @@ async function installFeedDesignDoc(dbName: string) {
 export async function ensureUserStateDatabase(userId: string): Promise<string> {
   const dbName = await resolveDatabase("user", userId, COUCHDB_USER_STATE_PREFIX)
   await ensureUserStateIndexes(dbName)
+  return dbName
+}
+
+// ── Bot 产出库 ──
+
+/** 确保 bot 产出库存在并返回库名（首次调用时生成随机库名并持久化映射） */
+export async function ensureBotDatabase(botId: string): Promise<string> {
+  const dbName = await resolveDatabase("bot", botId, COUCHDB_BOT_PREFIX)
   return dbName
 }
 

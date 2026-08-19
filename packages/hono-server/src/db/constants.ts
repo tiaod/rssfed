@@ -12,4 +12,5 @@ export enum FeedViewType {
 // 前缀与随机部分用下划线分隔，避免与前缀内部的连字符混淆（user-state_xxx / feed_xxx）
 export const COUCHDB_FEED_PREFIX = "feed_"
 export const COUCHDB_USER_STATE_PREFIX = "user-state_"
+export const COUCHDB_BOT_PREFIX = "bot_"
 export const CLEANUP_DAYS = 30

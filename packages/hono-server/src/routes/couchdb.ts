@@ -1,7 +1,7 @@
 import { Hono } from "hono"
 import type { Context, Next } from "hono"
 import { createHmac } from "node:crypto"
-import { couchUrl, proxySecret, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
+import { couchUrl, proxySecret, ensureFeedDatabase, ensureUserStateDatabase, ensureBotDatabase } from "../couchdb/client"
 import { auth } from "../auth"
 
 /** 中间件写入的请求级变量 */
@@ -12,12 +12,13 @@ export const couchdbRouter = new Hono<{ Variables: Variables }>()
 /**
  * CouchDB 反向代理（Proxy Authentication）。
  *
- * 支持两种目标库：
+ * 支持三种目标库：
  *   /api/couchdb/proxy/user-state/<剩余路径>  →  user-state-{userId}
  *   /api/couchdb/proxy/feed/:feedId/<剩余路径> →  feed-{feedId}
+ *   /api/couchdb/proxy/bot/:botId/<剩余路径>   →  bot-{botId}（bot 产出库，全登录用户可读）
  *
  * Hono 自动添加 Proxy Auth header 后转发到 CouchDB。
- * 这样浏览器端 PouchDB 可以通过同源请求同步 feed 库和用户状态库。
+ * 这样浏览器端 PouchDB 可以通过同源请求同步 feed 库、bot 产出库和用户状态库。
  */
 
 // 认证中间件：校验 session，并把 userId 写入 context
@@ -39,6 +40,12 @@ couchdbRouter.all("/proxy/feed/:feedId/*", async (c) => {
   const { feedId } = c.req.param()
   const dbName = await ensureFeedDatabase(feedId)
   return proxyToCouchDb(c, dbName, `/api/couchdb/proxy/feed/${feedId}`)
+})
+
+couchdbRouter.all("/proxy/bot/:botId/*", async (c) => {
+  const { botId } = c.req.param()
+  const dbName = await ensureBotDatabase(botId)
+  return proxyToCouchDb(c, dbName, `/api/couchdb/proxy/bot/${botId}`)
 })
 
 /** 通用 CouchDB 代理转发逻辑（认证已在中间件完成） */

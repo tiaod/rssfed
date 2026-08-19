@@ -56,6 +56,10 @@ export const bots = pgTable("bots", {
   /** 头像附件外键（定位 attachments 行以删除旧 S3 文件） */
   avatarAttachmentId: text("avatar_attachment_id").references(() => attachments.id, { onDelete: "set null" }),
   isActive: boolean("is_active").notNull().default(true),
+  /** 关联的 CouchDB 产出库名（首次 ensure 时生成随机库名并回写） */
+  couchDbName: text("couch_db_name").unique(),
+  /** 最后写入新产出的时间：前端据此只同步「上次同步后有过新内容」的 bot */
+  lastNewEntryAt: timestamp("last_new_entry_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
 }, (table) => [
@@ -73,23 +77,7 @@ export const botFeeds = pgTable("bot_feeds", {
   index("bot_feeds_feed_id_idx").on(table.feedId),
 ])
 
-/** Bot 出站队列 — Worker 抓取新条目时写入，供 ActivityPub outbox 查询 */
-export const botOutbox = pgTable("bot_outbox", {
-  id: text("id").primaryKey(),
-  botId: text("bot_id").notNull().references(() => bots.id, { onDelete: "cascade" }),
-  entryId: text("entry_id").notNull(),
-  feedId: text("feed_id").notNull(),
-  /** 推送的 ActivityPub Activity ID */
-  activityId: text("activity_id"),
-  title: text("title").notNull(),
-  url: text("url"),
-  publishedAt: timestamp("published_at").notNull(),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-}, (table) => [
-  index("bot_outbox_bot_id_idx").on(table.botId),
-  index("bot_outbox_published_at_idx").on(table.publishedAt),
-])
-
+/** Bot 的 ActivityPub 关注者（联邦侧订阅本 bot 的用户） */
 export const botFollowers = pgTable("bot_followers", {
   id: text("id").primaryKey(),
   botId: text("bot_id").notNull().references(() => bots.id, { onDelete: "cascade" }),
@@ -201,5 +189,3 @@ export type BotFollowing = typeof botFollowing.$inferSelect
 export type NewBotFollowing = typeof botFollowing.$inferInsert
 export type BotInbox = typeof botInbox.$inferSelect
 export type NewBotInbox = typeof botInbox.$inferInsert
-export type BotOutbox = typeof botOutbox.$inferSelect
-export type NewBotOutbox = typeof botOutbox.$inferInsert

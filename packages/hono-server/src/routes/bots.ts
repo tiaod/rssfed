@@ -1,10 +1,11 @@
 import { Hono, type Context, type Next } from "hono"
 import crypto from "node:crypto"
-import { db, bots, feeds, attachments, botFeeds, botOutbox, botFollowing, botInbox, type Bot } from "../db"
+import { db, bots, feeds, attachments, botFeeds, botFollowing, botInbox, type Bot } from "../db"
 import { eq, and, desc } from "drizzle-orm"
 import { auth } from "../auth"
 import { followActor, unfollowActor } from "../bots"
 import { ApiError, cleanupAttachment, handleAvatarUpload } from "../avatar"
+import { createCouchDb, ensureBotDatabase, nanoServer } from "../couchdb/client"
 
 type BotVariables = { bot: Bot; userId: string }
 
@@ -64,6 +65,12 @@ botsRouter.get("/", requireAuth, async (c) => {
   return c.json(userBots)
 })
 
+/** 公开 Bot 列表（广场页）：所有启用状态的 bot 元数据，供用户发现并订阅产出 */
+botsRouter.get("/public", async (c) => {
+  const publicBots = await db.select().from(bots).where(eq(bots.isActive, true))
+  return c.json(publicBots)
+})
+
 botsRouter.put("/:id", requireOwnedBot, async (c) => {
   const id = c.req.param("id")!
   const body = await c.req.json()
@@ -73,6 +80,10 @@ botsRouter.put("/:id", requireOwnedBot, async (c) => {
 
 botsRouter.delete("/:id", requireOwnedBot, async (c) => {
   const bot = c.get("bot")
+  // 删除 CouchDB 产出库（库可能尚未创建，静默跳过）
+  if (bot.couchDbName) {
+    try { await nanoServer.db.destroy(bot.couchDbName) } catch { /* 库不存在，忽略 */ }
+  }
   await db.delete(bots).where(eq(bots.id, bot.id))
   // 清理头像附件（S3 文件 + 元数据行），避免孤儿
   await cleanupAttachment(bot.avatarAttachmentId)
@@ -134,18 +145,18 @@ botsRouter.delete("/:id/feeds/:feedId", requireOwnedBot, async (c) => {
   return c.json({ success: true })
 })
 
-/** 获取 Bot 的出站队列（ActivityPub outbox 内容） */
+/** 获取 Bot 的产出（per-bot CouchDB 产出库，即 ActivityPub outbox 的内容源） */
 botsRouter.get("/:id/outbox", async (c) => {
   const { id } = c.req.param()
   const limit = parseInt(c.req.query("limit") ?? "50")
   const offset = parseInt(c.req.query("offset") ?? "0")
 
-  const items = await db.select()
-    .from(botOutbox)
-    .where(eq(botOutbox.botId, id))
-    .orderBy(desc(botOutbox.publishedAt))
-    .limit(limit)
-    .offset(offset)
+  // entries-by-date 视图按 publishedAt 排序：descending 倒序 + skip/limit 分页
+  const botDb = createCouchDb(await ensureBotDatabase(id))
+  const result = await botDb.view("main", "entries-by-date", { descending: true, limit, skip: offset })
+  const items = await Promise.all(
+    result.rows.map((row) => botDb.get((row.value as { _id: string })._id)),
+  )
 
   return c.json(items)
 })

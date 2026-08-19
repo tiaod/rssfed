@@ -2,10 +2,10 @@ import { Worker, Queue } from "bullmq"
 import IORedis from "ioredis"
 import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
-import { ensureFeedDatabase, createCouchDb } from "../couchdb/client"
+import { ensureFeedDatabase, ensureBotDatabase, createCouchDb } from "../couchdb/client"
 import { parseFeedUrl, formatFeedError, type ParsedFeed, type ParsedItem } from "../rss/parser"
 import { cacheEntryImages, cacheSingleImage } from "../rss/entry-images"
-import { db, feeds, botFeeds, botOutbox, type EntryDoc, type NewBotOutbox } from "../db"
+import { db, feeds, botFeeds, bots as botsTable, type EntryDoc } from "../db"
 
 const connection = new IORedis({
   host: process.env.REDIS_HOST ?? "localhost",
@@ -35,6 +35,7 @@ export const worker = new Worker("rss-fetch", async (job) => {
       // 无新条目但首次缓存了 feed 图标：同样 touch，让前端同步拉取图标附件
       await db.update(feeds).set({ lastNewEntryAt: new Date() }).where(eq(feeds.id, feedId))
     }
+    // 无论有无新条目都同步相关 Bot：FeedDoc 元信息需在无新条目时也能校正
     await notifyRelatedBots(feedId, newEntries)
 
     return { feedId, newEntries: newEntries.length, totalItems: parsed.items?.length ?? 0 }
@@ -162,28 +163,82 @@ function buildEntry(feedId: string, item: ParsedItem, guid: string, entryId: str
   }
 }
 
-/** 将新条目写入引用了该 feed 的 Bot 的 outbox（冲突跳过，不重复写入） */
+/** 将新条目以「原文镜像」写入引用了该 feed 的 Bot 的产出库（_id 确定性天然幂等） */
 async function notifyRelatedBots(feedId: string, newEntries: EntryDoc[]) {
-  if (newEntries.length === 0) return
-
-  const relatedBots = await db.select({ botId: botFeeds.botId })
+  const relatedBots = await db.select({
+    id: botFeeds.botId,
+    name: botsTable.name,
+    avatarUrl: botsTable.avatarUrl,
+  })
     .from(botFeeds)
+    .innerJoin(botsTable, eq(botsTable.id, botFeeds.botId))
     .where(eq(botFeeds.feedId, feedId))
   if (relatedBots.length === 0) return
+  console.log(`[Bot] notifyRelatedBots: ${relatedBots.length} bot(s) for feed ${feedId}, newEntries=${newEntries.length}`)
 
-  // 为每个 Bot × 每条新条目生成 outbox 记录，一次批量插入
-  const outboxEntries: NewBotOutbox[] = relatedBots.flatMap(({ botId }) =>
-    newEntries.map(entry => ({
-      id: `${botId}:${entry._id}`,
-      botId,
-      entryId: entry._id,
-      feedId,
-      title: entry.title,
-      url: entry.url,
-      publishedAt: new Date(entry.publishedAt),
-    }))
-  )
-  await db.insert(botOutbox).values(outboxEntries).onConflictDoNothing()
+  // 从 feed 库读 entry（含图片附件二进制）复制到各 bot 产出库，避免重复下载压缩图片
+  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
+  for (const bot of relatedBots) {
+    const botDb = createCouchDb(await ensureBotDatabase(bot.id))
+    await ensureBotFeedDoc(botDb, bot.id, bot.name, bot.avatarUrl)
+    let published = 0
+    for (const entry of newEntries) {
+      // 产出 doc _id：entry:bot:{botId}:{hash12}，与 feed 库 entry 同源 hash，冲突即已写入
+      const outputId = `entry:bot:${bot.id}:${entry._id.replace(/^entry:[^:]+:/, "")}`
+      try {
+        await botDb.get(outputId)
+        continue // 已存在，跳过
+      } catch {
+        // 不存在，继续写入
+      }
+      try {
+        // 附件随 doc 读取（base64）后 multipart 写入，产出 doc 离线也能看图
+        const doc = await feedDb.get(entry._id, { attachments: true }) as any
+        const { _rev: _omit, _attachments: _omitAtt, ...rest } = doc
+        const outputDoc = { ...rest, _id: outputId, feedId: `bot:${bot.id}` }
+        if (doc._attachments) {
+          const attachments = Object.entries(doc._attachments).map(([name, att]: [string, any]) => ({
+            name,
+            data: Buffer.from(att.data, "base64"),
+            content_type: att.content_type,
+          }))
+          await botDb.multipart.insert(outputDoc, attachments, { docName: outputId })
+        } else {
+          await botDb.insert(outputDoc)
+        }
+        published++
+      } catch (err) {
+        // 写入失败（含并发 409 冲突）不阻塞抓取，记日志继续
+        console.warn(`[Bot] 产出写入失败 ${bot.id}/${entry._id}:`, (err as any)?.message ?? err)
+      }
+    }
+    if (published > 0) {
+      // touch 最后产出时间，供前端增量同步判断
+      await db.update(botsTable).set({ lastNewEntryAt: new Date() }).where(eq(botsTable.id, bot.id))
+    }
+  }
+}
+
+/** 确保 bot 产出库存在 FeedDoc（_id 为虚拟 feed id `bot:{botId}`），供时间线补全 bot 名字/头像 */
+async function ensureBotFeedDoc(botDb: FeedDb, botId: string, name: string, avatarUrl: string | null) {
+  const docId = `bot:${botId}`
+  try {
+    const existing = await botDb.get(docId) as any
+    // 名字/头像变化时同步更新（每次抓取都会校正）
+    if (existing.title !== name || existing.image !== avatarUrl) {
+      await botDb.insert({ ...existing, title: name, image: avatarUrl ?? undefined } as any)
+    }
+  } catch {
+    await botDb.insert({
+      _id: docId,
+      type: "feed",
+      url: "",
+      title: name,
+      image: avatarUrl ?? undefined,
+      lastFetchedAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+    } as any)
+  }
 }
 
 /** 抓取失败时记录错误到 feed 注册表 */
