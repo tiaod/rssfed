@@ -32,9 +32,13 @@ export function useFeedNavigation(
     /** 菜单项公共字段：feed 图标（有缓存/URL 显示图片，否则文字首字母占位） */
     const itemFor = (feed: SubscriptionItem) => {
       const src = icons?.value?.[feed.id]
+      // bot 订阅（id 形如 `bot:{botId}`）链接到 bot 产出页，普通 feed 链接到源页
+      const to = feed.kind === 'bot'
+        ? `/bots/${feed.id.slice('bot:'.length)}/posts`
+        : `/rss/feed/${feed.id}`
       return {
         label: feed.title,
-        to: `/rss/feed/${feed.id}`,
+        to,
         // 尺寸由 UNavigationMenu 的 linkLeadingAvatarSize 控制（默认 sm）
         avatar: src
           ? { src }

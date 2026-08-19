@@ -30,9 +30,9 @@ const navItems = computed<NavigationMenuItem[]>(() => {
       onSelect: () => { open.value = false }
     },
     {
-      label: '机器人',
+      label: 'Bot 广场',
       icon: 'i-lucide-bot',
-      to: '/bots',
+      to: '/bots/explore',
       onSelect: () => { open.value = false }
     },
     {

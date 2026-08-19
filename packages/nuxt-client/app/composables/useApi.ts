@@ -33,6 +33,8 @@ export function useApi() {
     },
     bots: {
       list: () => apiFetch<any[]>(`${base}/api/bots`),
+      /** 公开 Bot 列表（广场页）：所有启用状态的 bot 元数据 */
+      public: () => apiFetch<any[]>(`${base}/api/bots/public`),
       create: (body: any) => apiFetch(`${base}/api/bots`, { method: 'POST', body }),
       update: (id: string, body: any) => apiFetch(`${base}/api/bots/${id}`, { method: 'PUT', body }),
       remove: (id: string) => apiFetch(`${base}/api/bots/${id}`, { method: 'DELETE' }),

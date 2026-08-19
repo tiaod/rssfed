@@ -184,9 +184,12 @@ export function usePouchDb() {
    */
   async function replicateDb(id: string, full = false): Promise<{ ok: boolean, error?: string }> {
     const db = id === '__user_state__' ? getUserStateDb() : getEntriesDb()
+    // bot 订阅源走 bot 产出库代理（feedId 形如 `bot:{botId}`），其余走 feed 库代理
     const remoteUrl = id === '__user_state__'
       ? `${base}/api/couchdb/proxy/user-state`
-      : `${base}/api/couchdb/proxy/feed/${encodeURIComponent(id)}`
+      : id.startsWith('bot:')
+        ? `${base}/api/couchdb/proxy/bot/${encodeURIComponent(id.slice('bot:'.length))}`
+        : `${base}/api/couchdb/proxy/feed/${encodeURIComponent(id)}`
 
     syncStatuses[id] = {
       feedId: id,
@@ -730,6 +733,7 @@ export function usePouchDb() {
         image: doc.image,
         category: doc.category,
         createdAt: doc.createdAt ?? new Date().toISOString(),
+        kind: doc.kind === 'bot' ? 'bot' as const : 'feed' as const,
       }))
   }
 
@@ -766,6 +770,25 @@ export function usePouchDb() {
   }
 
   /**
+   * 订阅 Bot 产出（写入本地 PouchDB，自动同步到远端 CouchDB）。
+   * doc 的 feedId 为 `bot:{botId}`（虚拟 feed），kind 标记 bot 类型，
+   * 与 feed 订阅共用 `subscription:` 前缀，但 _id 带 `bot:` 避免与真实 feed 撞 key。
+   */
+  async function addBotSubscription(botId: string, info: { title: string, description?: string, image?: string }) {
+    const stateDb = getUserStateDb()
+    await stateDb.put({
+      _id: `subscription:bot:${botId}`,
+      type: 'subscription',
+      feedId: `bot:${botId}`,
+      kind: 'bot',
+      title: info.title,
+      description: info.description,
+      image: info.image,
+      createdAt: new Date().toISOString(),
+    })
+  }
+
+  /**
    * 更新订阅元信息（显示名/分类）
    */
   async function updateSubscription(feedId: string, patch: { title?: string, category?: string }) {
@@ -797,6 +820,7 @@ export function usePouchDb() {
     syncStatuses: syncStatuses as Readonly<Record<string, SyncStatus>>,
     listSubscriptions,
     addSubscription,
+    addBotSubscription,
     removeSubscription,
     updateSubscription,
   }

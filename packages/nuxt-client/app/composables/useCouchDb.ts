@@ -1,11 +1,13 @@
 export interface SubscriptionItem {
-  id: string // feedId
+  id: string // feedId（bot 订阅为 `bot:{botId}`）
   title: string
   siteUrl?: string
   description?: string
   image?: string
   category?: string
   createdAt: string
+  /** 订阅类型：feed 订阅源 / bot 产出（默认 feed） */
+  kind?: 'feed' | 'bot'
 }
 
 /**
@@ -25,7 +27,7 @@ export function useCouchDb() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         selector: { type: 'subscription' },
-        fields: ['feedId', 'title', 'siteUrl', 'description', 'image', 'category', 'createdAt'],
+        fields: ['feedId', 'title', 'siteUrl', 'description', 'image', 'category', 'createdAt', 'kind'],
         limit: 100
       })
     })
@@ -36,14 +38,15 @@ export function useCouchDb() {
     }
 
     const data = await res.json()
-    return (data.docs ?? []).map((doc: { feedId: string, title: string, siteUrl?: string, description?: string, image?: string, category?: string, createdAt?: string }) => ({
+    return (data.docs ?? []).map((doc: { feedId: string, title: string, siteUrl?: string, description?: string, image?: string, category?: string, createdAt?: string, kind?: string }) => ({
       id: doc.feedId,
       title: doc.title,
       siteUrl: doc.siteUrl,
       description: doc.description,
       image: doc.image,
       category: doc.category ?? undefined,
-      createdAt: doc.createdAt
+      createdAt: doc.createdAt,
+      kind: doc.kind === 'bot' ? 'bot' as const : 'feed' as const
     }))
   }
 
