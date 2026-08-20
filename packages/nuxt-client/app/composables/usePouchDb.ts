@@ -4,6 +4,7 @@ import { reactive } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
 import { resolveApiBase } from '~/utils/apiBase'
+import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 
 // 注册 Mango 查询插件（db.find / createIndex）。
 // pouchdb-find 是 CJS 模块，兼容 Vite 的 default interop 嵌套
@@ -32,7 +33,7 @@ interface PouchDbState {
   entriesDb: PouchDB.Database | null
   /** 用户状态库（已读/收藏/订阅，live 双向同步） */
   userStateDb: PouchDB.Database | null
-  /** 集中库索引是否已确保（避免每次重复 createIndex） */
+  /** 本地条目视图是否已安装（避免每次重复 put 设计文档） */
   entriesIndexed: boolean
   /** 同步句柄集合（用户状态库 live 同步） */
   syncHandles: Map<string, PouchDB.Replication.Sync<{}>>
@@ -93,15 +94,18 @@ export function usePouchDb() {
   }
 
   /**
-   * 确保集中库的 Mango 查询索引（pouchdb-find）：
-   * 时间线按 publishedAt 倒序；单源/分组按 feedId 过滤 + publishedAt 倒序。
+   * 确保本地视图（map view）存在。掏空 Mango：PouchDB 9.0.0 的 find
+   * 对自建索引做 desc 排序实测不可靠（会回退默认索引报错），而 db.query 的
+   * map view 天然支持 descending + startkey 游标，只返回窗口行、不把巨量文档
+   * 拉进内存排序。视图内容看 LOCAL_VIEWS。
    */
-  async function ensureEntriesIndex() {
+  async function ensureLocalViews() {
     if (pouchState.entriesIndexed) return
     const db = getEntriesDb()
-    // 临时调试：不吞错，暴露 createIndex 失败原因
-    await db.createIndex({ index: { fields: ['type', 'publishedAt'] } })
-    await db.createIndex({ index: { fields: ['type', 'feedId', 'publishedAt'] } })
+    await db.put(LOCAL_VIEWS).catch((e: any) => {
+      // 409 说明设计文档已存在（幂等），其余错误如实抛出方便排查
+      if (e?.status !== 409) throw e
+    })
     pouchState.entriesIndexed = true
   }
 
@@ -484,68 +488,79 @@ export function usePouchDb() {
   }
 
   /**
-   * 集中库查询：一次 find 取全部条目（fields 裁剪，不含 content 全文），
-   * 内存按 publishedAt 排序后取前 limit 条。
+   * 集中库查询：走本地 map view，desc 只取一页窗口，不再把全库文档拉进内存排序。
    *
-   * 说明：PouchDB 9 的 Mango sort 与自建索引的自动匹配不可靠（会回退默认索引报错），
-   * 故不带 sort；字段裁剪避免把全文读入内存（列表不需要 content，详情走 getEntry）。
+   * 背景：PouchDB 9 的 Mango（pouchdb-find）对自建索引无法可靠做 desc 排序，
+   * 旧实现退化为 find 一次拉 1 万条 + JS 整体排序，翻页还会重复整库查询，
+   * 内存被不断顶高（浏览器端是只读模型，翻页 O(全库)）。map view 的
+   * descending + limit 由 PouchDB 在索引 B 树上完成，单次开销 O(窗口大小)。
+   *
+   * viewName: 'local_entries_v1/timeline' | 'local_entries_v1/by_feed'
+   * bucket: by_feed 时限定单个 feedId 桶的起扫端点；timeline 传 undefined。
    */
-  const ENTRY_FIELDS = ['_id', 'feedId', 'title', 'url', 'publishedAt', 'insertedAt', 'author', 'categories', 'description', 'images']
 
-  /** 对 find 结果按 publishedAt 倒序排序并截取 */
-  function sortEntries(docs: any[], limit: number): RssEntry[] {
-    const entries = docs.map(docToEntry)
-    entries.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime())
-    return entries.slice(0, limit)
+  /** 把视图 value 投影还原为 RssEntry（行已按发布时间倒序，保留顺序） */
+  function rowToEntry(row: { value?: Record<string, unknown> }): RssEntry {
+    return docToEntry({ ...row.value } as any)
   }
 
-  /** 时间线：一次查询所有订阅源的最新条目 */
-  async function queryTimeline(limit = 50): Promise<RssEntry[]> {
+  /** 视图翻页：翻转窗口大小下取分桶最新条目（不补全 feed 元信息，由调用方统一 enrich） */
+  async function queryByView(view: string, feedId: string | undefined, limit: number): Promise<RssEntry[]> {
     const db = getEntriesDb()
-    await ensureEntriesIndex()
+    await ensureLocalViews()
+    const opts: Record<string, unknown> = { descending: true, include_docs: false, reduce: false, limit }
+    // 限定到 feed 桶内：desc 桶顶 = 该 feed 最新的一条
+    if (feedId !== undefined) {
+      opts.startkey = [feedId, VIEW_MAX_TS, '']
+    }
     try {
-      const result = await db.find({
-        selector: { type: 'entry' },
-        fields: ENTRY_FIELDS,
-        limit: 10000, // 上限足够覆盖当前规模的条目数
-      })
-      return await enrichEntries(sortEntries(result.docs, limit))
+      const res = await db.query(view, opts)
+      return res.rows.map(rowToEntry)
     } catch {
       return []
     }
+  }
+
+  /** 时间线：一次性查询所有订阅源的最新条目（走全局视图，最新在前） */
+  async function queryTimeline(limit = 50): Promise<RssEntry[]> {
+    return enrichEntries(await queryByView(TIMELINE_VIEW, undefined, limit))
   }
 
   /** 单个订阅源的最新条目 */
   async function queryFeedEntries(feedId: string, limit = 50): Promise<RssEntry[]> {
-    const db = getEntriesDb()
-    await ensureEntriesIndex()
-    try {
-      const result = await db.find({
-        selector: { type: 'entry', feedId },
-        fields: ENTRY_FIELDS,
-        limit: 10000,
-      })
-      return await enrichEntries(sortEntries(result.docs, limit))
-    } catch {
-      return []
-    }
+    return enrichEntries(await queryByView(BY_FEED_VIEW, feedId, limit))
   }
 
-  /** 分组（多个订阅源）的最新条目 */
+  /**
+   * 分组（多个订阅源）的最新条目：每个源各浅取一页，再归并出全局前 limit 条。
+   * 正确性：全局前 L 条中的任意一条，必然位于它所处源的前 L（否则该源上有
+   * 至少 L 条更新的条目，足以把它挤出并集前 L），因此每源只取 L 条足够精确。
+   */
   async function queryGroupEntries(feedIds: string[], limit = 50): Promise<RssEntry[]> {
     if (feedIds.length === 0) return []
-    const db = getEntriesDb()
-    await ensureEntriesIndex()
-    try {
-      const result = await db.find({
-        selector: { type: 'entry', feedId: { $in: feedIds } },
-        fields: ENTRY_FIELDS,
-        limit: 10000,
-      })
-      return await enrichEntries(sortEntries(result.docs, limit))
-    } catch {
-      return []
+    const perFeed = await Promise.all(
+      feedIds.map(id => queryByView(BY_FEED_VIEW, id, limit))
+    )
+    const ptr = perFeed.map(() => 0)
+    const merged: RssEntry[] = []
+    while (merged.length < limit) {
+      let bestIdx = -1
+      let bestTs = -Infinity
+      for (let i = 0; i < perFeed.length; i++) {
+        const at = ptr[i]!
+        const e = perFeed[i]![at]
+        if (!e) continue
+        const ts = new Date(e.publishedAt).getTime()
+        if (ts > bestTs) {
+          bestTs = ts
+          bestIdx = i
+        }
+      }
+      if (bestIdx === -1) break
+      merged.push(perFeed[bestIdx]![ptr[bestIdx]!]!)
+      ptr[bestIdx]!++
     }
+    return enrichEntries(merged)
   }
 
   /**

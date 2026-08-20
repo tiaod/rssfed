@@ -6,6 +6,7 @@
     "build": "nuxt build",
     "dev": "nuxt dev --host 0.0.0.0",
     "preview": "nuxt preview",
+    "test": "vitest run",
     "postinstall": "nuxt prepare",
     "lint": "eslint .",
     "typecheck": "nuxt typecheck"
