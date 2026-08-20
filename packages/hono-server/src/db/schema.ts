@@ -6,6 +6,7 @@ import {
   timestamp,
   index,
   uniqueIndex,
+  jsonb,
 } from "drizzle-orm/pg-core"
 import { relations } from "drizzle-orm"
 import { user } from "./auth-schema"
@@ -24,6 +25,27 @@ export const attachments = pgTable("attachments", {
   mimeType: text("mime_type"),
   sizeBytes: integer("size_bytes"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
+})
+
+/** 站点全局配置 — 单例行（id 恒为 "site"），管理员维护的站点品牌/外观定制。
+ *  权威数据存 PG，离线性由前端 Service Worker 缓存承担（改动频率极低，无需 PouchDB 复制）。
+ *  logo 与头像同套路：S3 存文件 + attachments 元数据行，logoUrl 为冗余展示列。 */
+export const siteSettings = pgTable("site_settings", {
+  id: text("id").primaryKey(),
+  siteTitle: text("site_title"),
+  description: text("description"),
+  /** logo 公开 URL（冗余展示列，浏览器 <img> 直出） */
+  logoUrl: text("logo_url"),
+  /** logo 附件外键（定位 attachments 行以删除旧 S3 文件） */
+  logoAttachmentId: text("logo_attachment_id").references(() => attachments.id, { onDelete: "set null" }),
+  /** 主题主色（hex，如 #10b981）；未设置时前端回退内置默认主题 */
+  primaryColor: text("primary_color"),
+  /** 皮肤标识（占位：皮肤体系尚未定义枚举，先存自由字符串） */
+  skin: text("skin"),
+  /** 预留扩展项（新配置字段暂写此处，避免频繁改表结构） */
+  extras: jsonb("extras").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+  updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
 })
 
 /** Feed 注册表 — 记录所有已知订阅源的元数据，供 Worker 定时抓取 */
@@ -130,6 +152,14 @@ export const botInbox = pgTable("bot_inbox", {
 export const attachmentsRelations = relations(attachments, ({ many }) => ({
   bots: many(bots),
   users: many(user),
+  siteSettings: many(siteSettings),
+}))
+
+export const siteSettingsRelations = relations(siteSettings, ({ one }) => ({
+  logoAttachment: one(attachments, {
+    fields: [siteSettings.logoAttachmentId],
+    references: [attachments.id],
+  }),
 }))
 
 export const botsRelations = relations(bots, ({ one, many }) => ({
@@ -181,6 +211,8 @@ export type Feed = typeof feeds.$inferSelect
 export type NewFeed = typeof feeds.$inferInsert
 export type Attachment = typeof attachments.$inferSelect
 export type NewAttachment = typeof attachments.$inferInsert
+export type SiteSettings = typeof siteSettings.$inferSelect
+export type NewSiteSettings = typeof siteSettings.$inferInsert
 export type Bot = typeof bots.$inferSelect
 export type NewBot = typeof bots.$inferInsert
 export type BotFeed = typeof botFeeds.$inferSelect

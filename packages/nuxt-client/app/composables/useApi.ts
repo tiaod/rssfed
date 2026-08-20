@@ -1,5 +1,6 @@
 // 统一 API 请求：跨源访问 Hono 后端时必须携带会话 Cookie（ofetch 默认 same-origin）
 import type { FeedSubscriptionItem } from '~/types/rss'
+import type { SiteSettingsPublic, SiteSettingsFull, SiteSettingsUpdate } from '~/types/site'
 import { resolveApiBase } from '~/utils/apiBase'
 
 function apiFetch<T>(url: string, options: Parameters<typeof $fetch<T>>[1] = {}) {
@@ -65,6 +66,25 @@ export function useApi() {
         const form = new FormData()
         form.append('file', file)
         return apiFetch<{ avatarUrl: string }>(`${base}/api/user/avatar`, { method: 'POST', body: form })
+      }
+    },
+    /** 站点品牌配置（公开读取，免登录；离线可由 Service Worker 缓存命中） */
+    siteSettings: {
+      get: () => apiFetch<SiteSettingsPublic>(`${base}/api/site-settings`)
+    },
+    /** 管理员：站点品牌/外观定制 */
+    admin: {
+      siteSettings: {
+        get: () => apiFetch<SiteSettingsFull>(`${base}/api/admin/site-settings`),
+        update: (body: Partial<SiteSettingsUpdate>) =>
+          apiFetch<SiteSettingsFull>(`${base}/api/admin/site-settings`, { method: 'PUT', body }),
+        /** 上传站点 logo（multipart），返回 { logoUrl } */
+        uploadLogo: (file: File) => {
+          const form = new FormData()
+          form.append('file', file)
+          return apiFetch<{ logoUrl: string }>(`${base}/api/admin/site-settings/logo`, { method: 'POST', body: form })
+        },
+        deleteLogo: () => apiFetch(`${base}/api/admin/site-settings/logo`, { method: 'DELETE' })
       }
     }
   }

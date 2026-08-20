@@ -6,6 +6,7 @@ import { feedsRouter } from "./routes/feeds"
 import { botsRouter } from "./routes/bots"
 import { userRouter } from "./routes/user"
 import { couchdbRouter } from "./routes/couchdb"
+import { siteSettingsPublicRouter, siteSettingsAdminRouter } from "./routes/site-settings"
 import { instance } from "./bots"
 import { storage } from "./storage"
 import { bullBoardApp } from "./bullboard"
@@ -26,6 +27,8 @@ app.route("/api/feeds", feedsRouter)
 app.route("/api/bots", botsRouter)
 app.route("/api/user", userRouter)
 app.route("/api/couchdb", couchdbRouter)
+app.route("/api/site-settings", siteSettingsPublicRouter)
+app.route("/api/admin/site-settings", siteSettingsAdminRouter)
 
 app.get("/api/health", (c) => c.json({ status: "ok" }))
 

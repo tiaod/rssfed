@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import SubscriptionManager from '~/components/settings/SubscriptionManager.vue'
 import AdminFeedManager from '~/components/admin/AdminFeedManager.vue'
+import SiteSettingsManager from '~/components/admin/SiteSettingsManager.vue'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 
 definePageMeta({
@@ -61,6 +62,7 @@ const tabs = computed(() => {
   ]
   if (isAdmin.value) {
     items.push({ label: '订阅源管理', icon: 'i-lucide-shield' })
+    items.push({ label: '站点设置', icon: 'i-lucide-palette' })
   }
   return items
 })
@@ -253,6 +255,9 @@ const handleReset = async () => {
 
               <!-- 订阅源管理（管理员） -->
               <AdminFeedManager v-else-if="isAdmin && index === 2" />
+
+              <!-- 站点设置（管理员） -->
+              <SiteSettingsManager v-else-if="isAdmin && index === 3" />
             </div>
           </template>
         </UTabs>

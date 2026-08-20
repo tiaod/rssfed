@@ -6,6 +6,10 @@ const STATIC_ASSETS = [
 
 const API_CACHE_PATTERNS = [
   /^\/api\/entries/,
+  // 站点品牌配置与 logo 走 service worker 侧（本服务的文件代理），
+  // 授权数据在 PG，改动极少，network-first 即在首访联网后获得离线可用性。
+  /^\/api\/site-settings/,
+  /^\/api\/files\//,
 ]
 
 self.addEventListener('install', (event) => {
