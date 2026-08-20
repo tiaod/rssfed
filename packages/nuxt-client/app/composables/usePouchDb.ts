@@ -509,9 +509,13 @@ export function usePouchDb() {
     const db = getEntriesDb()
     await ensureLocalViews()
     const opts: Record<string, unknown> = { descending: true, include_docs: false, reduce: false, limit }
-    // 限定到 feed 桶内：desc 桶顶 = 该 feed 最新的一条
+    // 限定到 feed 桶内：desc 起点取该 feed 最新的一条（startkey=[feedId, MAX, '']）。
+    // 关键：desc 只给 startkey 会沿索引一路扫到开头，越过桶底串进其它 feed；
+    // 必须再用 endkey=[feedId] 兜住桶底。数组键里 [feedId] 排在全部 [feedId,*] 之前，
+    // 且不会有行恰等于该键，因此正好在不漏本桶的同时把扫描截断在桶边界。
     if (feedId !== undefined) {
       opts.startkey = [feedId, VIEW_MAX_TS, '']
+      opts.endkey = [feedId]
     }
     try {
       const res = await db.query(view, opts)

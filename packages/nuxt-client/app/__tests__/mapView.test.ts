@@ -122,7 +122,7 @@ describe('by_feed 视图 + 归并（单源/分组）', () => {
   it('单源取前 L 与其自身 oracle 一致', async () => {
     const feedDoc = seeded.filter(s => s.feedId === 'f2').map(s => ({ id: s.id, feedId: s.feedId, ms: s.ms }))
     const L = 5
-    const got = await rowsOf(BY_FEED_VIEW, { descending: true, startkey: ['f2', Number.MAX_SAFE_INTEGER, ''], limit: L })
+    const got = await rowsOf(BY_FEED_VIEW, { descending: true, startkey: ['f2', Number.MAX_SAFE_INTEGER, ''], endkey: ['f2'], limit: L })
     expect([...got].sort()).toEqual(oracle(feedDoc).slice(0, L).sort())
   })
 
@@ -135,7 +135,7 @@ describe('by_feed 视图 + 归并（单源/分组）', () => {
     // 复刻模块内归并：每源取 top-L，逐位挑最新的那条
     const perFeed = await Promise.all(
       feeds.map(f =>
-        rowsOf(BY_FEED_VIEW, { descending: true, startkey: [f, Number.MAX_SAFE_INTEGER, ''], limit: L })
+        rowsOf(BY_FEED_VIEW, { descending: true, startkey: [f, Number.MAX_SAFE_INTEGER, ''], endkey: [f], limit: L })
       )
     )
     const msOf = (id: string) => seeded.find(s => s.id === id)!.ms
@@ -159,5 +159,23 @@ describe('by_feed 视图 + 归并（单源/分组）', () => {
       ptr[best]!++
     }
     expect([...merged].sort()).toEqual([...want].sort())
+  })
+
+  it('翻页窗口超出桶大时绝不串入其它 feed（回归：desc 缺 endkey 会一路扫到索引开头）', async () => {
+    // f2 桶共 14 条（12 条编号 + 2 条同 ms 的 tw:*）。用远超桶大的 limit 查询
+    // 只能返回这 14 条本身；缺 endkey 的实现会把 f1 桶（键序在 f2 之下）的条目一同返回。
+    const big = await db.query(BY_FEED_VIEW, {
+      descending: true,
+      include_docs: false,
+      reduce: false,
+      limit: 1000,
+      startkey: ['f2', Number.MAX_SAFE_INTEGER, ''],
+      endkey: ['f2'],
+    })
+    const gotFeed = big.rows.map(r => seeded.find(s => s.id === (r.key as [string, number, string])[2])!.feedId)
+    expect(gotFeed).not.toHaveLength(0)
+    expect(gotFeed.every(f => f === 'f2')).toBe(true)
+    const f2Expected = seeded.filter(s => s.feedId === 'f2').map(s => s.id).sort()
+    expect(big.rows.map(r => (r.key as [string, number, string])[2]).sort()).toEqual(f2Expected)
   })
 })
