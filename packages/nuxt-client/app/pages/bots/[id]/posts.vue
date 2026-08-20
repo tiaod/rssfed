@@ -23,17 +23,27 @@ const hasMore = ref(true)
 
 // 从集中库查询该 bot 的产出（bot 产出以虚拟 feedId `bot:{id}` 入库）
 async function refreshEntries() {
-  entries.value = await pouch.queryFeedEntries(virtualFeedId, displayLimit.value)
-  // 返回条数达到窗口上限说明可能还有更多；触顶（达到 find 上限）则停止
-  hasMore.value = entries.value.length >= displayLimit.value && displayLimit.value < MAX_ENTRIES
-  loadingMore.value = false
+  try {
+    entries.value = await pouch.queryFeedEntries(virtualFeedId, displayLimit.value)
+    // 返回条数达到窗口上限说明可能还有更多；触顶（达到 find 上限）则停止
+    hasMore.value = entries.value.length >= displayLimit.value && displayLimit.value < MAX_ENTRIES
+  } finally {
+    loadingMore.value = false
+  }
 }
 
+let fetchingNext = false // 防重入：弹窗尾部预加载与「加载更多」按钮共用同一入口
 function loadMore() {
+  if (fetchingNext || !hasMore.value) return
+  fetchingNext = true
   loadingMore.value = true
   displayLimit.value += PAGE_SIZE
-  void refreshEntries()
+  void refreshEntries().finally(() => {
+    fetchingNext = false
+  })
 }
+// EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
+const hasMoreGetter = () => hasMore.value
 
 onMounted(async () => {
   try {
@@ -142,6 +152,8 @@ async function toggleSubscribe() {
       <template v-else>
         <EntryList
           :entries="entries || []"
+          :load-more="loadMore"
+          :has-more="hasMoreGetter"
         />
 
         <!-- 分页加载：滚动到底部附近或点击按钮加载下一批 -->

@@ -1,11 +1,25 @@
 <script setup lang="ts">
 import type { RssEntry } from '~/types/rss'
 
-defineProps<{
+const props = defineProps<{
   entries: RssEntry[]
+  /** 加载下一页数据的入口（带防重入）；不传时弹窗不预加载、也不提示「没有下一篇」 */
+  loadMore?: () => void | Promise<unknown>
+  /** 是否还有更多条目可分页 */
+  hasMore?: () => boolean
 }>()
 
 const { openEntry } = useEntryModal()
+
+// 打开详情时传入当前可见列表（取值函数而非快照），modal 内的上一篇/下一篇沿此定位
+function handleOpen(entry: RssEntry) {
+  openEntry(
+    entry,
+    () => props.entries,
+    // 列表支持分页才注入加载上下文；否则保持纯静态快照行为
+    props.loadMore ? { loadMore: props.loadMore, hasMore: props.hasMore ?? (() => true) } : undefined
+  )
+}
 
 function formatDate(dateStr: string): Date {
   return new Date(dateStr)
@@ -45,7 +59,7 @@ function getExcerpt(entry: RssEntry): string {
         to: entry.feed?.siteUrl
       }]"
       class="cursor-pointer"
-      @click="openEntry(entry)"
+      @click="handleOpen(entry)"
     />
   </UPageColumns>
 </template>

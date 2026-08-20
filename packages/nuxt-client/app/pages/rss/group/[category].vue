@@ -29,13 +29,15 @@ const PAGE_SIZE = 50
 const MAX_ENTRIES = 10000 // 与集中库 find 上限一致，达到后不再加载
 const displayLimit = ref(PAGE_SIZE)
 
-// 滚动到底部附近时加载下一批
-const { sentinelRef, loading: loadingMore, hasMore } = useInfiniteList(async () => {
+// 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
+const { sentinelRef, loading: loadingMore, hasMore, loadMore } = useInfiniteList(async () => {
   if (!hasMore.value) return false
   displayLimit.value += PAGE_SIZE
   await refreshEntries()
   return hasMore.value
 })
+// EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
+const hasMoreGetter = () => hasMore.value
 
 // 从集中库查询该分组所有订阅源的条目
 async function refreshEntries() {
@@ -146,6 +148,8 @@ watch(
       <template v-else>
         <EntryList
           :entries="entries"
+          :load-more="loadMore"
+          :has-more="hasMoreGetter"
         />
 
         <!-- 无限滚动：哨兵进入视口触发加载下一批 -->
