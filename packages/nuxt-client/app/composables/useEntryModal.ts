@@ -35,6 +35,9 @@ export function useEntryModal() {
   /** 列表的无限加载上下文（最近一次打开时注入）；不注入时不做预加载与尽头提示 */
   const loader = useState<EntryListLoader | null>('entry-modal-loader', () => null)
 
+  /** 所属列表的响应式视图（取值时触达实际列表，随无限滚动 grow）；无列表上下文时为空数组 */
+  const entries = computed(() => listGetter.value?.() ?? [])
+
   function openEntry(entry: RssEntry, getList?: () => RssEntry[], listLoader?: EntryListLoader) {
     currentEntry.value = entry
     listGetter.value = getList ?? null
@@ -104,6 +107,7 @@ export function useEntryModal() {
   return {
     isOpen,
     currentEntry,
+    entries,
     openEntry,
     closeEntry,
     goPrev: () => navEntry(-1),

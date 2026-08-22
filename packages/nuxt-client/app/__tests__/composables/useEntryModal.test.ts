@@ -164,4 +164,19 @@ describe('useEntryModal', () => {
     await nextTick()
     expect(isLastWithNoMore()).toBe(false)
   })
+
+  it('entries 暴露所属列表的响应式视图（供 Swiper 三槽渲染），随无限滚动推入而增长', () => {
+    const list = ref([makeEntry(1)])
+    const { entries, openEntry } = useEntryModal()
+
+    // 未打开（无列表上下文）时为空
+    expect(entries.value.map(e => e.id)).toEqual([])
+
+    openEntry(list.value[0]!, () => list.value)
+    expect(entries.value.map(e => e.id)).toEqual(['entry-1'])
+
+    // 新一批推入后 entries 同步反映
+    list.value.push(makeEntry(2), makeEntry(3))
+    expect(entries.value.map(e => e.id)).toEqual(['entry-1', 'entry-2', 'entry-3'])
+  })
 })
