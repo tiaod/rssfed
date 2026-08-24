@@ -6,5 +6,8 @@ ignoredBuiltDependencies:
 
 allowBuilds:
   # 前端用 IndexedDB 适配器，不需要 leveldown 原生构建；vue-demi 的 postinstall 由 Vite 处理
+  '@parcel/watcher': set this to true or false
+  esbuild: set this to true or false
   leveldown: false
+  unrs-resolver: set this to true or false
   vue-demi: false
