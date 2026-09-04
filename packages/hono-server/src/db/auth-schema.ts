@@ -1,5 +1,5 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, boolean, index } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, boolean, index, uniqueIndex } from "drizzle-orm/pg-core";
 import { attachments } from "./schema";
 
 export const user = pgTable("user", {
@@ -49,6 +49,8 @@ export const account = pgTable(
     id: text("id").primaryKey(),
     accountId: text("account_id").notNull(),
     providerId: text("provider_id").notNull(),
+    /** 身份命名空间（better-auth ≥1.7 必需）：provider-id 策略下凭证登录为 local:credential，外部连接为 local:oauth:<providerId> */
+    issuer: text("issuer").notNull(),
     userId: text("user_id")
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
@@ -64,7 +66,11 @@ export const account = pgTable(
       .$onUpdate(() => /* @__PURE__ */ new Date())
       .notNull(),
   },
-  (table) => [index("account_userId_idx").on(table.userId)],
+  (table) => [
+    index("account_userId_idx").on(table.userId),
+    // 1.7 强制：同一 (issuer, accountId) 下的唯一复合索引（物理账号身份唯一）
+    uniqueIndex("account_issuer_accountId_uidx").on(table.issuer, table.accountId),
+  ],
 );
 
 export const verification = pgTable(

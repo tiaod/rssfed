@@ -308,10 +308,14 @@ const showingCounter = ref(true)
 function syncCounterOnScroll(e: Event) {
   if (!isOpen.value) return
   const scroller = e.target
-  if (scroller !== document && !(scroller instanceof Element)) return
-  const pos = scroller === document ? window.scrollY : scroller.scrollTop
-  if (pos == null) return
-  showingCounter.value = pos <= COUNTER_HIDE_GAP
+  // document 走整体页面向下滚动量
+  if (scroller === document) {
+    showingCounter.value = window.scrollY <= COUNTER_HIDE_GAP
+    return
+  }
+  // 其余情形为可滚动元素；用 instanceof Element 收窄后读取 scrollTop
+  if (!(scroller instanceof Element)) return
+  showingCounter.value = scroller.scrollTop <= COUNTER_HIDE_GAP
 }
 
 /** 左右切篇或划卡结束后即将展示新一页的顶部，强制亮出页码 */

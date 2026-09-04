@@ -11,6 +11,9 @@ export const auth = betterAuth({
   plugins: [
     admin(),
   ],
+  // 注：better-auth 1.7 强制 account 表需有 issuer 字段及 (issuer, accountId) 唯一复合索引。
+  // 当前 1.7.2 中尚无 account.identityStrategy 配置项（文档领先于实现），运行时默认即用
+  // provider 级身份（local namespace），credential 账号 issuer 为 "local:credential"。
   emailAndPassword: {
     enabled: true,
   },
