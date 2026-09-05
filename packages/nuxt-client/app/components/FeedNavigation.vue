@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
 
 defineProps<{
@@ -21,7 +21,8 @@ const addError = ref<string | null>(null)
 // feed 图标（本地缓存 blob 优先），侧边栏菜单项 avatar 用
 const iconSrcs = ref<Record<string, string>>({})
 
-onMounted(async () => {
+/** 从本地用户状态库重新加载订阅列表与各源图标（可被初始挂载与同步后刷新复用） */
+async function loadFeeds() {
   try {
     feeds.value = await pouch.listSubscriptions()
     // 异步解析各源图标：附件 blob 优先，回退原始 URL；无图标保持纯文字
@@ -31,10 +32,31 @@ onMounted(async () => {
       if (url) map[f.id] = url
     }))
     iconSrcs.value = map
+    error.value = null
   } catch (e: any) {
     error.value = e?.message ?? '加载订阅失败'
   }
+}
+
+onMounted(() => {
+  void loadFeeds()
 })
+
+// 用户状态库（订阅列表）同步版本递增时重新加载侧边栏。
+// syncNow 会先暂停用户状态库的 live 同步、全量复制后恢复，期间拉取的远端订阅
+// 变化（新增/改名/分类）不会实时推给侧边栏，这里在同步完成后重新读取订阅列表。
+// 防抖：恢复 live 同步会再次触发版本变化，合并为一次刷新。
+let feedsTimer: ReturnType<typeof setTimeout> | null = null
+watch(
+  () => pouch.syncStatuses['__user_state__']?.version ?? 0,
+  () => {
+    if (feedsTimer) clearTimeout(feedsTimer)
+    feedsTimer = setTimeout(() => {
+      feedsTimer = null
+      void loadFeeds()
+    }, 200)
+  }
+)
 
 const { menuItems, hasFeeds } = useFeedNavigation(computed(() => feeds.value), computed(() => iconSrcs.value))
 
