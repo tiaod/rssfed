@@ -69,6 +69,26 @@ services:
       - seaweedfs-data:/data
     restart: always
 
+  rsshub:
+    # chromium-bundled 镜像内置了 CA 证书和 Chromium。
+    # 相比默认镜像，它自带 /etc/ssl/certs/ca-certificates.crt，
+    # 所以不需要再手动挂载证书或设置 NODE_EXTRA_CA_CERTS。
+    # 同时也具备 puppeteer 能力，可抓取需要浏览器渲染的反爬路由。
+    image: diygod/rsshub:chromium-bundled
+    # 使用 host 网络，让容器直接共享 WSL 的网络栈。
+    # 这样容器就能通过 WSL 默认网关访问 Windows 宿主机上的代理。
+    network_mode: host
+    volumes:
+      - ./rsshub-config.yml:/app/rsshub-config.yml:ro
+    environment:
+      # 环境变量可覆盖 config 文件中的部分配置
+      NODE_ENV: production
+      # 代理：RSSHub 通过 PROXY_URI 环境变量配置代理（不是 config 文件的 proxy 字段）。
+      # 代理运行在 Windows 宿主机上，WSL 需要走默认网关 172.29.96.1 访问。
+      # 注意：不能用 127.0.0.1，因为那指向 WSL 自身，而代理不在 WSL 的 localhost 上监听。
+      PROXY_URI: http://172.29.96.1:7897
+    restart: always
+
 volumes:
   rssfed-db:
   rssfed-couchdb:

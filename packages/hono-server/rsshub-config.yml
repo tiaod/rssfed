@@ -1,0 +1,55 @@
+# =============================================================
+# RSSHub 配置文件
+# =============================================================
+# 此文件挂载到 RSSHub 容器，用于集中管理运行时配置。
+# 修改后需要重启 RSSHub 容器生效：pnpm --filter hono-server ... 或 docker compose up -d rsshub
+#
+# 说明：
+# - 大部分国内/国外平台的抓取需要额外的 Cookie、API 密钥等凭证，
+#   请按需在此文件中添加或通过环境变量注入。
+# - 若是本地/私有部署，建议保持 accessKey 默认（否则请求需带密码）。
+# =============================================================
+
+# 监听端口（容器内固定 1200，与 compose 映射对应）
+port: 1200
+
+# 本地部署无需反代，可开启调试日志便于排查抓取失败
+logger:
+  level: info
+
+# 是否允许远程访问（本地自用建议保持默认 false）
+# 若需要从其他设备访问，可放开并配合密码：
+# allowRemote: true
+
+# 全局请求超时（毫秒）
+request:
+  timeout: 10000
+  # 抓取国内站点，适当提高重试给源站留时间
+  retry: 2
+
+# ---------- 国内平台凭证（按需填入） ----------
+# 示例（B站）：在浏览器登录后从 Cookie 中获取 SESSDATA，填入下面
+# bilibili:
+#   cookie: "SESSDATA=xxxx;"
+
+# 示例（微博）：
+# weibo:
+#   cookie: "SUB=xxxx;"
+
+# 示例（知乎）：
+# zhihu:
+#   cookie: "z_c0=xxxx;"
+
+# ---------- 国外平台配置（后续用到时再开） ----------
+# 示例（Twitter/X）：需要 BP 等 Token
+# twitter:
+#   key: "xxxx"
+#   secret: "xxxx"
+#   token: "xxxx"
+#   tokenSecret: "xxxx"
+
+# 示例（YouTube/Reddit）通常无需凭证即可抓公开 rss 源
+
+# ---------- 代理（用于访问被墙的国外平台） ----------
+# 注意：RSSHub 通过环境变量 PROXY_URI 配置代理（见 docker-compose.yml），
+# 而不是 config 文件的 proxy 字段。请勿在此文件里配置代理。

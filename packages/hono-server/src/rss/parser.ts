@@ -3,6 +3,7 @@ import https from "node:https"
 import { parseFeed } from "feedsmith"
 import { HttpProxyAgent } from "http-proxy-agent"
 import { HttpsProxyAgent } from "https-proxy-agent"
+import { rewriteRssHubUrl } from "./rsshub"
 
 // 代理配置来自环境变量（与 curl/node 惯例一致），兼容大小写两种写法
 const PROXY_HTTP = process.env.HTTP_PROXY || process.env.http_proxy
@@ -79,9 +80,14 @@ function extractProtocolCover(item: any): string | undefined {
 /**
  * 抓取 URL 并解析为归一化的 feed 对象。
  * 支持 HTTP/HTTPS 代理、自动跟随重定向（最多 5 次）。
+ *
+ * 抓取前会先将公共 RSSHub 实例（rsshub.app）改写为本地自建地址（见 rsshub.ts）。
+ * 仅影响实际 HTTP 请求的地址；调用方仍以原始 URL 存储订阅与派生 feedId，
+ * 从而保证订阅身份稳定。
  */
 export async function parseFeedUrl(url: string): Promise<ParsedFeed> {
-  const xml = await fetchUrl(url)
+  const targetUrl = rewriteRssHubUrl(url)
+  const xml = await fetchUrl(targetUrl)
   return parseFeedContent(xml)
 }
 
