@@ -5,8 +5,10 @@ import { isOriginAllowed } from "./config"
 import { feedsRouter } from "./routes/feeds"
 import { botsRouter } from "./routes/bots"
 import { userRouter } from "./routes/user"
+import { userTokensRouter } from "./routes/user-tokens"
 import { couchdbRouter } from "./routes/couchdb"
 import { siteSettingsPublicRouter, siteSettingsAdminRouter } from "./routes/site-settings"
+import { mcpRouter } from "./routes/mcp"
 import { instance } from "./bots"
 import { storage } from "./storage"
 import { bullBoardApp } from "./bullboard"
@@ -26,9 +28,13 @@ app.use("/api/auth/*", async (c) => {
 app.route("/api/feeds", feedsRouter)
 app.route("/api/bots", botsRouter)
 app.route("/api/user", userRouter)
+app.route("/api/user/tokens", userTokensRouter)
 app.route("/api/couchdb", couchdbRouter)
 app.route("/api/site-settings", siteSettingsPublicRouter)
 app.route("/api/admin/site-settings", siteSettingsAdminRouter)
+
+// MCP server（订阅管理 AI 工具）：须在 BotKit 兜底 app.all("*") 之前注册
+app.route("/mcp", mcpRouter)
 
 app.get("/api/health", (c) => c.json({ status: "ok" }))
 

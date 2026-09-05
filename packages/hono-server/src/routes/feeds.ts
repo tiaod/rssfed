@@ -1,11 +1,16 @@
 import { Hono, type Context, type Next } from "hono"
-import crypto from "node:crypto"
-import { inArray, eq } from "drizzle-orm"
-import { parseFeedUrl, parseFeedContent, formatFeedError, type ParsedFeed } from "../rss/parser"
+import { eq } from "drizzle-orm"
+import { parseFeedUrl, formatFeedError, type ParsedFeed } from "../rss/parser"
 import { parseOpml, type OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
-import { db, feeds, bots } from "../db"
+import { db, feeds } from "../db"
 import { enqueueFetch } from "../workers"
+import {
+  resolveFeedId,
+  ensureFeedRegistered,
+  addSubscriptionIfAbsent,
+  listSubscriptionsForUser,
+} from "../services/feeds"
 import { auth } from "../auth"
 
 type FeedsVariables = { userId: string }
@@ -28,28 +33,6 @@ async function requireAdmin(c: Context<{ Variables: FeedsVariables }>, next: Nex
 }
 
 export const feedsRouter = new Hono<{ Variables: FeedsVariables }>()
-
-/**
- * 由 URL 确定性派生 feedId：对完整 URL 做 sha256 后取 base64url 前 16 位。
- * 历史实现取 base64url(URL).slice(0,12)，只编码了前 9 字节，
- * 导致 https://www.a.com 与 https://www.b.com 这类前缀相同的 URL 撞 ID；
- * 改用完整 URL 哈希可彻底避免冲突（base64url 保证路径安全，不含 / + =）。
- */
-export function deriveFeedId(url: string): string {
-  return crypto.createHash("sha256").update(url).digest("base64url").slice(0, 16)
-}
-
-/**
- * 解析 feedId：URL 已注册时复用其现有 ID（兼容历史短 ID 数据），
- * 否则按完整 URL 哈希派生新 ID。
- */
-async function resolveFeedId(url: string): Promise<string> {
-  const existing = await db.query.feeds.findFirst({
-    where: eq(feeds.url, url),
-    columns: { id: true },
-  })
-  return existing?.id ?? deriveFeedId(url)
-}
 
 /** 获取全部订阅源注册表（仅管理员） */
 feedsRouter.get("/", requireAdmin, async (c) => {
@@ -129,91 +112,6 @@ feedsRouter.post("/import-opml", requireAuth, async (c) => {
   return c.json({ total: unique.length, imported, skipped, failed })
 })
 
-/** 注册后的 feed 元信息，用于写入订阅文档 */
-interface FeedMeta {
-  feedId: string
-  title: string
-  siteUrl?: string
-  description?: string
-}
-
-/**
- * 确保 feed 已登记：PostgreSQL 注册表 + per-feed CouchDB 库。
- * 首轮解析失败不阻塞导入（用 OPML 自带标题兜底注册），
- * 统一入队抓取（jobId 去重），由 Worker 更新元数据或标记错误。
- */
-async function ensureFeedRegistered(item: OpmlFeed): Promise<FeedMeta> {
-  // 已注册过的 URL 复用现有 ID，避免与历史短 ID 数据分裂；新 URL 按完整 URL 哈希派生
-  const feedId = await resolveFeedId(item.url)
-
-  let parsed: ParsedFeed | null = null
-  try {
-    parsed = await parseFeedUrl(item.url)
-  } catch {
-    // 忽略：用 OPML 标题兜底，错误状态留给 Worker 抓取时标记
-  }
-
-  const title = parsed?.title ?? item.title ?? item.url
-  await db.insert(feeds).values({
-    id: feedId,
-    url: item.url,
-    title,
-    description: parsed?.description,
-    siteUrl: parsed?.link,
-  }).onConflictDoNothing()
-
-  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
-  try {
-    await feedDb.get(feedId)
-  } catch {
-    await feedDb.insert({
-      _id: feedId,
-      type: "feed",
-      url: item.url,
-      title,
-      description: parsed?.description,
-      siteUrl: parsed?.link,
-      lastFetchedAt: new Date().toISOString(),
-      createdAt: new Date().toISOString(),
-    } as any)
-  }
-
-  // 无论首轮解析成败都入队一次抓取（enqueueFetch 内含 jobId 去重与旧记录清理）
-  await enqueueFetch(feedId, item.url)
-
-  return {
-    feedId,
-    title,
-    siteUrl: parsed?.link,
-    description: parsed?.description,
-  }
-}
-
-/** 为用户写入订阅文档；已订阅过（_id 冲突 409）则跳过并返回 false */
-async function addSubscriptionIfAbsent(
-  userDb: ReturnType<typeof createCouchDb>,
-  item: OpmlFeed,
-  meta: FeedMeta,
-): Promise<boolean> {
-  try {
-    await userDb.insert({
-      _id: `subscription:${meta.feedId}`,
-      type: "subscription",
-      feedId: meta.feedId,
-      title: meta.title,
-      siteUrl: meta.siteUrl,
-      description: meta.description,
-      category: item.category,
-      createdAt: new Date().toISOString(),
-    } as any)
-    return true
-  } catch (err: any) {
-    // CouchDB 文档冲突 = 该用户已订阅过，跳过
-    if (err?.statusCode === 409 || err?.error === "conflict") return false
-    throw err
-  }
-}
-
 /** 有限并发处理任务（批量导入时避免并发打爆目标站点 / 数据库） */
 async function mapWithConcurrency<T>(
   items: T[],
@@ -269,72 +167,8 @@ async function seedFeedDoc(feedId: string, url: string, parsed: ParsedFeed) {
 /** 获取当前用户的订阅列表（feed + bot），合并注册表抓取状态（active/paused/error） */
 feedsRouter.get("/subscriptions", requireAuth, async (c) => {
   const userId = c.get("userId")
-  const userDb = createCouchDb(await ensureUserStateDatabase(userId))
-
-  // 用 allDocs 主键范围查询订阅文档（find 的 limit 默认 25/上限 100，
-  // 订阅源很多（如 OPML 批量导入数百个）时会被截断）
-  const { rows } = await userDb.list({
-    startkey: "subscription:",
-    endkey: "subscription:\uffff",
-    include_docs: true,
-  })
-  const docs = rows.map((r) => r.doc).filter(Boolean) as any[]
-
-  // 按 kind 分流：feed 订阅查 feeds 注册表，bot 订阅查 bots 表
-  const feedDocs = docs.filter((d: any) => d.kind !== "bot")
-  const botDocs = docs.filter((d: any) => d.kind === "bot")
-  const feedIds = feedDocs.map((d: any) => d.feedId).filter(Boolean)
-  const botIds = botDocs.map((d: any) => String(d.feedId).replace(/^bot:/, "")).filter(Boolean)
-
-  const [feedRegistry, botRegistry] = await Promise.all([
-    feedIds.length ? db.select().from(feeds).where(inArray(feeds.id, feedIds)) : [],
-    botIds.length ? db.select().from(bots).where(inArray(bots.id, botIds)) : [],
-  ])
-  const feedById = new Map(feedRegistry.map((f) => [f.id, f]))
-  const botById = new Map(botRegistry.map((b) => [b.id, b]))
-
-  return c.json([
-    ...feedDocs.map((d: any) => {
-      const reg = feedById.get(d.feedId)
-      // 状态由真实字段判定：暂停优先，其次错误，其余为活跃
-      const status = reg?.status === "paused" ? "paused"
-        : reg?.errorMessage ? "error"
-        : "active"
-      return {
-        feedId: d.feedId,
-        kind: "feed" as const,
-        title: d.title,
-        siteUrl: d.siteUrl,
-        image: d.image,
-        description: d.description,
-        category: d.category,
-        createdAt: d.createdAt,
-        status,
-        errorMessage: reg?.errorMessage ?? undefined,
-        lastFetchedAt: reg?.lastFetchedAt?.toISOString() ?? undefined,
-        // 最后抓到新条目的时间：前端据此只同步「上次同步后有过新内容」的源
-        lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
-      }
-    }),
-    ...botDocs.map((d: any) => {
-      const botId = String(d.feedId).replace(/^bot:/, "")
-      const reg = botById.get(botId)
-      return {
-        feedId: d.feedId,
-        kind: "bot" as const,
-        title: d.title ?? reg?.name,
-        siteUrl: undefined,
-        image: d.image ?? reg?.avatarUrl,
-        description: d.description ?? reg?.description,
-        category: d.category,
-        createdAt: d.createdAt,
-        // bot 无暂停概念：停用视作暂停，其余为活跃
-        status: reg?.isActive === false ? "paused" : "active",
-        // 最后写入产出的时间：前端据此只同步「上次同步后有过新内容」的 bot
-        lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
-      }
-    }),
-  ])
+  const subs = await listSubscriptionsForUser(userId)
+  return c.json(subs)
 })
 
 /** 暂停/恢复订阅抓取（仅管理员） */

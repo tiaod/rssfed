@@ -48,8 +48,30 @@ export const siteSettings = pgTable("site_settings", {
   updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
 })
 
-/** Feed 注册表 — 记录所有已知订阅源的元数据，供 Worker 定时抓取 */
-export const feeds = pgTable("feeds", {
+/** 用户个人 API token — 供 MCP / 外部客户端以 Bearer 认证访问订阅数据。
+ *  只存 token 的 SHA-256 hash，明文仅在创建时返回一次（与密码同规格的不可逆存储）。 */
+export const apiToken = pgTable("api_token", {
+  id: text("id").primaryKey(),
+  /** 所属用户 */
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  /** 可读名称，如 "claude-desktop" */
+  name: text("name").notNull(),
+  /** token 明文前缀（用于用户侧识别展示，如 rssfed_xxxx…），非完整 token */
+  prefix: text("prefix").notNull(),
+  /** SHA-256 hash，唯一索引 */
+  tokenHash: text("token_hash").notNull().unique(),
+  /** 最近一次使用时间（便于用户排查 / 清理） */
+  lastUsedAt: timestamp("last_used_at"),
+  /** 过期时间；为 NULL 表示不过期 */
+  expiresAt: timestamp("expires_at"),
+  /** 吊销时间；为 NULL 表示有效 */
+  revokedAt: timestamp("revoked_at"),
+  createdAt: timestamp("created_at").notNull().defaultNow(),
+}, (table) => [
+  index("api_token_user_id_idx").on(table.userId),
+])
+
+/** Feed 注册表 — 记录所有已知订阅源的元数据，供 Worker 定时抓取 */export const feeds = pgTable("feeds", {
   id: text("id").primaryKey(),
   url: text("url").notNull().unique(),
   title: text("title").notNull(),
@@ -209,6 +231,8 @@ export const botInboxRelations = relations(botInbox, ({ one }) => ({
 
 export type Feed = typeof feeds.$inferSelect
 export type NewFeed = typeof feeds.$inferInsert
+export type ApiToken = typeof apiToken.$inferSelect
+export type NewApiToken = typeof apiToken.$inferInsert
 export type Attachment = typeof attachments.$inferSelect
 export type NewAttachment = typeof attachments.$inferInsert
 export type SiteSettings = typeof siteSettings.$inferSelect
