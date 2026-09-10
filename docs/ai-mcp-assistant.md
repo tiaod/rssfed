@@ -201,6 +201,15 @@ MCP 请求头 `Authorization: Bearer <token>`：
 - 客户端配置：
   `{ "mcpServers": { "rssfed": { "type": "http", "url": "https://<host>/mcp", "headers": { "Authorization": "Bearer <token>" } } } }`
 
+#### 端点尾部斜杠兼容性（重要）
+- **服务端同时响应 `/mcp` 与 `/mcp/`（及子路径），且不返回任何 301/307 重定向**——两种写法都直接落到同一个 MCP handler。
+- 原因：MCP 规范以无斜杠的 `/mcp` 为标准，但不同客户端/网关对尾部斜杠的处理不一致：
+  - Cursor 等客户端有时会**裁剪配置里的末尾斜杠**（`/mcp/` → `/mcp`）；
+  - AWS API Gateway 默认会**修剪尾部斜杠**；
+  - Cloud Run 等平台可能**追加尾部斜杠**（`/mcp` → `/mcp/`）；
+  - 最严重的是：若依赖 307 重定向，部分客户端跟随重定向时会**用不带 `Authorization` 头的 GET 重新请求**，导致 401 / OAuth 握手失败。
+- **因此不做重定向，而是让两种形式等价直达**，是最稳妥的兼容做法。客户端无论配 `/mcp` 还是 `/mcp/` 都能直接连通，不触发任何重定向。
+
 ### 本地 stdio（调试）
 - 提供 `npm run mcp` 启动本地 stdio server，共用同一套工具定义。
 

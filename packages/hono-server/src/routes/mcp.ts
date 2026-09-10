@@ -1,4 +1,4 @@
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 import { z } from "zod"
 import { createMcpHandler, McpServer, type McpRequestContext } from "@modelcontextprotocol/server"
 import { resolveTokenUser } from "../services/api-token"
@@ -428,12 +428,11 @@ async function buildServer(ctx: McpRequestContext): Promise<McpServer> {
 export const mcpHandler = createMcpHandler(buildServer)
 
 /**
- * Hono 路由：/mcp 交给 MCP handler 处理。
+ * 统一处理 MCP 请求的入口。
  * 认证在入口层完成：校验 Bearer token → 解析 userId → 写入内部头再转给 handler；
  * token 无效直接返回 HTTP 401，绝不创建有权限的 server 实例。
  */
-export const mcpRouter = new Hono()
-mcpRouter.all("/", async (c) => {
+async function handleMcp(c: Context) {
   const userId = await authenticate(c.req.raw)
   if (!userId) return c.json({ error: "unauthorized: invalid or missing API token" }, 401)
 
@@ -442,4 +441,19 @@ mcpRouter.all("/", async (c) => {
   headers.set("x-rssfed-user-id", userId)
   const requestWithUser = new Request(c.req.raw, { headers })
   return mcpHandler.fetch(requestWithUser)
-})
+}
+
+/**
+ * Hono 路由：/mcp 交给 MCP handler 处理。
+ *
+ * 同时注册 `/` 与 `/*` 两个路径，使 `/mcp` 与 `/mcp/`（及子路径）**都直接可达**，
+ * 均落到同一个 handleMcp 而不产生任何 301/307 重定向。
+ * 原因：MCP 规范以无斜杠的 `/mcp` 为标准，但不同客户端/网关对尾部斜杠的处理不一致
+ * （Cursor 会裁剪末尾斜杠、AWS API Gateway 会修剪斜杠、Cloud Run 可能追加斜杠）。
+ * 若依赖重定向，某些客户端在跟随 307 时会用不带 Authorization 头的 GET 重新请求，
+ * 导致 401/OAuth 握手失败。故让两种形式等价直达，是最稳妥的兼容做法。
+ */
+export const mcpRouter = new Hono()
+mcpRouter.all("/", handleMcp)
+// 命中 /mcp/ 及更深子路径（依赖 Hono 对 trailing slash 的 wildcard 匹配）
+mcpRouter.all("/*", handleMcp)
