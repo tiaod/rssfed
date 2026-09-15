@@ -15,6 +15,12 @@ interface AdminFeed {
   errorMessage?: string
   lastFetchedAt?: string
   createdAt: string
+  // per-feed 图片缓存策略（见 rss/entry-images.ts）
+  cacheImages: boolean
+  maxImageCount: number | null
+  maxImageWidth: number | null
+  avifQuality: number | null
+  maxSourceImageBytes: number | null
 }
 
 const feeds = ref<AdminFeed[]>([])
@@ -25,13 +31,31 @@ const statusFilter = ref<'all' | FeedStatus>('all')
 const keyword = ref('')
 
 const editingFeed = ref<AdminFeed | null>(null)
-const editForm = ref({ title: '', url: '', description: '', siteUrl: '', image: '' })
+const editForm = ref({
+  title: '', url: '', description: '', siteUrl: '', image: '',
+  cacheImages: false,
+  // 高级参数用字符串承载 UI 输入（留空表示「跟随全局默认」），提交时再规范成 number/null
+  maxImageCount: '',
+  maxImageWidth: '',
+  avifQuality: '',
+  maxSourceImageBytes: '',
+})
 const editOpen = computed({
   get: () => editingFeed.value !== null,
   set: (v: boolean) => { if (!v) editingFeed.value = null },
 })
 const saving = ref(false)
 const editError = ref<string | null>(null)
+/** 编辑弹窗内是否展开「高级图片缓存参数」 */
+const showAdvancedImages = ref(false)
+/** 全局默认图片缓存参数（来自后端环境变量），用于 placeholder 展示默认值 */
+const imageDefaults = ref<{ maxImageCount: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number } | null>(null)
+
+/** 生成高级参数输入框的 placeholder：显示当前全局默认值，未加载到则返回空 */
+function imagePlaceholder(value: number | undefined, unit = ''): string {
+  if (value === undefined || value === null) return ''
+  return `默认 ${value}${unit}`
+}
 
 const statusMeta: Record<FeedStatus, { label: string, color: 'success' | 'neutral' | 'error', icon: string }> = {
   active: { label: '活跃', color: 'success', icon: 'i-lucide-circle-check' },
@@ -73,6 +97,12 @@ async function load() {
     error.value = errorMessage(e)
   } finally {
     loading.value = false
+  }
+  // 拉取全局默认图片缓存参数（供 placeholder 展示；失败静默，仅影响提示文案）
+  try {
+    imageDefaults.value = await api.feeds.imageDefaults()
+  } catch {
+    imageDefaults.value = null
   }
 }
 
@@ -116,6 +146,11 @@ function openEdit(feed: AdminFeed) {
     description: feed.description ?? '',
     siteUrl: feed.siteUrl ?? '',
     image: feed.image ?? '',
+    cacheImages: feed.cacheImages ?? false,
+    maxImageCount: feed.maxImageCount != null ? String(feed.maxImageCount) : '',
+    maxImageWidth: feed.maxImageWidth != null ? String(feed.maxImageWidth) : '',
+    avifQuality: feed.avifQuality != null ? String(feed.avifQuality) : '',
+    maxSourceImageBytes: feed.maxSourceImageBytes != null ? String(feed.maxSourceImageBytes) : '',
   }
   editError.value = null
 }
@@ -125,7 +160,15 @@ async function saveEdit() {
   saving.value = true
   editError.value = null
   try {
-    await api.feeds.update(editingFeed.value.id, editForm.value)
+    // 高级参数输入框允许留空（→ null 表示跟随全局默认）；数字字段做规范化
+    const patch = {
+      ...editForm.value,
+      maxImageCount: toImageNumber(editForm.value.maxImageCount),
+      maxImageWidth: toImageNumber(editForm.value.maxImageWidth),
+      avifQuality: toImageNumber(editForm.value.avifQuality),
+      maxSourceImageBytes: toImageNumber(editForm.value.maxSourceImageBytes),
+    }
+    await api.feeds.update(editingFeed.value.id, patch)
     toast.add({ title: '已保存', description: editingFeed.value.title, color: 'success' })
     editingFeed.value = null
     await load()
@@ -134,6 +177,13 @@ async function saveEdit() {
   } finally {
     saving.value = false
   }
+}
+
+/** 把输入框里的空字符串规范成 null（后端据此回退全局默认）；非空合法数字保留 */
+function toImageNumber(v: string | number | null | undefined): number | null {
+  if (v === null || v === undefined || v === '' || Number.isNaN(Number(v))) return null
+  const n = Math.floor(Number(v))
+  return n >= 0 ? n : null
 }
 
 onMounted(load)
@@ -213,6 +263,17 @@ onMounted(load)
                   </template>
                   {{ statusMeta[feed.status].label }}
                 </UBadge>
+                <UBadge
+                  v-if="feed.cacheImages"
+                  color="info"
+                  variant="subtle"
+                  size="xs"
+                >
+                  <template #leading>
+                    <UIcon name="i-lucide-image-down" class="size-3" />
+                  </template>
+                  全量缓存
+                </UBadge>
               </div>
               <p class="text-xs text-muted truncate">{{ feed.url }}</p>
               <p class="text-xs text-muted">最近抓取：{{ timeAgo(feed.lastFetchedAt) }}</p>
@@ -280,6 +341,48 @@ onMounted(load)
           <UFormField label="图标 URL">
             <UInput v-model="editForm.image" class="w-full" />
           </UFormField>
+
+          <div class="rounded-xl border border-default p-3 space-y-3">
+            <div class="flex items-center justify-between gap-3">
+              <div class="min-w-0">
+                <p class="text-sm font-medium">缓存全部图片</p>
+                <p class="text-xs text-muted">
+                  开启后每篇条目不限缓存张数，适合漫画等图片密集的源（离线可看）。
+                </p>
+              </div>
+              <USwitch v-model="editForm.cacheImages" name="cacheImages" />
+            </div>
+
+            <div class="flex items-center justify-between border-t border-default pt-2">
+              <button
+                type="button"
+                class="text-xs text-muted hover:text-primary inline-flex items-center gap-1"
+                @click="showAdvancedImages = !showAdvancedImages"
+              >
+                <UIcon
+                  :name="showAdvancedImages ? 'i-lucide-chevron-up' : 'i-lucide-chevron-down'"
+                  class="size-3"
+                />
+                高级参数（可选，留空跟随全局默认）
+              </button>
+            </div>
+
+            <div v-if="showAdvancedImages" class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <UFormField label="每篇最多缓存张数">
+                <UInput v-model="editForm.maxImageCount" type="number" min="0" :placeholder="imagePlaceholder(imageDefaults?.maxImageCount)" class="w-full" />
+              </UFormField>
+              <UFormField label="压缩最大宽度 (px)">
+                <UInput v-model="editForm.maxImageWidth" type="number" min="0" :placeholder="imagePlaceholder(imageDefaults?.maxImageWidth, 'px')" class="w-full" />
+              </UFormField>
+              <UFormField label="AVIF 质量">
+                <UInput v-model="editForm.avifQuality" type="number" min="0" max="100" :placeholder="imagePlaceholder(imageDefaults?.avifQuality)" class="w-full" />
+              </UFormField>
+              <UFormField label="源图大小上限 (字节)">
+                <UInput v-model="editForm.maxSourceImageBytes" type="number" min="0" :placeholder="imagePlaceholder(imageDefaults?.maxSourceImageBytes, 'B')" class="w-full" />
+              </UFormField>
+            </div>
+          </div>
+
           <UAlert
             v-if="editError"
             color="error"

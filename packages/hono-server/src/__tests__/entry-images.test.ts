@@ -181,3 +181,60 @@ describe("cacheEntryImages 封面选择", () => {
     expect(images.every((i) => !i.cover)).toBe(true)
   })
 })
+
+describe("cacheEntryImages per-feed 配置", () => {
+  // 生成 n 张（比全局默认 5 张多）可缓存的小图，验证 cacheAll 不限张数
+  async function serveImages(count: number, prefix: string) {
+    const bufs = await Promise.all(
+      Array.from({ length: count }, () => sharp({
+        create: { width: 300, height: 220, channels: 3, background: { r: 40, g: 80, b: 120 } },
+      }).png().toBuffer()),
+    )
+    let hits = 0
+    const server = http.createServer((req, res) => {
+      hits++
+      res.setHeader("Content-Type", "image/png")
+      const idx = Number((req.url ?? "").match(/\d+/)?.[0] ?? 0)
+      res.end(bufs[idx] ?? bufs[0])
+    })
+    await new Promise<void>((r) => server.listen(0, r))
+    const port = (server.address() as { port: number }).port
+    return {
+      port,
+      content: Array.from({ length: count }, (_, i) =>
+        `<img src="http://127.0.0.1:${port}/${prefix}${i}.png">`).join(""),
+      close: () => server.close(),
+    }
+  }
+
+  it("cacheAll 开启时缓存正文全部图片（超过全局默认 5 张）", async () => {
+    const total = 7
+    const { port, content, close } = await serveImages(total, "a")
+    try {
+      const { images } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`, undefined, { cacheAll: true })
+      expect(images.length).toBe(total) // 全部被缓存，未被 5 张上限截断
+    } finally {
+      close()
+    }
+  })
+
+  it("maxImageCount 覆盖全局默认", async () => {
+    const { port, content, close } = await serveImages(4, "b")
+    try {
+      const { images } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`, undefined, { maxImageCount: 2 })
+      expect(images.length).toBe(2)
+    } finally {
+      close()
+    }
+  })
+
+  it("不传配置时遵循全局默认上限（5 张）", async () => {
+    const { port, content, close } = await serveImages(7, "c")
+    try {
+      const { images } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`)
+      expect(images.length).toBe(5)
+    } finally {
+      close()
+    }
+  })
+})

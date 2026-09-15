@@ -4,22 +4,48 @@ import sharp from "sharp"
 import { httpAgent, httpsAgent, shouldProxy } from "./parser"
 import type { CachedImage } from "../db/types"
 
-// ── 图片缓存配置（环境变量可覆盖，见 .env.example） ──
+// ── 图片缓存全局默认配置（环境变量可覆盖，见 .env.example） ──
+// 每个 feed 可在 PostgreSQL feeds 表上按源覆盖这些默认值（见 cacheEntryImages 的 options 参数）。
 
 /** 压缩后最大宽度（保持宽高比，小图不放大） */
-const MAX_IMAGE_WIDTH = parseInt(process.env.MAX_IMAGE_WIDTH ?? "1200")
+const DEFAULT_MAX_IMAGE_WIDTH = parseInt(process.env.MAX_IMAGE_WIDTH ?? "1200")
 /** AVIF 编码质量：越低体积越小（正文图片 40-50 即可接受） */
-const AVIF_QUALITY = parseInt(process.env.AVIF_QUALITY ?? "45")
+const DEFAULT_AVIF_QUALITY = parseInt(process.env.AVIF_QUALITY ?? "45")
 /** 每篇 entry 最多缓存的图片数，超出部分保留原 URL */
-const MAX_IMAGE_COUNT = parseInt(process.env.MAX_IMAGE_COUNT ?? "5")
+const DEFAULT_MAX_IMAGE_COUNT = parseInt(process.env.MAX_IMAGE_COUNT ?? "5")
 /** 源图下载大小上限（字节），超出即放弃缓存 */
-const MAX_SOURCE_IMAGE_BYTES = parseInt(process.env.MAX_SOURCE_IMAGE_BYTES ?? "8388608")
+const DEFAULT_MAX_SOURCE_IMAGE_BYTES = parseInt(process.env.MAX_SOURCE_IMAGE_BYTES ?? "8388608")
 /** 单张源图下载超时（毫秒） */
 const IMAGE_DOWNLOAD_TIMEOUT = 10_000
 /** 下载并发上限 */
 const DOWNLOAD_CONCURRENCY = 3
 /** 限制输入像素数，防止超大图耗尽内存 */
 const MAX_INPUT_PIXELS = 40_000_000
+
+/** 全局默认图片缓存参数（环境变量可覆盖），供前端展示 placeholder 默认值 */
+export const DEFAULT_IMAGE_OPTIONS = {
+  maxImageCount: DEFAULT_MAX_IMAGE_COUNT,
+  maxImageWidth: DEFAULT_MAX_IMAGE_WIDTH,
+  avifQuality: DEFAULT_AVIF_QUALITY,
+  maxSourceImageBytes: DEFAULT_MAX_SOURCE_IMAGE_BYTES,
+} as const
+
+/**
+ * 单条目图片缓存的可覆盖配置（per-feed，来自 feeds 表的 image 缓策略字段）。
+ * 未提供的字段回退到上方全局默认。
+ */
+export interface EntryImageOptions {
+  /** 每篇最多缓存图片数；0/undefined 且 cacheAll 时表示不限制 */
+  maxImageCount?: number
+  /** 压缩后最大宽度 px */
+  maxImageWidth?: number
+  /** AVIF 质量 */
+  avifQuality?: number
+  /** 源图下载大小上限（字节） */
+  maxSourceImageBytes?: number
+  /** 是否缓存全部图片（同一 entry 内不设数量上限） */
+  cacheAll?: boolean
+}
 
 /** 匹配 <img src="...">（含单/双引号，忽略大小写与属性顺序） */
 const IMG_SRC_RE = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi
@@ -52,7 +78,7 @@ export interface ImageAttachment {
  * - 相对路径基于 baseUrl 解析为绝对地址（与前端匹配一致）
  * - 去重，按 limit 截断
  */
-export function extractImageUrls(content: string | undefined, baseUrl: string, limit = MAX_IMAGE_COUNT): string[] {
+export function extractImageUrls(content: string | undefined, baseUrl: string, limit = DEFAULT_MAX_IMAGE_COUNT): string[] {
   if (!content) return []
   const urls: string[] = []
   for (const match of content.matchAll(IMG_SRC_RE)) {
@@ -72,12 +98,12 @@ export function extractImageUrls(content: string | undefined, baseUrl: string, l
 }
 
 /** 下载一张图片（跟随重定向，校验 Content-Type，限制大小与超时）；失败返回 null */
-async function downloadImage(url: string): Promise<Buffer | null> {
+async function downloadImage(url: string, maxBytes?: number): Promise<Buffer | null> {
   try {
     let current = url
     // 最多跟随 3 次重定向
     for (let i = 0; i < 4; i++) {
-      const res = await httpGet(current)
+      const res = await httpGet(current, maxBytes)
       if (res.status >= 300 && res.status < 400 && res.headers.location) {
         current = new URL(res.headers.location, current).toString()
         continue
@@ -94,7 +120,9 @@ async function downloadImage(url: string): Promise<Buffer | null> {
 }
 
 /** 发起 HTTP(S) GET 并流式收集响应体（超时、大小超限时抛错终止） */
-function httpGet(url: string): Promise<{ status: number, headers: http.IncomingHttpHeaders, buffer: Buffer }> {
+function httpGet(url: string, maxBytes?: number): Promise<{ status: number, headers: http.IncomingHttpHeaders, buffer: Buffer }> {
+  // 未显式指定时用全局默认上限
+  const limit = maxBytes ?? DEFAULT_MAX_SOURCE_IMAGE_BYTES
   return new Promise((resolve, reject) => {
     const mod = url.startsWith("https:") ? https : http
     const agent = shouldProxy(url) ? (url.startsWith("https:") ? httpsAgent : httpAgent) : undefined
@@ -108,7 +136,7 @@ function httpGet(url: string): Promise<{ status: number, headers: http.IncomingH
       let total = 0
       res.on("data", (chunk: Buffer) => {
         total += chunk.length
-        if (total > MAX_SOURCE_IMAGE_BYTES) {
+        if (total > limit) {
           req.destroy(new Error("image too large"))
           return
         }
@@ -123,13 +151,18 @@ function httpGet(url: string): Promise<{ status: number, headers: http.IncomingH
 }
 
 /** 压缩为 AVIF 小图；解码失败返回 null（导出供测试） */
-export async function compressToAvif(buffer: Buffer): Promise<{ buffer: Buffer, width: number, height: number } | null> {
+export async function compressToAvif(
+  buffer: Buffer,
+  opts: { maxWidth?: number, quality?: number } = {},
+): Promise<{ buffer: Buffer, width: number, height: number } | null> {
+  const maxWidth = opts.maxWidth ?? DEFAULT_MAX_IMAGE_WIDTH
+  const quality = opts.quality ?? DEFAULT_AVIF_QUALITY
   try {
     const meta = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
     if (!meta.width || !meta.height) return null
     const out = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS })
-      .resize({ width: MAX_IMAGE_WIDTH, withoutEnlargement: true })
-      .avif({ quality: AVIF_QUALITY })
+      .resize({ width: maxWidth, withoutEnlargement: true })
+      .avif({ quality })
       .toBuffer()
     const outMeta = await sharp(out).metadata()
     return { buffer: out, width: outMeta.width ?? meta.width, height: outMeta.height ?? meta.height }
@@ -171,21 +204,28 @@ export function cacheSingleImage(url: string): Promise<{ image: CachedImage, dat
  * @param protocolCoverUrl 协议封面（media:thumbnail / 图片 enclosure / JSON Feed image）。
  *   存在且可缓存时作为封面图（cover: true），正文图片仅作内容图；
  *   无协议封面时从正文图中选第一张合格图作为封面。
+ * @param options per-feed 图片缓存策略（来自 feeds 表），覆盖全局默认；未提供字段回退全局默认。
+ *   cacheAll 为 true 且未设置 maxImageCount 时，同一 entry 内不限制缓存图片数（漫画源全量离线）。
  */
 export async function cacheEntryImages(
   content: string | undefined,
   baseUrl: string,
   protocolCoverUrl?: string,
+  options: EntryImageOptions = {},
 ): Promise<{ attachments: ImageAttachment[], images: CachedImage[] }> {
-  const urls = extractImageUrls(content, baseUrl)
+  // 每篇最多缓存图片数：cacheAll 且未显式设置时视为不限制（用极大数近似）
+  const maxImageCount = options.cacheAll && !options.maxImageCount
+    ? Number.MAX_SAFE_INTEGER
+    : (options.maxImageCount ?? DEFAULT_MAX_IMAGE_COUNT)
+  const urls = extractImageUrls(content, baseUrl, maxImageCount)
   const attachments: ImageAttachment[] = []
   const images: CachedImage[] = []
 
   // 协议封面优先：下载压缩为第一张图并标记 cover（失败则静默回退正文选图）
   if (protocolCoverUrl) {
-    const raw = await downloadImage(protocolCoverUrl)
+    const raw = await downloadImage(protocolCoverUrl, options.maxSourceImageBytes)
     if (raw) {
-      const result = await compressToAvif(raw)
+      const result = await compressToAvif(raw, { maxWidth: options.maxImageWidth, quality: options.avifQuality })
       if (result) {
         const name = `img-${images.length}.avif`
         attachments.push({ name, data: result.buffer, content_type: "image/avif" })
@@ -209,9 +249,9 @@ export async function cacheEntryImages(
       const url = urls[i]!
       // 协议封面已在上面缓存，正文里重复的 URL 跳过
       if (url === protocolCoverUrl) continue
-      const raw = await downloadImage(url)
+      const raw = await downloadImage(url, options.maxSourceImageBytes)
       if (!raw) continue
-      const result = await compressToAvif(raw)
+      const result = await compressToAvif(raw, { maxWidth: options.maxImageWidth, quality: options.avifQuality })
       if (!result) continue
       results[i] = { url, result }
     }

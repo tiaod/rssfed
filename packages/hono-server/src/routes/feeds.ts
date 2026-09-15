@@ -5,6 +5,7 @@ import { parseOpml, type OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
 import { db, feeds } from "../db"
 import { enqueueFetch } from "../workers"
+import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
 import {
   resolveFeedId,
   ensureFeedRegistered,
@@ -48,6 +49,12 @@ feedsRouter.get("/", requireAdmin, async (c) => {
     errorMessage: f.errorMessage,
     lastFetchedAt: f.lastFetchedAt?.toISOString(),
     createdAt: f.createdAt.toISOString(),
+    // per-feed 图片缓存策略（见 rss/entry-images.ts）
+    cacheImages: f.cacheImages ?? false,
+    maxImageCount: f.maxImageCount ?? null,
+    maxImageWidth: f.maxImageWidth ?? null,
+    avifQuality: f.avifQuality ?? null,
+    maxSourceImageBytes: f.maxSourceImageBytes ?? null,
   })))
 })
 
@@ -171,6 +178,11 @@ feedsRouter.get("/subscriptions", requireAuth, async (c) => {
   return c.json(subs)
 })
 
+/** 获取全局默认图片缓存参数（仅管理员），供前端展示输入框 placeholder 默认值 */
+feedsRouter.get("/image-defaults", requireAdmin, async (c) => {
+  return c.json(DEFAULT_IMAGE_OPTIONS)
+})
+
 /** 暂停/恢复订阅抓取（仅管理员） */
 feedsRouter.patch("/:feedId", requireAdmin, async (c) => {
   const feedId = c.req.param("feedId")!
@@ -186,13 +198,26 @@ feedsRouter.patch("/:feedId", requireAdmin, async (c) => {
   return c.json({ feedId, status })
 })
 
-/** 修改订阅源信息（仅管理员）：title / url / description / siteUrl / image */
+/** 修改订阅源信息（仅管理员）：title / url / description / siteUrl / image 及 per-feed 图片缓存策略 */
 feedsRouter.put("/:feedId", requireAdmin, async (c) => {
   const feedId = c.req.param("feedId")!
   const body = await c.req.json()
-  const patch: Record<string, string> = {}
-  for (const key of ["title", "url", "description", "siteUrl", "image"]) {
-    if (body[key] !== undefined) patch[key] = body[key]
+  // 图片缓存策略字段（数值/布尔；传 null 表示重置回全局默认）
+  const imageKeys = ["maxImageCount", "maxImageWidth", "avifQuality", "maxSourceImageBytes"] as const
+  type ImageKey = typeof imageKeys[number]
+  const patch: Record<string, string | number | boolean | null> = {}
+  for (const key of ["title", "url", "description", "siteUrl", "image"] as const) {
+    if (typeof body[key] === "string") patch[key] = body[key]
+  }
+  if (typeof body.cacheImages === "boolean") patch.cacheImages = body.cacheImages
+  for (const key of imageKeys) {
+    const v = body[key]
+    if (v === null) {
+      patch[key] = null // 显式重置为全局默认
+    } else if (v !== undefined) {
+      const n = Number(v)
+      if (!Number.isNaN(n) && n >= 0) patch[key] = Math.floor(n)
+    }
   }
   if (!Object.keys(patch).length) {
     return c.json({ error: "no fields to update" }, 400)

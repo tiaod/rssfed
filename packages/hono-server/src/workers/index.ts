@@ -4,7 +4,7 @@ import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
 import { ensureFeedDatabase, ensureBotDatabase, createCouchDb } from "../couchdb/client"
 import { parseFeedUrl, formatFeedError, type ParsedFeed, type ParsedItem } from "../rss/parser"
-import { cacheEntryImages, cacheSingleImage } from "../rss/entry-images"
+import { cacheEntryImages, cacheSingleImage, type EntryImageOptions } from "../rss/entry-images"
 import { db, feeds, botFeeds, bots as botsTable, type EntryDoc } from "../db"
 
 const connection = new IORedis({
@@ -112,6 +112,8 @@ async function updateFeedRegistry(feedId: string, url: string, parsed: ParsedFee
 /** 写入新条目到 per-feed CouchDB 库，返回本次新增的条目列表 */
 async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedItem[]) {
   const newEntries: EntryDoc[] = []
+  // 读取该 feed 的 per-feed 图片缓存策略（管理员可覆盖全局默认，未设置则走全局默认）
+  const imageOptions = await resolveFeedImageOptions(feedId)
   for (const item of items) {
     const guid = item.guid ?? item.link ?? item.title ?? ""
     const entryId = `entry:${feedId}:${crypto.createHash("sha256").update(guid).digest("hex").slice(0, 12)}`
@@ -129,7 +131,7 @@ async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedIte
     // 协议封面（media:thumbnail/图片 enclosure）优先作为封面，正文图回退；
     // 图片缓存失败不阻塞抓取，回退为无图条目（前端保留原 URL 直链）
     try {
-      const { attachments, images } = await cacheEntryImages(entry.content, entry.url, item.coverUrl)
+      const { attachments, images } = await cacheEntryImages(entry.content, entry.url, item.coverUrl, imageOptions)
       if (images.length > 0) {
         // nano 的 multipart.insert 需在 params 中显式传入 docName
         await feedDb.multipart.insert({ ...entry, images } as any, attachments, { docName: entryId })
@@ -143,6 +145,30 @@ async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedIte
     newEntries.push(entry)
   }
   return newEntries
+}
+
+/** 从 feeds 表读取该 feed 的 per-feed 图片缓存配置（仅返回设置过的字段，其余走全局默认） */
+async function resolveFeedImageOptions(feedId: string): Promise<EntryImageOptions> {
+  try {
+    const [feed] = await db.select({
+      cacheImages: feeds.cacheImages,
+      maxImageCount: feeds.maxImageCount,
+      maxImageWidth: feeds.maxImageWidth,
+      avifQuality: feeds.avifQuality,
+      maxSourceImageBytes: feeds.maxSourceImageBytes,
+    }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
+    if (!feed) return {}
+    return {
+      cacheAll: feed.cacheImages ?? false,
+      maxImageCount: feed.maxImageCount ?? undefined,
+      maxImageWidth: feed.maxImageWidth ?? undefined,
+      avifQuality: feed.avifQuality ?? undefined,
+      maxSourceImageBytes: feed.maxSourceImageBytes ?? undefined,
+    }
+  } catch {
+    // 读取配置失败不影响抓取，走全局默认
+    return {}
+  }
 }
 
 /** 由 RSS item 构造 EntryDoc */

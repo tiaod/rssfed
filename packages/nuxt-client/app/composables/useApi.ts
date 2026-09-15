@@ -21,11 +21,22 @@ export function useApi() {
       /** 管理员：暂停/恢复抓取 */
       updateStatus: (id: string, status: 'active' | 'paused') =>
         apiFetch(`${base}/api/feeds/${id}`, { method: 'PATCH', body: { status } }),
-      /** 管理员：修改订阅源信息 */
-      update: (id: string, body: Partial<{ title: string, url: string, description: string, siteUrl: string, image: string }>) =>
+      /** 管理员：修改订阅源信息（含 per-feed 图片缓存策略；数值传 null 表示重置回全局默认） */
+      update: (id: string, body: Partial<{
+        title: string, url: string, description: string, siteUrl: string, image: string,
+        cacheImages: boolean,
+        maxImageCount: number | null,
+        maxImageWidth: number | null,
+        avifQuality: number | null,
+        maxSourceImageBytes: number | null,
+      }>) =>
         apiFetch(`${base}/api/feeds/${id}`, { method: 'PUT', body }),
       /** 管理员：触发重新抓取 */
       refetch: (id: string) => apiFetch(`${base}/api/feeds/${id}/refetch`, { method: 'POST' }),
+      /** 管理员：获取全局默认图片缓存参数（供输入框 placeholder 展示默认值） */
+      imageDefaults: () => apiFetch<{ maxImageCount: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number }>(
+        `${base}/api/feeds/image-defaults`
+      ),
       /** 导入 OPML：批量注册订阅源并创建订阅，返回导入汇总 */
       importOpml: (opml: string) => apiFetch<{ total: number, imported: number, skipped: number, failed: { url: string, error: string }[] }>(
         `${base}/api/feeds/import-opml`,

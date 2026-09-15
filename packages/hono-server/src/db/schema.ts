@@ -85,6 +85,17 @@ export const apiToken = pgTable("api_token", {
   status: text("status").notNull().default("active"),
   /** 关联的 CouchDB 库名（首次 ensure 时生成随机库名并回写） */
   couchDbName: text("couch_db_name").unique(),
+  // ── 图片缓存 per-feed 策略（管理员可覆盖全局默认，见 rss/entry-images.ts） ──
+  /** 是否缓存全部正文图片（如漫画源全量离线；false/null 跟随全局默认限制数量） */
+  cacheImages: boolean("cache_images"),
+  /** 每篇最多缓存图片数（null=跟随全局默认；cacheImages 开启且未设置时视为不限制） */
+  maxImageCount: integer("max_image_count"),
+  /** 压缩后最大宽度 px（null=跟随全局默认 MAX_IMAGE_WIDTH） */
+  maxImageWidth: integer("max_image_width"),
+  /** AVIF 编码质量（null=跟随全局默认 AVIF_QUALITY） */
+  avifQuality: integer("avif_quality"),
+  /** 源图下载大小上限字节（null=跟随全局默认 MAX_SOURCE_IMAGE_BYTES） */
+  maxSourceImageBytes: integer("max_source_image_bytes"),
 })
 
 export const bots = pgTable("bots", {
