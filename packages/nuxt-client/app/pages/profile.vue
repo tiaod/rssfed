@@ -2,6 +2,7 @@
 import SubscriptionManager from '~/components/settings/SubscriptionManager.vue'
 import AdminFeedManager from '~/components/admin/AdminFeedManager.vue'
 import SiteSettingsManager from '~/components/admin/SiteSettingsManager.vue'
+import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 
 definePageMeta({
@@ -54,11 +55,12 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
 
 const isAdmin = computed(() => userStore.isAdmin)
 
-// 标签页：管理员额外显示“订阅源管理”
+// 标签页：AI 助手对普通用户可用；管理员额外显示“订阅源管理”“站点设置”
 const tabs = computed(() => {
   const items = [
     { label: '订阅管理', icon: 'i-lucide-rss' },
     { label: '通用设置', icon: 'i-lucide-settings' },
+    { label: 'AI 助手', icon: 'i-lucide-bot' }
   ]
   if (isAdmin.value) {
     items.push({ label: '订阅源管理', icon: 'i-lucide-shield' })
@@ -253,11 +255,14 @@ const handleReset = async () => {
                 </section>
               </div>
 
+              <!-- AI 助手（MCP 接入） -->
+              <McpSetupPanel v-else-if="index === 2" />
+
               <!-- 订阅源管理（管理员） -->
-              <AdminFeedManager v-else-if="isAdmin && index === 2" />
+              <AdminFeedManager v-else-if="isAdmin && index === 3" />
 
               <!-- 站点设置（管理员） -->
-              <SiteSettingsManager v-else-if="isAdmin && index === 3" />
+              <SiteSettingsManager v-else-if="isAdmin && index === 4" />
             </div>
           </template>
         </UTabs>

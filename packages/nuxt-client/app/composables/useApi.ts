@@ -1,6 +1,7 @@
 // 统一 API 请求：跨源访问 Hono 后端时必须携带会话 Cookie（ofetch 默认 same-origin）
 import type { FeedSubscriptionItem } from '~/types/rss'
 import type { SiteSettingsPublic, SiteSettingsFull, SiteSettingsUpdate } from '~/types/site'
+import type { McpToken, McpTokenCreated } from '~/types/mcp'
 import { resolveApiBase } from '~/utils/apiBase'
 
 function apiFetch<T>(url: string, options: Parameters<typeof $fetch<T>>[1] = {}) {
@@ -78,6 +79,16 @@ export function useApi() {
         form.append('file', file)
         return apiFetch<{ avatarUrl: string }>(`${base}/api/user/avatar`, { method: 'POST', body: form })
       }
+    },
+    /** 用户个人 API token：供 MCP 客户端以 Bearer 认证调用 /mcp 端点 */
+    tokens: {
+      /** 列出当前用户的 token 元数据（不含明文/token） */
+      list: () => apiFetch<McpToken[]>(`${base}/api/user/tokens`),
+      /** 生成一个新 token，明文只在本次返回（需一次性保存） */
+      create: (body: { name?: string, expiresInDays?: number }) =>
+        apiFetch<McpTokenCreated>(`${base}/api/user/tokens`, { method: 'POST', body }),
+      /** 删除某个 token（物理删除，删除后立即失效） */
+      remove: (id: string) => apiFetch(`${base}/api/user/tokens/${id}`, { method: 'DELETE' })
     },
     /** 站点品牌配置（公开读取，免登录；离线可由 Service Worker 缓存命中） */
     siteSettings: {
