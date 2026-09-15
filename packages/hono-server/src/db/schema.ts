@@ -64,8 +64,6 @@ export const apiToken = pgTable("api_token", {
   lastUsedAt: timestamp("last_used_at"),
   /** 过期时间；为 NULL 表示不过期 */
   expiresAt: timestamp("expires_at"),
-  /** 吊销时间；为 NULL 表示有效 */
-  revokedAt: timestamp("revoked_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (table) => [
   index("api_token_user_id_idx").on(table.userId),

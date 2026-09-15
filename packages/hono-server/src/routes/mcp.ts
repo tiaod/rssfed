@@ -32,7 +32,7 @@ import { getFeed, listEntries, searchEntries } from "../services/entries"
  * McpServer 实例」的多租户模式运行：每个请求从其 `Authorization: Bearer <token>`
  * 解析出 userId，然后为该用户构建一套只读写其订阅数据的工具。
  *
- * 认证：token 无效 / 吊销 / 过期时拒绝（401）。
+ * 认证：token 无效 / 已删除 / 过期时拒绝（401）。
  * 授权：所有工具都以 userId 为边界，绝不提供 admin 级全局操作。
  */
 

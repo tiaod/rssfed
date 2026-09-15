@@ -1,6 +1,6 @@
 import { Hono, type Context, type Next } from "hono"
 import { auth } from "../auth"
-import { createToken, listTokens, revokeToken } from "../services/api-token"
+import { createToken, listTokens, deleteToken } from "../services/api-token"
 
 type TokenVariables = { userId: string }
 
@@ -45,16 +45,15 @@ userTokensRouter.get("/", requireAuth, async (c) => {
     prefix: t.prefix,
     lastUsedAt: t.lastUsedAt?.toISOString() ?? null,
     expiresAt: t.expiresAt?.toISOString() ?? null,
-    revokedAt: t.revokedAt?.toISOString() ?? null,
     createdAt: t.createdAt.toISOString(),
   })))
 })
 
-/** 吊销当前用户的某个 token（幂等） */
+/** 删除当前用户的某个 token（物理删除，删除后不可恢复） */
 userTokensRouter.delete("/:id", requireAuth, async (c) => {
   const userId = c.get("userId")
   const tokenId = c.req.param("id")!
-  const ok = await revokeToken(userId, tokenId)
-  if (!ok) return c.json({ error: "token not found or already revoked" }, 404)
+  const ok = await deleteToken(userId, tokenId)
+  if (!ok) return c.json({ error: "token not found" }, 404)
   return c.json({ success: true })
 })

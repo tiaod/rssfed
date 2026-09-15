@@ -55,7 +55,7 @@ describe("MCP 认证拦截", () => {
     expect(res.status).toBe(401)
   })
 
-  // 注：「无效/吊销/过期 token → 401」需要查询 api_token 表（依赖真实 PostgreSQL），
+  // 注：「无效/已删除/过期 token → 401」需要查询 api_token 表（依赖真实 PostgreSQL），
   // 不属于本文件的无基础设施断言；已在 scripts/verify-mcp.ts 中覆盖。
 })
 

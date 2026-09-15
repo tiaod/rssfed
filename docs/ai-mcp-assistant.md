@@ -15,7 +15,7 @@
 | 交付形态 | 一个 MCP server，作为 RSSFed Hono 后端的一个端点（`/mcp`）对外暴露 |
 | 传输方式 | **Streamable HTTP**（当前 MCP 标准，单端点 `POST/GET /mcp`，内部使用 SSE 流式）。旧 HTTP+SSE（2024-11-05）已被弃用，不作为主目标 |
 | 采用 SDK | **官方 `@modelcontextprotocol/server`** + Hono 适配 `@modelcontextprotocol/hono`（`createMcpHonoApp()` + `WebStandardStreamableHTTPServerTransport`） |
-| 认证 | **用户个人 API token（Bearer）**，每个用户独立生成/吊销 |
+| 认证 | **用户个人 API token（Bearer）**，每个用户独立生成/删除 |
 | 职责 | 只做「用户已授权数据」的读 + 订阅相关写操作；绝不提供跨用户或 admin 级操作 |
 | 工具范围 | 订阅管理、推荐新源、Bot/分组管理、读取内容（4 类，见 §3） |
 
@@ -146,7 +146,7 @@ MCP 工具**复用现有函数，不新写业务逻辑**。所需改动集中在
 REST 路由（`feeds.ts`）改为从 `services/feeds.ts` import 这些函数，行为不变。
 > 价值：MCP 与 REST 路由共用同一份业务逻辑 + 授权校验，逻辑不分裂。
 
-**同时新增** `routes/user-tokens.ts`（token 生成/列表/吊销）+ `routes/mcp.ts`（挂 `/mcp`）。
+**同时新增** `routes/user-tokens.ts`（token 生成/列表/删除）+ `routes/mcp.ts`（挂 `/mcp`）。
 
 ### 5.2 新增数据表
 `api_token`（见 §6 认证）：
@@ -159,7 +159,6 @@ prefix text               -- 明文前缀展示用
 lastUsedAt timestamp
 createdAt timestamp
 expiresAt timestamp NULL
-revokedAt timestamp NULL
 ```
 
 ### 5.3 依赖
@@ -172,11 +171,11 @@ revokedAt timestamp NULL
 ### 6.1 token 生命周期
 - `POST /api/user/tokens`：登录后生成，**明文只返回一次**；DB 只存 hash。
 - `GET /api/user/tokens`：列出自己 token 元数据（不含明文）。
-- `DELETE /api/user/tokens/:id`：吊销（置 `revokedAt`）。
+- `DELETE /api/user/tokens/:id`：删除（物理删除该行，删除后立即失效）。
 
 ### 6.2 MCP server 校验
 MCP 请求头 `Authorization: Bearer <token>`：
-1. 找不到 / 已吊销 / 过期 → 未授权；
+1. 找不到（含已删除）/ 过期 → 未授权；
 2. 解析出 `userId` 注入工具上下文；
 3. 所有工具只读写该 `userId` 数据。
 
@@ -219,7 +218,7 @@ MCP 请求头 `Authorization: Bearer <token>`：
 
 | 阶段 | 内容 | 工作量 |
 |---|---|---|
-| **P0** | `api_token` 表 + 生成/列表/吊销 + 校验中间件 | ✅ 已完成 |
+| **P0** | `api_token` 表 + 生成/列表/删除 + 校验中间件 | ✅ 已完成 |
 | **P1** | 抽 `services/feeds.ts` 共享层，补 `removeSubscription` | ✅ 已完成 |
 | **P2** | 挂 `/mcp`，用 SDK 暴露工具，接认证 | ✅ 已完成 |
 | **P3** | 订阅管理工具（list/add/remove/pause/resume/update/refetch/discover） | ✅ 已完成 |

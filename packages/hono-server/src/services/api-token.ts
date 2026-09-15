@@ -1,5 +1,5 @@
 import crypto from "node:crypto"
-import { eq, and, isNull, desc } from "drizzle-orm"
+import { eq, and, desc } from "drizzle-orm"
 import { db, apiToken, user } from "../db"
 
 /**
@@ -50,14 +50,14 @@ export async function createToken(userId: string, name: string, expiresAt?: Date
 }
 
 /**
- * 校验一个 token 明文，返回其归属用户 id；无效/吊销/过期返回 null。
+ * 校验一个 token 明文，返回其归属用户 id；无效/已删除/过期返回 null。
  * 校验成功时顺带刷新 lastUsedAt（不阻塞主流程，失败忽略）。
  */
 export async function resolveTokenUser(token: string): Promise<string | null> {
   const tokenHash = hashToken(token)
   const [row] = await db.select()
     .from(apiToken)
-    .where(and(eq(apiToken.tokenHash, tokenHash), isNull(apiToken.revokedAt)))
+    .where(eq(apiToken.tokenHash, tokenHash))
     .limit(1)
   if (!row) return null
   if (row.expiresAt && row.expiresAt.getTime() < Date.now()) return null
@@ -67,7 +67,7 @@ export async function resolveTokenUser(token: string): Promise<string | null> {
     .where(eq(apiToken.id, row.id))
     .catch(() => {})
 
-  // 确认用户仍存在（被删除的 token 无意义）
+  // 确认用户仍存在（用户注销时 token 会级联删除，此处再兜一层）
   const [u] = await db.select({ id: user.id }).from(user).where(eq(user.id, row.userId)).limit(1)
   return u ? u.id : null
 }
@@ -80,7 +80,6 @@ export async function listTokens(userId: string) {
     prefix: apiToken.prefix,
     lastUsedAt: apiToken.lastUsedAt,
     expiresAt: apiToken.expiresAt,
-    revokedAt: apiToken.revokedAt,
     createdAt: apiToken.createdAt,
   }).from(apiToken)
     .where(eq(apiToken.userId, userId))
@@ -88,11 +87,10 @@ export async function listTokens(userId: string) {
   return rows
 }
 
-/** 吊销某用户的某个 token（幂等；不属于该用户则返回 false） */
-export async function revokeToken(userId: string, tokenId: string): Promise<boolean> {
-  const updated = await db.update(apiToken)
-    .set({ revokedAt: new Date() })
-    .where(and(eq(apiToken.id, tokenId), eq(apiToken.userId, userId), isNull(apiToken.revokedAt)))
+/** 删除某用户的某个 token（物理删除，删除后立即失效且不再出现在列表中；不属于该用户则返回 false） */
+export async function deleteToken(userId: string, tokenId: string): Promise<boolean> {
+  const deleted = await db.delete(apiToken)
+    .where(and(eq(apiToken.id, tokenId), eq(apiToken.userId, userId)))
     .returning({ id: apiToken.id })
-  return updated.length > 0
+  return deleted.length > 0
 }
