@@ -30,6 +30,15 @@ function toNullable(v: string) {
   return trimmed === '' ? null : trimmed
 }
 
+/** 主题色留空时，取色器与色块用于展示的内置默认色（仅前端展示，不落库） */
+const DEFAULT_PRIMARY_COLOR = '#059669'
+
+/** UColorPicker 需要具体颜色，空值回退默认色；选色后写回表单（仍可手动清空以恢复默认） */
+const pickerColor = computed({
+  get: () => form.value.primaryColor || DEFAULT_PRIMARY_COLOR,
+  set: (value: string | undefined) => { form.value.primaryColor = value ?? '' },
+})
+
 async function load() {
   loading.value = true
   error.value = null
@@ -188,15 +197,44 @@ onMounted(load)
         label="主题色"
         description="主色调（hex）。留空使用应用内置默认主题"
       >
-        <div class="flex items-center gap-2">
-          <input
-            type="color"
-            class="h-10 w-14 cursor-pointer rounded-lg border border-default p-0.5"
-            :value="form.primaryColor || '#059669'"
-            @input="form.primaryColor = ($event.target as HTMLInputElement).value"
-          />
-          <UInput v-model="form.primaryColor" placeholder="#059669" class="w-40" />
-        </div>
+        <!-- 整块输入框即触发器：左侧色块显示当前色，点击（或聚焦后回车）弹出取色器 -->
+        <UPopover
+          :content="{ onOpenAutoFocus: (e: Event) => e.preventDefault() }"
+        >
+          <div class="w-48">
+            <UInput
+              v-model="form.primaryColor"
+              placeholder="#059669"
+              class="w-full"
+            >
+              <template #leading>
+                <span
+                  class="size-3.5 rounded-full ring-1 ring-default"
+                  :style="{ backgroundColor: pickerColor }"
+                />
+              </template>
+            </UInput>
+          </div>
+
+          <template #content>
+            <div class="flex flex-col gap-2 p-3">
+              <UColorPicker
+                v-model="pickerColor"
+              />
+
+              <UButton
+                v-if="form.primaryColor"
+                label="恢复默认"
+                icon="i-lucide-rotate-ccw"
+                color="neutral"
+                variant="ghost"
+                size="sm"
+                block
+                @click="form.primaryColor = ''"
+              />
+            </div>
+          </template>
+        </UPopover>
       </UFormField>
 
       <UFormField
