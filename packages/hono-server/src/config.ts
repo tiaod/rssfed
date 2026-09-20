@@ -9,14 +9,19 @@ export const allowedOrigins: string[] = (() => {
   return raw.split(",").map((s) => s.trim()).filter(Boolean)
 })()
 
+/** 是否生产环境：生产只认显式白名单，不做任何网段放行 */
+export const isProduction = process.env.NODE_ENV === "production"
+
 /**
  * 是否允许该跨域来源。
  *
- * 在 allowedOrigins 白名单基础上，开发场景额外允许局域网私有网段访问
+ * 生产环境只认 allowedOrigins 白名单；
+ * 开发场景额外允许 localhost 与局域网私有网段访问
  * （手机通过 http://192.168.x.x:3000 调试时 origin 为局域网 IP）。
  */
 export function isOriginAllowed(origin: string): boolean {
   if (allowedOrigins.includes(origin)) return true
+  if (isProduction) return false
   try {
     const host = new URL(origin).hostname
     if (host === "localhost" || host === "127.0.0.1") return true

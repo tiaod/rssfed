@@ -13,6 +13,7 @@ import {
   listSubscriptionsForUser,
 } from "../services/feeds"
 import { auth } from "../auth"
+import { requireAdmin } from "../middleware/require-admin"
 
 type FeedsVariables = { userId: string }
 
@@ -20,15 +21,6 @@ type FeedsVariables = { userId: string }
 async function requireAuth(c: Context<{ Variables: FeedsVariables }>, next: Next) {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
-  c.set("userId", session.user.id)
-  await next()
-}
-
-/** 校验管理员权限（未登录 401 / 非管理员 403） */
-async function requireAdmin(c: Context<{ Variables: FeedsVariables }>, next: Next) {
-  const session = await auth.api.getSession({ headers: c.req.raw.headers })
-  if (!session?.user) return c.json({ error: "unauthorized" }, 401)
-  if (session.user.role !== "admin") return c.json({ error: "forbidden" }, 403)
   c.set("userId", session.user.id)
   await next()
 }

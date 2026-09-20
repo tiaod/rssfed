@@ -1,22 +1,13 @@
-import { Hono, type Context, type Next } from "hono"
+import { Hono } from "hono"
 import { eq } from "drizzle-orm"
 import { db, siteSettings, type SiteSettings } from "../db"
-import { auth } from "../auth"
+import { requireAdmin } from "../middleware/require-admin"
 import { ApiError, handleAvatarUpload, cleanupAttachment } from "../avatar"
 
 type SiteSettingsVariables = { userId: string }
 
 /** 站点配置恒为单行，固定主键 */
 const SITE_ID = "site"
-
-/** 校验管理员权限（未登录 401 / 非管理员 403） */
-async function requireAdmin(c: Context<{ Variables: SiteSettingsVariables }>, next: Next) {
-  const session = await auth.api.getSession({ headers: c.req.raw.headers })
-  if (!session?.user) return c.json({ error: "unauthorized" }, 401)
-  if (session.user.role !== "admin") return c.json({ error: "forbidden" }, 403)
-  c.set("userId", session.user.id)
-  await next()
-}
 
 /** 保证单例行存在；并发安全（onConflictDoNothing） */
 async function ensureSiteSettingsRow() {
