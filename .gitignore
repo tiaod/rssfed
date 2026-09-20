@@ -10,6 +10,8 @@ dist/
 *.tsbuildinfo
 .env
 .env.local
+# 生产密钥（模板见 .env.production.example）
+.env.production
 *.db
 *.sqlite
 # ZCode 自动生成的会话计划（.zcode/skills 为项目自定义技能，保留跟踪）

@@ -137,12 +137,18 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
 ## 部署架构
 
 ```
-反向代理（nginx / Caddy）
-  ├── /api/*  → Hono（后端服务）
-  └── /*      → Nuxt（SSR 渲染）
+反向代理（Caddy / nginx）:443
+  ├── /api/*              → Hono（后端服务）
+  ├── /mcp、/mcp/*        → Hono（MCP 端点，不能做 301/307）
+  ├── /.well-known/*      → Hono（webfinger）
+  ├── /nodeinfo/*         → Hono
+  ├── /users/*、/inbox    → Hono（ActivityPub actor / inbox）
+  └── /*                  → Nuxt（SSR 渲染）
 ```
 
-开发模式下 Nuxt 通过 Nitro middleware 将 `/api/*` 代理到 Hono。生产环境通过反向代理统一域名，确保 cookie 同域。
+后端的 ActivityPub 端点由 Hono 的 `app.all("*")` 兜底提供，**只转发 `/api/*` 会让联邦功能整体 404**，而首页看起来完全正常。
+
+前端不经过 Nitro 代理后端：浏览器按 `NUXT_PUBLIC_API_BASE_URL` 直连后端（见 `packages/nuxt-client/app/composables/useApi.ts`），同域部署下即反代地址，cookie 同站。生产部署步骤见 [docs/docker-deployment.md](docs/docker-deployment.md)，反代规则见 [deploy/Caddyfile](deploy/Caddyfile)。
 
 ## 数据流
 
