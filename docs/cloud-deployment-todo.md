@@ -166,7 +166,7 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 本次部署遇到的限制与结论：
 
 - `github.com` 的 HTTPS 与 Docker Hub 直连都超时（国内云主机常见）；GitHub **SSH(22) 可用**，镜像拉取依赖容器运行时已配置的内网加速源。换机器时先确认这两条通路，否则会卡在构建阶段。
-- 内存只有 2G 左右，容器内构建 Nuxt 极易 OOM，因此镜像一律**本地构建后传输**（`docker save | gzip | ssh | docker load`），服务器只跑不建。
+- 内存只有 2G 左右，容器内构建 Nuxt 极易 OOM，因此镜像改由 **CI 构建并推送到 ghcr**，服务器只 `compose pull` 拉取运行（见 [docker-deployment.md](docker-deployment.md) 第 10 节）。
 - 反代复用宿主机已有的 Caddy：只在其配置**末尾追加**一个站点段，不动既有站点；TLS 由 Caddy 自动签发。
 
 与具体环境无关的部署形态：
@@ -174,7 +174,7 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 | 项 | 值 |
 | --- | --- |
 | 部署目录 | `~/rssfed/`：`docker-compose.prod.yml` + `.env.production`（权限 600），无需完整源码 |
-| 镜像来源 | 本地构建 → ssh 流式传输 → 服务器 `docker load` |
+| 镜像来源 | CI（GitHub Actions）构建并推送到 ghcr，服务器 `compose pull` 拉取；本地构建仅用于开发 |
 | 文件存储 | `STORAGE_DRIVER=fs`，数据在 `uploads-data` 卷（`/app/data/uploads`），附件走 `/api/files/*` 代理；SeaweedFS 保留为可选（`--profile s3`） |
 | 启动方式 | `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` |
 | 资源占用 | 上线后实测内存约 900Mi（5 个容器） |

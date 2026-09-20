@@ -6,11 +6,13 @@
 # 镜像名：ghcr.io/<owner>/<repo>/<target>，带两个 tag：
 #   latest       —— 常规发布用
 #   sha-<短hash> —— 便于回滚到任意一次提交（改 compose 里的 tag 即可）
-name: deploy
+name: build-images
 
-# 当前阶段只做「构建 + 推送镜像」。
-# SSH 自动部署（deploy job）等服务器侧准备好部署密钥与 ghcr 登录后再接入本文件，
-# 届时触发方式仍为 push master。
+# 只做「构建 + 推送镜像」，部署是手工的：
+#   docker compose --env-file .env.production -f docker-compose.prod.yml pull
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build
+# 不让 CI 直接 SSH 部署的原因：那要求把生产私钥交给云端 Runner，而构建阶段会执行
+# 第三方依赖的代码，供应链一旦出问题，等于把服务器钥匙一并交出去。
 
 on:
   push:

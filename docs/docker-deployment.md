@@ -27,8 +27,9 @@ openssl rand -hex 32   # 生成 POSTGRES_PASSWORD / COUCHDB_PASSWORD / BETTER_AU
 openssl rand -hex 16   # 生成 COUCHDB_PROXY_SECRET（生成一次后不要再改）
 vim .env.production
 
-# 2) 构建并启动（--profile tls 会额外拉起 Caddy 自动申请 HTTPS 证书）
-docker compose --env-file .env.production -f docker-compose.prod.yml --profile tls up -d --build
+# 2) 拉取镜像并启动（镜像由 CI 构建推送到 ghcr，见第 10 节）
+#    --profile tls 会额外拉起 Caddy 自动申请 HTTPS 证书
+docker compose --env-file .env.production -f docker-compose.prod.yml --profile tls up -d
 ```
 
 启动顺序由编排保证：`postgres`/`couchdb`/`redis` 健康 → `migrate` 对齐表结构 → `server` → `web` → `caddy`。
@@ -165,7 +166,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 - **单副本**：抓取调度与 BotKit 轮询是进程内 `setInterval`，worker 与 API 同进程。`server` 不要 `--scale` 超过 1，否则会重复入队、重复发布 ActivityPub 活动。
 - **持久化**：`postgres-data`、`couchdb-data`、`redis-data`、`seaweedfs-data`、`caddy-data` 五个命名卷必须纳入备份。CouchDB 每个订阅源一个库，是数据主体，别只备份 PostgreSQL；`seaweedfs-data` 存的是正文图片与头像附件。
 - **日志**：compose 里统一配了 `json-file` 轮转（单文件 10MB × 3）。要集中收集就改 `x-logging` 锚点，或把 `docker logs` 接到 Loki/CloudWatch。
-- **更新发布**：`git pull` 后重复 `up -d --build` 即可，`migrate` 会先跑完再滚动应用容器。
+- **更新发布**：push 到 master 后 CI 构建并推送镜像，然后在服务器执行 `docker compose --env-file .env.production -f docker-compose.prod.yml pull && docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` —— 镜像没变时 `up -d` 不会重建容器，变了则会先跑 migrate 再滚动应用。回滚方式见第 10 节。
 - **构建缓存**：镜像分层与 pnpm store 都走 BuildKit 缓存，首次构建后再次构建很快。缓存占用的磁盘可用 `docker builder prune` 回收（代价是下次构建重新下载依赖）。
 - **资源**：抓取 + AVIF 压缩与 API 抢 CPU/内存，2 核 4GB 起步；抓取量大时优先把 worker 拆成独立进程。
 
@@ -250,3 +251,38 @@ console.log("bucket ready");
 ```
 
 排障：用未签名请求探测 SeaweedFS 的 S3 端口会返回 403 `AccessDenied` —— 这说明服务在正常监听，不是故障。
+
+## 10. 镜像仓库与 CI
+
+镜像由 GitHub Actions 构建并推送到 **GitHub Container Registry**（[build-images.yml](../.github/workflows/build-images.yml)，push `master` 触发）：
+
+| 镜像 | 用途 |
+| --- | --- |
+| `ghcr.io/tiaod/rssfed/server` | 后端（API + ActivityPub + worker） |
+| `ghcr.io/tiaod/rssfed/web` | 前端（Nuxt SSR） |
+| `ghcr.io/tiaod/rssfed/migrate` | 数据库结构对齐（一次性任务） |
+
+每次构建打两个 tag：`latest` 与 `sha-<短hash>`。
+
+**为什么在 CI 构建**：生产服务器内存只有 ~2G，容器内构建 Nuxt 会 OOM（见第 2 节）。服务器只负责拉取与运行。
+
+**为什么不让 CI 直接 SSH 部署**：那要求把生产私钥交给云端 Runner，而构建阶段会执行第三方依赖的代码 —— 供应链一旦出问题，等于把服务器钥匙一并交出去。当前是「CI 只推镜像 + 服务器手工拉取」，认证只有单向的：服务器持有一个 ghcr 只读凭证。
+
+### 部署与回滚
+
+```bash
+cd ~/rssfed
+
+# 常规发布：拉取新镜像，重建变化了的容器
+docker compose --env-file .env.production -f docker-compose.prod.yml pull
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build
+
+# 回滚：把 compose 里三个服务的 :latest 换成目标提交的 :sha-<短hash>，再执行上面两条
+```
+
+拉取私有包前需要登录（仓库转 public 且把 package 可见性也改成 public 后，可 `docker logout ghcr.io` 去掉这步）：
+
+```bash
+echo "<PAT>" | docker login ghcr.io -u tiaod --password-stdin
+# PAT 只需 read:packages 权限
+```
