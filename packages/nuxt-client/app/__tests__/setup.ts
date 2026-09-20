@@ -13,7 +13,8 @@ const mockAuthClient = {
       isPending: false,
     },
   })),
-  getSession: vi.fn(),
+  // store 的 refresh() 会解构 getSession() 的返回值，mock 必须返回对象而非 undefined
+  getSession: vi.fn(async () => ({ data: null })),
   signOut: vi.fn(),
   signUp: {
     email: vi.fn(),
