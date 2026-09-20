@@ -2,7 +2,7 @@ services:
   postgres:
     image: postgres:17-alpine
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     environment:
       POSTGRES_USER: rssfed
       POSTGRES_PASSWORD: rssfed
@@ -18,7 +18,7 @@ services:
   couchdb:
     image: couchdb:3
     ports:
-      - "5984:5984"
+      - "127.0.0.1:5984:5984"
     environment:
       COUCHDB_USER: admin
       COUCHDB_PASSWORD: admin
@@ -33,7 +33,7 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     volumes:
       - rssfed-redis:/data
     healthcheck:
@@ -46,7 +46,7 @@ services:
     image: dpage/pgadmin4:latest
     profiles: ["dev"]
     ports:
-      - "5050:80"
+      - "127.0.0.1:5050:80"
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@rssfed.dev
       PGADMIN_DEFAULT_PASSWORD: admin
