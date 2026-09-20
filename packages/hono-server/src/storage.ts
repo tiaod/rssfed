@@ -141,7 +141,7 @@ const MIME_BY_EXT: Record<string, string> = {
 }
 
 /**
- * 本地文件系统存储：文件落在 STORAGE_LOCAL_DIR（生产环境应挂持久卷）。
+ * 本地文件系统存储：文件落在 STORAGE_FS_DIR（生产环境应挂持久卷）。
  * 上传路径会保留原始扩展名（见 generateUniqueFileName），因此读取时按扩展名推断类型是可靠的。
  */
 export class FilesystemStorage implements Storage {
@@ -216,33 +216,39 @@ export function getUserFilePath(userId: string, filename: string): string {
 
 /**
  * 按 STORAGE_DRIVER 选择存储后端：
- *   - `local`：本地文件系统，需要 STORAGE_LOCAL_DIR
- *   - `s3`（默认）：S3 兼容对象存储，保持既有行为不变
+ *   - `fs`：本地文件系统（FilesystemStorage），需要 STORAGE_FS_DIR
+ *   - `s3`（默认）：S3 兼容对象存储（S3Storage），配置见 STORAGE_S3_*
+ *
+ * 未知取值直接抛错：命名拼错时宁可启动失败，也不要静默退化到另一个后端。
  */
 export function createStorageFromEnv(): Storage {
   const driver = (process.env.STORAGE_DRIVER ?? 's3').trim().toLowerCase()
 
-  if (driver === 'local') {
-    const root = process.env.STORAGE_LOCAL_DIR
+  if (driver === 'fs') {
+    const root = process.env.STORAGE_FS_DIR
     if (!root) {
-      throw new Error('STORAGE_DRIVER=local 时必须设置 STORAGE_LOCAL_DIR')
+      throw new Error('STORAGE_DRIVER=fs 时必须设置 STORAGE_FS_DIR')
     }
     return new FilesystemStorage({
       root,
-      publicDomain: process.env.STORAGE_LOCAL_PUBLIC_DOMAIN,
+      publicDomain: process.env.STORAGE_FS_PUBLIC_DOMAIN,
     })
   }
 
-  return new S3Storage({
-    endpoint: process.env.STORAGE_S3_ENDPOINT,
-    region: process.env.STORAGE_S3_REGION || 'auto',
-    accessKeyId: process.env.STORAGE_S3_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.STORAGE_S3_SECRET_ACCESS_KEY!,
-    bucket: process.env.STORAGE_S3_BUCKET!,
-    publicDomain: process.env.STORAGE_S3_PUBLIC_DOMAIN,
-    pathPrefix: process.env.STORAGE_S3_PATH_PREFIX,
-    forcePathStyle: process.env.STORAGE_S3_FORCE_PATH_STYLE === 'true',
-  })
+  if (driver === 's3') {
+    return new S3Storage({
+      endpoint: process.env.STORAGE_S3_ENDPOINT,
+      region: process.env.STORAGE_S3_REGION || 'auto',
+      accessKeyId: process.env.STORAGE_S3_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.STORAGE_S3_SECRET_ACCESS_KEY!,
+      bucket: process.env.STORAGE_S3_BUCKET!,
+      publicDomain: process.env.STORAGE_S3_PUBLIC_DOMAIN,
+      pathPrefix: process.env.STORAGE_S3_PATH_PREFIX,
+      forcePathStyle: process.env.STORAGE_S3_FORCE_PATH_STYLE === 'true',
+    })
+  }
+
+  throw new Error(`未知的 STORAGE_DRIVER: ${driver}（可选 fs | s3）`)
 }
 
 export const storage = createStorageFromEnv()

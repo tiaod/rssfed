@@ -191,19 +191,19 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 
 | 后端 | 适用场景 | 关键配置 |
 | --- | --- | --- |
-| `local` | 图片量小，不想多养一个服务 | `STORAGE_DRIVER=local` + `STORAGE_LOCAL_DIR=/app/data/uploads`，数据在 `uploads-data` 卷 |
+| `fs` | 图片量小，不想多养一个服务 | `STORAGE_DRIVER=fs` + `STORAGE_FS_DIR=/app/data/uploads`，数据在 `uploads-data` 卷 |
 | `s3`（默认值） | 图片多要挂 CDN，或改用云对象存储 | `STORAGE_S3_*`；用编排里的 SeaweedFS 还要 `--profile s3` |
 
 两者 `getPublicUrl` 的行为一致：配了公开域名就返回直链，否则返回 `undefined`，调用方回退到本服务的 `/api/files/*` 代理。
 
-### local 后端（默认推荐给单机小规模）
+### fs 后端（默认推荐给单机小规模）
 
 ```bash
 # .env.production
-STORAGE_DRIVER=local
-STORAGE_LOCAL_DIR=/app/data/uploads
+STORAGE_DRIVER=fs
+STORAGE_FS_DIR=/app/data/uploads
 # 可选：配置后附件 URL 直指该域名，否则走 /api/files/* 代理
-# STORAGE_LOCAL_PUBLIC_DOMAIN=https://cdn.example.com
+# STORAGE_FS_PUBLIC_DOMAIN=https://cdn.example.com
 ```
 
 不需要额外服务。数据落在 `uploads-data` 卷里，**备份与迁移时别漏了它**。改完要重建 server 容器生效：

@@ -70,7 +70,7 @@ FROM node:${NODE_VERSION}-alpine AS server
 ENV NODE_ENV=production \
     PORT=3001
 WORKDIR /app
-# 本地文件存储（STORAGE_DRIVER=local）的挂载点：先建好并 chown，
+# 本地文件存储（STORAGE_DRIVER=fs）的挂载点：先建好并 chown，
 # 命名卷首次挂载会继承这里的属主与权限，node 用户才写得进去
 RUN mkdir -p /app/data/uploads && chown -R node:node /app/data
 # .npmrc 里 shamefully-hoist=true：依赖实体在根 node_modules/.pnpm，

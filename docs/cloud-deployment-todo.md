@@ -167,7 +167,7 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 | 主机 | Ubuntu 24.04，2 核 / 1.9G 内存 + 1.9G swap，50G 磁盘 |
 | 运行时 | Docker 29.7.2 + Compose v5.5.0；Caddy 2.11.4（宿主机 systemd，非容器） |
 | 部署目录 | `~/rssfed/`：`docker-compose.prod.yml`、`.env.production`、`seaweedfs-s3.json`（后两者权限 600） |
-| 文件存储 | `STORAGE_DRIVER=local`，数据在 `uploads-data` 卷（`/app/data/uploads`），附件走 `/api/files/*` 代理；SeaweedFS 保留为可选（`--profile s3`） |
+| 文件存储 | `STORAGE_DRIVER=fs`，数据在 `uploads-data` 卷（`/app/data/uploads`），附件走 `/api/files/*` 代理；SeaweedFS 保留为可选（`--profile s3`） |
 | 镜像来源 | 本地构建 → `docker save \| gzip \| ssh \| docker load`，服务器上不构建 |
 | Caddy 配置 | `/etc/caddy/Caddyfile` 末尾追加的 `<你的域名>` 段，原 VitePress 站点配置未改动 |
 | 启动方式 | `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` |
