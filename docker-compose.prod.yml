@@ -1,0 +1,186 @@
+# =============================================================================
+# RSSFed 生产编排（单机 Docker Compose）
+#
+# 用法：
+#   cp .env.production.example .env.production     # 填好 PUBLIC_URL 与各密钥
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+#   需要编排自带 Caddy 自动 HTTPS 时追加：--profile tls
+#
+# 拓扑：
+#   Caddy / Nginx (443)
+#     ├── /api/* /.well-known/* /nodeinfo/* /users/* /inbox /mcp → server:3001（Hono + ActivityPub）
+#     └── 其余                                                    → web:3000（Nuxt SSR）
+#   postgres / couchdb / redis 只在 compose 网络内可达，不映射宿主端口。
+#
+# 约束：
+#   - server 单副本：抓取调度与 BotKit 轮询是进程内 setInterval，worker 与 API 同进程，
+#     scale > 1 会重复入队、重复发布 ActivityPub 活动。
+#   - 数据库结构由 migrate 服务在启动前单次对齐，应用容器不执行 push。
+
+name: rssfed-prod
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ── 依赖服务（仅内网）──────────────────────────────────────────────────────
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: rssfed
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?未设置 POSTGRES_PASSWORD，请先准备 .env.production}
+      POSTGRES_DB: rssfed
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rssfed -d rssfed"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    restart: unless-stopped
+
+  couchdb:
+    image: couchdb:3
+    environment:
+      COUCHDB_USER: ${COUCHDB_USER:-admin}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:?未设置 COUCHDB_PASSWORD，请先准备 .env.production}
+    volumes:
+      - couchdb-data:/opt/couchdb/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5984/"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging: *default-logging
+    restart: unless-stopped
+
+  # 可选：自建 RSSHub（需要浏览器渲染的路由请换 diygod/rsshub:chromium-bundled）
+  # rsshub:
+  #   image: diygod/rsshub:latest
+  #   environment:
+  #     NODE_ENV: production
+  #   logging: *default-logging
+  #   restart: unless-stopped
+  #   然后在 .env.production 设置 RSSHUB_BASE_URL=http://rsshub:1200
+
+  # ── 数据库结构对齐（一次性，成功后才启动 server）───────────────────────────
+  # 应用镜像重建时该容器会一并重建并重跑；镜像未变而要手动重跑：
+  #   docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://rssfed:${POSTGRES_PASSWORD}@postgres:5432/rssfed}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  # ── 后端：API + ActivityPub + worker ───────────────────────────────────────
+  server:
+    build:
+      context: .
+      target: server
+    env_file:
+      # 缺文件时不报错：必填变量由下面的 ${VAR:?} 把关，避免"文件不存在"掩盖真正的问题
+      - path: .env.production
+        required: false
+    environment:
+      NODE_ENV: production
+      PORT: "3001"
+      # 依赖地址：默认走 compose 网络；.env.production 里填了则用外部的
+      DATABASE_URL: ${DATABASE_URL:-postgresql://rssfed:${POSTGRES_PASSWORD}@postgres:5432/rssfed}
+      COUCHDB_URL: ${COUCHDB_URL:-http://couchdb:5984}
+      # CouchDB 管理员凭证：server 启动时要用它写 proxy auth 配置，
+      # 若不显式传递，.env.production 漏填 COUCHDB_USER 就会退化成空用户名（报 You are not a server admin）
+      COUCHDB_USER: ${COUCHDB_USER:-admin}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      # 对外地址：ActivityPub actor origin 与前端跨域白名单，必须是 PUBLIC_URL
+      BETTER_AUTH_URL: ${PUBLIC_URL:?未设置 PUBLIC_URL，请先准备 .env.production}
+      BOTS_BASE_URL: ${PUBLIC_URL:?未设置 PUBLIC_URL，请先准备 .env.production}
+      CORS_ORIGINS: ${PUBLIC_URL:?未设置 PUBLIC_URL，请先准备 .env.production}
+    ports:
+      # 默认只绑宿主回环，供宿主反代访问；公网不应直连
+      - "${SERVER_BIND:-127.0.0.1}:${SERVER_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      couchdb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ── 前端：Nuxt SSR ─────────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      target: web
+    environment:
+      NODE_ENV: production
+      NITRO_PORT: "3000"
+      NITRO_HOST: 0.0.0.0
+      # 同域部署：前端直连 PUBLIC_URL，由反代按路径分流到后端（cookie 同站）
+      NUXT_PUBLIC_API_BASE_URL: ${PUBLIC_URL:?未设置 PUBLIC_URL，请先准备 .env.production}
+      NUXT_PUBLIC_AUTH_BASE_URL: ${PUBLIC_URL:?未设置 PUBLIC_URL，请先准备 .env.production}/api/auth
+    ports:
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-3000}:3000"
+    depends_on:
+      - server
+    logging: *default-logging
+    restart: unless-stopped
+
+  # ── 可选反代：自动申请 Let's Encrypt 证书并做路径分流（--profile tls）──────
+  caddy:
+    image: caddy:2-alpine
+    profiles: ["tls"]
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      PUBLIC_URL: ${PUBLIC_URL:?未设置 PUBLIC_URL，请先准备 .env.production}
+      # Let's Encrypt 证书到期通知邮箱（Caddyfile 里也带默认值，不填不影响签发）
+      ACME_EMAIL: ${ACME_EMAIL:-admin@example.com}
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - web
+      - server
+    logging: *default-logging
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  couchdb-data:
+  redis-data:
+  caddy-data:
+  caddy-config:

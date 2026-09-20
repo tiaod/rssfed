@@ -1,0 +1,89 @@
+# =============================================================================
+# RSSFed 反向代理示例（Caddy 2）
+#
+# 两种用法：
+#
+#   A. 用 compose 内置的 Caddy（推荐，证书全自动）
+#      docker compose --env-file .env.production -f docker-compose.prod.yml --profile tls up -d
+#      compose 会把 PUBLIC_URL 传进来当作站点地址，Caddy 据此自动申请/续期证书。
+#
+#   B. 宿主机已装 Caddy，容器只跑应用
+#      把下面的 server:3001 / web:3000 改成 127.0.0.1:3001 / 127.0.0.1:3000，
+#      并且不要加 --profile tls（否则两个 Caddy 抢 80/443）。
+#
+# 关键背景：为什么不能只转发 /api/*
+#   Hono 除 /api/* 外，还用 app.all("*") 兜底承载 ActivityPub 联邦端点
+#   （webfinger、actor、inbox、nodeinfo）。少转 /.well-known/*、/users/*、/inbox 这几条，
+#   联邦功能会整体 404，而且表面上看首页一切正常，很难排查。
+#
+# 生效前提：PUBLIC_URL 必须与 .env.production 里的一致（含协议、不带结尾斜杠）。
+# =============================================================================
+
+# 全局选项：ACME 证书到期通知邮箱（不填则用示例值，证书照常签发但收不到到期提醒）
+{
+	email {$ACME_EMAIL:admin@example.com}
+
+	# 若 Caddy 前面还有一层云负载均衡 / CDN，让它透传真实客户端 IP：
+	# servers {
+	# 	trusted_proxies static 10.0.0.0/8 172.16.0.0/12
+	# }
+}
+
+# 站点地址 = 访问地址。PUBLIC_URL=https://rss.example.com 时自动监听 443 并申请证书，
+# 同时监听 80 做跳转；PUBLIC_URL=http://localhost 时只监听 80（本地试跑用）。
+#
+# 需要 www 一起服务时写成：rss.example.com, www.rss.example.com {
+{$PUBLIC_URL} {
+	# 访问日志：默认写 stdout，交给 compose 的 json-file 驱动轮转。
+	# 想按大小切割成文件，改成：
+	# 	log {
+	# 		output file /data/access.log {
+	# 			roll_size 20MiB
+	# 			roll_keep 10
+	# 		}
+	# 	}
+	log
+
+	# 压缩：Caddy 只压文本类 MIME，AVIF/图片不会被二次压缩，可以放心全局开
+	encode zstd gzip
+
+	# 基础安全响应头。HSTS 只在 HTTPS 下对浏览器生效，用 http:// 试跑无副作用。
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		-Server
+	}
+
+	# ── 队列看板不对公网开放 ────────────────────────────────────────────────
+	# /admin/queues 目前没有鉴权，公网可达 = 公开任务数据、失败堆栈和「重试/清理」按钮。
+	# 临时排障可以走隧道，别为它开公网：
+	#   ssh -L 3001:127.0.0.1:3001 <云主机>   然后访问 http://127.0.0.1:3001/admin/queues
+	@bullboard path /admin/queues /admin/queues/*
+	respond @bullboard 404
+
+	# ── 后端 Hono：API + MCP + ActivityPub ─────────────────────────────────
+	# 上游地址在 compose 网络里是服务名 server；宿主机自建 Caddy 时改成 127.0.0.1:3001。
+	#
+	# 几个不能动的点：
+	#   1. /mcp 和 /mcp/* 必须直达，任何 301/307 都会让 MCP 客户端跟随跳转时丢掉
+	#      Authorization 头；
+	#   2. 不要给这段开响应缓冲，MCP 的 SSE 流式响应依赖 Caddy 默认的即时转发；
+	#   3. Caddy 默认就透传原始 Host 与 X-Forwarded-For / X-Forwarded-Proto，
+	#      BotKit 的 behindProxy 依赖后者，无需手动 header_up。
+	@backend path /api/* /mcp /mcp/* /.well-known/* /nodeinfo/* /users/* /inbox /inbox/*
+	reverse_proxy @backend server:3001
+
+	# ── 其余全部交给 Nuxt SSR ───────────────────────────────────────────────
+	# 页面、/_nuxt/* 静态资源、PouchDB 同步入口都走这里；宿主机自建改为 127.0.0.1:3000。
+	reverse_proxy web:3000
+}
+
+# 备注：
+#   - 前端与后端刻意同域（cookie 同站，见 ARCHITECTURE.md）。拆成 api.example.com
+#     需要同时改 better-auth 的 cookie 域配置，不建议为了「看起来清晰」去拆。
+#   - server 目前必须单副本（抓取调度与 BotKit 轮询在进程内），
+#     所以这里不需要 upstream 负载均衡配置。
+#   - 改完配置热加载（容器内）：
+#     docker compose --env-file .env.production -f docker-compose.prod.yml exec caddy \
+#       caddy reload --config /etc/caddy/Caddyfile

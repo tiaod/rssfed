@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node --watch --import tsx src/index.ts",
     "build": "tsc",
+    "build:bundle": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --packages=external --sourcemap --outfile=dist/index.js",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -16,6 +17,9 @@
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1060.0",
     "@better-auth/drizzle-adapter": "^1.7.2",
+    "@bull-board/api": "8.6.1",
+    "@bull-board/hono": "8.6.1",
+    "@bull-board/ui": "8.6.1",
     "@fedify/botkit": "^0.5.1",
     "@fedify/postgres": "^2.3.4",
     "@fedify/redis": "^2.2.3",
@@ -25,6 +29,7 @@
     "better-auth": "^1.7.2",
     "bullmq": "^5.0.0",
     "drizzle-orm": "^0.45.1",
+    "dotenv": "^17.4.2",
     "feedsmith": "^2.9.6",
     "hono": "^4.7.0",
     "http-proxy-agent": "^9.1.0",
@@ -37,12 +42,9 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@bull-board/api": "8.6.1",
-    "@bull-board/hono": "8.6.1",
-    "@bull-board/ui": "8.6.1",
     "@types/node": "^22.0.0",
-    "dotenv": "^17.4.2",
     "drizzle-kit": "^0.31.9",
+    "esbuild": "^0.25.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
     "vitest": "^3.1.0"
