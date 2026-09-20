@@ -70,11 +70,16 @@ services:
     restart: always
 
   rsshub:
-    # chromium-bundled 镜像内置了 CA 证书和 Chromium。
-    # 相比默认镜像，它自带 /etc/ssl/certs/ca-certificates.crt，
-    # 所以不需要再手动挂载证书或设置 NODE_EXTRA_CA_CERTS。
-    # 同时也具备 puppeteer 能力，可抓取需要浏览器渲染的反爬路由。
-    image: diygod/rsshub:chromium-bundled
+    # 使用本地源码构建的镜像（源码目录执行：docker build -t rsshub:local .）
+    # 注意：rsshub:local 默认按 Dockerfile 的默认参数构建，
+    #   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 —— 不内置 Chromium，也未装 ca-certificates。
+    #   因此需要浏览器渲染的路由（如 bilibili 的浏览器兜底、twitter 等）会 503。
+    #   若需要这些路由，改用带浏览器的构建：
+    #     docker build --build-arg PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=0 -t rsshub:local .
+    #   （仅 linux/amd64 会下载 Chromium；该参数同时会安装 ca-certificates）
+    image: rsshub:local
+    # 本地专属 tag 不存在于任何 registry，禁止 compose 尝试拉取（缺失时直接报错而非静默 pull）
+    pull_policy: never
     # 使用 host 网络，让容器直接共享 WSL 的网络栈。
     # 这样容器就能通过 WSL 默认网关访问 Windows 宿主机上的代理。
     network_mode: host
