@@ -140,7 +140,7 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 ## 待决策
 
 - [x] 目标平台：单机 Docker Compose（自建依赖容器）
-- [x] 域名：`<你的域名>`（主域 `<你的域名>` 已用于 VitePress 站点，故用子域）
+- [x] 域名：生产实例使用自有域名的子域（主域已用于 VitePress 站点）；**具体域名与公网 IP 不记录在本仓库**
 - [x] 依赖服务：compose 内置（已支持随时切托管：设 `DATABASE_URL` / `COUCHDB_URL` / `REDIS_HOST` 即可）
 - [x] 前端形态：Nuxt SSR（当前）
 
