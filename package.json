@@ -14,6 +14,7 @@
     "scripts:create-users": "pnpm --filter @rssfed/hono-server exec tsx scripts/create-test-users.ts",
     "scripts:test-redis": "pnpm --filter @rssfed/hono-server exec tsx scripts/test-redis.ts"
   },
+  "packageManager": "pnpm@10.32.1",
   "engines": {
     "node": ">=20"
   }
