@@ -38,7 +38,7 @@
 - **实现**：[docker-compose.prod.yml](../docker-compose.prod.yml)。
   - 依赖服务（postgres/couchdb/redis）**不映射任何宿主端口**，只在 compose 网络内可达；
   - 口令与密钥全部来自 `.env.production`，仓库里只有 [.env.production.example](../.env.production.example)；
-  - dev 专用的 `pgadmin`、`seaweedfs` 不再出现；RSSHub 以注释形式给出官方镜像接法；
+  - dev 专用的 `pgadmin` 不再出现；`seaweedfs` 从 dev profile 提升为正式服务（不映射宿主端口，附件走 `/api/files/*` 代理）；RSSHub 以注释形式给出官方镜像接法；
   - 应用容器默认只绑 `127.0.0.1`（供宿主反代），公网只能走反代。
 - **验收**：✅ 本机实测五个服务全 healthy；迁移建出 13 张表；server 日志出现 `[CouchDB Config] proxy auth configured`。
 - **实测修正**：server 容器原先拿不到 `COUCHDB_USER`（compose 只传给了 couchdb 服务），导致 proxy auth 配置报 `You are not a server admin`；已在编排里显式传递。
@@ -152,7 +152,7 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 - [ ] 注册/登录成功，刷新后登录态保持（cookie 正常）—— **待人工验证**
 - [ ] 添加一个订阅源，抓取成功并能在时间线看到条目 —— **待人工验证**
 - [ ] PouchDB 离线同步正常（断网可读缓存条目）—— **待人工验证**
-- [ ] 图片附件可访问 —— 服务器未配置对象存储（`STORAGE_S3_*` 留空），上传类功能不可用
+- [x] 图片附件可访问 —— 自建 SeaweedFS 已随编排部署（无宿主端口映射），容器内 S3 建 bucket 与读写实测通过
 - [ ] `/.well-known/webfinger` 返回正确 actor —— 端点已挂载（无 bot 时 404），需先创建 bot
 - [ ] 从 Mastodon 等实例搜索并关注 bot，能收到推送 —— 需先创建 bot
 - [x] MCP 客户端用 token 连上 `/mcp` —— 无 token 时 401，路由正常（非 3xx）
@@ -166,7 +166,8 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 | 域名 | `https://<你的域名>`（A → `<服务器 IPv4>`，AAAA → `<服务器 IPv6>`） |
 | 主机 | Ubuntu 24.04，2 核 / 1.9G 内存 + 1.9G swap，50G 磁盘 |
 | 运行时 | Docker 29.7.2 + Compose v5.5.0；Caddy 2.11.4（宿主机 systemd，非容器） |
-| 部署目录 | `~/rssfed/`，只有 `docker-compose.prod.yml` 与 `.env.production`（权限 600） |
+| 部署目录 | `~/rssfed/`：`docker-compose.prod.yml`、`.env.production`、`seaweedfs-s3.json`（后两者权限 600） |
+| 对象存储 | 自建 SeaweedFS（compose 网络内，无宿主端口），bucket `rssfed`，附件走 `/api/files/*` 代理读取 |
 | 镜像来源 | 本地构建 → `docker save \| gzip \| ssh \| docker load`，服务器上不构建 |
 | Caddy 配置 | `/etc/caddy/Caddyfile` 末尾追加的 `<你的域名>` 段，原 VitePress 站点配置未改动 |
 | 启动方式 | `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` |

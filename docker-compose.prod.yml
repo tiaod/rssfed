@@ -74,6 +74,20 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
+  # ── 自建对象存储：头像与正文图片（AVIF 附件）──────────────────────────────
+  # 不映射宿主端口：附件默认由 server 经 /api/files/* 代理读取；
+  # 若配了 STORAGE_S3_PUBLIC_DOMAIN 也可直接指向 CDN。
+  # 凭据文件 ./seaweedfs-s3.json 只挂进容器，不要提交进仓库。
+  # 首次使用前需要先建好 bucket（见 docs/docker-deployment.md 第 9 节）。
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    command: "server -s3 -s3.port=8333 -s3.config=/etc/seaweedfs/s3.json"
+    volumes:
+      - ./seaweedfs-s3.json:/etc/seaweedfs/s3.json:ro
+      - seaweedfs-data:/data
+    logging: *default-logging
+    restart: unless-stopped
+
   # 可选：自建 RSSHub（需要浏览器渲染的路由请换 diygod/rsshub:chromium-bundled）
   # rsshub:
   #   image: diygod/rsshub:latest
@@ -186,5 +200,6 @@ volumes:
   postgres-data:
   couchdb-data:
   redis-data:
+  seaweedfs-data:
   caddy-data:
   caddy-config:

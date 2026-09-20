@@ -163,22 +163,66 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 ## 6. 运维备注
 
 - **单副本**：抓取调度与 BotKit 轮询是进程内 `setInterval`，worker 与 API 同进程。`server` 不要 `--scale` 超过 1，否则会重复入队、重复发布 ActivityPub 活动。
-- **持久化**：`postgres-data`、`couchdb-data`、`redis-data`、`caddy-data` 四个命名卷必须纳入备份。CouchDB 每个订阅源一个库，是数据主体，别只备份 PostgreSQL。
+- **持久化**：`postgres-data`、`couchdb-data`、`redis-data`、`seaweedfs-data`、`caddy-data` 五个命名卷必须纳入备份。CouchDB 每个订阅源一个库，是数据主体，别只备份 PostgreSQL；`seaweedfs-data` 存的是正文图片与头像附件。
 - **日志**：compose 里统一配了 `json-file` 轮转（单文件 10MB × 3）。要集中收集就改 `x-logging` 锚点，或把 `docker logs` 接到 Loki/CloudWatch。
 - **更新发布**：`git pull` 后重复 `up -d --build` 即可，`migrate` 会先跑完再滚动应用容器。
 - **构建缓存**：镜像分层与 pnpm store 都走 BuildKit 缓存，首次构建后再次构建很快。缓存占用的磁盘可用 `docker builder prune` 回收（代价是下次构建重新下载依赖）。
 - **资源**：抓取 + AVIF 压缩与 API 抢 CPU/内存，2 核 4GB 起步；抓取量大时优先把 worker 拆成独立进程。
 
-## 7. 上线前仍需处理（代码层）
+## 7. 代码层生产开关（已完成）
 
-镜像与编排解决的是交付问题，下面几项属于代码层的生产开关，**公网暴露前建议先改**（详见 [cloud-deployment-todo.md](cloud-deployment-todo.md) P0-5、P0-6）：
+以下三项属于代码层，已在 [cloud-deployment-todo.md](cloud-deployment-todo.md) 的 P0-5/P0-6 修复并实测（恶意 Origin 403、看板未登录 401）：
 
-- [auth.ts](../packages/hono-server/src/auth.ts) 的 `trustedOrigins` 目前包含 `"*"`，应收紧为 `allowedOrigins` 白名单。
-- [config.ts](../packages/hono-server/src/config.ts) 的 `isOriginAllowed` 无条件放行 localhost 与私有网段，生产环境应改为仅非生产启用。
-- `/admin/queues` 已由 Caddyfile 屏蔽，但代码层仍建议加管理员鉴权或用 `NODE_ENV` 开关不注册该路由——自建反代时容易漏掉这条规则。
+- [auth.ts](../packages/hono-server/src/auth.ts) 的 `trustedOrigins` 生产环境只认 `CORS_ORIGINS` 白名单，开发环境才放开通配。
+- [config.ts](../packages/hono-server/src/config.ts) 的 `isOriginAllowed` 仅在非生产放行 localhost 与私有网段。
+- `/admin/queues` 由 [require-admin.ts](../packages/hono-server/src/middleware/require-admin.ts) 强制管理员校验，Caddyfile 里另有一层 404 屏蔽。
 
 ## 8. 其他部署形态
 
 - **托管依赖 + 应用容器**：删掉 compose 里的 `postgres`/`couchdb`/`redis` 服务，把 `DATABASE_URL` 等指向托管实例，只跑 `migrate` + `server` + `web`。
 - **PaaS（Railway / Fly.io / Render）**：分别部署两个镜像（`--target server`、`--target web`），环境变量按第 4 节配置；注意这些平台要单独跑一次 `migrate`（可作为 release/pre-deploy 命令）。
 - **K8s**：`server` 用 Deployment（`replicas: 1`）+ 单次 Job 跑 migrate，`web` 可多副本，Ingress 按第 3 节路径分流。
+
+## 9. 对象存储（自建 SeaweedFS）
+
+编排自带一个 SeaweedFS 作为 S3 兼容存储，用于头像与正文图片（AVIF 附件）。它**不映射宿主端口**，只在 compose 网络内可达；附件默认由 server 经 `/api/files/*` 代理读取（配了 `STORAGE_S3_PUBLIC_DOMAIN` 也可直连 CDN）。
+
+首次部署三步：
+
+```bash
+# 1) 生成凭据（accessKey/secretKey 要与 .env.production 里填的一致）
+AK=$(openssl rand -hex 12); SK=$(openssl rand -hex 24)
+cat > ~/rssfed/seaweedfs-s3.json <<EOF
+{ "identities": [ { "name": "rssfed-prod",
+    "credentials": [ { "accessKey": "$AK", "secretKey": "$SK" } ],
+    "actions": ["Read","Write","List","Tagging","Admin"] } ] }
+EOF
+chmod 600 ~/rssfed/seaweedfs-s3.json
+
+# 2) .env.production 指向 compose 服务名（不是 localhost）
+#    STORAGE_S3_ENDPOINT=http://seaweedfs:8333
+#    STORAGE_S3_REGION=us-east-1
+#    STORAGE_S3_ACCESS_KEY_ID=$AK
+#    STORAGE_S3_SECRET_ACCESS_KEY=$SK
+#    STORAGE_S3_BUCKET=rssfed
+#    STORAGE_S3_FORCE_PATH_STYLE=true
+
+# 3) 启动后建 bucket —— 应用不会自动创建，缺了它上传会报 NoSuchBucket
+docker compose --env-file .env.production -f docker-compose.prod.yml exec -T \
+  -w /app/packages/hono-server server node --input-type=module -e '
+import { S3Client, CreateBucketCommand } from "@aws-sdk/client-s3";
+const c = new S3Client({ endpoint: process.env.STORAGE_S3_ENDPOINT, region: process.env.STORAGE_S3_REGION,
+  credentials: { accessKeyId: process.env.STORAGE_S3_ACCESS_KEY_ID, secretAccessKey: process.env.STORAGE_S3_SECRET_ACCESS_KEY },
+  forcePathStyle: true });
+await c.send(new CreateBucketCommand({ Bucket: process.env.STORAGE_S3_BUCKET }));
+console.log("bucket ready");
+'
+```
+
+改动 `STORAGE_S3_*` 后要**重建 server 容器**才会生效（环境变量在容器创建时注入）：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build server
+```
+
+排障：用未签名请求探测 SeaweedFS 的 S3 端口会返回 403 `AccessDenied` —— 这说明服务在正常监听，不是故障。
