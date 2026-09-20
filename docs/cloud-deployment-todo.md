@@ -69,13 +69,16 @@
 - **验收**：✅ 本机实测 —— `/admin/queues` → 401，`/admin/queues/static/x` → 401，`/api/health` 仍 200（未误伤）。
 - 反代层的 404 屏蔽保留，形成纵深防御。
 
-### 7. 密钥轮换 ⚠️
+### 7. 密钥轮换 ✅（远端待 force push）
 
 - **已做**：[.env.example](../packages/hono-server/.env.example) 里的 Garage S3 凭据已换成占位符。
-- **仍需你处理**：那把 key **已经进入 git 历史**（commit `27df94d`），仅删文件不能消除。
-  - 若该 key 从未在真实环境使用过，可直接忽略；
-  - 若用过：先在存储侧轮换，再决定是否用 `git filter-repo` / BFG 清理历史（会改写 commit hash，需协调协作者）；
-  - 另外 `BETTER_AUTH_SECRET`、`COUCHDB_PROXY_SECRET` 生产环境务必用 `openssl rand -hex 32` 生成，后者**必须固定**。
+- **已清理历史**：那把 key 由初始 commit `27df94d` 写入 `packages/server/.env.example`（该包后改名 `packages/hono-server`），此后 60+ 个 commit 一直带着它。已用 `git filter-branch --tree-filter` 把全部历史中的这两处字符串替换为占位符（commit 结构、数量与 message 均保留，只有 hash 变化），并删除了 `refs/original` 备份、本地 `origin/*` 缓存 ref，清理 reflog 后 `gc` 回收旧对象。
+  - 验证：对象库 851 个 blob 全量扫描 0 命中；`master` 与 `refactor/new-architecture` 两个分支 `git log -S` 命中 0；`git fsck` 无错误；`.git` 由 3.5 MB 降至 1.6 MB。
+- **仍需你处理**：
+  1. **force push**，否则远端（GitHub）仍是含 key 的旧历史：`git push --force origin master`，另一个分支同理。⚠️ **推送前不要 `git fetch`**，否则会把含 key 的旧对象拉回本地。
+  2. 若仓库是 public、或该 key 曾用于任何真实环境，**请轮换 Garage/S3 凭据** —— 被 force push 掉的提交在一段时间内仍可能通过直接 SHA 访问。
+  3. `BETTER_AUTH_SECRET`、`COUCHDB_PROXY_SECRET` 生产环境务必用 `openssl rand -hex 32` 生成，后者**必须固定**。
+
 
 ## P1 · 生产化（能跑但会出事）
 
