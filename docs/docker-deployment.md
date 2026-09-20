@@ -183,11 +183,36 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 - **PaaS（Railway / Fly.io / Render）**：分别部署两个镜像（`--target server`、`--target web`），环境变量按第 4 节配置；注意这些平台要单独跑一次 `migrate`（可作为 release/pre-deploy 命令）。
 - **K8s**：`server` 用 Deployment（`replicas: 1`）+ 单次 Job 跑 migrate，`web` 可多副本，Ingress 按第 3 节路径分流。
 
-## 9. 对象存储（自建 SeaweedFS）
+## 9. 文件存储（本地文件或 S3）
 
-编排自带一个 SeaweedFS 作为 S3 兼容存储，用于头像与正文图片（AVIF 附件）。它**不映射宿主端口**，只在 compose 网络内可达；附件默认由 server 经 `/api/files/*` 代理读取（配了 `STORAGE_S3_PUBLIC_DOMAIN` 也可直连 CDN）。
+头像、Bot 头像、站点 logo 走存储后端；**正文图片不走这里** —— 它们在抓取时压成 AVIF，作为 CouchDB 附件保存（这也是启动时把 CouchDB 附件上限放宽到 8MB 的原因）。
 
-首次部署三步：
+两个后端由 `STORAGE_DRIVER` 选择，对 key 的语义完全一致，可随时切换：
+
+| 后端 | 适用场景 | 关键配置 |
+| --- | --- | --- |
+| `local` | 图片量小，不想多养一个服务 | `STORAGE_DRIVER=local` + `STORAGE_LOCAL_DIR=/app/data/uploads`，数据在 `uploads-data` 卷 |
+| `s3`（默认值） | 图片多要挂 CDN，或改用云对象存储 | `STORAGE_S3_*`；用编排里的 SeaweedFS 还要 `--profile s3` |
+
+两者 `getPublicUrl` 的行为一致：配了公开域名就返回直链，否则返回 `undefined`，调用方回退到本服务的 `/api/files/*` 代理。
+
+### local 后端（默认推荐给单机小规模）
+
+```bash
+# .env.production
+STORAGE_DRIVER=local
+STORAGE_LOCAL_DIR=/app/data/uploads
+# 可选：配置后附件 URL 直指该域名，否则走 /api/files/* 代理
+# STORAGE_LOCAL_PUBLIC_DOMAIN=https://cdn.example.com
+```
+
+不需要额外服务。数据落在 `uploads-data` 卷里，**备份与迁移时别漏了它**。改完要重建 server 容器生效：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build server
+```
+
+### s3 后端
 
 ```bash
 # 1) 生成凭据（accessKey/secretKey 要与 .env.production 里填的一致）
@@ -200,6 +225,7 @@ EOF
 chmod 600 ~/rssfed/seaweedfs-s3.json
 
 # 2) .env.production 指向 compose 服务名（不是 localhost）
+#    STORAGE_DRIVER=s3
 #    STORAGE_S3_ENDPOINT=http://seaweedfs:8333
 #    STORAGE_S3_REGION=us-east-1
 #    STORAGE_S3_ACCESS_KEY_ID=$AK
@@ -207,7 +233,11 @@ chmod 600 ~/rssfed/seaweedfs-s3.json
 #    STORAGE_S3_BUCKET=rssfed
 #    STORAGE_S3_FORCE_PATH_STYLE=true
 
-# 3) 启动后建 bucket —— 应用不会自动创建，缺了它上传会报 NoSuchBucket
+# 3) SeaweedFS 默认不启动，需要显式带上 profile
+docker compose --env-file .env.production -f docker-compose.prod.yml --profile s3 up -d --no-build seaweedfs
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build server
+
+# 4) 建 bucket —— 应用不会自动创建，缺了它上传会报 NoSuchBucket
 docker compose --env-file .env.production -f docker-compose.prod.yml exec -T \
   -w /app/packages/hono-server server node --input-type=module -e '
 import { S3Client, CreateBucketCommand } from "@aws-sdk/client-s3";
@@ -217,12 +247,6 @@ const c = new S3Client({ endpoint: process.env.STORAGE_S3_ENDPOINT, region: proc
 await c.send(new CreateBucketCommand({ Bucket: process.env.STORAGE_S3_BUCKET }));
 console.log("bucket ready");
 '
-```
-
-改动 `STORAGE_S3_*` 后要**重建 server 容器**才会生效（环境变量在容器创建时注入）：
-
-```bash
-docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build server
 ```
 
 排障：用未签名请求探测 SeaweedFS 的 S3 端口会返回 403 `AccessDenied` —— 这说明服务在正常监听，不是故障。

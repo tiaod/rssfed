@@ -152,7 +152,7 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 - [ ] 注册/登录成功，刷新后登录态保持（cookie 正常）—— **待人工验证**
 - [ ] 添加一个订阅源，抓取成功并能在时间线看到条目 —— **待人工验证**
 - [ ] PouchDB 离线同步正常（断网可读缓存条目）—— **待人工验证**
-- [x] 图片附件可访问 —— 自建 SeaweedFS 已随编排部署（无宿主端口映射），容器内 S3 建 bucket 与读写实测通过
+- [x] 图片附件可访问 —— 本地文件存储端到端实测：上传头像 → 落盘到 `uploads-data` 卷 → `/api/files/*` 读回 200（`image/png`）
 - [ ] `/.well-known/webfinger` 返回正确 actor —— 端点已挂载（无 bot 时 404），需先创建 bot
 - [ ] 从 Mastodon 等实例搜索并关注 bot，能收到推送 —— 需先创建 bot
 - [x] MCP 客户端用 token 连上 `/mcp` —— 无 token 时 401，路由正常（非 3xx）
@@ -167,7 +167,7 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 | 主机 | Ubuntu 24.04，2 核 / 1.9G 内存 + 1.9G swap，50G 磁盘 |
 | 运行时 | Docker 29.7.2 + Compose v5.5.0；Caddy 2.11.4（宿主机 systemd，非容器） |
 | 部署目录 | `~/rssfed/`：`docker-compose.prod.yml`、`.env.production`、`seaweedfs-s3.json`（后两者权限 600） |
-| 对象存储 | 自建 SeaweedFS（compose 网络内，无宿主端口），bucket `rssfed`，附件走 `/api/files/*` 代理读取 |
+| 文件存储 | `STORAGE_DRIVER=local`，数据在 `uploads-data` 卷（`/app/data/uploads`），附件走 `/api/files/*` 代理；SeaweedFS 保留为可选（`--profile s3`） |
 | 镜像来源 | 本地构建 → `docker save \| gzip \| ssh \| docker load`，服务器上不构建 |
 | Caddy 配置 | `/etc/caddy/Caddyfile` 末尾追加的 `<你的域名>` 段，原 VitePress 站点配置未改动 |
 | 启动方式 | `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` |

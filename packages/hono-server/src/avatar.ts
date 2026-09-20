@@ -48,13 +48,16 @@ export async function cleanupAttachment(attachmentId: string | null) {
 }
 
 /**
- * 附件公开 URL：优先 S3 publicDomain（可挂 CDN / 直接对外），
+ * 附件公开 URL：优先存储后端的 publicDomain（可挂 CDN / 直接对外），
  * 未配置时回退到本服务的文件代理路由，保证默认开箱即用。
  */
 function publicUrlOf(c: Context, key: string): string {
   const fromStorage = storage.getPublicUrl(key)
   if (fromStorage) return fromStorage
-  return `${new URL(c.req.url).origin}/api/files/${key}`
+  // 注意：反代之后 c.req.url 的协议可能仍是 http（Node 适配器未必采用 X-Forwarded-Proto），
+  // 因此优先用配置的对外地址，避免生成 http:// 链接在 https 页面上触发混合内容拦截
+  const base = process.env.BOTS_BASE_URL ?? process.env.BETTER_AUTH_URL ?? new URL(c.req.url).origin
+  return `${base.replace(/\/+$/, '')}/api/files/${key}`
 }
 
 /**
