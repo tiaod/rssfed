@@ -4,7 +4,7 @@
 
 RSSFed 是一个**离线优先的、基于用户兴趣的资讯聚合与推送工具**，旨在帮助用户在信息爆炸的时代高效地获取自己真正关心的内容。核心能力：
 
-1. **RSS 协议资讯聚合** — 自实现抓取引擎，定时从用户订阅的 Feed 拉取内容（BullMQ 调度 + rss-parser）
+1. **RSS 协议资讯聚合** — 自实现抓取引擎，定时从用户订阅的 Feed 拉取内容（BullMQ 调度 + feedsmith）
 2. **离线优先的订阅管理与阅读** — 服务端 CouchDB（每个订阅源独立库）+ 客户端 PouchDB 同步，支持离线缓存、已读/收藏标记，联网后自动合并
 3. **ActivityPub 协议内容分发** — 通过 BotKit（基于 Fedify）将聚合的资讯以 ActivityPub 机器人身份自动推送到 Fediverse
 
@@ -19,7 +19,7 @@ RSSFed 是一个**离线优先的、基于用户兴趣的资讯聚合与推送�
 | 文档数据库       | CouchDB 3.x               |
 | 客户端离线       | PouchDB（浏览器 IndexedDB）    |
 | 任务队列        | BullMQ（Redis）             |
-| RSS 解析      | rss-parser                |
+| RSS 解析      | feedsmith                |
 | ActivityPub | BotKit（基于 Fedify）       |
 | 前端          | Nuxt（SSR）+ Nuxt UI        |
 
@@ -36,7 +36,7 @@ rssfed/
 │   │   ├── bots/           ← ActivityPub Bot（BotKit）
 │   │   ├── couchdb/        ← CouchDB 客户端（nano）
 │   │   ├── routes/         ← feeds、sync、bots、subscriptions
-│   │   ├── rss/            ← rss-parser 封装
+│   │   ├── rss/            ← feedsmith 封装
 │   │   └── workers/        ← BullMQ Worker（RSS 定时抓取）
 │   │
 │   └── src/index.ts        ← 入口，serve() 启动
@@ -134,6 +134,30 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
 | CouchDB user-state:{id} | 用户对条目的 read/saved 状态                  | 多设备阅读状态同步                   |
 | PouchDB（浏览器）           | 订阅源的条目 + 用户操作状态（本地合并）              | 离线阅读、跨源聚合查询                 |
 
+## 文件存储职责
+
+二进制文件有**两条完全不同的路径**，改相关代码前先确认自己面对的是哪一类 —— 这一点容易误判（正文图片其实不走对象存储）：
+
+| 文件类型 | 存放位置 | 访问方式 |
+| --- | --- | --- |
+| 正文图片（抓取时压缩为 AVIF） | **CouchDB 附件**，跟随条目文档 | 随 PouchDB 同步到浏览器，供离线阅读 |
+| 头像、Bot 头像、站点 logo | **存储后端**（`Storage` 接口） | 经 `/api/files/*` 代理读取，或配置公开域名直连 |
+
+### 为什么正文图片不放对象存储
+
+正文图片要跟随 feed 库同步进浏览器 PouchDB 以供离线阅读，作为 CouchDB 附件写入时与条目文档天然同源同步，省掉了独立下载与关联的逻辑。代价是放宽了 CouchDB 的附件大小上限（默认 1MB → 8MB，见 `index.ts` 的 `couchdb/max_attachment_size`）。
+
+### 头像为什么单独走存储后端
+
+头像与 logo 是**上传类**文件（用户主动提交、需要独立 URL 展示），不适合塞进文档库。它们统一走 `Storage` 接口，有两个可切换的实现：
+
+| `STORAGE_DRIVER` | 实现 | 说明 |
+| --- | --- | --- |
+| `fs` | `FilesystemStorage` | 写本地目录（生产挂持久卷），小规模部署够用 |
+| `s3`（默认） | `S3Storage` | S3 兼容对象存储：SeaweedFS / 云 COS / R2 |
+
+两个实现对 key 的语义一致；`getPublicUrl` 在未配置公开域名时都返回 `undefined`，由调用方回退到 `/api/files/*` 代理 —— 因此切换后端不需要改业务代码。部署细节见 [docs/docker-deployment.md](docs/docker-deployment.md) 第 9 节。
+
 ## 部署架构
 
 ```
@@ -152,7 +176,7 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
 
 ## 数据流
 
-1. **RSS 资讯聚合**：用户发现并订阅感兴趣的 feed → rss-parser 解析 → 写入对应 feed:{feedId} 库（去重）→ BullMQ 定时调度周期性拉取更新
+1. **RSS 资讯聚合**：用户发现并订阅感兴趣的 feed → feedsmith 解析 → 写入对应 feed:{feedId} 库（去重）→ BullMQ 定时调度周期性拉取更新
 2. **用户同步**：登录后 → 获取用户订阅的 feedId 列表 → 浏览器 PouchDB 逐个 `_replicate` feed 库到本地 → 本地 PouchDB 跨源合并，按时间线展示
 3. **离线阅读**：浏览器 PouchDB 本地缓存 → 离线浏览、跨源搜索、按时间排序 → 标记已读/收藏 → 同步到 user-state 库 → 其他设备接收变更
 4. **ActivityPub 分发**：Worker 抓取到新条目 → 查 PostgreSQL bot_feeds 找出引用该 feed 的 Bot → 对每个 Bot 通过 BotKit 构建 Create Activity 推送到 follower inbox → 同时写入 PostgreSQL bot_outbox 表供 outbox 查询（按 botId + publishedAt 索引，查询高效）

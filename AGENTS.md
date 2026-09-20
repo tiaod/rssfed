@@ -15,7 +15,7 @@
 
 - 认证：Better Auth；关系库：PostgreSQL + Drizzle ORM；文档库：CouchDB 3.x
 - 客户端离线：PouchDB（浏览器 IndexedDB 同步）；任务队列：BullMQ（Redis）
-- RSS 解析：rss-parser；ActivityPub：BotKit（基于 Fedify）
+- RSS 解析：feedsmith；ActivityPub：BotKit（基于 Fedify）
 - 前端 UI：Nuxt UI
 
 ## 常用命令
