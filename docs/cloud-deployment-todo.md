@@ -159,23 +159,25 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 - [x] `/admin/queues` 未登录返回 401 —— 公网实测 404（反代层已屏蔽）
 - [ ] 备份任务已配置并验证过一次恢复
 
-## 当前部署实例（2026-09-20）
+## 当前部署实例
+
+> 具体域名、公网 IP 等运行环境信息**不记录在本仓库** —— 它们写在服务器 `~/rssfed/.env.production` 的头部注释里（该文件权限 600、不入库）。本节只保留换机器或重装时仍然有用的知识。
+
+本次部署遇到的限制与结论：
+
+- `github.com` 的 HTTPS 与 Docker Hub 直连都超时（国内云主机常见）；GitHub **SSH(22) 可用**，镜像拉取依赖容器运行时已配置的内网加速源。换机器时先确认这两条通路，否则会卡在构建阶段。
+- 内存只有 2G 左右，容器内构建 Nuxt 极易 OOM，因此镜像一律**本地构建后传输**（`docker save | gzip | ssh | docker load`），服务器只跑不建。
+- 反代复用宿主机已有的 Caddy：只在其配置**末尾追加**一个站点段，不动既有站点；TLS 由 Caddy 自动签发。
+
+与具体环境无关的部署形态：
 
 | 项 | 值 |
 | --- | --- |
-| 域名 | `https://<你的域名>`（A → `<服务器 IPv4>`，AAAA → `<服务器 IPv6>`） |
-| 主机 | Ubuntu 24.04，2 核 / 1.9G 内存 + 1.9G swap，50G 磁盘 |
-| 运行时 | Docker 29.7.2 + Compose v5.5.0；Caddy 2.11.4（宿主机 systemd，非容器） |
-| 部署目录 | `~/rssfed/`：`docker-compose.prod.yml`、`.env.production`、`seaweedfs-s3.json`（后两者权限 600） |
+| 部署目录 | `~/rssfed/`：`docker-compose.prod.yml` + `.env.production`（权限 600），无需完整源码 |
+| 镜像来源 | 本地构建 → ssh 流式传输 → 服务器 `docker load` |
 | 文件存储 | `STORAGE_DRIVER=fs`，数据在 `uploads-data` 卷（`/app/data/uploads`），附件走 `/api/files/*` 代理；SeaweedFS 保留为可选（`--profile s3`） |
-| 镜像来源 | 本地构建 → `docker save \| gzip \| ssh \| docker load`，服务器上不构建 |
-| Caddy 配置 | `/etc/caddy/Caddyfile` 末尾追加的 `<你的域名>` 段，原 VitePress 站点配置未改动 |
 | 启动方式 | `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` |
-
-该服务器有两个网络限制（本次已绕开，换机器或重装时需注意）：
-
-- `github.com` 的 HTTPS 与 Docker Hub 直连都超时；GitHub **SSH(22) 可达**，镜像拉取依赖已配置的腾讯云内网加速器（`mirror.ccs.tencentyun.com`、`docker.m.daocloud.io`）。
-- 内存只有 1.9G，容器内构建 Nuxt 极易 OOM，所以镜像一律本地构建后传输。上线后实测内存占用约 911Mi。
+| 资源占用 | 上线后实测内存约 900Mi（5 个容器） |
 
 ### 未实现：nodeinfo
 
