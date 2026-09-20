@@ -9,7 +9,7 @@ import type { Readable } from 'node:stream'
  *
  * 两个实现：
  *   - S3Storage：S3 兼容对象存储（SeaweedFS / 云 COS / R2 等）
- *   - LocalStorage：本地文件系统（图片量小的时候够用，少一个常驻服务）
+ *   - FilesystemStorage：本地文件系统（图片量小的时候够用，少一个常驻服务）
  *
  * 由 STORAGE_DRIVER 选择，两侧对 key 的语义完全一致，可随时切换。
  */
@@ -144,7 +144,7 @@ const MIME_BY_EXT: Record<string, string> = {
  * 本地文件系统存储：文件落在 STORAGE_LOCAL_DIR（生产环境应挂持久卷）。
  * 上传路径会保留原始扩展名（见 generateUniqueFileName），因此读取时按扩展名推断类型是可靠的。
  */
-export class LocalStorage implements Storage {
+export class FilesystemStorage implements Storage {
   private root: string
   private publicDomain?: string
 
@@ -227,7 +227,7 @@ export function createStorageFromEnv(): Storage {
     if (!root) {
       throw new Error('STORAGE_DRIVER=local 时必须设置 STORAGE_LOCAL_DIR')
     }
-    return new LocalStorage({
+    return new FilesystemStorage({
       root,
       publicDomain: process.env.STORAGE_LOCAL_PUBLIC_DOMAIN,
     })
