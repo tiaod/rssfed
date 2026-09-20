@@ -128,33 +128,54 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 
 ## 部署当天执行顺序
 
-> 以下步骤都需要真实主机与域名，**尚未执行**。
+> ✅ 已于 2026-09-20 在真实云主机上完整执行（实例信息见文末「当前部署实例」）。
 
 1. 起依赖服务（PG / CouchDB / Redis / S3），等 healthcheck 全绿
 2. `migrate` 自动执行 `drizzle-kit push`（首次可直接 `--force`）
 3. 起后端，确认日志出现 `[CouchDB Config] proxy auth configured`
 4. 起前端
-5. 起反代（`--profile tls` 或宿主机自建），逐条跑第 3 节的验收 curl
+5. 起反代（该机器已有宿主机 Caddy 在服务其他站点，故未用 compose 的 `--profile tls`）
 6. 跑下方上线验收清单
 
 ## 待决策
 
 - [x] 目标平台：单机 Docker Compose（自建依赖容器）
-- [ ] 域名
+- [x] 域名：`<你的域名>`（主域 `<你的域名>` 已用于 VitePress 站点，故用子域）
 - [x] 依赖服务：compose 内置（已支持随时切托管：设 `DATABASE_URL` / `COUCHDB_URL` / `REDIS_HOST` 即可）
 - [x] 前端形态：Nuxt SSR（当前）
 
 ## 上线验收清单
 
-> 全部**未验证**，每项都需要公网域名。
+> 自动化部分已验证；标注「待人工验证」的需要在浏览器里操作。
 
-- [ ] 公网 HTTPS 可访问首页
-- [ ] 注册/登录成功，刷新后登录态保持（cookie 正常）
-- [ ] 添加一个订阅源，抓取成功并能在时间线看到条目
-- [ ] PouchDB 离线同步正常（断网可读缓存条目）
-- [ ] 图片附件可访问（走 `/api/files/*` 或 S3 公开域名）
-- [ ] `/.well-known/webfinger` 返回正确 actor
-- [ ] 从 Mastodon 等实例搜索并关注 bot，能收到推送
-- [ ] MCP 客户端用 token 连上 `/mcp`
-- [ ] `/admin/queues` 未登录返回 401（反代层 404 + 应用层 401 均已就绪，需公网确认）
+- [x] 公网 HTTPS 可访问首页 —— 200，证书由宿主机 Caddy 自动签发
+- [ ] 注册/登录成功，刷新后登录态保持（cookie 正常）—— **待人工验证**
+- [ ] 添加一个订阅源，抓取成功并能在时间线看到条目 —— **待人工验证**
+- [ ] PouchDB 离线同步正常（断网可读缓存条目）—— **待人工验证**
+- [ ] 图片附件可访问 —— 服务器未配置对象存储（`STORAGE_S3_*` 留空），上传类功能不可用
+- [ ] `/.well-known/webfinger` 返回正确 actor —— 端点已挂载（无 bot 时 404），需先创建 bot
+- [ ] 从 Mastodon 等实例搜索并关注 bot，能收到推送 —— 需先创建 bot
+- [x] MCP 客户端用 token 连上 `/mcp` —— 无 token 时 401，路由正常（非 3xx）
+- [x] `/admin/queues` 未登录返回 401 —— 公网实测 404（反代层已屏蔽）
 - [ ] 备份任务已配置并验证过一次恢复
+
+## 当前部署实例（2026-09-20）
+
+| 项 | 值 |
+| --- | --- |
+| 域名 | `https://<你的域名>`（A → `<服务器 IPv4>`，AAAA → `<服务器 IPv6>`） |
+| 主机 | Ubuntu 24.04，2 核 / 1.9G 内存 + 1.9G swap，50G 磁盘 |
+| 运行时 | Docker 29.7.2 + Compose v5.5.0；Caddy 2.11.4（宿主机 systemd，非容器） |
+| 部署目录 | `~/rssfed/`，只有 `docker-compose.prod.yml` 与 `.env.production`（权限 600） |
+| 镜像来源 | 本地构建 → `docker save \| gzip \| ssh \| docker load`，服务器上不构建 |
+| Caddy 配置 | `/etc/caddy/Caddyfile` 末尾追加的 `<你的域名>` 段，原 VitePress 站点配置未改动 |
+| 启动方式 | `docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` |
+
+该服务器有两个网络限制（本次已绕开，换机器或重装时需注意）：
+
+- `github.com` 的 HTTPS 与 Docker Hub 直连都超时；GitHub **SSH(22) 可达**，镜像拉取依赖已配置的腾讯云内网加速器（`mirror.ccs.tencentyun.com`、`docker.m.daocloud.io`）。
+- 内存只有 1.9G，容器内构建 Nuxt 极易 OOM，所以镜像一律本地构建后传输。上线后实测内存占用约 911Mi。
+
+### 未实现：nodeinfo
+
+原评估认为 `/nodeinfo/2.1` 由 Fedify 提供，实际代码中没有注册 nodeinfo dispatcher，该路径返回 404。这是代码层缺失，**不是部署问题**；联邦功能（webfinger / actor / inbox）不依赖 nodeinfo。要做的话需在 BotKit/Fedify 实例上加 `setNodeInfoDispatcher`。
