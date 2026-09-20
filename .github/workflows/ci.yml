@@ -33,25 +33,5 @@ jobs:
       - name: Test
         run: pnpm run test
 
-  # 部署的硬前提是镜像能构建：这里只验证两个 target 可构建，不推送仓库。
-  # 源码或 Dockerfile 改动导致构建失败时，在这个 job 就被挡住。
-  docker:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        target: [server, web]
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Set up Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build ${{ matrix.target }} image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: ${{ matrix.target }}
-          push: false
-          cache-from: type=gha,scope=${{ matrix.target }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+  # 镜像构建与推送见 deploy.yml：那里会把 server / web / migrate 推到 ghcr，
+  # 构建失败同样会挡住流水线，因此这里不再重复做「可构建性」验证。
