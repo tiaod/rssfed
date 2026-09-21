@@ -13,8 +13,13 @@
 #
 # 关键背景：为什么不能只转发 /api/*
 #   Hono 除 /api/* 外，还用 app.all("*") 兜底承载 ActivityPub 联邦端点
-#   （webfinger、actor、inbox、nodeinfo）。少转 /.well-known/*、/users/*、/inbox 这几条，
+#   （webfinger、actor、inbox、nodeinfo）。少转 /.well-known/*、/ap/*、/@* 这几条，
 #   联邦功能会整体 404，而且表面上看首页一切正常，很难排查。
+#
+#   ⚠️ 最容易踩的一个：actor 的真实路径是 /ap/actor/{username}（BotKit 默认），
+#      不是 /users/*。若把 /users/* 当成 actor 路径，webfinger 会照常返回 200
+#      （因为它走 /.well-known/*），但 Mastodon 拿着返回的 actor URL 来取时拿到 404，
+#      表现为「能搜到账号、无法关注 / 账号加载失败」。2026-09-21 上线验收实测踩过。
 #
 # 生效前提：PUBLIC_URL 必须与 .env.production 里的一致（含协议、不带结尾斜杠）。
 # =============================================================================
@@ -70,8 +75,17 @@
 	#      Authorization 头；
 	#   2. 不要给这段开响应缓冲，MCP 的 SSE 流式响应依赖 Caddy 默认的即时转发；
 	#   3. Caddy 默认就透传原始 Host 与 X-Forwarded-For / X-Forwarded-Proto，
-	#      BotKit 的 behindProxy 依赖后者，无需手动 header_up。
-	@backend path /api/* /mcp /mcp/* /.well-known/* /nodeinfo/* /users/* /inbox /inbox/*
+	#      BotKit 的 behindProxy 依赖后者，无需手动 header_up；
+	#   4. 联邦路径必须按 BotKit 的实际路由放行 —— actor / inbox / outbox 都在
+	#      /ap/actor/* 下，profile 页在 /@* 下。改这段时不要只盯着 /api/*。
+	# 联邦路径以 BotKit 实际路由为准（2026-09-21 本地实测）：
+	#   /ap/actor/{username}            → 200  actor 文档
+	#   /ap/actor/{username}/outbox     → 200
+	#   /ap/actor/{username}/followers  → 200
+	#   /@username                      → 200  profile 页
+	#   /users/*、/inbox                → 404（Fedify 默认路由与共享 inbox 未启用），
+	#                                     保留是为将来启用时不至于又漏一条
+	@backend path /api/* /mcp /mcp/* /.well-known/* /nodeinfo/* /ap/* /@* /users/* /inbox /inbox/*
 	reverse_proxy @backend server:3001
 
 	# ── 其余全部交给 Nuxt SSR ───────────────────────────────────────────────

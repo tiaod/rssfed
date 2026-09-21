@@ -13,9 +13,13 @@ const pollIntervalMs = parseInt(process.env.CHECK_INTERVAL ?? "300000")
 // 使用独立 postgres.js 连接，与 drizzle 业务连接分离，避免 KV 高频读写干扰业务查询。
 const botkitSql = postgres(process.env.DATABASE_URL ?? "postgres://localhost:5432/rssfed")
 
+// BotKit 的 KV 存储：Bot actor 的密钥对等联邦身份数据存在这里，删除 Bot 时必须一并清理
+// （见 clearBotKv）。单独持有引用是为了能主动操作它。
+const kv = new PostgresKvStore(botkitSql)
+
 // 创建 BotKit Instance
 const instance = createInstance<void>({
-  kv: new PostgresKvStore(botkitSql),
+  kv,
   queue: new PostgresMessageQueue(botkitSql),
   behindProxy: true,
 })
@@ -45,6 +49,28 @@ async function findBotByUsername(preferredUsername: string) {
     .where(eq(botsTable.preferredUsername, preferredUsername))
     .limit(1)
   return bot ?? null
+}
+
+/** BotKit 在 KV 中存放 Bot 数据的键前缀（其内部约定，键形如 `["_botkit","bots",username,"keyPairs"]`） */
+const BOT_KV_PREFIX = ["_botkit", "bots"] as const
+
+/**
+ * 清理某个 Bot 在 Fedify KV 中留下的全部数据（主要是 actor 密钥对）。
+ *
+ * 必须在删除 Bot 时一并调用：密钥对不在 bots 表里，只删表行的话，之后用同名
+ * username 重建的 Bot 会从 KV 读到旧密钥对并复用它 —— 而 preferred_username
+ * 现在有唯一约束，同名即同一联邦身份，复用私钥等于身份串号。
+ */
+export async function clearBotKv(username: string) {
+  const prefix = [...BOT_KV_PREFIX, username] as const
+  let removed = 0
+  for await (const entry of kv.list(prefix)) {
+    await kv.delete(entry.key)
+    removed++
+  }
+  if (removed > 0) {
+    console.log(`[Bot] 已清理 ${username} 的 ${removed} 条 Fedify KV 记录（含密钥对）`)
+  }
 }
 
 /** 查询 Bot 并校验其处于启用状态，否则抛错 */

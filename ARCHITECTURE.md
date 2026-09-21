@@ -129,10 +129,26 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
 
 | 存储                      | 内容                          | 用途                     |
 | ----------------------- | --------------------------- | ---------------------- |
-| PostgreSQL（Drizzle）    | 用户、bots、bot_feeds 关联、bot_outbox（仅标题+摘要+原文URL，不含压缩图片）、订阅关系 | 核心业务、认证、关系管理、Bot 出站队列 |
-| CouchDB feed:{feedId}   | 单个订阅源的 FeedDoc + EntryDoc              | RSS 内容权威来源，每源独立库            |
-| CouchDB user-state:{id} | 用户对条目的 read/saved 状态                  | 多设备阅读状态同步                   |
+| PostgreSQL（Drizzle）    | 用户与认证（`user` / `session` / `account` / `api_token`）、`bots`、`bot_feeds` / `bot_followers` / `bot_following` 关联、`bot_inbox`、`feeds` 注册表、`site_settings`、Fedify KV | 核心业务、认证、关系与元数据 |
+| CouchDB feed:{feedId}   | 单个订阅源的 FeedDoc + EntryDoc（正文图片作为附件随文档存放） | RSS 内容权威来源，每源独立库            |
+| CouchDB user-state:{id} | 用户的**订阅关系**（`subscription` 文档）+ read/saved 状态 | 离线优先的订阅管理、多设备阅读状态同步 |
+| CouchDB bot:{botId}     | Bot 的产出文档（ActivityPub outbox 的内容源） | Bot 分发与 outbox 查询 |
 | PouchDB（浏览器）           | 订阅源的条目 + 用户操作状态（本地合并）              | 离线阅读、跨源聚合查询                 |
+
+### 为什么订阅关系在 CouchDB 而不在 PostgreSQL
+
+最初的设计是把订阅关系放进 PostgreSQL，但它**与离线优先目标冲突**：离线阅读要求用户断网时也能订阅/退订，这些改动先落在浏览器 PouchDB，联网后再与服务端合并。关系型表没有对应的客户端副本与冲突合并机制，跨端修改无法收敛。
+
+因此订阅关系统一改由 CouchDB `user-state:{id}` 库承载（`subscription` 文档），与已读/收藏状态复用同一条 PouchDB 双向同步链路。**PostgreSQL 侧没有「某用户订阅了哪些 feed」的表**：`feeds` 只是所有已知订阅源的注册表（供 Worker 定时抓取），`bot_feeds` 是 Bot↔feed 的关联，两者都不表示用户订阅。
+
+同理，**Bot 的产出也不在 PostgreSQL**：`workers/index.ts` 把每个 Bot 的产出写入其专属的 CouchDB `bot:{botId}` 库，outbox 路由从该库的 `entries-by-date` 视图读取（见 `routes/bots.ts`）。PostgreSQL 中不存在 `bot_outbox` 表。
+
+**但 Bot 的身份数据仍在 PostgreSQL**，其中最要紧的是 **actor 密钥对**：Fedify 把它存在 `fedify_kv_v2` 里（键形如 `["_botkit", "bots", {username}, "keyPairs"]`），删除 Bot 时由 `clearBotKv()` 一并清理 —— 只删 `bots` 表行的话，同名重建的 Bot 会复用旧私钥。密钥对**不可重建**：丢失后 Bot 会生成新密钥，已关注实例缓存的公钥随之失效。
+
+两处容易踩的约束：
+
+- `bots.preferred_username` **必须有唯一约束** —— 它就是联邦标识符 `@username@域名`，ActivityPub 的 acct 语义要求全局唯一；创建接口对重名返回 409。
+- `drizzle.config.ts` 必须用 `tablesFilter: ["*", "!fedify_*"]` **排除 Fedify 自建自管的表**。`fedify_kv_v2` / `fedify_message_v2` 不在本仓库 schema 中，不排除的话 `drizzle-kit push` 会把它们当成「多余的副本」直接 DROP —— 而 migrate 服务跑的正是 `push --force`（无人值守、自动批准数据丢失语句），等于每次部署都可能清掉 Bot 私钥。
 
 ## 文件存储职责
 
@@ -166,7 +182,9 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
   ├── /mcp、/mcp/*        → Hono（MCP 端点，不能做 301/307）
   ├── /.well-known/*      → Hono（webfinger）
   ├── /nodeinfo/*         → Hono
-  ├── /users/*、/inbox    → Hono（ActivityPub actor / inbox）
+  ├── /ap/*               → Hono（ActivityPub actor / inbox / outbox）
+  ├── /@*                 → Hono（actor 的 profile 页）
+  ├── /users/*、/inbox    → Hono（Fedify 默认路由，当前未启用）
   └── /*                  → Nuxt（SSR 渲染）
 ```
 
@@ -179,6 +197,6 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
 1. **RSS 资讯聚合**：用户发现并订阅感兴趣的 feed → feedsmith 解析 → 写入对应 feed:{feedId} 库（去重）→ BullMQ 定时调度周期性拉取更新
 2. **用户同步**：登录后 → 获取用户订阅的 feedId 列表 → 浏览器 PouchDB 逐个 `_replicate` feed 库到本地 → 本地 PouchDB 跨源合并，按时间线展示
 3. **离线阅读**：浏览器 PouchDB 本地缓存 → 离线浏览、跨源搜索、按时间排序 → 标记已读/收藏 → 同步到 user-state 库 → 其他设备接收变更
-4. **ActivityPub 分发**：Worker 抓取到新条目 → 查 PostgreSQL bot_feeds 找出引用该 feed 的 Bot → 对每个 Bot 通过 BotKit 构建 Create Activity 推送到 follower inbox → 同时写入 PostgreSQL bot_outbox 表供 outbox 查询（按 botId + publishedAt 索引，查询高效）
+4. **ActivityPub 分发**：Worker 抓取到新条目 → 查 PostgreSQL `bot_feeds` 找出引用该 feed 的 Bot → 对每个 Bot 通过 BotKit 构建 Create Activity 推送到 follower inbox → 同时写入该 Bot 的 **CouchDB `bot:{botId}` 产出库**供 outbox 查询（`entries-by-date` 视图按 publishedAt 排序，天然支持倒序分页）
 
-   > **为什么不把压缩图片也放进 bot_outbox？** 两个场景的消费者不同：PouchDB 同步 feed 库中的条目供离线阅读，需要下载并压缩图片嵌入文档；ActivityPub outbox 返回的是轻量分发元数据，远程实例会自行拉取原始图片 URL，不需要也不应该处理压缩版本。bot_outbox 只存标题、摘要、原文链接即可。
+   > **为什么 Bot 产出库里不放压缩图片？** 两个场景的消费者不同：PouchDB 同步 feed 库中的条目供离线阅读，需要下载并压缩图片嵌入文档；ActivityPub outbox 返回的是轻量分发元数据，远程实例会自行拉取原始图片 URL，不需要也不应该处理压缩版本。Bot 产出库只存标题、摘要、原文链接即可。

@@ -3,7 +3,7 @@ import crypto from "node:crypto"
 import { db, bots, feeds, attachments, botFeeds, botFollowing, botInbox, type Bot } from "../db"
 import { eq, and, desc } from "drizzle-orm"
 import { auth } from "../auth"
-import { followActor, unfollowActor } from "../bots"
+import { clearBotKv, followActor, unfollowActor } from "../bots"
 import { ApiError, cleanupAttachment, handleAvatarUpload } from "../avatar"
 import { createCouchDb, ensureBotDatabase, nanoServer } from "../couchdb/client"
 
@@ -33,8 +33,22 @@ async function requireAuth(c: Context<{ Variables: BotVariables }>, next: Next) 
   await next()
 }
 
+/** 判断是否为 PostgreSQL 唯一约束冲突（23505）；postgres.js 可能把原始错误包在 cause 里 */
+function isUniqueViolation(err: unknown): boolean {
+  const e = err as { code?: string, cause?: { code?: string } } | null
+  return e?.code === "23505" || e?.cause?.code === "23505"
+}
+
 botsRouter.post("/", requireAuth, async (c) => {
   const body = await c.req.json()
+
+  // 联邦标识符 @username@域名 必须全局唯一（ActivityPub 的 acct 语义），重名直接拒绝。
+  // 先查一次是为了不在注定失败的请求里白建附件行；并发竞态由下面的唯一约束兜底。
+  if (body.preferredUsername) {
+    const [taken] = await db.select({ id: bots.id }).from(bots)
+      .where(eq(bots.preferredUsername, body.preferredUsername)).limit(1)
+    if (taken) return c.json({ error: `preferredUsername "${body.preferredUsername}" is already taken` }, 409)
+  }
 
   // 手填外链头像：同步建一条 storageKey=null 的附件行（无文件可删），业务表只留冗余 URL + 外键
   let avatarAttachmentId: string | null = null
@@ -47,17 +61,27 @@ botsRouter.post("/", requireAuth, async (c) => {
     avatarAttachmentId = attachment?.id ?? null
   }
 
-  const bot = await db.insert(bots).values({
-    id: crypto.randomUUID(),
-    userId: c.get("userId"),
-    name: body.name,
-    description: body.description,
-    preferredUsername: body.preferredUsername,
-    avatarUrl: body.avatarUrl ?? null,
-    avatarAttachmentId,
-    isActive: body.isActive ?? true,
-  }).returning()
-  return c.json(bot[0], 201)
+  try {
+    const bot = await db.insert(bots).values({
+      id: crypto.randomUUID(),
+      userId: c.get("userId"),
+      name: body.name,
+      description: body.description,
+      preferredUsername: body.preferredUsername,
+      avatarUrl: body.avatarUrl ?? null,
+      avatarAttachmentId,
+      isActive: body.isActive ?? true,
+    }).returning()
+    return c.json(bot[0], 201)
+  } catch (err) {
+    // 两个并发请求可能同时通过上面的预检查，唯一约束会在这里拦下；
+    // 顺带回滚刚建的附件行，避免留下孤儿
+    await cleanupAttachment(avatarAttachmentId)
+    if (isUniqueViolation(err)) {
+      return c.json({ error: `preferredUsername "${body.preferredUsername}" is already taken` }, 409)
+    }
+    throw err
+  }
 })
 
 botsRouter.get("/", requireAuth, async (c) => {
@@ -84,6 +108,9 @@ botsRouter.delete("/:id", requireOwnedBot, async (c) => {
   if (bot.couchDbName) {
     try { await nanoServer.db.destroy(bot.couchDbName) } catch { /* 库不存在，忽略 */ }
   }
+  // 清理 Fedify KV 中的密钥对等联邦身份数据。必须放在删表之前：这里失败就中止删除，
+  // 避免出现「表行已删、KV 仍残留旧私钥」的不一致（残留会让同名重建的 Bot 复用旧私钥）。
+  await clearBotKv(bot.preferredUsername)
   await db.delete(bots).where(eq(bots.id, bot.id))
   // 清理头像附件（S3 文件 + 元数据行），避免孤儿
   await cleanupAttachment(bot.avatarAttachmentId)

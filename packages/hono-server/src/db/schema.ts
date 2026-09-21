@@ -103,7 +103,12 @@ export const bots = pgTable("bots", {
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   description: text("description"),
-  preferredUsername: text("preferred_username").notNull(),
+  /**
+   * 联邦标识符 `@username@域名`。ActivityPub 的 acct 语义要求它全局唯一，
+   * 所以必须有唯一约束：重名会让两个 Bot 争抢同一个联邦身份，而 Fedify 的 KV
+   * 又是按 username 存放 actor 密钥对的，同名重建会直接复用旧私钥。
+   */
+  preferredUsername: text("preferred_username").notNull().unique(),
   /** 头像公开 URL（冗余展示列，同步自附件表，BotKit icon / 前端直出用） */
   avatarUrl: text("avatar_url"),
   /** 头像附件外键（定位 attachments 行以删除旧 S3 文件） */

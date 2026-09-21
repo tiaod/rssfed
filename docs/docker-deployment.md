@@ -39,7 +39,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml --profile t
 ```bash
 docker compose --env-file .env.production -f docker-compose.prod.yml ps
 curl -s https://<你的域名>/api/health          # {"status":"ok"}
-curl -s https://<你的域名>/nodeinfo/2.1        # 联邦端点
+curl -s -o /dev/null -w '%{http_code}\n' https://<你的域名>/.well-known/nodeinfo  # 200 即联邦端点可达（当前 links 为空，见 troubleshooting）
 ```
 
 首屏可用后，用 `ADMIN_EMAIL` / `ADMIN_PASSWORD` 引导创建的管理员账号登录（见 [.env.production.example](../.env.production.example)），或在站点注册首个账号。
@@ -94,11 +94,15 @@ docker build --target web    -t rssfed-web:latest    .
 | `/mcp`、`/mcp/*` | server，**不做 301/307**（重定向会让 MCP 客户端丢掉 `Authorization` 头） |
 | `/.well-known/*` | server（webfinger） |
 | `/nodeinfo/*` | server |
-| `/users/*`、`/inbox` | server（Fedify actor / inbox） |
+| `/ap/*` | server（**BotKit actor / inbox / outbox —— 真实路径是 `/ap/actor/{username}`**） |
+| `/@*` | server（actor 的 profile 页） |
+| `/users/*`、`/inbox` | server（Fedify 默认路由与共享 inbox，当前未启用，实测 404） |
 | `/admin/queues` | 反代直接 404（队列看板不对外） |
 | 其余 `/` | web（Nuxt SSR） |
 
-**只转 `/api/*` 是最常见的踩坑**：ActivityPub 端点挂在 Hono 的 `app.all("*")` 兜底上，漏了 `/mcp`、`/.well-known/*`、`/users/*` 会让联邦与 MCP 整体 404。
+**只转 `/api/*` 是最常见的踩坑**：ActivityPub 端点挂在 Hono 的 `app.all("*")` 兜底上，漏了 `/mcp`、`/.well-known/*`、`/ap/*` 会让联邦与 MCP 整体 404。
+
+其中 **`/ap/*` 最阴**：webfinger 走 `/.well-known/*`，能正常返回 200；外部实例据此拿到 `/ap/actor/{username}` 再回来取时才发现 404，外部表现为「能搜到账号、但无法关注 / 账号加载不出来」，而站点首页完全正常。2026-09-21 上线验收实测踩过这个坑，详见 [cloud-deployment-todo.md](cloud-deployment-todo.md) 的「本地端到端验收」一节。
 
 用自建 Nginx / 云负载均衡代替 Caddy 时，对照上表配置，并把上游指向宿主的 `127.0.0.1:3000`（web）与 `127.0.0.1:3001`（server）——compose 默认只把这两个端口绑到回环，公网直连不到。此时不要加 `--profile tls`，避免 80/443 冲突。
 
@@ -118,11 +122,18 @@ Caddyfile 里还留了几处按需开关（都是注释形式）：访问日志�
 上线验收（应全部符合预期）：
 
 ```bash
-curl -s https://<域名>/api/health
-curl -s https://<域名>/nodeinfo/2.1
-curl -s "https://<域名>/.well-known/webfinger?resource=acct:<bot名>@<域名>"
-curl -s https://<域名>/mcp/ -o /dev/null -w '%{http_code}\n'   # 不能是 3xx
+BASE=https://<域名>
+curl -s $BASE/api/health
+curl -s -o /dev/null -w '%{http_code}\n' $BASE/.well-known/nodeinfo   # 200：联邦端点可达
+curl -s "$BASE/.well-known/webfinger?resource=acct:<bot名>@<域名>"    # 返回 subject 与 actor 链接
+# 下面这条最关键：webfinger 通了不代表 actor 取得回来。
+# 反代若漏放行 /ap/*，这里会落到 Nuxt 上返回 404（JSON 形如 {"statusCode":404,...}）
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Accept: application/activity+json' \
+  "$BASE/ap/actor/<bot名>"                                            # 必须是 200
+curl -s -o /dev/null -w '%{http_code}\n' $BASE/mcp/                   # 不能是 3xx
 ```
+
+> `/ap/actor/{username}` 是 BotKit actor 的真实路径，**不是 `/users/*`**。2026-09-21 上线验收正是漏了这一条：webfinger 返回 200、首页正常，但 actor 一律 404，联邦功能整体不可用。详见 [cloud-deployment-todo.md](cloud-deployment-todo.md) 的「本地端到端验收」。
 
 ## 4. 环境变量
 

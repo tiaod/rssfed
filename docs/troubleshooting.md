@@ -51,7 +51,35 @@
 ### 只转 `/api/*` 会让联邦功能整体 404
 
 - **原因**：Hono 除 `/api/*` 外，还用 `app.all("*")` 兜底承载 ActivityPub 端点。
-- **解法**：反代必须同时转发 `/mcp`、`/mcp/*`、`/.well-known/*`、`/nodeinfo/*`、`/users/*`、`/inbox`。规则见 [deploy/Caddyfile](../deploy/Caddyfile)。另外 `/mcp` 不能做 301/307，否则 MCP 客户端跟随跳转会丢掉 `Authorization` 头。
+- **解法**：反代必须同时转发 `/mcp`、`/mcp/*`、`/.well-known/*`、`/nodeinfo/*`、`/ap/*`、`/@*`。规则见 [deploy/Caddyfile](../deploy/Caddyfile)。（`/users/*`、`/inbox` 是 Fedify 默认路由与共享 inbox，当前未启用，实测 404，留着只为将来启用时不至于又漏。）另外 `/mcp` 不能做 301/307，否则 MCP 客户端跟随跳转会丢掉 `Authorization` 头。
+
+### webfinger 正常但 actor 取不到：反代漏放行 `/ap/*`
+
+- **现象**：在 Mastodon 里能搜到 bot 账号（说明 webfinger 解析成功），但账号加载不出来、无法关注、也收不到投递；同时站点首页与 `/api/*` 一切正常，极易误判成联邦代码有问题。
+- **原因**：BotKit 的 actor 真实路径是 **`/ap/actor/{username}`**，而反代 matcher 里放行的却是**后端并不存在的 `/users/*`**（实测 404）。webfinger 走 `/.well-known/*`，那条是被放行的，所以它照常返回 200 并给出 `/ap/actor/...` 链接；外部实例拿着这个链接回来取时才落到 Nuxt 上 404。
+- **解法**：反代 matcher 必须包含 `/ap/*`（以及 profile 页的 `/@*`），改完 `caddy reload`，然后用这条确认：
+  ```bash
+  curl -s -o /dev/null -w '%{http_code}\n' -H 'Accept: application/activity+json' \
+    https://<域名>/ap/actor/<bot名>     # 必须 200；返回形如 {"statusCode":404,...} 的 JSON 就是漏了
+  ```
+- **记录**：2026-09-21 上线验收实测踩到，详见 [cloud-deployment-todo.md](cloud-deployment-todo.md) 的「本地端到端验收」一节。
+
+## 数据库与迁移
+
+### `drizzle-kit push` 要 DROP `fedify_kv_v2`，会删掉 Bot 私钥
+
+- **现象**：本地 `pnpm db:push` 提示 `You're about to delete fedify_kv_v2 table with N items`；线上 migrate 服务跑的是 `push --force`，会**自动批准**这条 DROP。
+- **原因**：`fedify_kv_v2` / `fedify_message_v2` 由 `@fedify/postgres` 自建自管，不在本仓库的 Drizzle schema 里，push 因此把它们当成「多余的副本」。而 `fedify_kv_v2` 存着 Bot 的 ActivityPub **密钥对**（键形如 `["_botkit","bots",{username},"keyPairs"]`），删掉即永久丢失联邦身份 —— 已关注的实例会因公钥失效而无法验证签名。
+- **解法**：在 `packages/hono-server/drizzle.config.ts` 里排除它们：`tablesFilter: ["*", "!fedify_*"]`。改完 `pnpm db:push` 不再有任何数据丢失提示。
+- **注意**：线上生效依赖新镜像（migrate 跑的是 ghcr 镜像），旧镜像下次部署仍会删表。
+
+### 加唯一约束时 `push` 会问「是否 truncate 表」
+
+- **现象**：给已有数据的表加 `.unique()` 后，`drizzle-kit push` 会问 `Do you want to truncate <table> table?`，而 `--force` 会走 truncate 分支（即清空该表）。
+- **解法**：别用 `--force` 硬跑。先用等价 SQL 手工加约束 —— 数据无重复时必然成功且保留数据，之后 `push` 会认为结构已对齐：
+  ```sql
+  ALTER TABLE bots ADD CONSTRAINT bots_preferred_username_unique UNIQUE (preferred_username);
+  ```
 
 ## 对象存储
 
