@@ -101,7 +101,9 @@
 - [docker-compose.prod.yml](../docker-compose.prod.yml) 的 `migrate` 服务在 `server` 启动前单次执行 `drizzle-kit push --force`，`server` 用 `service_completed_successfully` 依赖它。
 - **实跑确认**：`up -d --build` 会重建 migrate 容器并重跑；镜像未变而要重跑用 `docker compose ... run --rm migrate`。
 - `--force` 会自动批准数据丢失语句（可能 truncate 表）：首次部署无风险，后续删列/改类型前先 `--verbose` 复核（见 [docker-deployment.md](docker-deployment.md) 第 5 节）。
-- ⚠️ **2026-09-21 发现并已修的真实风险**：Fedify 自建自管的 `fedify_kv_v2` / `fedify_message_v2` 不在本仓库 schema 里，`push` 会把它们当成多余的表并 **DROP TABLE**（`--force` 自动批准；**空表时甚至不提示，直接静默删除**）。而 `fedify_kv_v2` 存着 Bot 的 **ActivityPub 密钥对**，被删即永久丢失联邦身份（不可重建）。**已把这两张表迁到独立 schema `fedify`**（drizzle 默认只管理 `public`，结构上够不着；schema 由启动流程的 `ensureFedifySchema()` 幂等创建），另在 [drizzle.config.ts](../packages/hono-server/drizzle.config.ts) 保留 `tablesFilter` 作第二道防线。**需新镜像才在线上生效** —— 线上 `fedify` schema 已提前建好，`public` 里那两张空表待新镜像部署后再删。
+- ⚠️ **2026-09-21 发现并已修的真实风险**：Fedify 自建自管的 `fedify_kv_v2` / `fedify_message_v2` 不在本仓库 schema 里，`push` 会把它们当成多余的表并 **DROP TABLE**（`--force` 自动批准；**空表时甚至不提示，直接静默删除**）。而 `fedify_kv_v2` 存着 Bot 的 **ActivityPub 密钥对**，被删即永久丢失联邦身份（不可重建）。**已把这两张表迁到独立 schema `fedify`**（drizzle 默认只管理 `public`，结构上够不着；schema 由启动流程的 `ensureFedifySchema()` 幂等创建），另在 [drizzle.config.ts](../packages/hono-server/drizzle.config.ts) 保留 `tablesFilter` 作第二道防线。
+  - **已上线（2026-09-21）**：新镜像部署完成，`migrate` 退出码 0 且**零数据丢失提示**，`server` 日志出现 `[Fedify] schema ready`；`public` 下的两张残留空表已 DROP；在 server 容器内实测 KV 读写往返成功、表落在 `fedify.fedify_kv_v2`。
+  - 部署时顺带发现：**服务器上的 `docker-compose.prod.yml` 一直没跟上「改用 ghcr」那次提交**（仍是本地镜像名 `rssfed-server:latest`），因此那次改动从未在线上生效过。本次已用仓库版本覆盖（旧版备份为 `docker-compose.prod.yml.bak.<时间戳>`）。ghcr 包改为 public 的坑见 [docker-deployment.md](docker-deployment.md) 第 10 节。
 - `push` 只对齐结构、不回填数据；新增非空列之类改动需手动补数据。
 
 ### 11. 运行时与资源 ✅

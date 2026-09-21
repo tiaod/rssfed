@@ -277,7 +277,7 @@ console.log("bucket ready");
 
 **为什么在 CI 构建**：生产服务器内存只有 ~2G，容器内构建 Nuxt 会 OOM（见第 2 节）。服务器只负责拉取与运行。
 
-**为什么不让 CI 直接 SSH 部署**：那要求把生产私钥交给云端 Runner，而构建阶段会执行第三方依赖的代码 —— 供应链一旦出问题，等于把服务器钥匙一并交出去。当前是「CI 只推镜像 + 服务器手工拉取」，认证只有单向的：服务器持有一个 ghcr 只读凭证。
+**为什么不让 CI 直接 SSH 部署**：那要求把生产私钥交给云端 Runner，而构建阶段会执行第三方依赖的代码 —— 供应链一旦出问题，等于把服务器钥匙一并交出去。当前是「CI 只推镜像 + 服务器手工拉取」：三个镜像包是**公开可见**的，服务器不持有任何 registry 凭证。
 
 ### 部署与回滚
 
@@ -291,9 +291,13 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-
 # 回滚：把 compose 里三个服务的 :latest 换成目标提交的 :sha-<短hash>，再执行上面两条
 ```
 
-拉取私有包前需要登录（仓库转 public 且把 package 可见性也改成 public 后，可 `docker logout ghcr.io` 去掉这步）：
+> **当前状态（2026-09-21）**：`rssfed/server`、`rssfed/web`、`rssfed/migrate` 三个包已设为 **public**，服务器直接 `pull` 即可，无需登录。若将来改回 private，再补一次登录：
 
 ```bash
 echo "<PAT>" | docker login ghcr.io -u tiaod --password-stdin
 # PAT 只需 read:packages 权限
 ```
+
+> ⚠️ **改包可见性时最容易漏的两点**（2026-09-21 实际踩过）：
+> 1. **仓库转 public 不会连带改包** —— ghcr 包的可见性是独立设置，三个包要各自进 Package settings → 底部 Danger Zone → Change visibility → Public，而且**必须手动输入包名确认**，点完按钮不等于改完。
+> 2. 漏掉任何一个都会让 `pull` 以 `unauthorized` 失败。尤其别漏 `migrate`：它挂在 `server` 的 `depends_on: service_completed_successfully` 上，拉不到会让整个 `up` 起不来（`server`/`web` 即使已经拉到也不会启动）。
