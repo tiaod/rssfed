@@ -148,7 +148,7 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
 两处容易踩的约束：
 
 - `bots.preferred_username` **必须有唯一约束** —— 它就是联邦标识符 `@username@域名`，ActivityPub 的 acct 语义要求全局唯一；创建接口对重名返回 409。
-- `drizzle.config.ts` 必须用 `tablesFilter: ["*", "!fedify_*"]` **排除 Fedify 自建自管的表**。`fedify_kv_v2` / `fedify_message_v2` 不在本仓库 schema 中，不排除的话 `drizzle-kit push` 会把它们当成「多余的副本」直接 DROP —— 而 migrate 服务跑的正是 `push --force`（无人值守、自动批准数据丢失语句），等于每次部署都可能清掉 Bot 私钥。
+- **Fedify 的表必须放在独立 schema（`fedify`）下，不能留在 `public`**：`fedify_kv_v2` / `fedify_message_v2` 由 `@fedify/postgres` 自建自管、不在本仓库 schema 中，留在 `public` 的话 `drizzle-kit push` 会把它们当成「多余的副本」直接 DROP —— 而 migrate 跑的是 `push --force`（无人值守、自动批准数据丢失语句），等于每次部署都可能清掉 Bot 私钥。做法是让 BotKit 的独立连接把 `search_path` 指向 `fedify`（见 `bots/index.ts` 的 `botkitSql`），schema 由启动流程的 `ensureFedifySchema()` 幂等创建；drizzle 默认只管理 `public`，从此结构上就够不着。`drizzle.config.ts` 另配了 `tablesFilter: ["*", "!fedify_*"]` 作为第二道防线。
 
 ## 文件存储职责
 

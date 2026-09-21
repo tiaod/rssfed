@@ -68,10 +68,10 @@
 
 ### `drizzle-kit push` 要 DROP `fedify_kv_v2`，会删掉 Bot 私钥
 
-- **现象**：本地 `pnpm db:push` 提示 `You're about to delete fedify_kv_v2 table with N items`；线上 migrate 服务跑的是 `push --force`，会**自动批准**这条 DROP。
+- **现象**：本地 `pnpm db:push` 提示 `You're about to delete fedify_kv_v2 table with N items`；线上 migrate 服务跑的是 `push --force`，会**自动批准**这条 DROP。⚠️ 更隐蔽的是：**表为空时连这条提示都不会出现**，drizzle 静默 DROP。
 - **原因**：`fedify_kv_v2` / `fedify_message_v2` 由 `@fedify/postgres` 自建自管，不在本仓库的 Drizzle schema 里，push 因此把它们当成「多余的副本」。而 `fedify_kv_v2` 存着 Bot 的 ActivityPub **密钥对**（键形如 `["_botkit","bots",{username},"keyPairs"]`），删掉即永久丢失联邦身份 —— 已关注的实例会因公钥失效而无法验证签名。
-- **解法**：在 `packages/hono-server/drizzle.config.ts` 里排除它们：`tablesFilter: ["*", "!fedify_*"]`。改完 `pnpm db:push` 不再有任何数据丢失提示。
-- **注意**：线上生效依赖新镜像（migrate 跑的是 ghcr 镜像），旧镜像下次部署仍会删表。
+- **解法**：把这两张表移出 `public` —— Fedify 的表统一建在独立 schema `fedify` 下。做法是给 BotKit 的独立连接设置 `search_path`（`bots/index.ts` 的 `botkitSql`，走 PG 启动参数 `options`），并在启动流程里由 `ensureFedifySchema()` 幂等建 schema。drizzle 默认只管理 `public`，从此结构上够不着它们。`drizzle.config.ts` 另保留 `tablesFilter: ["*", "!fedify_*"]` 作为第二道防线。
+- **注意**：`fedify` schema 必须先于 Fedify 建表存在 —— Fedify 只建表、不建 schema，schema 缺失时建表会失败（由 `ensureFedifySchema()` 保证）。移库后 `public` 里的旧 `fedify_*` 空表可手工 DROP。
 
 ### 加唯一约束时 `push` 会问「是否 truncate 表」
 

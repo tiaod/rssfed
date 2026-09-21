@@ -9,9 +9,33 @@ import { createCouchDb, ensureBotDatabase } from "../couchdb/client"
 const origin = process.env.BOTS_BASE_URL ?? "http://localhost:3001"
 const pollIntervalMs = parseInt(process.env.CHECK_INTERVAL ?? "300000")
 
+/**
+ * Fedify 的表（`fedify_kv_v2` / `fedify_message_v2`）统一建在这个独立 schema 下。
+ *
+ * 它们由 `@fedify/postgres` 自建自管、不在本仓库的 Drizzle schema 里。若留在 `public`，
+ * `drizzle-kit push` 会把它们当成「多余的副本」直接 DROP —— 而 migrate 服务跑的正是
+ * `push --force`（无人值守、自动批准数据丢失语句），等于每次部署都可能清掉 Bot 的
+ * ActivityPub 私钥。放进独立 schema 后，drizzle 默认只管理 `public`，结构上就够不着。
+ */
+export const FEDIFY_SCHEMA = "fedify"
+
 // BotKit KV 存储与消息队列：PostgreSQL（@fedify/postgres 官方实现，表由包自动管理）。
 // 使用独立 postgres.js 连接，与 drizzle 业务连接分离，避免 KV 高频读写干扰业务查询。
-const botkitSql = postgres(process.env.DATABASE_URL ?? "postgres://localhost:5432/rssfed")
+// `options` 是 PG 的启动参数，用它把本连接的 search_path 指向 Fedify 专用 schema（见上）。
+const botkitSql = postgres(process.env.DATABASE_URL ?? "postgres://localhost:5432/rssfed", {
+  connection: { options: `-c search_path=${FEDIFY_SCHEMA}` },
+})
+
+/**
+ * 确保 Fedify 专用 schema 存在（幂等）。
+ *
+ * Fedify 只会建表、不会建 schema，所以必须在它首次建表前调用 —— 由应用启动流程
+ * （src/index.ts）负责。刻意不写成模块顶层 await：那样任何 import 本模块的代码
+ * （包括单元测试）都会在加载阶段就要求数据库可用。
+ */
+export async function ensureFedifySchema() {
+  await botkitSql`CREATE SCHEMA IF NOT EXISTS ${botkitSql(FEDIFY_SCHEMA)}`
+}
 
 // BotKit 的 KV 存储：Bot actor 的密钥对等联邦身份数据存在这里，删除 Bot 时必须一并清理
 // （见 clearBotKv）。单独持有引用是为了能主动操作它。

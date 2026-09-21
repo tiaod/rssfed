@@ -10,7 +10,7 @@ import {
   ensureSystemDatabases,
 } from "./couchdb/client"
 import { shutdownWorkers } from "./workers"
-import { shutdownBots } from "./bots"
+import { shutdownBots, ensureFedifySchema } from "./bots"
 import { bootstrapAdminFromEnv } from "./bootstrap-admin"
 
 const port = parseInt(process.env.PORT ?? "3001")
@@ -91,6 +91,14 @@ configureProxyAuth().then(() => {
 // 环境变量引导创建管理员（幂等：已存在则跳过），失败不影响服务启动
 bootstrapAdminFromEnv().catch((err) => {
   console.error("Failed to bootstrap admin:", err)
+})
+
+// Fedify 专用 schema 必须先于它首次建表而存在（Fedify 只建表、不建 schema）。
+// 失败不阻塞启动：真正用到 KV 时会再次报错，这里先把原因打出来。
+ensureFedifySchema().then(() => {
+  console.log("[Fedify] schema ready")
+}).catch((err) => {
+  console.error("Failed to ensure Fedify schema:", err)
 })
 
 console.log(`Server running on http://localhost:${port}`)
