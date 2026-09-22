@@ -1,3 +1,4 @@
+import { ref } from 'vue'
 import { vi } from 'vitest'
 
 // =====================================================
@@ -40,6 +41,8 @@ const mockAuthClient = {
 const nuxtGlobals = globalThis as unknown as Record<string, unknown>
 nuxtGlobals.useAuthClient = vi.fn(() => mockAuthClient)
 nuxtGlobals.useFetch = vi.fn()
+// Nuxt 的 useState：测试里退化成普通 ref，只需要支持初始值
+nuxtGlobals.useState = vi.fn(<T>(_key: string, init: () => T) => ref(init()))
 nuxtGlobals.navigateTo = vi.fn()
 // runtimeConfig 供 useCouchTargets 等 composable 读取后端地址
 nuxtGlobals.useRuntimeConfig = () => ({

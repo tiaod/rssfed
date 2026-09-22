@@ -102,7 +102,10 @@ onMounted(load)
         v-else-if="loading"
         class="flex justify-center py-12"
       >
-        <ULoading />
+        <UIcon
+          name="i-lucide-loader-circle"
+          class="size-8 animate-spin text-muted"
+        />
       </div>
 
       <div
