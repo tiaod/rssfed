@@ -41,3 +41,10 @@ const nuxtGlobals = globalThis as unknown as Record<string, unknown>
 nuxtGlobals.useAuthClient = vi.fn(() => mockAuthClient)
 nuxtGlobals.useFetch = vi.fn()
 nuxtGlobals.navigateTo = vi.fn()
+// runtimeConfig 供 useCouchTargets 等 composable 读取后端地址
+nuxtGlobals.useRuntimeConfig = () => ({
+  public: {
+    apiBaseUrl: 'http://localhost:3001',
+    authBaseUrl: 'http://localhost:3001/api/auth'
+  }
+})

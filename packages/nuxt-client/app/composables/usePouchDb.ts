@@ -3,7 +3,7 @@ import * as PouchDBFindNS from 'pouchdb-find'
 import { reactive } from 'vue'
 import type { RssCachedImage, RssEntry } from '~/types/rss'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
-import { resolveApiBase } from '~/utils/apiBase'
+import { useCouchTargets, USER_STATE_ID } from '~/composables/useCouchTargets'
 import { errorMessage } from '~/utils/errorMessage'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 
@@ -99,6 +99,8 @@ interface PouchDbState {
   replicateWaiting: Array<{ id: string, full?: boolean, resolve: (r: { ok: boolean, error?: string }) => void }>
   /** 当前正在执行的复制数 */
   activeReplicates: number
+  /** 用户状态库 live 同步的启动 Promise（syncNow 暂停它之前必须先等它挂上 handle） */
+  userStateSyncPromise: Promise<void> | null
 }
 
 /** 集中条目库名称 */
@@ -112,8 +114,8 @@ const ENTRIES_DB_NAME = 'rssfed-entries'
  * 用户状态库（已读/收藏/订阅）通过 live 双向同步。
  */
 export function usePouchDb() {
-  const { public: { apiBaseUrl } } = useRuntimeConfig()
-  const base = resolveApiBase(apiBaseUrl)
+  // 代理地址里的库名由后端下发（随机库名，无法推导），见 useCouchTargets
+  const { remoteUrlForId, invalidate: invalidateTargets } = useCouchTargets()
 
   // 通过 nuxtApp 单例化共享状态，避免每次组件挂载都创建新实例
   const nuxtApp = useNuxtApp() as NuxtAppWithPouchState
@@ -125,7 +127,8 @@ export function usePouchDb() {
       syncHandles: new Map<string, PouchDB.Replication.Sync<Record<string, unknown>>>(),
       syncStatuses: reactive<Record<string, SyncStatus>>({}),
       replicateWaiting: [],
-      activeReplicates: 0
+      activeReplicates: 0,
+      userStateSyncPromise: null
     }
   }
   const { syncHandles, syncStatuses } = nuxtApp.$pouchDbState
@@ -216,10 +219,15 @@ export function usePouchDb() {
     while (pouchState.activeReplicates < MAX_CONCURRENT_REPLICATE && pouchState.replicateWaiting.length > 0) {
       const item = pouchState.replicateWaiting.shift()!
       pouchState.activeReplicates++
-      void replicateDb(item.id, item.full).then(item.resolve).finally(() => {
-        pouchState.activeReplicates--
-        pumpReplicateQueue()
-      })
+      // replicateDb 承诺以 { ok, error } 上报失败、不抛错；这里再兜一层 catch，
+      // 保证任何意外异常都不会让入队的 Promise 悬空（否则 syncNow 的 Promise.all 会挂死）
+      void replicateDb(item.id, item.full)
+        .then(item.resolve)
+        .catch((e: unknown) => item.resolve({ ok: false, error: errorMessage(e) }))
+        .finally(() => {
+          pouchState.activeReplicates--
+          pumpReplicateQueue()
+        })
     }
   }
 
@@ -229,7 +237,7 @@ export function usePouchDb() {
    */
   function isValidDbId(id: unknown): id is string {
     if (typeof id !== 'string' || id.length === 0) return false
-    if (id === '__user_state__') return true
+    if (id === USER_STATE_ID) return true
     if (id.startsWith('bot:')) return id.length > 'bot:'.length
     return true
   }
@@ -269,13 +277,28 @@ export function usePouchDb() {
    * full=true 时强制全量（since: 0），见 enqueueReplicate 说明。
    */
   async function replicateDb(id: string, full = false): Promise<{ ok: boolean, error?: string }> {
-    const db = id === '__user_state__' ? getUserStateDb() : getEntriesDb()
-    // bot 订阅源走 bot 产出库代理（feedId 形如 `bot:{botId}`），其余走 feed 库代理
-    const remoteUrl = id === '__user_state__'
-      ? `${base}/api/couchdb/proxy/user-state`
-      : id.startsWith('bot:')
-        ? `${base}/api/couchdb/proxy/bot/${encodeURIComponent(id.slice('bot:'.length))}`
-        : `${base}/api/couchdb/proxy/feed/${encodeURIComponent(id)}`
+    const db = id === USER_STATE_ID ? getUserStateDb() : getEntriesDb()
+
+    // 远端地址必须带真实库名（后端随机生成、持久化在业务表上），先取寻址信息。
+    // 取寻址信息本身也会失败（未登录、接口不可达），按同步失败上报而不是往上抛：
+    // replicateDb 的契约是不抛错，抛出去会让队列里的 Promise 悬空。
+    let remoteUrl: string | null = null
+    let lookupError: string | null = null
+    try {
+      remoteUrl = await remoteUrlForId(id)
+    } catch (e: unknown) {
+      lookupError = errorMessage(e)
+    }
+    if (!remoteUrl) {
+      const error = lookupError ?? `未取到订阅对应的 CouchDB 库名（${id}），已跳过同步`
+      syncStatuses[id] = {
+        feedId: id,
+        status: 'error',
+        version: syncStatuses[id]?.version ?? 0,
+        error
+      }
+      return { ok: false, error }
+    }
 
     syncStatuses[id] = {
       feedId: id,
@@ -385,14 +408,16 @@ export function usePouchDb() {
       targets = [...new Set(feedIds)].filter(isValidDbId)
     } else {
       const subs = await listSubscriptions()
-      targets = [...new Set([...subs.map(s => s.id), '__user_state__'])].filter(isValidDbId)
+      targets = [...new Set([...subs.map(s => s.id), USER_STATE_ID])].filter(isValidDbId)
     }
 
-    // ① 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用
-    const pausedUserState = syncHandles.has('__user_state__')
+    // ① 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用。
+    // 先等 live 同步启动完成：它要先取库名（异步），否则 handle 还没挂上，暂停会落空
+    await pouchState.userStateSyncPromise
+    const pausedUserState = syncHandles.has(USER_STATE_ID)
     if (pausedUserState) {
-      syncHandles.get('__user_state__')!.cancel()
-      syncHandles.delete('__user_state__')
+      syncHandles.get(USER_STATE_ID)!.cancel()
+      syncHandles.delete(USER_STATE_ID)
     }
 
     // ② 入队执行一次性复制（队列内部限制并发，等待全部完成）。
@@ -411,7 +436,7 @@ export function usePouchDb() {
 
     // ③ 恢复用户状态库的 live 同步，保持已读/收藏的实时双向同步
     if (pausedUserState) {
-      startUserStateLiveSync()
+      void startUserStateLiveSync()
     }
 
     return { ok, failed }
@@ -528,6 +553,8 @@ export function usePouchDb() {
     for (const key of Object.keys(syncStatuses)) {
       Reflect.deleteProperty(syncStatuses, key)
     }
+    // 代理寻址信息一并失效：服务端库重建后库名可能已变
+    invalidateTargets()
   }
 
   /**
@@ -685,13 +712,31 @@ export function usePouchDb() {
    * 启动用户状态库的 live 双向同步（db 必须已创建）。
    * 与 getUserStateDb 分离，便于手动同步（syncNow）暂停后恢复实时同步。
    */
-  function startUserStateLiveSync() {
-    const key = '__user_state__'
+  async function startUserStateLiveSync() {
+    const key = USER_STATE_ID
     const db = pouchState.userStateDb
     if (!db) return
 
+    // 远端地址要带真实库名，先取寻址信息；取不到就记错误，等下次触发再试。
+    // 这里也不能往上抛：返回值会作为 userStateSyncPromise 被 syncNow await。
+    let remoteUrl: string | null = null
+    let lookupError: string | null = null
+    try {
+      remoteUrl = await remoteUrlForId(key)
+    } catch (e: unknown) {
+      lookupError = errorMessage(e)
+    }
+    if (!remoteUrl) {
+      syncStatuses[key] = {
+        feedId: key,
+        status: 'error',
+        version: syncStatuses[key]?.version ?? 0,
+        error: lookupError ?? '未取到用户状态库名，实时同步未启动'
+      }
+      return
+    }
+
     // 启动双向同步；错误写入 syncStatuses，供 UI 展示
-    const remoteUrl = `${base}/api/couchdb/proxy/user-state`
     syncStatuses[key] = {
       feedId: key,
       status: 'syncing',
@@ -739,7 +784,8 @@ export function usePouchDb() {
   function getUserStateDb(): PouchDB.Database {
     if (!pouchState.userStateDb) {
       pouchState.userStateDb = new PouchDB('rssfed-user-state')
-      startUserStateLiveSync()
+      // 记下启动 Promise：syncNow 要等它挂上 handle 才能暂停 live 同步
+      pouchState.userStateSyncPromise = startUserStateLiveSync()
     }
     return pouchState.userStateDb
   }
@@ -806,6 +852,9 @@ export function usePouchDb() {
       handle.cancel?.()
     }
     syncHandles.clear()
+    pouchState.userStateSyncPromise = null
+    // 代理寻址信息与账号绑定，销毁本地状态时一并失效（登出/切换用户后不能沿用旧库名）
+    invalidateTargets()
     if (pouchState.entriesDb) {
       pouchState.entriesDb.close()
       pouchState.entriesDb = null
@@ -861,6 +910,8 @@ export function usePouchDb() {
       category,
       createdAt: new Date().toISOString()
     })
+    // 新订阅的库名还不在代理寻址缓存里，失效后下次同步重新取
+    invalidateTargets()
   }
 
   /**
@@ -875,6 +926,8 @@ export function usePouchDb() {
     } catch {
       // 文档不存在，忽略
     }
+    // 订阅集合变了，下次同步重新取寻址信息（服务端已删掉对应库名映射）
+    invalidateTargets()
   }
 
   /**
@@ -894,6 +947,8 @@ export function usePouchDb() {
       image: info.image,
       createdAt: new Date().toISOString()
     })
+    // 新订阅的库名还不在代理寻址缓存里，失效后下次同步重新取
+    invalidateTargets()
   }
 
   /**

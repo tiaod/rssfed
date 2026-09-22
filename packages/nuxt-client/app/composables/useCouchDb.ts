@@ -1,3 +1,5 @@
+import { useCouchTargets, USER_STATE_ID } from '~/composables/useCouchTargets'
+
 export interface SubscriptionItem {
   id: string // feedId（bot 订阅为 `bot:{botId}`）
   title: string
@@ -12,15 +14,25 @@ export interface SubscriptionItem {
 
 /**
  * 通过 Hono 代理直连 CouchDB 用户状态库。
- * 走 /api/couchdb/proxy/user-state/*，Hono 自动 Proxy Auth 签名。
+ *
+ * 代理地址形如 /api/couchdb/proxy/<库名>/*，库名是后端随机生成、持久化在业务表上的，
+ * 前端推导不出来，所以每个方法都要先经 useCouchTargets 取一次寻址信息（内存缓存）。
  */
 export function useCouchDb() {
   const { public: { apiBaseUrl } } = useRuntimeConfig()
   const base = apiBaseUrl.replace(/\/+$/, '')
-  const proxyBase = `${base}/api/couchdb/proxy/user-state`
+  const { remoteUrlForId, invalidate: invalidateTargets } = useCouchTargets()
+
+  /** 用户状态库的代理地址；取不到库名（未登录/后端不可达）时抛错 */
+  async function userStateProxyBase(): Promise<string> {
+    const url = await remoteUrlForId(USER_STATE_ID)
+    if (!url) throw new Error('未取到用户状态库地址：请确认已登录且后端可达')
+    return url
+  }
 
   /** 获取当前用户库的订阅列表（Mango 查询） */
   async function listSubscriptions(): Promise<SubscriptionItem[]> {
+    const proxyBase = await userStateProxyBase()
     const res = await fetch(`${proxyBase}/_find`, {
       method: 'POST',
       credentials: 'include',
@@ -52,6 +64,7 @@ export function useCouchDb() {
 
   /** 添加订阅：先通过 API 获取 FeedDoc 信息，再写入 CouchDB */
   async function addSubscription(feedId: string, category?: string) {
+    const proxyBase = await userStateProxyBase()
     const feed = await $fetch<{ title: string, siteUrl?: string, description?: string, image?: string }>(`${base}/api/feeds/${feedId}`)
 
     const doc = {
@@ -76,10 +89,13 @@ export function useCouchDb() {
     if (!res.ok && res.status !== 409) {
       throw new Error(`CouchDB insert failed: ${res.statusText}`)
     }
+    // 新订阅对应新库，寻址缓存里还没有，失效后由下次同步重新取
+    invalidateTargets()
   }
 
   /** 删除订阅：先读 _rev，再删除 */
   async function removeSubscription(feedId: string) {
+    const proxyBase = await userStateProxyBase()
     const docId = `subscription:${feedId}`
 
     const getRes = await fetch(`${proxyBase}/${encodeURIComponent(docId)}`, { credentials: 'include' })
@@ -95,6 +111,7 @@ export function useCouchDb() {
 
   /** 更新订阅元信息（显示名/分类），直接读写 CouchDB 文档 */
   async function updateSubscription(feedId: string, patch: { title?: string, category?: string }) {
+    const proxyBase = await userStateProxyBase()
     const docId = `subscription:${feedId}`
 
     const getRes = await fetch(`${proxyBase}/${encodeURIComponent(docId)}`, { credentials: 'include' })

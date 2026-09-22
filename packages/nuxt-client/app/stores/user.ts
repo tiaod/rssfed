@@ -1,5 +1,6 @@
 import { defineStore } from 'pinia'
 import { computed } from 'vue'
+import { useCouchTargets } from '~/composables/useCouchTargets'
 
 export const useUserStore = defineStore('user', () => {
   const authClient = useAuthClient()
@@ -30,6 +31,9 @@ export const useUserStore = defineStore('user', () => {
 
   async function logout() {
     await authClient.signOut()
+    // 代理寻址信息（CouchDB 库名）与账号绑定，登出后必须失效，
+    // 否则同一浏览器换账号登录会继续用上一个账号的库名（同步只会拿到 403）
+    useCouchTargets().invalidate()
     await refresh()
   }
 
