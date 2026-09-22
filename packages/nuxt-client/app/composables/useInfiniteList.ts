@@ -40,7 +40,7 @@ export function useInfiniteList(
     },
     {
       // 提前 300px 预加载，减少滚动到底的等待
-      rootMargin: options.rootMargin ?? '300px 0px',
+      rootMargin: options.rootMargin ?? '300px 0px'
     }
   )
 

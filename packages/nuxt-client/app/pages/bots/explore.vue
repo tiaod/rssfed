@@ -1,16 +1,9 @@
 <script setup lang="ts">
+import type { PublicBot } from '~/types/bot'
+
 definePageMeta({
   layout: 'default'
 })
-
-interface PublicBot {
-  id: string
-  name: string
-  preferredUsername: string
-  description?: string
-  avatarUrl?: string
-  isActive: boolean
-}
 
 const api = useApi()
 const pouch = usePouchDb()
@@ -59,7 +52,7 @@ async function toggleSubscribe(bot: PublicBot) {
       await pouch.addBotSubscription(bot.id, {
         title: bot.name,
         description: bot.description,
-        image: bot.avatarUrl,
+        image: bot.avatarUrl
       })
       // 订阅后立即触发产出库复制，马上能看到产出
       pouch.syncFeed(`bot:${bot.id}`)

@@ -18,14 +18,14 @@ const mockEntry: RssEntry = {
     title: '测试订阅源',
     siteUrl: 'https://example.com',
     feedUrl: 'https://example.com/rss',
-    lastFetchedAt: '2026-06-01T10:00:00Z',
+    lastFetchedAt: '2026-06-01T10:00:00Z'
   },
   starred: false,
   read: false,
   readingTime: 5,
   enclosures: [
-    { url: 'https://example.com/file.pdf', mimeType: 'application/pdf', size: 1024 },
-  ],
+    { url: 'https://example.com/file.pdf', mimeType: 'application/pdf', size: 1024 }
+  ]
 }
 
 describe('EntryDetail', () => {
@@ -35,9 +35,9 @@ describe('EntryDetail', () => {
       global: {
         stubs: {
           UButton: true,
-          UIcon: true,
-        },
-      },
+          UIcon: true
+        }
+      }
     })
 
     expect(wrapper.find('h1').text()).toBe('测试文章标题')
@@ -49,9 +49,9 @@ describe('EntryDetail', () => {
       global: {
         stubs: {
           UButton: true,
-          UIcon: true,
-        },
-      },
+          UIcon: true
+        }
+      }
     })
 
     expect(wrapper.text()).toContain('测试作者')
@@ -64,9 +64,9 @@ describe('EntryDetail', () => {
       global: {
         stubs: {
           UButton: true,
-          UIcon: true,
-        },
-      },
+          UIcon: true
+        }
+      }
     })
 
     const contentDiv = wrapper.find('.entry-content')
@@ -80,9 +80,9 @@ describe('EntryDetail', () => {
       global: {
         stubs: {
           UButton: true,
-          UIcon: true,
-        },
-      },
+          UIcon: true
+        }
+      }
     })
 
     expect(wrapper.find('footer').exists()).toBe(false)

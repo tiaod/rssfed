@@ -28,8 +28,8 @@ const handleAvatarChange = async (e: Event) => {
     await api.user.uploadAvatar(file)
     await userStore.refresh()
     toast.add({ title: '头像已更新', color: 'success' })
-  } catch (err: any) {
-    toast.add({ title: '头像上传失败', description: String(err?.data?.error ?? err?.message ?? err), color: 'error' })
+  } catch (err: unknown) {
+    toast.add({ title: '头像上传失败', description: errorMessage(err), color: 'error' })
   } finally {
     uploadingAvatar.value = false
     input.value = ''
@@ -50,7 +50,7 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
   { label: '较宽', value: 'sm:max-w-2xl' },
   { label: '宽', value: 'sm:max-w-4xl' },
   { label: '很宽', value: 'sm:max-w-6xl' },
-  { label: '全屏', value: 'fullscreen' },
+  { label: '全屏', value: 'fullscreen' }
 ]
 
 const isAdmin = computed(() => userStore.isAdmin)
@@ -85,7 +85,9 @@ const handleReset = async () => {
   if (resetting.value) return
   if (!confirmReset.value) {
     confirmReset.value = true
-    confirmTimer = setTimeout(() => { confirmReset.value = false }, 4000)
+    confirmTimer = setTimeout(() => {
+      confirmReset.value = false
+    }, 4000)
     return
   }
   if (confirmTimer) clearTimeout(confirmTimer)
@@ -95,8 +97,8 @@ const handleReset = async () => {
     await pouch.resetLocalData()
     await pouch.syncNow()
     toast.add({ title: '本地缓存已重置，正在重新同步', color: 'success' })
-  } catch (e: any) {
-    toast.add({ title: '重置失败', description: String(e?.message ?? e), color: 'error' })
+  } catch (e: unknown) {
+    toast.add({ title: '重置失败', description: errorMessage(e), color: 'error' })
   } finally {
     resetting.value = false
   }
@@ -129,7 +131,9 @@ const handleReset = async () => {
               />
               <div class="min-w-0">
                 <div class="flex flex-wrap items-center gap-2">
-                  <h2 class="text-lg font-bold truncate">{{ user?.name || '用户' }}</h2>
+                  <h2 class="text-lg font-bold truncate">
+                    {{ user?.name || '用户' }}
+                  </h2>
                   <UBadge
                     v-if="isAdmin"
                     color="primary"
@@ -137,12 +141,17 @@ const handleReset = async () => {
                     size="xs"
                   >
                     <template #leading>
-                      <UIcon name="i-lucide-shield" class="size-3" />
+                      <UIcon
+                        name="i-lucide-shield"
+                        class="size-3"
+                      />
                     </template>
                     管理员
                   </UBadge>
                 </div>
-                <p class="text-sm text-muted truncate">{{ user?.email }}</p>
+                <p class="text-sm text-muted truncate">
+                  {{ user?.email }}
+                </p>
                 <div class="mt-1 flex items-center gap-2 text-sm">
                   <UIcon
                     name="i-lucide-wifi"
@@ -165,7 +174,7 @@ const handleReset = async () => {
                     accept="image/*"
                     class="hidden"
                     @change="handleAvatarChange"
-                  />
+                  >
                 </div>
               </div>
             </div>
@@ -182,14 +191,20 @@ const handleReset = async () => {
         </UCard>
 
         <!-- 功能标签页 -->
-        <UTabs v-model="activeTab" :items="tabs">
+        <UTabs
+          v-model="activeTab"
+          :items="tabs"
+        >
           <template #content="{ index }">
             <div class="pt-4">
               <!-- 订阅管理 -->
               <SubscriptionManager v-if="index === 0" />
 
               <!-- 通用设置 -->
-              <div v-else-if="index === 1" class="space-y-8">
+              <div
+                v-else-if="index === 1"
+                class="space-y-8"
+              >
                 <section class="space-y-4">
                   <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
                     阅读

@@ -4,7 +4,7 @@ const { data: session } = await authClient.useSession(useFetch)
 
 async function handleLogout() {
   await authClient.signOut()
-  await navigateTo("/login")
+  await navigateTo('/login')
 }
 </script>
 
@@ -12,7 +12,10 @@ async function handleLogout() {
   <div>
     <UHeader>
       <template #left>
-        <NuxtLink to="/" class="font-bold text-lg">
+        <NuxtLink
+          to="/"
+          class="font-bold text-lg"
+        >
           RSSFed
         </NuxtLink>
       </template>

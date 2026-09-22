@@ -15,7 +15,7 @@ describe('useOffline', () => {
 
   it('监听 online/offline 事件', () => {
     const addEventListenerSpy = vi.spyOn(window, 'addEventListener')
-    const { result } = withSetup(() => useOffline())
+    withSetup(() => useOffline())
 
     // onMounted 时注册了监听
     expect(addEventListenerSpy).toHaveBeenCalledWith('online', expect.any(Function))

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { SubscriptionItem } from '~/composables/useCouchDb'
-import type { FeedSubscriptionItem } from '~/types/rss'
+import type { FeedSubscriptionItem, RssEntry } from '~/types/rss'
 
 definePageMeta({
   layout: 'default'
@@ -10,7 +10,7 @@ const api = useApi()
 const pouch = usePouchDb()
 const subs = ref<SubscriptionItem[]>([])
 const feedIds = computed(() => subs.value.map(s => s.id))
-const entries = ref<any[]>([])
+const entries = ref<RssEntry[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 
@@ -79,8 +79,8 @@ onMounted(async () => {
       }
     }
     await refreshEntries()
-  } catch (e: any) {
-    error.value = e?.message ?? '加载失败'
+  } catch (e: unknown) {
+    error.value = errorMessage(e, '加载失败')
   } finally {
     loading.value = false
   }

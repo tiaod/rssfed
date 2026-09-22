@@ -8,7 +8,7 @@ export const useUserStore = defineStore('user', () => {
   const user = computed(() => session.value.data?.user ?? null)
   const isAuthenticated = computed(() => session.value.data?.user != null)
   const isPending = computed(() => session.value.isPending)
-  const isAdmin = computed(() => (user.value as any)?.role === 'admin')
+  const isAdmin = computed(() => (user.value as { role?: string } | null)?.role === 'admin')
 
   async function refresh() {
     try {

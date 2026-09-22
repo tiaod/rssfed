@@ -6,6 +6,9 @@ import type { RssEntry } from '../../types/rss'
 
 // ── 测试用全局桩：还原 Nuxt/composables 自动导入，便于在纯 vitest 环境挂载 ──
 
+/** Nuxt 自动导入的 composable 与 swiper 实例桩都挂在 globalThis 上，这里统一做类型化访问 */
+const testGlobals = globalThis as unknown as Record<string, unknown>
+
 function makeEntry(n: number): RssEntry {
   return {
     id: `entry-${n}`,
@@ -18,7 +21,7 @@ function makeEntry(n: number): RssEntry {
     starred: false,
     read: false,
     readingTime: 0,
-    content: `<p>正文 ${n}</p>`,
+    content: `<p>正文 ${n}</p>`
   }
 }
 
@@ -35,9 +38,9 @@ vi.mock('swiper/vue', async () => {
       slides,
       update: vi.fn(() => history.push(['update', { slidesLen: slides.length }])),
       slideTo: vi.fn(() => history.push(['slideTo', { slidesLen: slides.length }])),
-      __fill(n: number) { for (let i = 0; i < n; i++) slides.push(document.createElement('div')) },
+      __fill(n: number) { for (let i = 0; i < n; i++) slides.push(document.createElement('div')) }
     }
-    ;(globalThis as any).__swiperFake = { inst, history }
+    testGlobals.__swiperFake = { inst, history }
     return inst
   }
   return {
@@ -48,14 +51,14 @@ vi.mock('swiper/vue', async () => {
         // 与真实实现一致：挂载后把实例抛给父组件
         setTimeout(() => emit('swiper', makeFakeInstance()), 0)
         return () => h('div', { class: 'swiper-stub' }, slots.default?.())
-      },
+      }
     }),
     SwiperSlide: defineComponent({
       name: 'MockSwiperSlide',
       setup(_, { slots }) {
         return () => h('div', { class: 'swiper-slide-stub' }, slots.default?.())
-      },
-    }),
+      }
+    })
   }
 })
 
@@ -69,7 +72,7 @@ let g: ModalGlobals
 let modalSize = 'sm:max-w-6xl'
 let fixedBars = true
 
-;(globalThis as any).useEntryModal = () => ({
+testGlobals.useEntryModal = () => ({
   isOpen: g.isOpen,
   currentEntry: g.currentEntry,
   entries: g.entries,
@@ -79,24 +82,24 @@ let fixedBars = true
   goNext: vi.fn(),
   canGoPrev: computed(() => false),
   canGoNext: computed(() => false),
-  isLastWithNoMore: () => false,
+  isLastWithNoMore: () => false
 })
 
-;(globalThis as any).useSettings = () => ({
+testGlobals.useSettings = () => ({
   settings: computed(() => ({ entryModalSize: modalSize, fixedBars })),
-  updateSettings: vi.fn(),
+  updateSettings: vi.fn()
 })
 
-;(globalThis as any).useToast = () => ({ add: vi.fn() })
-;(globalThis as any).usePouchDb = () => ({
-  getEntry: vi.fn(async () => null),
+testGlobals.useToast = () => ({ add: vi.fn() })
+testGlobals.usePouchDb = () => ({
+  getEntry: vi.fn(async () => null)
 })
 
 beforeEach(() => {
   g = {
     isOpen: ref(false),
     currentEntry: ref(null),
-    entries: ref([]),
+    entries: ref([])
   }
   modalSize = 'sm:max-w-6xl'
   fixedBars = true
@@ -105,18 +108,18 @@ beforeEach(() => {
 const STUBS = {
   UModal: {
     template: '<div class="umodal"><slot name="body" /><slot name="footer" /></div>',
-    props: ['open', 'fullscreen', 'scrollable', 'ui', 'title'],
+    props: ['open', 'fullscreen', 'scrollable', 'ui', 'title']
   },
   UButton: true,
   UIcon: true,
   USkeleton: true,
   EntryDetail: {
     props: ['entry'],
-    template: '<div class="entry-detail">{{ entry.title }}</div>',
+    template: '<div class="entry-detail">{{ entry.title }}</div>'
   },
   ClientOnly: {
-    template: '<div class="client-only"><slot /></div>',
-  },
+    template: '<div class="client-only"><slot /></div>'
+  }
 }
 
 describe('EntryDetailModal', () => {
@@ -221,16 +224,25 @@ describe('EntryDetailModal', () => {
     // 测试环境 rAF 近乎 0ms，会把「等槽位」的帧数上限瞬间烧完。这里手动接管 rAF，
     // 按真实浏览器节奏逐帧推进，才能精确复现「先拿到半成品实例、后补上子槽」的时序
     const pendingRaf: FrameRequestCallback[] = []
-    const realRaf = (globalThis as any).requestAnimationFrame
-    ;(globalThis as any).requestAnimationFrame = (cb: FrameRequestCallback) => { pendingRaf.push(cb); return pendingRaf.length }
-    const pumpRaf = () => { const q = pendingRaf.splice(0); for (const cb of q) cb(0) }
+    const realRaf = testGlobals.requestAnimationFrame
+    testGlobals.requestAnimationFrame = (cb: FrameRequestCallback) => {
+      pendingRaf.push(cb)
+      return pendingRaf.length
+    }
+    const pumpRaf = () => {
+      const q = pendingRaf.splice(0)
+      for (const cb of q) cb(0)
+    }
     try {
-      const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+      mount(EntryDetailModal, { global: { stubs: STUBS } })
       await flushPromises()
       pumpRaf() // 让 emit('swiper') 的微任务先落地，再推一帧
       await flushPromises()
 
-      const fake = (globalThis as any).__swiperFake
+      const fake = testGlobals.__swiperFake as {
+        inst: { slides: unknown[], __fill: (n: number) => void }
+        history: [string, { slidesLen: number }][]
+      }
       expect(fake.inst).toBeTruthy()
       expect(fake.inst.slides.length).toBe(0) // 复现冷启动首帧：实例就绪但子槽未挂载
 
@@ -244,7 +256,7 @@ describe('EntryDetailModal', () => {
       expect(slideToMeta.length).toBeGreaterThan(0)
       expect(Math.max(...slideToMeta)).toBeGreaterThan(0) // 对齐发生在槽位就绪之后，空几何不得定格
     } finally {
-      ;(globalThis as any).requestAnimationFrame = realRaf
+      testGlobals.requestAnimationFrame = realRaf
     }
   })
 })

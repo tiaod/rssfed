@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import { setActivePinia, createPinia } from 'pinia'
 import { useUserStore } from '../../stores/user'
 
@@ -17,7 +17,9 @@ describe('useUserStore', () => {
   it('logout 调用 signOut', async () => {
     const store = useUserStore()
     // useAuthClient() 在 setup.ts 中已 mock，返回 mockAuthClient
-    const mockAuthClient = (globalThis as any).useAuthClient()
+    const mockAuthClient = (globalThis as unknown as {
+      useAuthClient: () => { signOut: () => Promise<void> }
+    }).useAuthClient()
 
     await store.logout()
 

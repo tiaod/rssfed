@@ -25,7 +25,7 @@ export const LOCAL_VIEWS = (() => {
     'author: doc.author',
     'categories: doc.categories',
     'description: doc.description',
-    'images: doc.images',
+    'images: doc.images'
   ].join(',\n          ')
   const mapFn = (keyExpr: string) => `function (doc) {
           if (doc && doc.type === 'entry' && typeof doc.publishedAt === 'string') {
@@ -41,8 +41,8 @@ export const LOCAL_VIEWS = (() => {
     _id: '_design/local_entries_v1',
     views: {
       timeline: { map: mapFn('[ms, doc._id]') },
-      by_feed: { map: mapFn("[doc.feedId || '', ms, doc._id]") },
-    },
+      by_feed: { map: mapFn('[doc.feedId || \'\', ms, doc._id]') }
+    }
   }
 })()
 

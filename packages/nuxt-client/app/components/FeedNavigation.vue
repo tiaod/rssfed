@@ -33,8 +33,8 @@ async function loadFeeds() {
     }))
     iconSrcs.value = map
     error.value = null
-  } catch (e: any) {
-    error.value = e?.message ?? '加载订阅失败'
+  } catch (e: unknown) {
+    error.value = errorMessage(e, '加载订阅失败')
   }
 }
 
@@ -68,15 +68,16 @@ async function addFeed() {
   try {
     // 1. 后端解析并注册该订阅源，写入 per-feed 库并触发首轮抓取
     const { feedId, title } = await api.feeds.discover(url)
+    // 源没给标题时退回 URL，避免订阅列表里出现空标题
+    const feedTitle = title ?? url
     // 2. 在本地 PouchDB 写入订阅关系（自动同步到远端，出现在侧边栏）
-    await pouch.addSubscription(feedId, { title })
-    toast.add({ title: '订阅成功', description: title, color: 'success' })
+    await pouch.addSubscription(feedId, { title: feedTitle })
+    toast.add({ title: '订阅成功', description: feedTitle, color: 'success' })
     addOpen.value = false
     feedUrl.value = ''
     feeds.value = await pouch.listSubscriptions()
-  } catch (e: any) {
-    const err = e as { data?: { error?: string }, message?: string }
-    addError.value = err.data?.error ?? err.message ?? '订阅失败'
+  } catch (e: unknown) {
+    addError.value = errorMessage(e, '订阅失败')
   } finally {
     submitting.value = false
   }
@@ -145,7 +146,10 @@ async function addFeed() {
         </p>
 
         <UForm @submit="addFeed">
-          <UFormField label="RSS URL" required>
+          <UFormField
+            label="RSS URL"
+            required
+          >
             <UInput
               v-model="feedUrl"
               type="url"

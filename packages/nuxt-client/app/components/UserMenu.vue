@@ -20,7 +20,7 @@ const items = computed(() => {
         label: '个人资料',
         icon: 'i-lucide-user',
         to: '/profile'
-      },
+      }
     ],
     [
       {

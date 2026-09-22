@@ -1,16 +1,9 @@
 <script setup lang="ts">
+import type { BotInfo } from '~/types/bot'
+
 definePageMeta({
   layout: 'default'
 })
-
-interface BotInfo {
-  id: string
-  name: string
-  preferredUsername: string
-  description?: string
-  avatarUrl?: string
-  isActive: boolean
-}
 
 const api = useApi()
 const toast = useToast()
@@ -214,7 +207,10 @@ function botHandle(bot: BotInfo): string {
             class="space-y-4"
             @submit="createBot"
           >
-            <UFormField label="名称" required>
+            <UFormField
+              label="名称"
+              required
+            >
               <UInput
                 v-model="form.name"
                 placeholder="如：科技早报"
@@ -222,7 +218,10 @@ function botHandle(bot: BotInfo): string {
               />
             </UFormField>
 
-            <UFormField label="用户名" required>
+            <UFormField
+              label="用户名"
+              required
+            >
               <UInput
                 v-model="form.preferredUsername"
                 placeholder="如：tech_daily（将显示为 @tech_daily@你的域名）"

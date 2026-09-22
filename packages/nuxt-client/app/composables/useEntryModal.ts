@@ -6,7 +6,7 @@ import type { RssEntry } from '~/types/rss'
  */
 export interface EntryListLoader {
   /** 拉取下一页数据并入列（列表页自身的单飞保护负责折叠并发调用） */
-  loadMore(): void | Promise<unknown>
+  loadMore(): unknown
   /** 是否还可能加载出更多条目 */
   hasMore(): boolean
 }
@@ -114,6 +114,6 @@ export function useEntryModal() {
     goNext: () => navEntry(1),
     canGoPrev,
     canGoNext,
-    isLastWithNoMore,
+    isLastWithNoMore
   }
 }

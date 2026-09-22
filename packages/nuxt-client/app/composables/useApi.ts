@@ -1,5 +1,14 @@
 // 统一 API 请求：跨源访问 Hono 后端时必须携带会话 Cookie（ofetch 默认 same-origin）
-import type { FeedSubscriptionItem } from '~/types/rss'
+import type { AdminFeed, FeedSubscriptionItem, RssFeed } from '~/types/rss'
+import type {
+  AttachedFeed,
+  BotCreateBody,
+  BotInfo,
+  BotUpdateBody,
+  FollowingItem,
+  PublicBot,
+  TimelineItem
+} from '~/types/bot'
 import type { SiteSettingsPublic, SiteSettingsFull, SiteSettingsUpdate } from '~/types/site'
 import type { McpToken, McpTokenCreated } from '~/types/mcp'
 import { resolveApiBase } from '~/utils/apiBase'
@@ -14,22 +23,29 @@ export function useApi() {
 
   return {
     feeds: {
-      discover: (url: string) => apiFetch<any>(`${base}/api/feeds/discover`, { method: 'POST', body: { url } }),
-      get: (id: string) => apiFetch<any>(`${base}/api/feeds/${id}`),
+      discover: (url: string) => apiFetch<{ feedId: string, title?: string, items: number }>(
+        `${base}/api/feeds/discover`,
+        { method: 'POST', body: { url } }
+      ),
+      get: (id: string) => apiFetch<RssFeed>(`${base}/api/feeds/${id}`),
       subscriptions: () => apiFetch<FeedSubscriptionItem[]>(`${base}/api/feeds/subscriptions`),
       /** 管理员：获取全部 feed 注册表 */
-      listAll: () => apiFetch<any[]>(`${base}/api/feeds`),
+      listAll: () => apiFetch<AdminFeed[]>(`${base}/api/feeds`),
       /** 管理员：暂停/恢复抓取 */
       updateStatus: (id: string, status: 'active' | 'paused') =>
         apiFetch(`${base}/api/feeds/${id}`, { method: 'PATCH', body: { status } }),
       /** 管理员：修改订阅源信息（含 per-feed 图片缓存策略；数值传 null 表示重置回全局默认） */
       update: (id: string, body: Partial<{
-        title: string, url: string, description: string, siteUrl: string, image: string,
-        cacheImages: boolean,
-        maxImageCount: number | null,
-        maxImageWidth: number | null,
-        avifQuality: number | null,
-        maxSourceImageBytes: number | null,
+        title: string
+        url: string
+        description: string
+        siteUrl: string
+        image: string
+        cacheImages: boolean
+        maxImageCount: number | null
+        maxImageWidth: number | null
+        avifQuality: number | null
+        maxSourceImageBytes: number | null
       }>) =>
         apiFetch(`${base}/api/feeds/${id}`, { method: 'PUT', body }),
       /** 管理员：触发重新抓取 */
@@ -45,11 +61,11 @@ export function useApi() {
       )
     },
     bots: {
-      list: () => apiFetch<any[]>(`${base}/api/bots`),
+      list: () => apiFetch<BotInfo[]>(`${base}/api/bots`),
       /** 公开 Bot 列表（广场页）：所有启用状态的 bot 元数据 */
-      public: () => apiFetch<any[]>(`${base}/api/bots/public`),
-      create: (body: any) => apiFetch(`${base}/api/bots`, { method: 'POST', body }),
-      update: (id: string, body: any) => apiFetch(`${base}/api/bots/${id}`, { method: 'PUT', body }),
+      public: () => apiFetch<PublicBot[]>(`${base}/api/bots/public`),
+      create: (body: BotCreateBody) => apiFetch(`${base}/api/bots`, { method: 'POST', body }),
+      update: (id: string, body: BotUpdateBody) => apiFetch(`${base}/api/bots/${id}`, { method: 'PUT', body }),
       remove: (id: string) => apiFetch(`${base}/api/bots/${id}`, { method: 'DELETE' }),
       /** 上传 Bot 头像（multipart），返回 { avatarUrl } */
       uploadAvatar: (id: string, file: File) => {
@@ -57,7 +73,7 @@ export function useApi() {
         form.append('file', file)
         return apiFetch<{ avatarUrl: string }>(`${base}/api/bots/${id}/avatar`, { method: 'POST', body: form })
       },
-      feeds: (id: string) => apiFetch<any[]>(`${base}/api/bots/${id}/feeds`),
+      feeds: (id: string) => apiFetch<AttachedFeed[]>(`${base}/api/bots/${id}/feeds`),
       attachFeed: (id: string, feedId: string) =>
         apiFetch(`${base}/api/bots/${id}/feeds`, { method: 'POST', body: { feedId } }),
       detachFeed: (id: string, feedId: string) =>
@@ -68,9 +84,9 @@ export function useApi() {
         apiFetch(`${base}/api/bots/${id}/follow`, { method: 'POST', body: { handle } }),
       unfollow: (id: string, handle: string) =>
         apiFetch(`${base}/api/bots/${id}/unfollow`, { method: 'POST', body: { handle } }),
-      following: (id: string) => apiFetch<any[]>(`${base}/api/bots/${id}/following`),
+      following: (id: string) => apiFetch<FollowingItem[]>(`${base}/api/bots/${id}/following`),
       timeline: (id: string, params?: { limit?: number, offset?: number }) =>
-        apiFetch<any[]>(`${base}/api/bots/${id}/timeline`, { params })
+        apiFetch<TimelineItem[]>(`${base}/api/bots/${id}/timeline`, { params })
     },
     user: {
       /** 上传当前用户头像（multipart），返回 { avatarUrl } */

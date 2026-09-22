@@ -19,7 +19,7 @@ describe('useFeedNavigation', () => {
   it('根据 feeds 生成导航菜单', () => {
     const feeds: SubscriptionItem[] = [
       { id: '1', title: 'Feed A', siteUrl: '', createdAt: '' },
-      { id: '2', title: 'Feed B', siteUrl: '', createdAt: '' },
+      { id: '2', title: 'Feed B', siteUrl: '', createdAt: '' }
     ]
     const { menuItems, hasFeeds } = useFeedNavigation(computed(() => feeds))
 
@@ -37,7 +37,7 @@ describe('useFeedNavigation', () => {
     const feeds: SubscriptionItem[] = [
       { id: '1', title: 'Feed A', siteUrl: '', createdAt: '', category: '技术' },
       { id: '2', title: 'Feed B', siteUrl: '', createdAt: '', category: '技术' },
-      { id: '3', title: 'Feed C', siteUrl: '', createdAt: '' },
+      { id: '3', title: 'Feed C', siteUrl: '', createdAt: '' }
     ]
     const { menuItems } = useFeedNavigation(computed(() => feeds))
 
@@ -51,8 +51,8 @@ describe('useFeedNavigation', () => {
       defaultOpen: true,
       children: [
         { label: 'Feed A', to: '/rss/feed/1' },
-        { label: 'Feed B', to: '/rss/feed/2' },
-      ],
+        { label: 'Feed B', to: '/rss/feed/2' }
+      ]
     })
     expect(group[2]).toMatchObject({ label: 'Feed C', to: '/rss/feed/3' })
   })

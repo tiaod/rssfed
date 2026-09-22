@@ -54,8 +54,8 @@ async function refreshEntries() {
 onMounted(async () => {
   try {
     feeds.value = await pouch.listSubscriptions()
-  } catch (e: any) {
-    error.value = e?.message ?? '加载分组失败'
+  } catch (e: unknown) {
+    error.value = errorMessage(e, '加载分组失败')
     loading.value = false
     return
   }

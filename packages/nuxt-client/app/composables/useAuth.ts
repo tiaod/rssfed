@@ -1,5 +1,5 @@
-import { createAuthClient } from "better-auth/vue"
-import { resolveApiBase } from "~/utils/apiBase"
+import { createAuthClient } from 'better-auth/vue'
+import { resolveApiBase } from '~/utils/apiBase'
 
 let _client: ReturnType<typeof createAuthClient> | null = null
 

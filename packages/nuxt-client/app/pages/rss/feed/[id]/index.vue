@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { RssEntry, RssFeed } from '~/types/rss'
+
 definePageMeta({
   layout: 'default'
 })
@@ -9,8 +11,8 @@ const feedId = route.params.id as string
 const api = useApi()
 const pouch = usePouchDb()
 const toast = useToast()
-const feed = ref<any>(null)
-const entries = ref<any[]>([])
+const feed = ref<RssFeed | null>(null)
+const entries = ref<RssEntry[]>([])
 const loading = ref(true)
 const feedLoading = ref(true)
 
@@ -71,8 +73,8 @@ async function unsubscribe() {
     await pouch.removeSubscription(feedId)
     toast.add({ title: '已取消订阅', color: 'success' })
     await navigateTo('/')
-  } catch (e: any) {
-    toast.add({ title: '取消订阅失败', description: e?.message ?? '未知错误', color: 'error' })
+  } catch (e: unknown) {
+    toast.add({ title: '取消订阅失败', description: errorMessage(e), color: 'error' })
   } finally {
     unsubscribing.value = false
   }

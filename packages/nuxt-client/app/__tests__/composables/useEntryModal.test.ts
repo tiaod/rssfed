@@ -1,17 +1,19 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { ref, computed, watch, nextTick } from 'vue'
+import type { Ref } from 'vue'
 import { useEntryModal } from '../../composables/useEntryModal'
 import type { RssEntry } from '../../types/rss'
 
 // 复刻 Nuxt auto-import：useState 按 key 全局单例，ref/watch/computed 直接用 vue 的实现
-const stateCache = new Map<string, any>()
-;(globalThis as any).useState = vi.fn(<T>(key: string, init: () => T) => {
-  if (!stateCache.has(key)) stateCache.set(key, ref<T>(init()))
-  return stateCache.get(key)
+const nuxtGlobals = globalThis as unknown as Record<string, unknown>
+const stateCache = new Map<string, Ref<unknown>>()
+nuxtGlobals.useState = vi.fn(<T>(key: string, init: () => T) => {
+  if (!stateCache.has(key)) stateCache.set(key, ref<T>(init()) as Ref<unknown>)
+  return stateCache.get(key) as Ref<T>
 })
-;(globalThis as any).ref = ref
-;(globalThis as any).watch = watch
-;(globalThis as any).computed = computed
+nuxtGlobals.ref = ref
+nuxtGlobals.watch = watch
+nuxtGlobals.computed = computed
 
 function makeEntry(n: number): RssEntry {
   return {
@@ -24,7 +26,7 @@ function makeEntry(n: number): RssEntry {
     feed: { id: 'feed-1', title: '源', siteUrl: '', feedUrl: '', lastFetchedAt: '' },
     starred: false,
     read: false,
-    readingTime: 0,
+    readingTime: 0
   }
 }
 

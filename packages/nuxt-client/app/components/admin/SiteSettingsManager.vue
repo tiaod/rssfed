@@ -12,7 +12,7 @@ const form = ref({
   siteTitle: '',
   description: '',
   primaryColor: '',
-  skin: '',
+  skin: ''
 })
 const logoUrl = ref<string | null>(null)
 
@@ -36,7 +36,7 @@ const DEFAULT_PRIMARY_COLOR = '#059669'
 /** UColorPicker 需要具体颜色，空值回退默认色；选色后写回表单（仍可手动清空以恢复默认） */
 const pickerColor = computed({
   get: () => form.value.primaryColor || DEFAULT_PRIMARY_COLOR,
-  set: (value: string | undefined) => { form.value.primaryColor = value ?? '' },
+  set: (value: string | undefined) => { form.value.primaryColor = value ?? '' }
 })
 
 async function load() {
@@ -48,7 +48,7 @@ async function load() {
       siteTitle: s.siteTitle ?? '',
       description: s.description ?? '',
       primaryColor: s.primaryColor ?? '',
-      skin: s.skin ?? '',
+      skin: s.skin ?? ''
     }
     logoUrl.value = s.logoUrl ?? null
   } catch (e) {
@@ -65,7 +65,7 @@ async function save() {
       siteTitle: toNullable(form.value.siteTitle),
       description: toNullable(form.value.description),
       primaryColor: toNullable(form.value.primaryColor)?.toLowerCase() ?? null,
-      skin: toNullable(form.value.skin),
+      skin: toNullable(form.value.skin)
     })
     toast.add({ title: '站点设置已保存', color: 'success' })
     void siteSettings.refresh()
@@ -118,9 +118,18 @@ onMounted(load)
       title="加载失败"
       icon="i-lucide-circle-alert"
     >
-      <template #description>{{ error }}</template>
+      <template #description>
+        {{ error }}
+      </template>
       <template #actions>
-        <UButton size="sm" variant="outline" color="neutral" @click="load">重试</UButton>
+        <UButton
+          size="sm"
+          variant="outline"
+          color="neutral"
+          @click="load"
+        >
+          重试
+        </UButton>
       </template>
     </UAlert>
 
@@ -131,7 +140,10 @@ onMounted(load)
 
     <template v-else>
       <!-- Logo -->
-      <UFormField label="站点 Logo" description="上传后在站点各处展示站长设定的图形（离线时由 Service Worker 缓存可用）">
+      <UFormField
+        label="站点 Logo"
+        description="上传后在站点各处展示站长设定的图形（离线时由 Service Worker 缓存可用）"
+      >
         <div class="flex items-center gap-3">
           <UAvatar
             v-if="logoUrl"
@@ -160,7 +172,7 @@ onMounted(load)
               accept="image/*"
               class="hidden"
               @change="handleLogoChange"
-            />
+            >
             <UButton
               v-if="logoUrl"
               icon="i-lucide-trash"
@@ -175,10 +187,16 @@ onMounted(load)
       </UFormField>
 
       <!-- 品牌 -->
-      <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">品牌</h3>
+      <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
+        品牌
+      </h3>
 
       <UFormField label="站点标题">
-        <UInput v-model="form.siteTitle" class="w-full" placeholder="RSSFed" />
+        <UInput
+          v-model="form.siteTitle"
+          class="w-full"
+          placeholder="RSSFed"
+        />
       </UFormField>
 
       <UFormField label="描述">
@@ -191,7 +209,9 @@ onMounted(load)
       </UFormField>
 
       <!-- 外观 -->
-      <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">外观</h3>
+      <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
+        外观
+      </h3>
 
       <UFormField
         label="主题色"
@@ -241,7 +261,11 @@ onMounted(load)
         label="皮肤"
         description="皮肤标识（占位字段：皮肤体系尚未定义，可先存名字；留空使用默认皮肤）"
       >
-        <UInput v-model="form.skin" class="w-64" placeholder="默认" />
+        <UInput
+          v-model="form.skin"
+          class="w-64"
+          placeholder="默认"
+        />
       </UFormField>
 
       <div class="flex justify-start">

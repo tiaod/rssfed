@@ -1,14 +1,15 @@
 import PouchDB from 'pouchdb'
 import * as PouchDBFindNS from 'pouchdb-find'
 import { reactive } from 'vue'
-import type { RssEntry } from '~/types/rss'
+import type { RssCachedImage, RssEntry } from '~/types/rss'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
 import { resolveApiBase } from '~/utils/apiBase'
+import { errorMessage } from '~/utils/errorMessage'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 
 // 注册 Mango 查询插件（db.find / createIndex）。
 // pouchdb-find 是 CJS 模块，兼容 Vite 的 default interop 嵌套
-const PouchDBFind = (PouchDBFindNS as any).default ?? PouchDBFindNS
+const PouchDBFind = (PouchDBFindNS as { default?: typeof PouchDBFindNS }).default ?? PouchDBFindNS
 PouchDB.plugin(PouchDBFind)
 
 export interface SyncStatus {
@@ -20,6 +21,61 @@ export interface SyncStatus {
   /** 最近一次成功同步的时间，供 UI 展示 */
   lastSyncedAt?: string
 }
+
+/** 集中库里的 feed 文档（订阅源元信息，由远端 feed 库同步过来） */
+interface FeedDoc {
+  _id: string
+  _rev: string
+  type?: string
+  title?: string
+  url?: string
+  siteUrl?: string
+  lastFetchedAt?: string
+  image?: string
+  /** 已缓存为本地附件的图标（见 rss/entry-images.ts） */
+  imageCached?: { attachment?: string }
+}
+
+/** 集中库里的条目文档 */
+interface EntryDoc {
+  _id: string
+  _rev?: string
+  type?: string
+  feedId: string
+  title?: string
+  url?: string
+  content?: string
+  description?: string
+  author?: string
+  publishedAt: string
+  insertedAt: string
+  categories?: string[]
+  images?: RssCachedImage[]
+}
+
+/** 用户状态库里的文档（按 type 区分 entry-state / subscription） */
+interface StateDoc {
+  _id: string
+  _rev?: string
+  type?: string
+  entryId?: string
+  feedId?: string
+  read?: boolean
+  readAt?: string
+  saved?: boolean
+  savedAt?: string
+  title?: string
+  siteUrl?: string
+  description?: string
+  image?: string
+  category?: string
+  createdAt?: string
+  /** subscription 文档：订阅类型（默认 feed） */
+  kind?: 'feed' | 'bot'
+}
+
+/** nuxtApp 上挂载的 PouchDB 共享状态（用 $ 前缀避免与 Nuxt 内部字段冲突） */
+type NuxtAppWithPouchState = ReturnType<typeof useNuxtApp> & { $pouchDbState?: PouchDbState }
 
 /**
  * PouchDB 共享状态：通过 nuxtApp 单例化，确保所有组件使用同一份实例与同步状态。
@@ -36,7 +92,7 @@ interface PouchDbState {
   /** 本地条目视图是否已安装（避免每次重复 put 设计文档） */
   entriesIndexed: boolean
   /** 同步句柄集合（用户状态库 live 同步） */
-  syncHandles: Map<string, PouchDB.Replication.Sync<{}>>
+  syncHandles: Map<string, PouchDB.Replication.Sync<Record<string, unknown>>>
   /** 同步状态（响应式，供组件 watch） */
   syncStatuses: Record<string, SyncStatus>
   /** 复制任务队列（限制并发，避免大量订阅源同时复制挤爆连接与 IndexedDB） */
@@ -60,21 +116,21 @@ export function usePouchDb() {
   const base = resolveApiBase(apiBaseUrl)
 
   // 通过 nuxtApp 单例化共享状态，避免每次组件挂载都创建新实例
-  const nuxtApp = useNuxtApp()
-  if (!(nuxtApp as any).$pouchDbState) {
-    ;(nuxtApp as any).$pouchDbState = {
+  const nuxtApp = useNuxtApp() as NuxtAppWithPouchState
+  if (!nuxtApp.$pouchDbState) {
+    nuxtApp.$pouchDbState = {
       entriesDb: null,
       userStateDb: null,
       entriesIndexed: false,
-      syncHandles: new Map<string, PouchDB.Replication.Sync<{}>>(),
+      syncHandles: new Map<string, PouchDB.Replication.Sync<Record<string, unknown>>>(),
       syncStatuses: reactive<Record<string, SyncStatus>>({}),
       replicateWaiting: [],
-      activeReplicates: 0,
-    } as PouchDbState
+      activeReplicates: 0
+    }
   }
-  const { syncHandles, syncStatuses } = (nuxtApp as any).$pouchDbState as PouchDbState
+  const { syncHandles, syncStatuses } = nuxtApp.$pouchDbState
   // 队列与集中库字段需通过对象引用读写（解构 number 会丢失状态）
-  const pouchState = (nuxtApp as any).$pouchDbState as PouchDbState
+  const pouchState = nuxtApp.$pouchDbState
 
   /** 迁移清理的幂等 Promise（避免并发重复执行） */
   let cleanupPromise: Promise<void> | null = null
@@ -102,9 +158,9 @@ export function usePouchDb() {
   async function ensureLocalViews() {
     if (pouchState.entriesIndexed) return
     const db = getEntriesDb()
-    await db.put(LOCAL_VIEWS).catch((e: any) => {
+    await db.put(LOCAL_VIEWS).catch((e: unknown) => {
       // 409 说明设计文档已存在（幂等），其余错误如实抛出方便排查
-      if (e?.status !== 409) throw e
+      if ((e as { status?: number })?.status !== 409) throw e
     })
     pouchState.entriesIndexed = true
   }
@@ -124,15 +180,23 @@ export function usePouchDb() {
       // v2：集中库架构的迁移标记（与 per-feed 时代的 v1 区分，强制重新迁移一次）
       if (localStorage.getItem('rssfed-central-migrated-v2')) return
       // 先清增量记录：集中库全新，必须全量同步一次（无论删库是否成功）
-      try { localStorage.removeItem(SYNCED_FEEDS_KEY) } catch { /* 忽略 */ }
+      try {
+        localStorage.removeItem(SYNCED_FEEDS_KEY)
+      } catch {
+        // localStorage 不可用时忽略
+      }
       // 尝试删除旧 per-feed 库（限时 3 秒，超时放弃）
       try {
-        const pouchStatic = PouchDB as any
+        // PouchDB 的静态方法（allDbs / destroy）不在类型定义里，这里按实际签名断言
+        const pouchStatic = PouchDB as unknown as {
+          allDbs: () => Promise<string[]>
+          destroy: (name: string) => Promise<void>
+        }
         const dbs: string[] = await pouchStatic.allDbs()
         const legacy = dbs.filter(name => name.startsWith('rssfed-feed-'))
         await Promise.race([
           Promise.all(legacy.map(name => pouchStatic.destroy(name).catch(() => {}))),
-          new Promise(resolve => setTimeout(resolve, 3000)),
+          new Promise(resolve => setTimeout(resolve, 3000))
         ])
       } catch {
         // 删库失败不影响主流程
@@ -175,7 +239,7 @@ export function usePouchDb() {
         resolve: (r) => {
           if (r.ok) markSynced(id)
           resolve(r)
-        },
+        }
       })
       pumpReplicateQueue()
     })
@@ -198,7 +262,7 @@ export function usePouchDb() {
     syncStatuses[id] = {
       feedId: id,
       status: 'syncing',
-      version: syncStatuses[id]?.version ?? 0,
+      version: syncStatuses[id]?.version ?? 0
     }
 
     try {
@@ -210,17 +274,17 @@ export function usePouchDb() {
         feedId: id,
         status: 'idle',
         version: (syncStatuses[id]?.version ?? 0) + 1,
-        lastSyncedAt: new Date().toISOString(),
+        lastSyncedAt: new Date().toISOString()
       }
       return { ok: true }
-    } catch (e: any) {
+    } catch (e: unknown) {
       syncStatuses[id] = {
         feedId: id,
         status: 'error',
         version: syncStatuses[id]?.version ?? 0,
-        error: String(e?.message ?? e),
+        error: errorMessage(e)
       }
-      return { ok: false, error: e?.message ?? String(e) }
+      return { ok: false, error: errorMessage(e) }
     }
   }
 
@@ -342,14 +406,14 @@ export function usePouchDb() {
   const feedIconBlobs = new Map<string, { rev: string, url: string }>()
 
   /** 从集中库 FeedDoc 解析 feed 图标：AVIF 附件 blob 优先，回退原始 URL；无图标返回 null */
-  async function resolveFeedImage(feedDoc: any): Promise<string | null> {
+  async function resolveFeedImage(feedDoc: FeedDoc | null): Promise<string | null> {
     if (!feedDoc) return null
     const cached = feedDoc.imageCached as { attachment?: string } | undefined
     if (cached?.attachment) {
       const hit = feedIconBlobs.get(feedDoc._id)
       if (hit && hit.rev === feedDoc._rev) return hit.url
       try {
-        const blob = await getEntriesDb().getAttachment(feedDoc._id, cached.attachment) as any as Blob
+        const blob = await getEntriesDb().getAttachment(feedDoc._id, cached.attachment) as unknown as Blob
         const url = URL.createObjectURL(blob)
         if (hit) URL.revokeObjectURL(hit.url) // 附件更新后回收旧 blob
         feedIconBlobs.set(feedDoc._id, { rev: feedDoc._rev, url })
@@ -375,10 +439,12 @@ export function usePouchDb() {
   async function enrichEntries(entries: RssEntry[]): Promise<RssEntry[]> {
     if (entries.length === 0) return entries
     const feedIds = [...new Set(entries.map(e => e.feedId))]
-    let docs: any[] = []
+    let docs: FeedDoc[] = []
     try {
       const res = await getEntriesDb().allDocs({ include_docs: true, keys: feedIds })
-      docs = (res.rows as any[]).filter(r => r.doc).map(r => r.doc)
+      docs = (res.rows as Array<{ doc?: FeedDoc }>)
+        .map(r => r.doc)
+        .filter((d): d is FeedDoc => Boolean(d))
     } catch {
       return entries
     }
@@ -393,7 +459,7 @@ export function usePouchDb() {
           entry.coverUrl = hit
         } else {
           try {
-            const blob = await getEntriesDb().getAttachment(entry.id, cover.attachment) as any as Blob
+            const blob = await getEntriesDb().getAttachment(entry.id, cover.attachment) as unknown as Blob
             const url = URL.createObjectURL(blob)
             entryCoverBlobs.set(cacheKey, url)
             entry.coverUrl = url
@@ -402,7 +468,7 @@ export function usePouchDb() {
           }
         }
       }
-      const doc = byId.get(entry.feedId) as any
+      const doc = byId.get(entry.feedId)
       if (!doc) continue
       entry.feed = {
         id: doc._id,
@@ -410,7 +476,7 @@ export function usePouchDb() {
         siteUrl: doc.siteUrl ?? '',
         feedUrl: doc.url ?? '',
         image: (await resolveFeedImage(doc)) ?? undefined,
-        lastFetchedAt: doc.lastFetchedAt ?? '',
+        lastFetchedAt: doc.lastFetchedAt ?? ''
       }
     }
     return entries
@@ -438,8 +504,9 @@ export function usePouchDb() {
       // localStorage 不可用时忽略
     }
     // 同步状态重置为未同步（relatedIds 依赖它判断全量同步目标）
+    // 用 Reflect.deleteProperty 而不是 delete：后者对动态键会破坏 V8 的对象形状优化
     for (const key of Object.keys(syncStatuses)) {
-      delete syncStatuses[key]
+      Reflect.deleteProperty(syncStatuses, key)
     }
   }
 
@@ -449,7 +516,7 @@ export function usePouchDb() {
    */
   async function getFeedImageUrl(feedId: string, fallback?: string): Promise<string | null> {
     try {
-      const doc = await getEntriesDb().get(feedId) as any
+      const doc = await getEntriesDb().get(feedId) as unknown as FeedDoc
       if (doc?.type === 'feed') {
         const url = await resolveFeedImage(doc)
         if (url) return url
@@ -461,7 +528,7 @@ export function usePouchDb() {
   }
 
   /** 将集中库文档映射为 RssEntry（列表展示用，feed 元信息由 enrichEntries 补全） */
-  function docToEntry(doc: any): RssEntry {
+  function docToEntry(doc: EntryDoc): RssEntry {
     return {
       id: doc._id,
       feedId: doc.feedId,
@@ -479,11 +546,11 @@ export function usePouchDb() {
         title: '',
         siteUrl: '',
         feedUrl: '',
-        lastFetchedAt: '',
+        lastFetchedAt: ''
       },
       starred: false,
       read: false,
-      readingTime: 0,
+      readingTime: 0
     }
   }
 
@@ -501,7 +568,7 @@ export function usePouchDb() {
 
   /** 把视图 value 投影还原为 RssEntry（行已按发布时间倒序，保留顺序） */
   function rowToEntry(row: { value?: Record<string, unknown> }): RssEntry {
-    return docToEntry({ ...row.value } as any)
+    return docToEntry({ ...row.value } as unknown as EntryDoc)
   }
 
   /** 视图翻页：翻转窗口大小下取分桶最新条目（不补全 feed 元信息，由调用方统一 enrich） */
@@ -572,7 +639,7 @@ export function usePouchDb() {
    */
   async function getEntry(entryId: string): Promise<RssEntry | null> {
     try {
-      const doc = await getEntriesDb().get(entryId) as any
+      const doc = await getEntriesDb().get(entryId) as unknown as EntryDoc
       if (doc && doc.type === 'entry') {
         const entry = docToEntry(doc)
         return (await enrichEntries([entry]))[0] ?? entry
@@ -608,18 +675,18 @@ export function usePouchDb() {
     syncStatuses[key] = {
       feedId: key,
       status: 'syncing',
-      version: syncStatuses[key]?.version ?? 0,
+      version: syncStatuses[key]?.version ?? 0
     }
     const sync = PouchDB.sync(db, remoteUrl, {
       live: true,
-      retry: true,
+      retry: true
     })
       .on('change', () => {
         syncStatuses[key] = {
           feedId: key,
           status: 'idle',
           version: (syncStatuses[key]?.version ?? 0) + 1,
-          lastSyncedAt: new Date().toISOString(),
+          lastSyncedAt: new Date().toISOString()
         }
       })
       .on('paused', (err) => {
@@ -629,7 +696,7 @@ export function usePouchDb() {
             feedId: key,
             status: 'idle',
             version: syncStatuses[key]?.version ?? 0,
-            lastSyncedAt: new Date().toISOString(),
+            lastSyncedAt: new Date().toISOString()
           }
         }
       })
@@ -638,7 +705,7 @@ export function usePouchDb() {
           feedId: key,
           status: 'error',
           version: syncStatuses[key]?.version ?? 0,
-          error: String(err),
+          error: String(err)
         }
       })
 
@@ -665,11 +732,11 @@ export function usePouchDb() {
     const docId = `entry-state:${entryId}`
 
     try {
-      const existing = await stateDb.get(docId) as any
+      const existing = await stateDb.get(docId) as unknown as StateDoc
       await stateDb.put({
         ...existing,
         read,
-        readAt: read ? new Date().toISOString() : undefined,
+        readAt: read ? new Date().toISOString() : undefined
       })
     } catch {
       await stateDb.put({
@@ -679,7 +746,7 @@ export function usePouchDb() {
         feedId,
         read,
         readAt: read ? new Date().toISOString() : undefined,
-        saved: false,
+        saved: false
       })
     }
   }
@@ -692,11 +759,11 @@ export function usePouchDb() {
     const docId = `entry-state:${entryId}`
 
     try {
-      const existing = await stateDb.get(docId) as any
+      const existing = await stateDb.get(docId) as unknown as StateDoc
       await stateDb.put({
         ...existing,
         saved: !existing.saved,
-        savedAt: !existing.saved ? new Date().toISOString() : undefined,
+        savedAt: !existing.saved ? new Date().toISOString() : undefined
       })
     } catch {
       await stateDb.put({
@@ -706,7 +773,7 @@ export function usePouchDb() {
         feedId,
         read: false,
         saved: true,
-        savedAt: new Date().toISOString(),
+        savedAt: new Date().toISOString()
       })
     }
   }
@@ -739,20 +806,20 @@ export function usePouchDb() {
     const result = await stateDb.allDocs({
       include_docs: true,
       startkey: 'subscription:',
-      endkey: 'subscription:\uffff',
+      endkey: 'subscription:\uffff'
     })
     return result.rows
-      .map(r => r.doc as any)
+      .map(r => r.doc as unknown as StateDoc)
       .filter(doc => doc?.type === 'subscription')
       .map(doc => ({
-        id: doc.feedId,
+        id: doc.feedId!,
         title: doc.title ?? '',
         siteUrl: doc.siteUrl,
         description: doc.description,
         image: doc.image,
         category: doc.category,
         createdAt: doc.createdAt ?? new Date().toISOString(),
-        kind: doc.kind === 'bot' ? 'bot' as const : 'feed' as const,
+        kind: doc.kind === 'bot' ? 'bot' as const : 'feed' as const
       }))
   }
 
@@ -770,7 +837,7 @@ export function usePouchDb() {
       description: info.description,
       image: info.image,
       category,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date().toISOString()
     })
   }
 
@@ -803,7 +870,7 @@ export function usePouchDb() {
       title: info.title,
       description: info.description,
       image: info.image,
-      createdAt: new Date().toISOString(),
+      createdAt: new Date().toISOString()
     })
   }
 
@@ -817,7 +884,7 @@ export function usePouchDb() {
     await stateDb.put({
       ...doc,
       ...(patch.title !== undefined ? { title: patch.title } : {}),
-      ...(patch.category !== undefined ? { category: patch.category } : {}),
+      ...(patch.category !== undefined ? { category: patch.category } : {})
     })
   }
 
@@ -841,6 +908,6 @@ export function usePouchDb() {
     addSubscription,
     addBotSubscription,
     removeSubscription,
-    updateSubscription,
+    updateSubscription
   }
 }

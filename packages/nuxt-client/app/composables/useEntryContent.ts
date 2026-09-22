@@ -11,7 +11,7 @@ import { usePouchDb } from '~/composables/usePouchDb'
  */
 export function useEntryContent(
   entryRef: () => RssEntry | null,
-  contentEl: Ref<HTMLElement | null | undefined>,
+  contentEl: Ref<HTMLElement | null | undefined>
 ) {
   const resolving = ref(false)
   /** 本次处理创建的 blob URL，切换/卸载时回收 */

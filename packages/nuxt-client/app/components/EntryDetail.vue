@@ -36,11 +36,13 @@ function formatDate(dateStr: string): string {
       </div>
     </header>
 
+    <!-- eslint-disable vue/no-v-html -- 正文是订阅源提供的富文本，必须按 HTML 注入；未净化是已知风险（事件属性如 <img onerror> 可执行脚本），净化方案待定 -->
     <div
       ref="contentEl"
       class="entry-content"
       v-html="entry.content"
     />
+    <!-- eslint-enable vue/no-v-html -->
 
     <footer
       v-if="entry.enclosures?.length"
@@ -65,6 +67,5 @@ function formatDate(dateStr: string): string {
         </li>
       </ul>
     </footer>
-
   </article>
 </template>

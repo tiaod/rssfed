@@ -16,7 +16,7 @@ const {
   goNext,
   canGoPrev,
   canGoNext,
-  isLastWithNoMore,
+  isLastWithNoMore
 } = useEntryModal()
 const { settings } = useSettings()
 const toast = useToast()
@@ -84,9 +84,9 @@ function resetScroll() {
   let el: HTMLElement | null = bodyRef.value
   while (el) {
     if (
-      el.scrollHeight > el.clientHeight &&
-      (el.style.overflowY === 'auto' || el.style.overflowY === 'scroll' ||
-        /(auto|scroll)/.test(getComputedStyle(el).overflowY))
+      el.scrollHeight > el.clientHeight
+      && (el.style.overflowY === 'auto' || el.style.overflowY === 'scroll'
+        || /(auto|scroll)/.test(getComputedStyle(el).overflowY))
     ) {
       el.scrollTop = 0
     }
@@ -168,7 +168,9 @@ function alignOrbit(withAnim = false) {
     aligning.value = true
     clearAlignTimer()
     // 兜底：万一这次位移没有走到 transitionend（例如宽度未变化被跳过），也定时放开闸门
-    alignTimer = setTimeout(() => { aligning.value = false }, SWIPE_SPEED + 420)
+    alignTimer = setTimeout(() => {
+      aligning.value = false
+    }, SWIPE_SPEED + 420)
   }
   sw.update()
   sw.slideTo(currentSlideIndex(), withAnim ? SWIPE_SPEED : 0)
@@ -287,7 +289,7 @@ function hydrateSlots() {
     const prj = raw
     pouch
       .getEntry(raw.id)
-      .then(full => { if (full) details.set(raw.id, full) })
+      .then((full) => { if (full) details.set(raw.id, full) })
       .catch(() => details.set(raw.id, prj)) // 取不到全文就保住投影，至少能看标题
       .finally(() => loadingIds.delete(raw.id))
   }
@@ -381,7 +383,7 @@ onBeforeUnmount(() => {
 // 标题过长时省略号截断，并预留右侧关闭按钮空间（各模式通用）
 const TRUNCATE_UI = {
   wrapper: 'min-w-0 flex-1 pe-10',
-  title: 'truncate',
+  title: 'truncate'
 }
 
 // 全屏 + 固定顶/底栏：content 铺满视口，body 内部滚动、header/footer 固定
@@ -400,7 +402,7 @@ const modalUi = computed(() => {
       body: 'flex-1 min-h-0 p-0 sm:p-0',
       footer: 'shrink-0 px-4 sm:px-6 py-2',
       close: 'top-1/2 -translate-y-1/2',
-      ...TRUNCATE_UI,
+      ...TRUNCATE_UI
     }
   }
   // 同样的原因，全屏不固定栏这条路径也要清掉 body 默认的内边距
@@ -441,7 +443,7 @@ function isLoading(raw: RssEntry | null): boolean {
             :threshold="12"
             class="h-full"
             @swiper="onSwiperReady"
-            @transitionEnd="onTransitionEnd"
+            @transition-end="onTransitionEnd"
           >
             <SwiperSlideView
               v-for="(slot, i) in slots"

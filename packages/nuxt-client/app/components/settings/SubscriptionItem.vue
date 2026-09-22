@@ -4,7 +4,8 @@ import type { FeedSubscriptionItem, FeedStatus } from '~/types/rss'
 import { usePouchDb } from '~/composables/usePouchDb'
 
 const props = defineProps<{ subscription: FeedSubscriptionItem }>()
-const emit = defineEmits<{
+// 模板里用 $emit 触发，这里只需要声明事件类型
+defineEmits<{
   remove: []
   edit: []
 }>()

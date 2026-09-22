@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useUserStore } from "~/stores/user"
+import { useUserStore } from '~/stores/user'
 
 const userStore = useUserStore()
 </script>
@@ -51,7 +51,9 @@ const userStore = useUserStore()
                 <span class="font-semibold">订阅</span>
               </div>
             </template>
-            <p class="text-sm text-muted">管理和发现新的 RSS 订阅源。</p>
+            <p class="text-sm text-muted">
+              管理和发现新的 RSS 订阅源。
+            </p>
           </UCard>
 
           <UCard>
@@ -61,7 +63,9 @@ const userStore = useUserStore()
                 <span class="font-semibold">机器人</span>
               </div>
             </template>
-            <p class="text-sm text-muted">配置 ActivityPub 自动转发机器人。</p>
+            <p class="text-sm text-muted">
+              配置 ActivityPub 自动转发机器人。
+            </p>
           </UCard>
 
           <UCard>
@@ -71,17 +75,28 @@ const userStore = useUserStore()
                 <span class="font-semibold">已读</span>
               </div>
             </template>
-            <p class="text-sm text-muted">离线阅读和收藏管理。</p>
+            <p class="text-sm text-muted">
+              离线阅读和收藏管理。
+            </p>
           </UCard>
         </div>
       </div>
 
-      <div v-else class="flex flex-col items-center justify-center min-h-[60vh] gap-4">
-        <h1 class="text-3xl font-bold">RSSFed</h1>
+      <div
+        v-else
+        class="flex flex-col items-center justify-center min-h-[60vh] gap-4"
+      >
+        <h1 class="text-3xl font-bold">
+          RSSFed
+        </h1>
         <p class="text-muted text-lg">
           支持 ActivityPub 的 RSS 阅读器
         </p>
-        <UButton to="/login" color="primary" size="lg">
+        <UButton
+          to="/login"
+          color="primary"
+          size="lg"
+        >
           开始使用
         </UButton>
       </div>

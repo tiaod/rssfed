@@ -94,14 +94,14 @@ async function load() {
     const localSubs = await pouch.listSubscriptions()
 
     // 2. 在线时从服务端获取抓取状态（active/paused/error），合并到本地数据
-    let statusMap = new Map<string, { status: FeedStatus, errorMessage?: string, lastFetchedAt?: string }>()
+    const statusMap = new Map<string, { status: FeedStatus, errorMessage?: string, lastFetchedAt?: string }>()
     try {
       const remote = await api.feeds.subscriptions()
       for (const r of remote) {
         statusMap.set(r.feedId, {
           status: r.status,
           errorMessage: r.errorMessage,
-          lastFetchedAt: r.lastFetchedAt,
+          lastFetchedAt: r.lastFetchedAt
         })
       }
     } catch {
@@ -109,7 +109,7 @@ async function load() {
     }
 
     // 3. 合并：本地订阅数据 + 服务端抓取状态（只读）
-    subscriptions.value = localSubs.map(sub => {
+    subscriptions.value = localSubs.map((sub) => {
       const st = statusMap.get(sub.id)
       return {
         feedId: sub.id,
@@ -121,7 +121,7 @@ async function load() {
         createdAt: sub.createdAt,
         status: st?.status ?? 'active',
         errorMessage: st?.errorMessage,
-        lastFetchedAt: st?.lastFetchedAt,
+        lastFetchedAt: st?.lastFetchedAt
       } as FeedSubscriptionItem
     })
   } catch (e) {
@@ -160,7 +160,7 @@ function onEdited() {
 async function reloadAfterImport() {
   const before = subscriptions.value.length
   for (let i = 0; i < 6; i++) {
-    await new Promise((r) => setTimeout(r, 800))
+    await new Promise(r => setTimeout(r, 800))
     await load()
     if (subscriptions.value.length > before) return
   }

@@ -1,43 +1,11 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui'
 import type { SubscriptionItem } from '~/composables/useCouchDb'
+import type { AttachedFeed, BotInfo, FollowingItem, TimelineItem } from '~/types/bot'
 
 definePageMeta({
   layout: 'default'
 })
-
-interface BotInfo {
-  id: string
-  name: string
-  preferredUsername: string
-  description?: string
-  avatarUrl?: string
-  isActive: boolean
-}
-
-interface AttachedFeed {
-  feedId: string
-  title: string
-  url?: string
-}
-
-interface FollowingItem {
-  id: string
-  handle: string
-  actorName?: string
-  actorAvatar?: string
-  status: 'pending' | 'accepted' | 'rejected'
-}
-
-interface TimelineItem {
-  id: string
-  actorId: string
-  actorName?: string
-  actorAvatar?: string
-  content: string
-  url?: string
-  publishedAt: string
-}
 
 const api = useApi()
 const pouch = usePouchDb()
@@ -310,7 +278,7 @@ function formatTime(iso: string): string {
           accept="image/*"
           class="hidden"
           @change="handleAvatarChange"
-        />
+        >
 
         <template #right>
           <UDropdownMenu :items="botMenuItems">

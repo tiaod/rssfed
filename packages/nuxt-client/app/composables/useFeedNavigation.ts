@@ -9,7 +9,7 @@ import type { NavigationMenuItem } from '@nuxt/ui'
  */
 export function useFeedNavigation(
   feeds: ComputedRef<SubscriptionItem[] | null>,
-  icons?: ComputedRef<Record<string, string>>,
+  icons?: ComputedRef<Record<string, string>>
 ) {
   const menuItems = computed<NavigationMenuItem[][]>(() => {
     if (!feeds.value || feeds.value.length === 0) return []
@@ -42,7 +42,7 @@ export function useFeedNavigation(
         // 尺寸由 UNavigationMenu 的 linkLeadingAvatarSize 控制（默认 sm）
         avatar: src
           ? { src }
-          : { text: feed.title?.trim()[0] ?? 'R', color: 'neutral' as const },
+          : { text: feed.title?.trim()[0] ?? 'R', color: 'neutral' as const }
       }
     }
 
@@ -61,7 +61,7 @@ export function useFeedNavigation(
           label: cat,
           defaultOpen: true,
           to: `/rss/group/${encodeURIComponent(cat)}`,
-          children: items.map(itemFor),
+          children: items.map(itemFor)
         })
       }
     }

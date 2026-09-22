@@ -7,13 +7,13 @@ export default defineConfig({
   resolve: {
     alias: {
       '~': path.resolve(__dirname, 'app'),
-      '@': path.resolve(__dirname, 'app'),
-    },
+      '@': path.resolve(__dirname, 'app')
+    }
   },
   test: {
     globals: true,
     environment: 'happy-dom',
     setupFiles: ['./app/__tests__/setup.ts'],
-    include: ['app/**/*.test.ts'],
-  },
+    include: ['app/**/*.test.ts']
+  }
 })

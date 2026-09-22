@@ -9,7 +9,7 @@
  * - 成功：tooltip 显示上次同步时间
  */
 const props = withDefaults(defineProps<{ feedIds?: string[] }>(), {
-  feedIds: undefined,
+  feedIds: undefined
 })
 
 const pouch = usePouchDb()
@@ -69,7 +69,7 @@ async function handleSync() {
       toast.add({
         title: '同步失败',
         description: result.failed.map(f => f.error).join('；'),
-        color: 'error',
+        color: 'error'
       })
     } else if (result.ok.length > 0) {
       toast.add({ title: '同步完成', color: 'success' })

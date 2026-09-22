@@ -12,7 +12,7 @@ const toast = useToast()
 
 const open = computed({
   get: () => props.subscription !== null,
-  set: (v: boolean) => { if (!v) emit('close') },
+  set: (v: boolean) => { if (!v) emit('close') }
 })
 
 const form = ref({ title: '', category: '' })
@@ -34,7 +34,7 @@ async function save() {
   try {
     await pouch.updateSubscription(props.subscription.feedId, {
       title: form.value.title.trim() || undefined,
-      category: form.value.category.trim() || undefined,
+      category: form.value.category.trim() || undefined
     })
     toast.add({ title: '已保存', description: props.subscription.title, color: 'success' })
     emit('saved', props.subscription)

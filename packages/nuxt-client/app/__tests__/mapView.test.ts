@@ -12,10 +12,10 @@ import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW } from '../utils/localViews'
 const TMP_DB = '/tmp/rssfed-localviews-test'
 let db: PouchDB.Database
 
-interface Seeded { ms: number; id: string; feedId: string }
+interface Seeded { ms: number, id: string, feedId: string }
 
 // 固定并列规则，模拟旧实现的时间戳排序（并集/分桶 oracle 都走同一规则）
-function oracle(rows: { id: string; feedId: string; ms: number }[]): string[] {
+function oracle(rows: { id: string, feedId: string, ms: number }[]): string[] {
   return rows
     .slice()
     .sort((a, b) => b.ms - a.ms || a.id.localeCompare(b.id))
@@ -24,9 +24,21 @@ function oracle(rows: { id: string; feedId: string; ms: number }[]): string[] {
 
 const seeded: Seeded[] = []
 
-async function rowsOf(view: string, opts: any): Promise<string[]> {
-  const res: any = await (db as any).query(view, opts)
-  return res.rows.map((r: any) => r.key[r.key.length - 1]) // 最后一个 key 段恒为 _id
+/** map view 的查询参数与返回行（测试里只用到这几个字段） */
+interface ViewQueryOptions {
+  descending?: boolean
+  include_docs?: boolean
+  limit?: number
+  skip?: number
+  startkey?: unknown
+  endkey?: unknown
+}
+
+async function rowsOf(view: string, opts: ViewQueryOptions): Promise<string[]> {
+  const res = await (db as unknown as {
+    query: (view: string, opts: ViewQueryOptions) => Promise<{ rows: Array<{ key: string[] }> }>
+  }).query(view, opts)
+  return res.rows.map(r => r.key[r.key.length - 1]!) // 最后一个 key 段恒为 _id
 }
 
 beforeAll(async () => {
@@ -38,7 +50,7 @@ beforeAll(async () => {
   // 造数据：故意留两篇发布时间完全相同（毫秒并列）验证边界不重不漏；
   // 多 feed 交错，另有一篇 type!=entry 与一篇无 publishedAt 的不该进视图。
   const T0 = Date.parse('2026-07-01T00:00:00Z')
-  const docsSeen: { _id: string; feedId: string; ms: number }[] = []
+  const docsSeen: { _id: string, feedId: string, ms: number }[] = []
   let idx = 0
   for (const feedId of ['f1', 'f2', 'f3', 'f4']) {
     for (let k = 0; k < 12; k++) {
@@ -64,12 +76,12 @@ beforeAll(async () => {
       url: `https://x/${s.id}`,
       publishedAt: new Date(s.ms).toISOString(),
       content: '<div>很长的正文字段，绝不能出现在视图 value 里</div><div style="width:100%;word-break:break-all;">x'.repeat(20),
-      images: [],
+      images: []
     }))
   )
   await db.bulkDocs([
     { _id: 'bad-type', type: 'feed', publishedAt: new Date(T0).toISOString() },
-    { _id: 'bad-ts', type: 'entry', publishedAt: 'not-a-date' },
+    { _id: 'bad-ts', type: 'entry', publishedAt: 'not-a-date' }
   ])
 })
 
@@ -99,16 +111,21 @@ describe('timeline 视图（全局 desc）', () => {
 
   it('整库游标遍历不重不漏，且坏类型/坏时间的文档不在视图内', async () => {
     const walked: string[] = []
-    let startkey: any
+    let startkey: [number, string] | undefined
+    // db.query 的类型定义对 map view 的重载不完整，这里按实际返回结构收窄一次
+    const query = db.query.bind(db) as unknown as (
+      view: string,
+      opts: ViewQueryOptions
+    ) => Promise<{ rows: Array<{ key: [number, string] }> }>
     for (;;) {
-      const res = await db.query(TIMELINE_VIEW, {
+      const res = await query(TIMELINE_VIEW, {
         descending: true,
         include_docs: false,
         limit: 7,
-        ...(startkey !== undefined ? { startkey, skip: 1 } : {}),
+        ...(startkey !== undefined ? { startkey, skip: 1 } : {})
       })
       if (!res.rows.length) break
-      walked.push(...res.rows.map(r => (r.key as [number, string])[1]!))
+      walked.push(...res.rows.map(r => r.key[1]))
       startkey = res.rows[res.rows.length - 1]!.key
     }
     expect(new Set(walked).size).toBe(walked.length) // 不重不漏
@@ -170,7 +187,7 @@ describe('by_feed 视图 + 归并（单源/分组）', () => {
       reduce: false,
       limit: 1000,
       startkey: ['f2', Number.MAX_SAFE_INTEGER, ''],
-      endkey: ['f2'],
+      endkey: ['f2']
     })
     const gotFeed = big.rows.map(r => seeded.find(s => s.id === (r.key as [string, number, string])[2])!.feedId)
     expect(gotFeed).not.toHaveLength(0)

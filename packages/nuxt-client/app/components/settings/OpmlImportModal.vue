@@ -28,7 +28,7 @@ const result = ref<ImportResult | null>(null)
 
 const openModel = computed({
   get: () => props.open,
-  set: (v: boolean) => emit('update:open', v),
+  set: (v: boolean) => emit('update:open', v)
 })
 
 const canSubmit = computed(() => {
@@ -77,7 +77,7 @@ async function submit() {
     toast.add({
       title: 'OPML 导入完成',
       description: `成功 ${result.value.imported} 个，跳过 ${result.value.skipped} 个`,
-      color: result.value.failed.length ? 'warning' : 'success',
+      color: result.value.failed.length ? 'warning' : 'success'
     })
     emit('imported')
   } catch (e) {
@@ -160,7 +160,7 @@ const summaryTitle = computed(() => {
         v-else
         v-model="pasted"
         :rows="8"
-        placeholder='粘贴 OPML 内容，例如 <opml version="2.0"><body>…</body></opml>'
+        placeholder="粘贴 OPML 内容，例如 <opml version=&quot;2.0&quot;><body>…</body></opml>"
       />
 
       <UAlert

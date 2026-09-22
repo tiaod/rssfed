@@ -14,7 +14,7 @@ export function withSetup<T>(composable: () => T): {
     setup() {
       result = composable()
       return () => null
-    },
+    }
   })
   const root = app.mount(document.createElement('div'))
   return { result: result!, app, root }

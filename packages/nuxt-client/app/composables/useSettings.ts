@@ -11,7 +11,7 @@ export interface AppSettings {
 
 const DEFAULT_SETTINGS: AppSettings = {
   entryModalSize: 'sm:max-w-6xl',
-  fixedBars: true,
+  fixedBars: true
 }
 
 // 首次在客户端调用时从 localStorage 读取持久化的设置（模块级标记，避免重复读取）

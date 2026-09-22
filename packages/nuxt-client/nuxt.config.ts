@@ -9,11 +9,6 @@ export default defineNuxtConfig({
     '@vueuse/nuxt'
   ],
 
-  // 监听 0.0.0.0，方便局域网（手机）访问开发服务器
-  devServer: {
-    host: '0.0.0.0',
-  },
-
   devtools: {
     enabled: true
   },
@@ -21,7 +16,54 @@ export default defineNuxtConfig({
   css: ['~/assets/css/main.css'],
 
   ui: {
-    fonts: false,
+    fonts: false
+  },
+
+  runtimeConfig: {
+    public: {
+      // better-auth 直连 Hono 后端（同源 Cookie 由 CORS + credentials 处理）
+      authBaseUrl: 'http://localhost:3001/api/auth',
+      // Hono 后端地址，前端直连
+      apiBaseUrl: 'http://localhost:3001'
+    }
+  },
+
+  // 监听 0.0.0.0，方便局域网（手机）访问开发服务器
+  devServer: {
+    host: '0.0.0.0'
+  },
+
+  compatibilityDate: '2025-01-15',
+
+  nitro: {
+    // 离线外壳预渲染成静态 HTML：Service Worker 在断网且没有同路径缓存时返回它
+    // （见 public/sw.js 与 app/pages/offline.vue）
+    prerender: {
+      routes: ['/offline']
+    },
+    routeRules: {
+      // 注意：不要在这里添加 /api/** 的全局代理规则，
+      // 否则会覆盖 @nuxt/icon 等模块的服务端路由。
+      // 生产反代同理：/api/_nuxt_icon/* 必须留在 Nuxt 上，不能跟着 /api/* 转给后端，
+      // 否则线上图标整片空白（见 deploy/Caddyfile 与 docs/troubleshooting.md）。
+    }
+  },
+
+  hooks: {
+    // 静态资源都落到 .output/public 之后，生成 SW 的预缓存清单并把构建号写进 sw.js
+    'nitro:build:public-assets': async (nitro) => {
+      const { version, count } = await generateServiceWorkerManifest(nitro.options.output.publicDir)
+      console.log(`[sw] 预缓存清单已生成：${count} 个资源，版本 ${version}`)
+    }
+  },
+
+  eslint: {
+    config: {
+      stylistic: {
+        commaDangle: 'never',
+        braceStyle: '1tbs'
+      }
+    }
   },
 
   // 离线优先：把图标数据随客户端 bundle 一起下发（编译期内联进 JS，不是运行时再发请求）。
@@ -80,48 +122,6 @@ export default defineNuxtConfig({
         'lucide:upload',
         'lucide:x'
       ]
-    }
-  },
-
-  nitro: {
-    // 离线外壳预渲染成静态 HTML：Service Worker 在断网且没有同路径缓存时返回它
-    // （见 public/sw.js 与 app/pages/offline.vue）
-    prerender: {
-      routes: ['/offline']
-    },
-    routeRules: {
-      // 注意：不要在这里添加 /api/** 的全局代理规则，
-      // 否则会覆盖 @nuxt/icon 等模块的服务端路由。
-      // 生产反代同理：/api/_nuxt_icon/* 必须留在 Nuxt 上，不能跟着 /api/* 转给后端，
-      // 否则线上图标整片空白（见 deploy/Caddyfile 与 docs/troubleshooting.md）。
-    },
-  },
-
-  hooks: {
-    // 静态资源都落到 .output/public 之后，生成 SW 的预缓存清单并把构建号写进 sw.js
-    'nitro:build:public-assets': async (nitro) => {
-      const { version, count } = await generateServiceWorkerManifest(nitro.options.output.publicDir)
-      console.log(`[sw] 预缓存清单已生成：${count} 个资源，版本 ${version}`)
-    }
-  },
-
-  runtimeConfig: {
-    public: {
-      // better-auth 直连 Hono 后端（同源 Cookie 由 CORS + credentials 处理）
-      authBaseUrl: 'http://localhost:3001/api/auth',
-      // Hono 后端地址，前端直连
-      apiBaseUrl: 'http://localhost:3001',
-    },
-  },
-
-  compatibilityDate: '2025-01-15',
-
-  eslint: {
-    config: {
-      stylistic: {
-        commaDangle: 'never',
-        braceStyle: '1tbs'
-      }
     }
   }
 })

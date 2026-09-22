@@ -1,19 +1,19 @@
 <script setup lang="ts">
 useHead({
   meta: [
-    { name: "viewport", content: "width=device-width, initial-scale=1" }
+    { name: 'viewport', content: 'width=device-width, initial-scale=1' }
   ],
   link: [
-    { rel: "icon", href: "/favicon.ico" }
+    { rel: 'icon', href: '/favicon.ico' }
   ],
   htmlAttrs: {
-    lang: "zh-CN"
+    lang: 'zh-CN'
   }
 })
 
 useSeoMeta({
-  title: "RSSFed",
-  description: "支持 ActivityPub 的 RSS 阅读器",
+  title: 'RSSFed',
+  description: '支持 ActivityPub 的 RSS 阅读器'
 })
 </script>
 

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { RssEntry } from '~/types/rss'
+
 definePageMeta({
   layout: 'default'
 })
@@ -10,7 +12,7 @@ const virtualFeedId = `bot:${botId}`
 const pouch = usePouchDb()
 const toast = useToast()
 const bot = ref<{ id: string, name: string, description?: string, avatarUrl?: string } | null>(null)
-const entries = ref<any[]>([])
+const entries = ref<RssEntry[]>([])
 const loading = ref(true)
 const subscribed = ref(false)
 
@@ -80,15 +82,15 @@ async function toggleSubscribe() {
       await pouch.addBotSubscription(botId, {
         title: bot.value?.name ?? '',
         description: bot.value?.description,
-        image: bot.value?.avatarUrl,
+        image: bot.value?.avatarUrl
       })
       // 订阅后立即触发产出库复制
       pouch.syncFeed(virtualFeedId)
       toast.add({ title: '订阅成功', color: 'success' })
     }
     subscribed.value = !subscribed.value
-  } catch (e: any) {
-    toast.add({ title: '操作失败', description: e?.message ?? '未知错误', color: 'error' })
+  } catch (e: unknown) {
+    toast.add({ title: '操作失败', description: errorMessage(e), color: 'error' })
   }
 }
 </script>

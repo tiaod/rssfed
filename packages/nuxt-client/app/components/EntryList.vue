@@ -4,7 +4,7 @@ import type { RssEntry } from '~/types/rss'
 const props = defineProps<{
   entries: RssEntry[]
   /** 加载下一页数据的入口（带防重入）；不传时弹窗不预加载、也不提示「没有下一篇」 */
-  loadMore?: () => void | Promise<unknown>
+  loadMore?: () => unknown
   /** 是否还有更多条目可分页 */
   hasMore?: () => boolean
 }>()
