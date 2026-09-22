@@ -4,7 +4,7 @@ import { resolveApiBase } from '~/utils/apiBase'
 export const USER_STATE_ID = '__user_state__'
 
 /** 代理寻址信息：业务 id → 真实 CouchDB 库名，由后端 GET /api/couchdb/targets 下发 */
-export interface CouchTargets {
+interface CouchTargets {
   /** 用户状态库名（已读/收藏/订阅） */
   userState: string
   /** feedId → feed 库名 */
@@ -89,5 +89,5 @@ export function useCouchTargets() {
     return dbName ? `${base}/api/couchdb/proxy/${encodeURIComponent(dbName)}` : null
   }
 
-  return { getTargets, dbNameFor, remoteUrlForId, invalidate }
+  return { remoteUrlForId, invalidate }
 }

@@ -1,6 +1,6 @@
 import { computed } from 'vue'
 import type { ComputedRef } from 'vue'
-import type { SubscriptionItem } from '~/composables/useCouchDb'
+import type { SubscriptionItem } from '~/types/rss'
 import type { NavigationMenuItem } from '@nuxt/ui'
 
 /**

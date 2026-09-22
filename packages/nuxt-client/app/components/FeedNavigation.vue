@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
-import type { SubscriptionItem } from '~/composables/useCouchDb'
+import type { SubscriptionItem } from '~/types/rss'
 
 defineProps<{
   collapsed?: boolean

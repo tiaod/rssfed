@@ -94,3 +94,20 @@ export interface FeedSubscriptionItem {
   /** 最后抓到新条目的时间：前端据此只同步「上次同步后有过新内容」的源 */
   lastNewEntryAt?: string
 }
+
+/**
+ * 本地订阅项（用户状态库里的 subscription 文档）。
+ * 与 FeedSubscriptionItem 的区别：id 用统一的业务 id（bot 订阅为 `bot:<botId>`），
+ * 且不含注册表的抓取状态 —— 导航/时间线只需要「有哪些订阅」。
+ */
+export interface SubscriptionItem {
+  id: string // feedId（bot 订阅为 `bot:{botId}`）
+  title: string
+  siteUrl?: string
+  description?: string
+  image?: string
+  category?: string
+  createdAt: string
+  /** 订阅类型：feed 订阅源 / bot 产出（默认 feed） */
+  kind?: 'feed' | 'bot'
+}

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui'
-import type { SubscriptionItem } from '~/composables/useCouchDb'
+import type { SubscriptionItem } from '~/types/rss'
 import type { AttachedFeed, BotInfo, FollowingItem, TimelineItem } from '~/types/bot'
 
 definePageMeta({

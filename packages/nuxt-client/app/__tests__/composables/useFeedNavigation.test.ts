@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { computed } from 'vue'
 import { useFeedNavigation } from '../../composables/useFeedNavigation'
-import type { SubscriptionItem } from '../../composables/useCouchDb'
+import type { SubscriptionItem } from '../../types/rss'
 
 describe('useFeedNavigation', () => {
   it('feeds 为 null 时返回空数组', () => {

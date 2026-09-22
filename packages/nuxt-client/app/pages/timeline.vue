@@ -1,6 +1,5 @@
 <script setup lang="ts">
-import type { SubscriptionItem } from '~/composables/useCouchDb'
-import type { FeedSubscriptionItem, RssEntry } from '~/types/rss'
+import type { SubscriptionItem, FeedSubscriptionItem, RssEntry } from '~/types/rss'
 
 definePageMeta({
   layout: 'default'
