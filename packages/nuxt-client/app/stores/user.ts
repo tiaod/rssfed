@@ -11,15 +11,20 @@ export const useUserStore = defineStore('user', () => {
   const isAdmin = computed(() => (user.value as any)?.role === 'admin')
 
   async function refresh() {
-    const { data } = await authClient.getSession()
-    // 手动更新 session 原子，确保 useSession() 的响应式 ref 随之更新
-    if (data && authClient.$store?.atoms?.session) {
-      authClient.$store.atoms.session.set({
-        ...authClient.$store.atoms.session.get(),
-        data,
-        isPending: false,
-        isRefetching: false,
-      })
+    try {
+      const { data } = await authClient.getSession()
+      // 手动更新 session 原子，确保 useSession() 的响应式 ref 随之更新
+      if (data && authClient.$store?.atoms?.session) {
+        authClient.$store.atoms.session.set({
+          ...authClient.$store.atoms.session.get(),
+          data,
+          isPending: false,
+          isRefetching: false
+        })
+      }
+    } catch {
+      // 离线或后端不可达：保留现有用户状态即可。
+      // 不吞掉这个异常会在离线时冒成 unhandled rejection（页面本身仍能用本地数据渲染）
     }
   }
 

@@ -78,6 +78,70 @@
   ```
 - **记录**：2026-09-21 上线验收实测踩到，详见 [cloud-deployment-todo.md](cloud-deployment-todo.md) 的「本地端到端验收」一节。
 
+### 页面文字正常但图标整片空白：`/api/*` 抢走了 Nuxt 的图标接口
+
+- **现象**：首页、导航、按钮都在，但所有 lucide 图标不显示（骨架期有过一个转圈图标，之后空白），控制台里 `/api/_nuxt_icon/lucide.json?icons=...` 返回 404 `404 Not Found`（`content-type: text/plain`、带 `access-control-allow-credentials`，是 Hono 的 404 而不是 Nuxt 的）。
+- **原因**：`@nuxt/icon` 的本地图标 API 挂在 Nuxt/Nitro 上，默认路径是 **`/api/_nuxt_icon/:collection`**（见 `.nuxt/types/nitro-routes.d.ts`，这是本项目里唯一一条 `/api` 前缀的 Nitro 路由）。反代若用 `path /api/*` 无差别甩给后端 Hono，这条也会被抢走；后端没有该路由 → 404。SSR 输出的只是 `<span class="iconify i-lucide:xxx">`，真正的图标数据由客户端来取，所以取不到就整片空白。
+- **解法**：在 `@backend` 那条 `reverse_proxy` **之前**放行图标接口（顺序不能反，Caddy 同指令按书写顺序匹配）：
+  ```
+  @nuxt_icon path /api/_nuxt_icon /api/_nuxt_icon/*
+  reverse_proxy @nuxt_icon web:3000
+  ```
+  改完 `caddy reload`，用 `curl -s -o /dev/null -w '%{http_code}\n' 'https://<域名>/api/_nuxt_icon/lucide.json?icons=refresh-cw'` 验证：返回 200 且是 `application/json` 才算修好；只改前端重新构建没用。
+- **根治**：前端已开 `icon.clientBundle`（见 `nuxt.config.ts`），图标数据编译期内联进客户端 bundle，客户端渲染不再请求 `/api/_nuxt_icon` —— 断网可用，也不再有"反代漏放行就整片空白"这个失败模式。上面的放行规则仍建议保留：它无害，而且将来若出现动态拼接、没被打进 bundle 的图标名，客户端还会回退到这个接口。
+- **记录**：2026-09-21 线上（rssfed.uvcat.cn）实测踩到。
+
+### 两个「创建机器人」按钮的图标一直不显示：图标名在 lucide 里不存在
+
+- **现象**：[bots/index.vue](../packages/nuxt-client/app/pages/bots/index.vue)、[bots/explore.vue](../packages/nuxt-client/app/pages/bots/explore.vue) 的「创建机器人」按钮图标空白，与网络、反代、离线状态都无关。
+- **原因**：写的是 `i-lucide-bot-plus`，而 lucide 集合里只有 `bot` / `bot-message-square` / `bot-off`，**没有 `bot-plus`**。开了 `clientBundle` 后这类错误会直接让构建失败（`Invalid icon ...` / `failed` 列表），反而更容易发现。
+- **解法**：改成集合里存在的图标（本次改为 `i-lucide-plus`）；校验脚本见下方「图标名全量校验」。
+- **记录**：2026-09-21 排查线上图标问题时发现，全项目仅此两处无效。
+
+### 图标名全量校验（改了图标或升级图标集后跑一次）
+
+```bash
+node - <<'JS'
+const fs = require('fs'), path = require('path')
+const collections = fs.readdirSync('node_modules/@iconify-json')
+const data = Object.fromEntries(collections.map(c => [c, JSON.parse(fs.readFileSync(`node_modules/@iconify-json/${c}/icons.json`, 'utf8'))]))
+const RE = new RegExp(`i-(${collections.join('|')})-([a-z0-9-]+)`, 'g')
+const walk = (d, acc = []) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const p = path.join(d, e.name); e.isDirectory() ? walk(p, acc) : /\.(vue|ts|js|mjs)$/.test(e.name) && acc.push(p) } return acc }
+let bad = 0
+for (const f of walk('packages/nuxt-client/app')) {
+  for (const m of fs.readFileSync(f, 'utf8').matchAll(RE)) {
+    const [, col, name] = m
+    if (!(name in data[col].icons) && !(name in (data[col].aliases || {}))) { console.log(`无效图标 ${m[0]} → ${f}`); bad++ }
+  }
+}
+console.log(bad ? `${bad} 处无效` : '全部有效')
+JS
+```
+
+## 离线与 Service Worker
+
+### 断网后页面完全打不开（连壳都没有）
+
+- **现象**：断网后访问站点是浏览器的「无法访问此网站」，不是应用内的离线提示。
+- **原因**：`public/sw.js` 没有被注册，或注册失败。**开发环境故意不注册**（`import.meta.dev` 短路，否则缓存优先会挡住 HMR），要看离线效果必须跑生产构建：`pnpm --filter @rssfed/nuxt-client build && node packages/nuxt-client/.output/server/index.mjs`。
+- **排查**：浏览器 DevTools → Application → Service Workers，应看到 `/sw.js` 处于 activated；Cache Storage 里应有 `rssfed-<构建号>` 且条目数 ≈ 60。另外确认 `/sw.js` 与 `/sw-manifest.json` 能直接打开（反代别拦这两条路径）。
+- **注意**：Service Worker 只在安全上下文生效（HTTPS 或 localhost）。**前面若套了 CDN，要给 `/sw.js` 禁用缓存**，否则更新永远下不来。
+
+### 部署了新版本，页面还是旧的
+
+- **原因与解法**：SW 更新后不会立刻接管，页面会弹「有新版本可用」的提示，点刷新才切换。这是刻意设计的——新版 SW 一激活就清掉旧构建的缓存，自动接管会让正在用旧页面的标签页加载不到旧 chunk 而白屏。
+- 提示一直不出现，多半是 `/sw.js` 被中间层缓存了（见上一条）。
+
+### 离线打开某个页面，看到的是「当前处于离线状态」
+
+- **说明**：这个路径之前没访问过，SW 拿不到同路径的 HTML，于是回退到预渲染的离线外壳 `/offline`。客户端接管后一般会按地址栏 URL 渲染出真实页面；如果目标页依赖尚未同步到本机的数据，就会停在外壳上。
+- 外壳只是兜底，页面上给了「打开时间线」入口。想让某个入口离线必达，在线时至少访问一次即可（HTML 会被缓存）。
+
+### 离线时数据是空的
+
+- **数据不在 Service Worker 里**：条目、订阅、已读/收藏都在浏览器 PouchDB（IndexedDB）。新设备/新浏览器首次必须联网同步一次，之后才有离线内容。SW 只负责让页面能打开。
+- 清过浏览器站点数据、或换过浏览器配置，都会丢掉本地库，需要重新联网同步。
+
 ## 数据库与迁移
 
 ### `drizzle-kit push` 要 DROP `fedify_kv_v2`，会删掉 Bot 私钥

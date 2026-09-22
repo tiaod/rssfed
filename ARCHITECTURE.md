@@ -200,3 +200,23 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
 4. **ActivityPub 分发**：Worker 抓取到新条目 → 查 PostgreSQL `bot_feeds` 找出引用该 feed 的 Bot → 对每个 Bot 通过 BotKit 构建 Create Activity 推送到 follower inbox → 同时写入该 Bot 的 **CouchDB `bot:{botId}` 产出库**供 outbox 查询（`entries-by-date` 视图按 publishedAt 排序，天然支持倒序分页）
 
    > **为什么 Bot 产出库里不放压缩图片？** 两个场景的消费者不同：PouchDB 同步 feed 库中的条目供离线阅读，需要下载并压缩图片嵌入文档；ActivityPub outbox 返回的是轻量分发元数据，远程实例会自行拉取原始图片 URL，不需要也不应该处理压缩版本。Bot 产出库只存标题、摘要、原文链接即可。
+
+## 离线可用（Service Worker）
+
+「离线优先」在数据上由 PouchDB 保证，但**页面本身也得打得开**——否则断网后连壳都没有。这一层由 `packages/nuxt-client/public/sw.js` 承担，配置见 `nuxt.config.ts`（`nitro.prerender` 与 `nitro:build:public-assets` 钩子），注册见 `app/plugins/service-worker.client.ts`。
+
+三层策略：
+
+| 请求类型 | 策略 | 说明 |
+| --- | --- | --- |
+| 构建产物 `/_nuxt/**`、静态文件 | 缓存优先 | 文件名带内容哈希，内容永不变化；构建期由钩子扫描 `.output/public` 生成 `/sw-manifest.json`，SW 安装时整份预缓存 |
+| 页面导航 | 网络优先 → 同路径 HTML 缓存 → `/offline` 外壳 | 访问过的页面离线可原样打开；没访问过的路径回退到预渲染的离线外壳，客户端接管后按地址栏 URL 渲染真实路由 |
+| 只读接口（条目、站点配置、文件、会话） | 网络优先 + 落缓存 | 断网时读缓存；写操作不拦截，让调用方拿到真实失败 |
+| 其它（PouchDB 复制 `/api/couchdb/proxy/*` 等） | 不拦截 | 同步语义必须由 PouchDB 自己处理重试与 checkpoint |
+
+几个关键决策：
+
+- **缓存名带构建号**：构建钩子把 `sw.js` 里的 `__BUILD_ID__` 替换成时间戳，新 SW 用新缓存名，`activate` 时整体删除旧缓存——避免旧 HTML 去引用已被删除的旧 chunk。
+- **不自动 `skipWaiting`**：首次安装直接接管；更新时先待命，由页面提示「有新版本可用」，用户点刷新才激活。否则新版一上来就清缓存，正在使用旧版页面的标签页会白屏。
+- **开发环境不注册**：缓存优先会挡住 Vite 的 HMR 请求，`app/plugins/service-worker.client.ts` 里用 `import.meta.dev` 短路。
+- **路由中间件在离线时放行**：拿不到会话不该把用户赶去登录页（`app/middleware/auth.ts`）。
