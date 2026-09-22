@@ -135,7 +135,7 @@ function botHandle(bot: BotInfo): string {
         </p>
         <UButton
           color="primary"
-          icon="i-lucide-bot-plus"
+          icon="i-lucide-plus"
           @click="createOpen = true"
         >
           创建机器人

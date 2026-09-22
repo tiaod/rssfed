@@ -125,7 +125,7 @@ onMounted(load)
         </p>
         <UButton
           color="primary"
-          icon="i-lucide-bot-plus"
+          icon="i-lucide-plus"
           :to="'/bots'"
         >
           创建机器人

@@ -85,6 +85,16 @@
 	#   /@username                      → 200  profile 页
 	#   /users/*、/inbox                → 404（Fedify 默认路由与共享 inbox 未启用），
 	#                                     保留是为将来启用时不至于又漏一条
+	# ── Nuxt Icon 的图标接口必须先于 @backend 放行 ──────────────────────────
+	# @nuxt/icon 的本地图标 API 挂在 Nuxt/Nitro 上（默认 /api/_nuxt_icon/:collection），
+	# 而它的前缀正好是 /api/*，会被下面的 @backend 抢走送到 Hono → 后端没有这条路由，
+	# 返回 404。表现是页面骨架和文字都正常、只是图标整片空白（线上验收踩过）。
+	#
+	# 顺序不能反：Caddy 同一指令按书写顺序匹配，先命中者生效，
+	# 所以这条 reverse_proxy 必须写在 @backend 那条之前。
+	@nuxt_icon path /api/_nuxt_icon /api/_nuxt_icon/*
+	reverse_proxy @nuxt_icon web:3000
+
 	@backend path /api/* /mcp /mcp/* /.well-known/* /nodeinfo/* /ap/* /@* /users/* /inbox /inbox/*
 	reverse_proxy @backend server:3001
 
