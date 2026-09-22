@@ -87,6 +87,18 @@
 - **原因**：代理现在只接受真实库名（`/api/couchdb/proxy/<库名>`），而旧版本前端仍按业务 id 拼地址（`/api/couchdb/proxy/feed/<feedId>`）。Service Worker 装好新版本后会先待命，等页面提示用户更新才激活，所以旧页面可能还跑着旧 JS。
 - **解法**：刷新页面（换成新构建产物）即可，错误响应里的 `hint` 也写了这条。
 
+### 同步全报 `Database does not exist`：库名还登记着，库却没了
+
+- **现象**：订阅列表正常、`GET /api/couchdb/targets` 也能下发库名，但同步请求返回 CouchDB 的 `{"error":"not_found","reason":"Database does not exist."}`。
+- **原因**：库名解析走快路径 —— 业务表里已登记的库名直接返回，不再顺手校验库是否还在（见 [client.ts](../packages/hono-server/src/couchdb/client.ts) 的 `resolveDatabase`；这条路径在抓取、写条目、查条目上每次都要走，原先的「每次都 `GET /db` + `PUT /_security`」纯属白打请求）。所以手工删库、CouchDB 数据卷丢失这类情况**不会自动重建**。
+- **解法**：把对应行的库名置空，下次寻址/抓取会重新建库：
+  ```bash
+  docker exec hono-server-postgres-1 psql -U rssfed -d rssfed -c \
+    "update feeds set couch_db_name = null where id='<feedId>';"
+  ```
+  用户状态库/ bot 库同理（`user` / `bots` 表的 `couch_db_name`）。注意重建出来的是**新库**，旧数据不会回来（库本身已不存在），本地 PouchDB 也会因远端库 URL 变化全量重同步一次。
+- **另一个代价**：库级 `_security` 也只在建库时设置一次，不再每次重写。如果有人手工改坏了某个库的 `_security`，同样用置空库名的方式重建。
+
 ## 反向代理与网络
 
 ### https 页面上附件地址是 `http://`，图片被浏览器拦截
