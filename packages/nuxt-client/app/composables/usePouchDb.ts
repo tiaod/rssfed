@@ -1,9 +1,11 @@
 import PouchDB from 'pouchdb'
 import * as PouchDBFindNS from 'pouchdb-find'
-import { reactive } from 'vue'
+import { reactive, watch } from 'vue'
 import type { RssCachedImage, RssEntry, SubscriptionItem } from '~/types/rss'
 import { useCouchTargets, USER_STATE_ID } from '~/composables/useCouchTargets'
+import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
+import { localDbName, syncedFeedsKey, LEGACY_LOCAL_DB_NAMES } from '~/utils/localDbName'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 
 // 注册 Mango 查询插件（db.find / createIndex）。
@@ -100,10 +102,11 @@ interface PouchDbState {
   activeReplicates: number
   /** 用户状态库 live 同步的启动 Promise（syncNow 暂停它之前必须先等它挂上 handle） */
   userStateSyncPromise: Promise<void> | null
+  /** 当前本地实例所属的账号 id：本地库按账号隔离，见 switchUser */
+  dbUserId: string | null
+  /** 账号切换监听是否已注册（多个组件都会调用 usePouchDb，只需注册一次） */
+  userWatchReady: boolean
 }
-
-/** 集中条目库名称 */
-const ENTRIES_DB_NAME = 'rssfed-entries'
 
 /**
  * 管理 PouchDB 集中库同步，提供跨源条目查询能力。
@@ -111,10 +114,15 @@ const ENTRIES_DB_NAME = 'rssfed-entries'
  * 每个订阅源通过单向复制（replicate.from）把条目同步到本地集中库，
  * 时间线/单源/分组查询走 Mango 索引（publishedAt 倒序）一次查询。
  * 用户状态库（已读/收藏/订阅）通过 live 双向同步。
+ *
+ * 本地库名带当前账号 id（见 utils/localDbName）：换账号就是换一套本地库，
+ * 避免上一个账号的本地数据经双向同步被推进新账号的远端库。
  */
 export function usePouchDb() {
   // 代理地址里的库名由后端下发（随机库名，无法推导），见 useCouchTargets
   const { remoteUrlForId, invalidate: invalidateTargets } = useCouchTargets()
+  // 本地库按账号隔离，需要当前登录用户（惰性取 store：usePouchDb 也可能在异步回调里被调用）
+  const currentUserId = () => useUserStore().user?.id ?? null
 
   // 通过 nuxtApp 单例化共享状态，避免每次组件挂载都创建新实例
   const nuxtApp = useNuxtApp() as NuxtAppWithPouchState
@@ -127,7 +135,9 @@ export function usePouchDb() {
       syncStatuses: reactive<Record<string, SyncStatus>>({}),
       replicateWaiting: [],
       activeReplicates: 0,
-      userStateSyncPromise: null
+      userStateSyncPromise: null,
+      dbUserId: null,
+      userWatchReady: false
     }
   }
   const { syncHandles, syncStatuses } = nuxtApp.$pouchDbState
@@ -138,14 +148,58 @@ export function usePouchDb() {
   let cleanupPromise: Promise<void> | null = null
 
   function ensureCleanup() {
-    if (!cleanupPromise) cleanupPromise = cleanupLegacyFeedDbs()
+    if (!cleanupPromise) cleanupPromise = cleanupLegacyDbs()
     return cleanupPromise
   }
 
-  /** 获取集中条目库（惰性创建，并顺带清理旧的 per-feed 本地库） */
+  /**
+   * 切换到某个账号的本地库：关掉上一个账号的实例与同步句柄，下次访问时懒重建。
+   * 不删库 —— 各账号的离线数据留着，换回来还能用。
+   */
+  function switchUser(uid: string | null) {
+    for (const [, handle] of syncHandles.entries()) handle.cancel?.()
+    syncHandles.clear()
+    // 队列里排队的复制必须回执，否则调用方（如 syncNow 的 Promise.all）会一直挂着
+    for (const item of pouchState.replicateWaiting.splice(0)) {
+      item.resolve({ ok: false, error: '账号已切换，同步已取消' })
+    }
+    if (pouchState.entriesDb) {
+      pouchState.entriesDb.close()
+      pouchState.entriesDb = null
+    }
+    if (pouchState.userStateDb) {
+      pouchState.userStateDb.close()
+      pouchState.userStateDb = null
+    }
+    pouchState.entriesIndexed = false
+    pouchState.userStateSyncPromise = null
+    feedIconBlobs.clear()
+    entryCoverBlobs.clear()
+    for (const key of Object.keys(syncStatuses)) {
+      Reflect.deleteProperty(syncStatuses, key)
+    }
+    pouchState.dbUserId = uid
+  }
+
+  /** 把本地实例对齐到当前账号（会话就绪前是 null → guest 库，登录后再切到该账号的库） */
+  function syncDbUser() {
+    const uid = currentUserId()
+    if (pouchState.dbUserId !== uid) switchUser(uid)
+  }
+
+  // 会话变化立即切换：登出后不该继续对着上一个账号的库做 live 同步
+  if (!pouchState.userWatchReady) {
+    pouchState.userWatchReady = true
+    watch(currentUserId, (uid) => {
+      if (pouchState.dbUserId !== uid) switchUser(uid)
+    })
+  }
+
+  /** 获取集中条目库（惰性创建，并顺带清理历史本地库） */
   function getEntriesDb(): PouchDB.Database {
+    syncDbUser()
     if (!pouchState.entriesDb) {
-      pouchState.entriesDb = new PouchDB(ENTRIES_DB_NAME)
+      pouchState.entriesDb = new PouchDB(localDbName('entries', pouchState.dbUserId))
       void ensureCleanup()
     }
     return pouchState.entriesDb
@@ -168,42 +222,50 @@ export function usePouchDb() {
   }
 
   /**
-   * 迁移清理：删除旧的 per-feed 本地库（rssfed-feed-*）。
-   * 集中库方案废弃多库结构，旧数据由集中库重新同步；一次性执行（localStorage 标记）。
-   */
-  /**
-   * 迁移清理：删除旧的 per-feed 本地库（rssfed-feed-*）并重置增量记录。
-   * 集中库方案废弃多库结构，旧数据由集中库重新同步；一次性执行（localStorage 标记）。
+   * 迁移清理（每次会话最多跑一次，幂等）：
+   *   1. 删除旧的 per-feed 本地库（rssfed-feed-*）。集中库方案废弃多库结构，
+   *      旧数据由集中库重新同步；
+   *   2. 删除账号隔离之前那两个固定库名（rssfed-entries / rssfed-user-state）。
+   *      它们可能混着多个账号的数据（固定库名 + 双向同步 = 串号），一律不复用 ——
+   *      搬进当前账号的隔离库反而会把上一个账号的数据固化下来并推上远端，比丢弃更糟。
+   *
    * 注意：多标签页持有旧库连接时 destroy 可能被 blocked（永不返回），因此
    * 增量记录先清、删库限时放弃——保证集中库必定全量同步一次，删库失败只是残留磁盘。
    */
-  async function cleanupLegacyFeedDbs() {
+  async function cleanupLegacyDbs() {
     try {
       // v2：集中库架构的迁移标记（与 per-feed 时代的 v1 区分，强制重新迁移一次）
-      if (localStorage.getItem('rssfed-central-migrated-v2')) return
-      // 先清增量记录：集中库全新，必须全量同步一次（无论删库是否成功）
-      try {
-        localStorage.removeItem(SYNCED_FEEDS_KEY)
-      } catch {
-        // localStorage 不可用时忽略
-      }
-      // 尝试删除旧 per-feed 库（限时 3 秒，超时放弃）
-      try {
-        // PouchDB 的静态方法（allDbs / destroy）不在类型定义里，这里按实际签名断言
-        const pouchStatic = PouchDB as unknown as {
-          allDbs: () => Promise<string[]>
-          destroy: (name: string) => Promise<void>
+      if (!localStorage.getItem('rssfed-central-migrated-v2')) {
+        // 先清增量记录：集中库全新，必须全量同步一次（无论删库是否成功）
+        try {
+          localStorage.removeItem('rssfed-synced-feeds')
+        } catch {
+          // localStorage 不可用时忽略
         }
-        const dbs: string[] = await pouchStatic.allDbs()
-        const legacy = dbs.filter(name => name.startsWith('rssfed-feed-'))
-        await Promise.race([
-          Promise.all(legacy.map(name => pouchStatic.destroy(name).catch(() => {}))),
-          new Promise(resolve => setTimeout(resolve, 3000))
-        ])
-      } catch {
-        // 删库失败不影响主流程
+        // 尝试删除旧 per-feed 库（限时 3 秒，超时放弃）
+        try {
+          // PouchDB 的静态方法（allDbs / destroy）不在类型定义里，这里按实际签名断言
+          const pouchStatic = PouchDB as unknown as {
+            allDbs: () => Promise<string[]>
+            destroy: (name: string) => Promise<void>
+          }
+          const dbs: string[] = await pouchStatic.allDbs()
+          const legacy = dbs.filter(name => name.startsWith('rssfed-feed-'))
+          await Promise.race([
+            Promise.all(legacy.map(name => pouchStatic.destroy(name).catch(() => {}))),
+            new Promise(resolve => setTimeout(resolve, 3000))
+          ])
+        } catch {
+          // 删库失败不影响主流程
+        }
+        localStorage.setItem('rssfed-central-migrated-v2', '1')
       }
-      localStorage.setItem('rssfed-central-migrated-v2', '1')
+
+      // 账号隔离前的固定库名：无条件清理（库不存在时 destroy 会报错，忽略即可）
+      await Promise.race([
+        Promise.all(LEGACY_LOCAL_DB_NAMES.map(name => new PouchDB(name).destroy().catch(() => {}))),
+        new Promise(resolve => setTimeout(resolve, 3000))
+      ])
     } catch {
       // 清理失败不影响主流程（旧库残留只是占磁盘）
     }
@@ -257,12 +319,15 @@ export function usePouchDb() {
     if (!syncStatuses[id]) {
       syncStatuses[id] = { feedId: id, status: 'queued', version: 0 }
     }
+    // 本次入队归属的账号：切换账号后旧任务的成败都不该记到新账号头上
+    // （同步记录按账号存 localStorage，记错会让新账号以为已经同步过而跳过）
+    const ownerUserId = pouchState.dbUserId
     return new Promise((resolve) => {
       pouchState.replicateWaiting.push({
         id,
         full,
         resolve: (r) => {
-          if (r.ok) markSynced(id)
+          if (r.ok && pouchState.dbUserId === ownerUserId) markSynced(id)
           resolve(r)
         }
       })
@@ -274,8 +339,17 @@ export function usePouchDb() {
    * 对指定订阅源执行一次性单向复制（远端 per-feed CouchDB → 本地集中库），
    * 并更新同步状态。增量由 PouchDB checkpoint 保证（每源独立记录同步位置）；
    * full=true 时强制全量（since: 0），见 enqueueReplicate 说明。
+   *
+   * 复制归属的账号在开头固定：期间若切换账号，本地实例已被关闭、结果一律作废，
+   * 也不再往新账号的同步状态里写（否则进度条会留下一条永不结束的记录）。
    */
   async function replicateDb(id: string, full = false): Promise<{ ok: boolean, error?: string }> {
+    const ownerUserId = pouchState.dbUserId
+    /** 只有账号没变时才写同步状态 */
+    function setStatus(status: SyncStatus) {
+      if (pouchState.dbUserId === ownerUserId) syncStatuses[id] = status
+    }
+
     const db = id === USER_STATE_ID ? getUserStateDb() : getEntriesDb()
 
     // 远端地址必须带真实库名（后端随机生成、持久化在业务表上），先取寻址信息。
@@ -290,40 +364,40 @@ export function usePouchDb() {
     }
     if (!remoteUrl) {
       const error = lookupError ?? `未取到订阅对应的 CouchDB 库名（${id}），已跳过同步`
-      syncStatuses[id] = {
+      setStatus({
         feedId: id,
         status: 'error',
         version: syncStatuses[id]?.version ?? 0,
         error
-      }
+      })
       return { ok: false, error }
     }
 
-    syncStatuses[id] = {
+    setStatus({
       feedId: id,
       status: 'syncing',
       version: syncStatuses[id]?.version ?? 0
-    }
+    })
 
     try {
       const res = await db.replicate.from(remoteUrl, full ? { since: 0 } : undefined)
       if (!res.ok) {
         throw new Error(`同步失败（HTTP ${res.status}）`)
       }
-      syncStatuses[id] = {
+      setStatus({
         feedId: id,
         status: 'idle',
         version: (syncStatuses[id]?.version ?? 0) + 1,
         lastSyncedAt: new Date().toISOString()
-      }
+      })
       return { ok: true }
     } catch (e: unknown) {
-      syncStatuses[id] = {
+      setStatus({
         feedId: id,
         status: 'error',
         version: syncStatuses[id]?.version ?? 0,
         error: errorMessage(e)
-      }
+      })
       return { ok: false, error: errorMessage(e) }
     }
   }
@@ -341,13 +415,12 @@ export function usePouchDb() {
    * 请求都不发）。订阅源很多（OPML 批量导入可达数百个）时避免每次进入时间线
    * 都对所有源发起复制请求。
    *
-   * 每个源上次同步完成时间持久化在 localStorage，跨会话生效。
+   * 每个源上次同步完成时间持久化在 localStorage（key 同样按账号隔离 ——
+   * 否则 A 的同步记录会让 B 以为自己已经同步过，直接跳过）。
    */
-  const SYNCED_FEEDS_KEY = 'rssfed-synced-feeds'
-
   function loadSyncedFeeds(): Record<string, string> {
     try {
-      return JSON.parse(localStorage.getItem(SYNCED_FEEDS_KEY) ?? '{}') as Record<string, string>
+      return JSON.parse(localStorage.getItem(syncedFeedsKey(pouchState.dbUserId)) ?? '{}') as Record<string, string>
     } catch {
       return {}
     }
@@ -358,7 +431,7 @@ export function usePouchDb() {
     try {
       const map = loadSyncedFeeds()
       map[feedId] = new Date().toISOString()
-      localStorage.setItem(SYNCED_FEEDS_KEY, JSON.stringify(map))
+      localStorage.setItem(syncedFeedsKey(pouchState.dbUserId), JSON.stringify(map))
     } catch {
       // localStorage 不可用时忽略（同步本身不受影响）
     }
@@ -543,7 +616,7 @@ export function usePouchDb() {
     entryCoverBlobs.clear()
     // 清掉增量同步记录，确保下次同步不因「已同步过」而跳过
     try {
-      localStorage.removeItem(SYNCED_FEEDS_KEY)
+      localStorage.removeItem(syncedFeedsKey(pouchState.dbUserId))
     } catch {
       // localStorage 不可用时忽略
     }
@@ -781,8 +854,9 @@ export function usePouchDb() {
    * 获取用户状态库 PouchDB 实例（用于已读/收藏标记）
    */
   function getUserStateDb(): PouchDB.Database {
+    syncDbUser()
     if (!pouchState.userStateDb) {
-      pouchState.userStateDb = new PouchDB('rssfed-user-state')
+      pouchState.userStateDb = new PouchDB(localDbName('user-state', pouchState.dbUserId))
       // 记下启动 Promise：syncNow 要等它挂上 handle 才能暂停 live 同步
       pouchState.userStateSyncPromise = startUserStateLiveSync()
     }
@@ -840,27 +914,6 @@ export function usePouchDb() {
         saved: true,
         savedAt: new Date().toISOString()
       })
-    }
-  }
-
-  /**
-   * 清理所有 PouchDB 实例
-   */
-  function destroyAll() {
-    for (const [, handle] of syncHandles.entries()) {
-      handle.cancel?.()
-    }
-    syncHandles.clear()
-    pouchState.userStateSyncPromise = null
-    // 代理寻址信息与账号绑定，销毁本地状态时一并失效（登出/切换用户后不能沿用旧库名）
-    invalidateTargets()
-    if (pouchState.entriesDb) {
-      pouchState.entriesDb.close()
-      pouchState.entriesDb = null
-    }
-    if (pouchState.userStateDb) {
-      pouchState.userStateDb.close()
-      pouchState.userStateDb = null
     }
   }
 
@@ -978,7 +1031,6 @@ export function usePouchDb() {
     getUserStateDb,
     markRead,
     toggleSaved,
-    destroyAll,
     syncStatuses: syncStatuses as Readonly<Record<string, SyncStatus>>,
     listSubscriptions,
     addSubscription,
