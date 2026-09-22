@@ -223,11 +223,29 @@ export function usePouchDb() {
     }
   }
 
+  /**
+   * 判断订阅 id 能否定位远端 CouchDB 库：feedId 不能为空串，bot 订阅还需要 botId。
+   * 空 id 拼出的地址定位不到任何库，复制只会拿到失败结果并刷一堆无用请求。
+   */
+  function isValidDbId(id: unknown): id is string {
+    if (typeof id !== 'string' || id.length === 0) return false
+    if (id === '__user_state__') return true
+    if (id.startsWith('bot:')) return id.length > 'bot:'.length
+    return true
+  }
+
   /** 将一次复制加入队列执行（限制并发，返回该库的复制结果）。
    *  入队即标记为 queued，供进度条统计剩余数量；成功完成后记录同步时间。
    *  full=true 时强制全量同步（since: 0），用于手动同步按钮——库被删重建后
    *  checkpoint 的 seq 会大于远端（旧 seq 残留），增量同步会误判"无新变更"。 */
   function enqueueReplicate(id: string, full = false): Promise<{ ok: boolean, error?: string }> {
+    // 兜底：无效 id 直接拒绝，不发出注定失败的复制请求（上游已过滤，这里防漏网）
+    if (!isValidDbId(id)) {
+      return Promise.resolve({
+        ok: false,
+        error: `订阅 id 无效（${JSON.stringify(id)}），已跳过同步`
+      })
+    }
     // 标记排队中（若尚未有状态记录）
     if (!syncStatuses[id]) {
       syncStatuses[id] = { feedId: id, status: 'queued', version: 0 }
@@ -339,6 +357,8 @@ export function usePouchDb() {
     const needSync: string[] = []
 
     for (const f of feeds) {
+      // 脏订阅文档（feedId 为空/缺失）无法定位远端库，跳过
+      if (!isValidDbId(f.feedId)) continue
       if (!needsSync(f.feedId, f.lastNewEntryAt)) continue
       needSync.push(f.feedId)
     }
@@ -362,10 +382,10 @@ export function usePouchDb() {
     // 订阅列表从 user-state 库读取（syncStatuses 是会话状态，刷新后为空，不能作为依据）
     let targets: string[]
     if (feedIds?.length) {
-      targets = [...new Set(feedIds)]
+      targets = [...new Set(feedIds)].filter(isValidDbId)
     } else {
       const subs = await listSubscriptions()
-      targets = [...new Set(subs.map(s => s.id)), '__user_state__']
+      targets = [...new Set([...subs.map(s => s.id), '__user_state__'])].filter(isValidDbId)
     }
 
     // ① 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用
@@ -811,6 +831,8 @@ export function usePouchDb() {
     return result.rows
       .map(r => r.doc as unknown as StateDoc)
       .filter(doc => doc?.type === 'subscription')
+      // 过滤脏文档：feedId 缺失/为空串的订阅定位不到远端库，同步注定失败
+      .filter(doc => isValidDbId(doc.feedId))
       .map(doc => ({
         id: doc.feedId!,
         title: doc.title ?? '',
