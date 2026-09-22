@@ -199,6 +199,20 @@ self.addEventListener('fetch', (event) => {
     return
   }
 
+  // 其余 /api/** 一律放行，不碰缓存。
+  //
+  // 起因是 CouchDB 代理的**附件** URL：PouchDB 复制时先 POST _bulk_get 拿文档，
+  // 附件只是 stub，再按文件名逐个 GET 拉取，形如
+  //   /api/couchdb/proxy/<库名>/<docId>/feed-image.avif?rev=<rev>
+  // 它以 .avif 结尾，会被下面的静态后缀规则当成「文件名带内容哈希、内容不会变」
+  // 的构建产物而 cache-first。可附件名不含哈希（feed 图标固定 feed-image.avif），
+  // PouchDB 靠 _attachments 的 digest 判断附件是否变化后回源拉取，却会被 SW 挡回
+  // 旧缓存 —— 图标/正文图片更新后，同一次部署周期内永远拿不到新内容。
+  //
+  // 数据通道一律交给 PouchDB 自己管（它有自己的 checkpoint 与本地库），SW 只在
+  // 上面几条明确的路径上兜离线，不猜 /api/ 下面的语义。
+  if (url.pathname.startsWith('/api/')) return
+
   // 构建产物与其它静态文件
   if (url.pathname.startsWith('/_nuxt/') || STATIC_FILE_RE.test(url.pathname)) {
     event.respondWith(cacheFirst(request))
