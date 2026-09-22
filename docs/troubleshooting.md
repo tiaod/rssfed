@@ -54,6 +54,47 @@
 - **现象**：`.env.example` 里写的是 Garage（`localhost:3900` / `region=garage`），而实际 dev 环境用的是 SeaweedFS（`8333` / `us-east-1`），照示例配连不上。
 - **教训**：示例文件是文档，改环境时容易忘记同步。发现后已把示例对齐到实际在用的服务。
 
+### 控制台刷 `GET /api/couchdb/proxy/feed/` 404（数量≈订阅数）
+
+- **现象**：Network/控制台里每个订阅同步时都出现一条 `GET /api/couchdb/proxy/feed/` 404，另外还有一条 `GET /api/couchdb/proxy/` 404。功能看起来正常，没有别的报错。
+- **原因**：这是 **PouchDB 的实例 uuid 探测**，不是脏数据。PouchDB 每次建立复制前都会调用远端库的 `id()`（内部 `api.id` → `genUrl(host, '')`，见 pouchdb 的 `lib/index-browser.js`），请求「**去掉库名段之后的那个路径**」来拿远端 CouchDB 实例的 uuid：
+
+  | 远端库 | 探测请求 |
+  | --- | --- |
+  | `.../proxy/user-state` | `GET .../proxy/` |
+  | `.../proxy/feed/<feedId>` | `GET .../proxy/feed/` |
+  | `.../proxy/bot/<botId>` | `GET .../proxy/bot/` |
+
+  **正常订阅也会请求 `/api/couchdb/proxy/feed/`**，所以「看到这条 404」推不出 feedId 为空——空 feedId 的复制同样会请求它，两者从 URL 上无法区分。拿不到 uuid 时 PouchDB 会回退用库 URL 当复制 id，同步功能不受影响，只是刷 404。
+- **快速验证**（Node 里跑一遍就能看到真实请求路径）：
+  ```js
+  const PouchDB = require('pouchdb')
+  const db = new PouchDB('http://localhost:3001/api/couchdb/proxy/feed/abc123')
+  await db.id() // 实际发出 GET .../feed/abc123/ 和 GET .../feed/（后者就是那条 404）
+  ```
+- **解法**：后端为这些探测路径返回 CouchDB 风格的根信息（`couchRootInfo`）：[routes/couchdb.ts](../packages/hono-server/src/routes/couchdb.ts)，回归用例 [couchdb-proxy-route.test.ts](../packages/hono-server/src/__tests__/couchdb-proxy-route.test.ts)。**响应里必须不带 `uuid`**：`api.id` 一旦拿到 uuid 就会改用 `uuid + 库名` 当复制 id，既有 checkpoint 全部因换名失效，每个订阅白跑一次全量重同步；不带 uuid 时 PouchDB 回退用远端库 URL，复制 id 与修复前完全一致。这个坑我踩过：第一版探测响应带了 uuid，紧接着就看到每个 feed 各来一条 `_local/...` 404（checkpoint 换名重建）。
+- **顺带加固**：`_changes`、`_local/...` 这类 CouchDB 保留段会被 `:feedId` 捕获，而 `ensureFeedDatabase` 会照单创建 `feed-_changes` 这样的垃圾库；现在对以 `_` 开头的段直接返回 400。
+- **如果确实怀疑有脏订阅**（空 feedId 也会让复制落到 `/proxy/feed/`），别看 404，直接查文档：
+  ```js
+  const q = 'include_docs=true&startkey=' + encodeURIComponent('"subscription:"') + '&endkey=' + encodeURIComponent('"subscription:\uffff"')
+  const docs = await (await fetch('/api/couchdb/proxy/user-state/_all_docs?' + q, { credentials: 'include' })).json()
+  console.log('订阅数:', docs.rows.length, '脏文档:', docs.rows.map(r => r.doc).filter(d => d?.type === 'subscription' && (typeof d.feedId !== 'string' || !d.feedId)))
+  ```
+  注意同时看 `rows.length`：如果它是 0，说明查错了库/账号，别据此下结论。前端 `isValidDbId`（[usePouchDb.ts](../packages/nuxt-client/app/composables/usePouchDb.ts)）和后端 `listSubscriptionsForUser`（[services/feeds.ts](../packages/hono-server/src/services/feeds.ts)）也会过滤掉这类文档，不让它们进入复制队列。
+
+### 同步时 `.../proxy/feed/<feedId>/_local/<id>` 返回 404
+
+- **现象**：Network 里出现 `GET /api/couchdb/proxy/feed/<feedId>/_local/xxxx==` 404，响应体是 CouchDB 的 `{"error":"not_found","reason":"missing"}`。
+- **原因**：这是 PouchDB 复制前的 **checkpoint 读取**。`_local` 文档不存在时 CouchDB 就返回 404，而 PouchDB 专门处理这个分支（`updateCheckpoint` 里对 404 的注释：「PouchDB is just checking if a remote checkpoint exists.」），随后从头复制、结束时 PUT 写入 checkpoint。**它是正常链路的一部分，不是错误**：只有 checkpoint 尚未建立的那一次会 404，之后同一复制 id 会命中并返回 200。
+- **排查**（库名是随机生成的，不是 `feed_<feedId>`，得先从 Postgres 拿）：
+  ```bash
+  docker exec hono-server-postgres-1 psql -U rssfed -d rssfed -c \
+    "select couch_db_name from feeds where id='<feedId>';"
+  curl -s -u admin:admin "http://localhost:5984/<couch_db_name>/_local_docs?include_docs=true"
+  ```
+  只要 PouchDB 复制过，这里就能看到 `_local/<replicationId>` 文档（`_rev` 递增、带 `last_seq`）。
+- **什么时候才是真问题**：**每次**同步都 404 且库里始终没有 checkpoint —— 说明 PUT 失败（权限或代理问题），会导致每个订阅反复全量复制。另外，改过 `COUCHDB_PROXY_SECRET`、远端库名，或者让探测响应带上 `uuid`，都会让复制 id 变化、checkpoint 一次性全部作废重来。
+
 ## 反向代理与网络
 
 ### https 页面上附件地址是 `http://`，图片被浏览器拦截
