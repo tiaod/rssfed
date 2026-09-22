@@ -187,6 +187,13 @@ JS
 - **数据不在 Service Worker 里**：条目、订阅、已读/收藏都在浏览器 PouchDB（IndexedDB）。新设备/新浏览器首次必须联网同步一次，之后才有离线内容。SW 只负责让页面能打开。
 - 清过浏览器站点数据、或换过浏览器配置，都会丢掉本地库，需要重新联网同步。
 
+### 同一浏览器换账号后，看到（并写进了）上一个账号的数据
+
+- **现象**：A 账号登出、B 账号登录，B 的时间线/订阅里出现 A 的订阅或已读状态；更麻烦的是 **B 的服务端 user-state 库被写入了 A 的文档**。
+- **原因**：旧版本本地 PouchDB 用固定库名（`rssfed-entries` / `rssfed-user-state`），而用户状态库走的是**双向** live 同步 —— 本地这份装着 A 数据的库会把文档推送到 B 的远端库。增量同步记录（localStorage 的 `rssfed-synced-feeds`）也是全局 key，会让 B 误以为自己已经同步过而整段跳过。
+- **解法**：本地库名与同步记录 key 都带上账号 id（[utils/localDbName.ts](../packages/nuxt-client/app/utils/localDbName.ts)），换账号等于换一套本地库；会话未就绪或未登录落到 `guest`，那段时间的数据不会被任何账号继承。启动清理会**删除**旧的固定库名（`rssfed-entries` / `rssfed-user-state`）而不是把它们搬进新库 —— 旧库里可能混着多个账号的数据，搬进去反而会把上一个账号的数据固化下来再推上远端。
+- **已经被写脏的远端库怎么办**：查该账号 user-state 库里的 `subscription:` 文档（`GET /api/couchdb/proxy/<库名>/_all_docs?startkey="subscription:"&endkey="subscription:\uffff"&include_docs=true`，库名从 `GET /api/couchdb/targets` 拿），确认哪些订阅不属于该账号后删除对应文档即可；本地 PouchDB 侧因为换了库名，会重新全量同步一次。
+
 ## 数据库与迁移
 
 ### `drizzle-kit push` 要 DROP `fedify_kv_v2`，会删掉 Bot 私钥
