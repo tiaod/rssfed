@@ -24,6 +24,14 @@ services:
       COUCHDB_PASSWORD: admin
     volumes:
       - rssfed-couchdb:/opt/couchdb/data
+      # Proxy Auth 的认证 handler 只在 CouchDB 启动时加载（config API 改它无效，
+      # CouchDB 3.5 也没有 POST /_restart），所以必须随容器启动注入，
+      # 否则 /api/couchdb/proxy/* 全部 401、前端看不到订阅内容。
+      # 不能加 `:ro`：entrypoint 会 chown 该文件，只读挂载会让它 set -e 退出；
+      # 用 00- 前缀是为了让 docker.ini 继续当 config API 的写入目标。
+      # 副作用：跑过 compose 之后，仓库里这个文件的属主会变成 couchdb(5984)，
+      # 要编辑它得用 sudo（内容不会变，git status 仍然干净）。
+      - ../../deploy/couchdb-proxy-auth.ini:/opt/couchdb/etc/local.d/00-proxy-auth.ini
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5984/"]
       interval: 10s

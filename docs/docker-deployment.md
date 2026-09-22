@@ -174,6 +174,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 
 ## 6. 运维备注
 
+- **部署目录要带 `deploy/`**：compose 会挂载 `deploy/couchdb-proxy-auth.ini` 到 CouchDB 的 `local.d/`（缺了它 CouchDB 不会挂载 proxy 认证 handler，`/api/couchdb/proxy/*` 全部 401，前端看不到订阅内容，见 [troubleshooting](troubleshooting.md)）。手工同步文件的部署方式（只 scp `docker-compose.prod.yml` + `.env.production`）必须连 `deploy/` 目录一起传，否则容器起不来或功能残缺。注意这个挂载**不能加 `:ro`**（entrypoint 会 chown，只读挂载会让容器无日志 exit 1），而且容器首次启动后宿主机的该文件属主会变成 `couchdb(5984)`，后续更新它要用 `sudo`。
 - **单副本**：抓取调度与 BotKit 轮询是进程内 `setInterval`，worker 与 API 同进程。`server` 不要 `--scale` 超过 1，否则会重复入队、重复发布 ActivityPub 活动。
 - **持久化**：`postgres-data`、`couchdb-data`、`redis-data`、`seaweedfs-data`、`caddy-data` 五个命名卷必须纳入备份。CouchDB 每个订阅源一个库，是数据主体，别只备份 PostgreSQL；`seaweedfs-data` 存的是正文图片与头像附件。
 - **日志**：compose 里统一配了 `json-file` 轮转（单文件 10MB × 3）。要集中收集就改 `x-logging` 锚点，或把 `docker logs` 接到 Loki/CloudWatch。

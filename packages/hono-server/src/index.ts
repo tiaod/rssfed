@@ -9,6 +9,7 @@ import {
   setProxySecret,
   ensureSystemDatabases,
 } from "./couchdb/client"
+import { verifyProxyAuthReady } from "./couchdb/proxy-auth"
 import { shutdownWorkers } from "./workers"
 import { shutdownBots, ensureFedifySchema } from "./bots"
 import { bootstrapAdminFromEnv } from "./bootstrap-admin"
@@ -39,6 +40,12 @@ async function configureProxyAuth() {
   for (const [key, value] of Object.entries(configs)) {
     await setCouchConfig(base, basic, key, value)
   }
+
+  // CouchDB 只在启动时读取 chttpd/authentication_handlers（chttpd:set_auth_handlers/0
+  // 把解析结果固化进 application env），刚写入的配置对运行中的进程无效，
+  // 且 CouchDB 3.5 已没有 POST /_restart 可用。所以这里只做探测：
+  // 没挂载就立刻把原因与修复动作写进日志，避免又表现成「前端空白」。
+  await verifyProxyAuthReady({ base, authorization: `Basic ${basic}` })
 
   // 确保 _users 系统库存在（消除监听器报错噪音）
   await ensureSystemDatabases()

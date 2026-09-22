@@ -24,6 +24,20 @@
 - **原因**：`COUCHDB_USER` 只在 `env_file` 里或根本没设，而 `couchdb/client.ts` 对它的默认值是**空字符串**（不是 `admin`），于是 Basic 认证变成 `:password`。
 - **解法**：编排里给 server 显式传 `COUCHDB_USER: ${COUCHDB_USER:-admin}`，保证与 CouchDB 容器用的是同一个用户名。
 
+### 登录后看不到任何订阅内容，`/api/couchdb/proxy/*` 全部 401
+
+- **现象**：页面能打开、能登录，但时间线与订阅列表空白。DevTools 里 `/api/couchdb/proxy/feed/<feedId>/`、`/api/couchdb/proxy/user-state/...` 全返回 401，响应体是 `{"error":"unauthorized","reason":"You are not authorized to access this db."}`——这是 **CouchDB** 的措辞；Hono 自己拦下的是 `{"error":"unauthorized"}`（那才是会话 cookie 失效）。
+- **原因**：CouchDB **只在进程启动时**读取 `chttpd/authentication_handlers`（`chttpd:set_auth_handlers/0` 把解析结果固化进 application env），启动后再用 config API 改这项配置对运行中的进程无效；CouchDB 3.5 又移除了 `POST /_restart`（实测 404），应用侧无法自行触发重载。而 server 的流程是「连上 CouchDB → 才写配置」，于是 `proxy_authentication_handler` 从未挂载：所有带 `X-Auth-CouchDB-*` 的转发请求都被当成匿名用户，被库级 `_security`（`members.roles = ["user"]`）拒绝，PouchDB 同步整体失败。
+- **排查**：进 CouchDB 容器看运行时认证链——
+  ```bash
+  docker exec <couchdb 容器> curl -s http://localhost:5984/_session
+  # 正常：{"info":{"authentication_handlers":["cookie","proxy","default"]}}
+  # 故障：{"info":{"authentication_handlers":["cookie","default"]}}   ← 缺 proxy
+  ```
+  注意 `_node/_local/_config/chttpd/authentication_handlers` 里**写着** proxy 也没用，那只是配置而非运行时状态。
+- **解法**：把这段配置固化到 CouchDB 启动时就会读的 ini —— [deploy/couchdb-proxy-auth.ini](../deploy/couchdb-proxy-auth.ini)，两个 compose 都已挂到 `/opt/couchdb/etc/local.d/00-proxy-auth.ini`。两个文件名上的坑：**不能加 `:ro`**（官方 entrypoint 会对 `/opt/couchdb` 下的文件 `chown`，只读挂载让 chown 失败，`set -e` 下容器无日志直接 exit 1），**前缀用 `00-`**（CouchDB 写配置时落在 local.d 里最后加载的 `docker.ini`，排到它后面会让 `COUCHDB_PROXY_SECRET` 被写进受版本控制的文件）。已经跑歪的实例执行一次 `docker compose --env-file .env.production -f docker-compose.prod.yml up -d couchdb server` 即可（重建 couchdb 会丢掉容器内的 `docker.ini`，所以 server 必须一起重建，让 `COUCHDB_PROXY_SECRET` 重新写入）。server 启动时会自动校验（[couchdb/proxy-auth.ts](../packages/hono-server/src/couchdb/proxy-auth.ts)），未挂载就在日志里给出上述修复动作。
+- **注意**：`chttpd_auth/secret` 与 `proxy_use_secret` 是**每次请求读取**的动态配置，仍由 server 启动时写入，不进 ini、不入版本控制。
+
 ### 改了 `.env.production` 却不生效
 
 - **原因**：`env_file` 的变量在**容器创建时**注入，`docker compose restart` 不会重新读取。

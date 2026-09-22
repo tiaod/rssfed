@@ -51,6 +51,21 @@ services:
       COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:?未设置 COUCHDB_PASSWORD，请先准备 .env.production}
     volumes:
       - couchdb-data:/opt/couchdb/data
+      # Proxy Auth 的认证 handler 必须在**进程启动时**就存在：CouchDB 只在启动时读取
+      # chttpd/authentication_handlers（config API 改它不影响运行中的进程），
+      # 且 CouchDB 3.5 已移除 POST /_restart，server 无法自行触发重载。
+      # 缺了这段配置，proxy handler 不会挂载，/api/couchdb/proxy/* 会整体 401
+      # （现象：前端看不到任何订阅内容）。
+      #
+      # 两个不能改的点：
+      #   1. 不能加 `:ro` —— 官方 entrypoint 会对 /opt/couchdb 下的文件执行
+      #      chown，只读挂载让 chown 失败，配合 `set -e` 会让容器无日志直接 exit 1；
+      #   2. 用 `00-` 前缀排在最前 —— CouchDB 通过 config API 写配置时落在这个
+      #      local.d 目录里**最后加载**的文件（docker.ini），用 zz- 前缀会让
+      #      COUCHDB_PROXY_SECRET 被写进仓库里的这个文件。
+      # 副作用：容器首次启动后宿主机的这个文件会被 chown 成 couchdb(5984)，
+      # 以后更新它要 `sudo rm` 后再传，或直接 `sudoedit`。
+      - ./deploy/couchdb-proxy-auth.ini:/opt/couchdb/etc/local.d/00-proxy-auth.ini
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:5984/"]
       interval: 10s
