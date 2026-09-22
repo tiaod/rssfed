@@ -223,8 +223,8 @@ export async function listSubscriptionsForUser(userId: string) {
   const docs = rows.map((r) => r.doc).filter(Boolean) as any[]
 
   // 脏订阅文档防御：feedId 必须是非空字符串。
-  // 若把 feedId 为空的文档返回给前端，前端会拼出 /api/couchdb/proxy/feed/
-  // （缺少 feedId 路径段），后端路由不匹配只能 404。
+  // 若把 feedId 为空的文档返回给前端，它既取不到对应的 CouchDB 库名
+  // （/api/couchdb/targets 的映射里没有这个 key），也定位不到任何远端库。
   const hasValidFeedId = (d: any) => typeof d.feedId === "string" && d.feedId.length > 0
   const feedDocs = docs.filter((d: any) => d.kind !== "bot" && hasValidFeedId(d))
   const botDocs = docs.filter((d: any) => d.kind === "bot" && hasValidFeedId(d))

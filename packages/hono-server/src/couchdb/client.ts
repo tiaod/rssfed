@@ -46,7 +46,30 @@ const FEED_DESIGN_DOC = {
 // ── 库名解析与创建 ──
 
 // 全小写字母+数字字符集：生成的库名满足 CouchDB 库名规则（小写、以字母开头、无非法字符）
-const generateDbNameSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 24)
+const DB_NAME_SUFFIX_LENGTH = 24
+const generateDbNameSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", DB_NAME_SUFFIX_LENGTH)
+
+/** 本服务自己创建的库名前缀白名单 */
+const OWNED_DB_PREFIXES = [COUCHDB_FEED_PREFIX, COUCHDB_BOT_PREFIX, COUCHDB_USER_STATE_PREFIX]
+
+/**
+ * 库名规则：`<本服务前缀>` + 固定长度的随机小写字母数字后缀，
+ * 与下方 resolveDatabase 的生成规则一一对应（改这里必须同步改生成侧）。
+ */
+const OWNED_DB_NAME_RE = new RegExp(
+  `^(?:${OWNED_DB_PREFIXES.join("|")})[a-z0-9]{${DB_NAME_SUFFIX_LENGTH}}$`,
+)
+
+/**
+ * 判断库名是否是「本服务所有、可经代理转发」的库。
+ *
+ * 代理路径直接携带库名（/api/couchdb/proxy/<库名>/...），所以这里必须严格白名单：
+ * 既挡掉 `_users`、`_replicator` 等系统库被当成转发目标，也挡掉 `%2F`、`..`
+ * 之类会改变目标 URL 结构的注入（正则只允许小写字母与数字，天然排除）。
+ */
+export function isProxyableDbName(name: string): boolean {
+  return OWNED_DB_NAME_RE.test(name)
+}
 
 /** 库名映射对象类型 */
 type DbKind = "feed" | "user" | "bot"

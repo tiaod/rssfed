@@ -11,7 +11,7 @@
  * 从未挂载。后果是带 X-Auth-CouchDB-* 的转发请求全部退化成匿名用户，
  * 被库级 _security 拒绝：
  *
- *   GET /api/couchdb/proxy/feed/<id>/
+ *   GET /api/couchdb/proxy/<库名>/
  *   → 401 {"error":"unauthorized","reason":"You are not authorized to access this db."}
  *
  * 前端 PouchDB 同步因此整体失败，页面表现为「看不到任何订阅内容」。
