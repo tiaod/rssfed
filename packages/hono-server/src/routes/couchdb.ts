@@ -17,6 +17,9 @@ export const couchdbRouter = new Hono<{ Variables: Variables }>()
  *   /api/couchdb/proxy/feed/:feedId/<剩余路径> →  feed-{feedId}
  *   /api/couchdb/proxy/bot/:botId/<剩余路径>   →  bot-{botId}（bot 产出库，全登录用户可读）
  *
+ * 另有一组「实例 uuid 探测」路径（/proxy/、/proxy/feed/、/proxy/bot/），
+ * PouchDB 每次复制前都会请求它们，返回 CouchDB 风格的根信息，见 couchRootInfo。
+ *
  * Hono 自动添加 Proxy Auth header 后转发到 CouchDB。
  * 这样浏览器端 PouchDB 可以通过同源请求同步 feed 库、bot 产出库和用户状态库。
  */
@@ -36,14 +39,46 @@ couchdbRouter.all("/proxy/user-state/*", async (c) => {
   return proxyToCouchDb(c, dbName, "/api/couchdb/proxy/user-state")
 })
 
+/**
+ * PouchDB 的「实例 uuid 探测」路径。
+ *
+ * PouchDB 每次建立复制前都会调用远端库的 `id()`（内部 `api.id` → `genUrl(host, '')`），
+ * 请求「去掉库名段之后的那个路径」来拿远端 CouchDB 实例的 uuid：
+ *   user-state 复制 → GET /api/couchdb/proxy/
+ *   每个 feed 复制  → GET /api/couchdb/proxy/feed/
+ *   每个 bot 复制   → GET /api/couchdb/proxy/bot/
+ *
+ * 注意这是**每个订阅、每次复制**都会发的正常请求，不是脏数据：拿不到 uuid 时
+ * PouchDB 会回退用远端库 URL 当复制 id，功能不受影响，但控制台会刷一屏 404。
+ *
+ * **故意不返回 uuid**：`api.id` 一旦拿到 uuid，就会改用 `uuid + 库名` 当复制 id，
+ * 所有既有 checkpoint 会因换名而失效 —— 每个订阅白跑一次全量重同步。
+ * 返回不含 uuid 的根信息，既能消掉 404，又保持复制 id（checkpoint）完全不变。
+ */
+const couchRootInfo = {
+  couchdb: "Welcome",
+  version: "rssfed-proxy",
+  vendor: { name: "RSSFed" },
+}
+
+for (const path of ["/proxy", "/proxy/", "/proxy/feed", "/proxy/feed/", "/proxy/bot", "/proxy/bot/"]) {
+  couchdbRouter.get(path, (c) => c.json(couchRootInfo))
+}
+
 couchdbRouter.all("/proxy/feed/:feedId/*", async (c) => {
   const { feedId } = c.req.param()
+  // 保留路径防御：库不存在时 /proxy/feed/_changes、/proxy/feed/_local/... 里的
+  // "_changes"/"_local" 会被 :feedId 捕获，ensureFeedDatabase 会照单创建一个
+  // feed-_changes 垃圾库。CouchDB 的库内保留段都以 _ 开头，直接拒绝。
+  if (feedId.startsWith("_")) return c.json({ error: "invalid feedId" }, 400)
   const dbName = await ensureFeedDatabase(feedId)
   return proxyToCouchDb(c, dbName, `/api/couchdb/proxy/feed/${feedId}`)
 })
 
 couchdbRouter.all("/proxy/bot/:botId/*", async (c) => {
   const { botId } = c.req.param()
+  // 同上：避免 bot-_changes 这类垃圾库
+  if (botId.startsWith("_")) return c.json({ error: "invalid botId" }, 400)
   const dbName = await ensureBotDatabase(botId)
   return proxyToCouchDb(c, dbName, `/api/couchdb/proxy/bot/${botId}`)
 })
