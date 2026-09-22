@@ -76,16 +76,19 @@ type DbKind = "feed" | "user" | "bot"
 
 /**
  * 解析（或创建）业务对象对应的 CouchDB 库名。
- * 库名保存在业务表的新增列上（feeds.couch_db_name / user.couch_db_name），
+ * 库名保存在业务表的新增列上（feeds.couch_db_name / user.couch_db_name / bots.couch_db_name），
  * 首次 ensure 时生成随机库名、建库并回写该列；库名不直接由业务 id 派生，
  * 避免非法字符/撞名问题，且 id 变更不影响已建库。
+ *
+ * **已有库名时直接返回，一个 CouchDB 请求都不发**：抓取条目、写条目、查条目、
+ * 下单寻址等高频路径每次都要走这里，原先「每次都 get 库 + PUT _security」
+ * 等于每个订阅多打两个请求。代价是不再自动修复「库名已登记但库被删掉」的情况
+ * （手工删库、CouchDB 数据卷丢失）；届时把该行的库名置空即可让下次 ensure 重建：
+ *   update feeds set couch_db_name = null where id = '<feedId>';
  */
 async function resolveDatabase(kind: DbKind, refId: string, prefix: string): Promise<string> {
   const existing = await getCouchDbName(kind, refId)
-  if (existing) {
-    await ensureDbExists(existing, kind, refId)
-    return existing
-  }
+  if (existing) return existing
 
   const dbName = `${prefix}${generateDbNameSuffix()}`
   await ensureDbExists(dbName, kind, refId)
@@ -131,7 +134,7 @@ async function saveCouchDbName(kind: DbKind, refId: string, dbName: string) {
   }
 }
 
-/** 建库（幂等）并按类型设置库级授权 */
+/** 建库（幂等）并按类型设置授权、安装设计文档/索引（只在首次建库时执行一次） */
 async function ensureDbExists(dbName: string, kind: DbKind, refId: string) {
   let created = false
   try {
@@ -140,9 +143,12 @@ async function ensureDbExists(dbName: string, kind: DbKind, refId: string) {
     await nanoServer.db.create(dbName)
     created = true
   }
-  // 新建 feed / bot 库时一次性安装设计文档；已有库不再重写，避免每次请求重装导致的并发 409 冲突
+  // 建库时一次性安装设计文档与索引；已有库不再重写，避免每次请求重装导致的并发 409 冲突
   if (created && (kind === "feed" || kind === "bot")) {
     await installFeedDesignDoc(dbName)
+  }
+  if (created && kind === "user") {
+    await ensureUserStateIndexes(dbName)
   }
   await setDatabaseSecurity(dbName, kind === "user" ? { names: [refId] } : { roles: ["user"] })
 }
@@ -184,9 +190,7 @@ async function installFeedDesignDoc(dbName: string) {
 
 /** 确保用户状态库存在并返回库名（首次调用时生成随机库名并持久化映射） */
 export async function ensureUserStateDatabase(userId: string): Promise<string> {
-  const dbName = await resolveDatabase("user", userId, COUCHDB_USER_STATE_PREFIX)
-  await ensureUserStateIndexes(dbName)
-  return dbName
+  return await resolveDatabase("user", userId, COUCHDB_USER_STATE_PREFIX)
 }
 
 // ── Bot 产出库 ──

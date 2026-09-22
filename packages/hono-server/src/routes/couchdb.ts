@@ -56,7 +56,8 @@ couchdbRouter.use("/*", async (c: Context<{ Variables: Variables }>, next: Next)
  *   { userState: "user-state_xxx", feeds: { <feedId>: "feed_xxx" }, bots: { <botId>: "bot_xxx" } }
  *
  * 前端 PouchDB 拿到库名才能拼出代理地址。顺带 ensure 一次：订阅是刚建立时
- * 库可能还不存在，先把库建好，前端不必关心建库时机（幂等，已有库只做校验）。
+ * 库可能还不存在，先把库建好，前端不必关心建库时机。已有库名的都是纯读
+ * （见 couchdb/client.ts 的 resolveDatabase），所以这个接口对老订阅几乎零成本。
  * 订阅列表内部会 ensure 用户状态库，并已过滤 feedId 无效的脏文档。
  */
 couchdbRouter.get("/targets", async (c) => {
