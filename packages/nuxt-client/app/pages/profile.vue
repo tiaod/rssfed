@@ -95,7 +95,9 @@ const handleReset = async () => {
   resetting.value = true
   try {
     await pouch.resetLocalData()
-    await pouch.syncNow()
+    // 重置后必须全量：本地库与 checkpoint 都已清空，且水位线已删，
+    // 若走默认增量，服务器「从未抓到新条目」的源会被 needsSync 挡掉，本地永远补不回来
+    await pouch.syncNow(undefined, { full: true })
     toast.add({ title: '本地缓存已重置，正在重新同步', color: 'success' })
   } catch (e: unknown) {
     toast.add({ title: '重置失败', description: errorMessage(e), color: 'error' })

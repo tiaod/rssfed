@@ -3,7 +3,8 @@
  * 手动同步按钮：点击立即从远端拉取最新数据（syncNow），并展示同步状态。
  *
  * 不传 feedIds 时作用于所有已激活的库（feed + 用户状态库），
- * 传入时仅作用于指定 feed。状态展示：
+ * 传入时仅作用于指定 feed。同步走增量：没有新内容的源会被跳过（见 syncNow），
+ * 因此点击通常很快完成。状态展示：
  * - 同步中：按钮转圈
  * - 失败：图标变红，tooltip 显示错误详情（可点击重试）
  * - 成功：tooltip 显示上次同步时间
@@ -72,7 +73,14 @@ async function handleSync() {
         color: 'error'
       })
     } else if (result.ok.length > 0) {
-      toast.add({ title: '同步完成', color: 'success' })
+      toast.add({
+        title: '同步完成',
+        // 被增量过滤跳过的源也报出来，避免「点了一下没反应」的困惑
+        description: result.skipped > 0 ? `另有 ${result.skipped} 个订阅源无更新，已跳过` : undefined,
+        color: 'success'
+      })
+    } else {
+      toast.add({ title: '已是最新', description: '所选订阅源都没有新内容', color: 'success' })
     }
   } finally {
     syncing.value = false

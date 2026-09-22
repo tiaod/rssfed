@@ -1,8 +1,10 @@
 import PouchDB from 'pouchdb'
 import * as PouchDBFindNS from 'pouchdb-find'
 import { reactive, watch } from 'vue'
-import type { RssCachedImage, RssEntry, SubscriptionItem } from '~/types/rss'
+import type { FeedSubscriptionItem, RssCachedImage, RssEntry, SubscriptionItem } from '~/types/rss'
 import { useCouchTargets, USER_STATE_ID } from '~/composables/useCouchTargets'
+import { useApi } from '~/composables/useApi'
+import { needsSync, pickFeedsNeedingSync } from '~/utils/syncDecision'
 import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
 import { localDbName, syncedFeedsKey, LEGACY_LOCAL_DB_NAMES } from '~/utils/localDbName'
@@ -121,6 +123,8 @@ interface PouchDbState {
 export function usePouchDb() {
   // 代理地址里的库名由后端下发（随机库名，无法推导），见 useCouchTargets
   const { remoteUrlForId, invalidate: invalidateTargets } = useCouchTargets()
+  // 订阅列表接口（含 feeds.lastNewEntryAt）：手动同步 syncNow 的增量判断依据
+  const api = useApi()
   // 本地库按账号隔离，需要当前登录用户（惰性取 store：usePouchDb 也可能在异步回调里被调用）
   const currentUserId = () => useUserStore().user?.id ?? null
 
@@ -410,13 +414,10 @@ export function usePouchDb() {
   }
 
   /**
-   * 增量同步：根据每个源「最后抓到新条目的时间」（后端 feeds.lastNewEntryAt）
-   * 只同步「上次同步后有过新内容」或「从未同步过」的源，其余直接跳过（连复制
-   * 请求都不发）。订阅源很多（OPML 批量导入可达数百个）时避免每次进入时间线
-   * 都对所有源发起复制请求。
-   *
-   * 每个源上次同步完成时间持久化在 localStorage（key 同样按账号隔离 ——
-   * 否则 A 的同步记录会让 B 以为自己已经同步过，直接跳过）。
+   * 增量同步的水位记录：每个源上次同步完成的时间，持久化在 localStorage
+   * （key 按账号隔离 —— 否则 A 的同步记录会让 B 以为自己已经同步过，直接跳过）。
+   * 与远端 feeds.lastNewEntryAt 的对比规则见 utils/syncDecision：
+   * 自动同步（syncFeedsIfChanged）与手动同步（syncNow）共用同一套判断。
    */
   function loadSyncedFeeds(): Record<string, string> {
     try {
@@ -437,24 +438,30 @@ export function usePouchDb() {
     }
   }
 
-  /** 判断某个源是否需要同步：从未同步过（首次/新订阅）或上次同步后有过新内容 */
-  function needsSync(feedId: string, lastNewEntryAt?: string): boolean {
-    if (!lastNewEntryAt) return false // 服务器从未抓到新条目，没有可拉取的内容
-    const lastSynced = loadSyncedFeeds()[feedId]
-    if (!lastSynced) return true
-    return lastNewEntryAt > lastSynced
+  /**
+   * 取远端订阅列表（含 feeds.lastNewEntryAt，增量同步的判断依据）。
+   * 失败（离线 / 未登录 / 接口不可达）返回 null，由调用方决定降级策略。
+   */
+  async function fetchRemoteSubs(): Promise<FeedSubscriptionItem[] | null> {
+    try {
+      return await api.feeds.subscriptions()
+    } catch {
+      return null
+    }
   }
 
   async function syncFeedsIfChanged(feeds: Array<{ feedId: string, lastNewEntryAt?: string }>) {
     // 等待迁移清理完成：首次迁移时旧增量记录会导致误跳过，需清空后全量同步一次
     await ensureCleanup()
 
+    // 水位表只读一次：订阅源可达数百个，逐个读 localStorage + JSON.parse 是白开销
+    const synced = loadSyncedFeeds()
     const needSync: string[] = []
 
     for (const f of feeds) {
       // 脏订阅文档（feedId 为空/缺失）无法定位远端库，跳过
       if (!isValidDbId(f.feedId)) continue
-      if (!needsSync(f.feedId, f.lastNewEntryAt)) continue
+      if (!needsSync(f.feedId, f.lastNewEntryAt, synced)) continue
       needSync.push(f.feedId)
     }
 
@@ -465,14 +472,27 @@ export function usePouchDb() {
   }
 
   /**
-   * 手动触发一次性同步：同步所有订阅源（或指定源）到集中库。
+   * 手动触发一次性同步：拉取「上次同步后有过新内容」的订阅源到集中库。
    *
-   * 不传 feedIds 时同步所有已激活的 feed 与用户状态库；返回成功/失败清单供 UI 提示。
-   * 订阅源本身无 live 长轮询，无需暂停；仅需临时暂停用户状态库的 live 同步
-   * （避免与一次性复制抢连接），复制完成后恢复实时同步。
+   * 触达范围：不传 feedIds 时作用于当前全部订阅 + 用户状态库；传入时仅作用于指定源。
+   * 与自动同步（syncFeedsIfChanged）共用同一套增量判断 —— 远端 feeds.lastNewEntryAt
+   * 对比本地记录的同步水位（localStorage），没有变化的源连复制请求都不发，因此订阅源
+   * 成百上千时点一下按钮也不会打满请求。判断依据取不到（离线 / 接口失败）时降级为
+   * 不过滤，复制仍由 PouchDB checkpoint 兜底增量（等同于改动前的行为）。
+   *
+   * 复制本身也走 checkpoint 增量；只有 opts.full 才强制 since: 0 全量，用于本地缓存被
+   * 清空后的重建（resetLocalData 已清掉水位线与 checkpoint 的场景），日常点击不要用。
+   *
+   * 用户状态库没有 lastNewEntryAt 概念，在目标集合里就参与同步；一次性复制前要临时
+   * 暂停它的 live 双向同步（避免两条链路抢连接），复制完成后恢复实时同步。
    * 复制统一走并发受限队列（见 enqueueReplicate），订阅源很多时不会挤爆连接。
+   *
+   * 返回值 skipped 是被增量过滤跳过的目标数，供 UI 提示「无更新」，避免点了按钮像没反应。
    */
-  async function syncNow(feedIds?: string[]): Promise<{ ok: string[], failed: { id: string, error: string }[] }> {
+  async function syncNow(
+    feedIds?: string[],
+    opts: { full?: boolean } = {}
+  ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number }> {
     // 目标集合：显式传入的 feed，或当前已订阅的全部源 + 用户状态库。
     // 订阅列表从 user-state 库读取（syncStatuses 是会话状态，刷新后为空，不能作为依据）
     let targets: string[]
@@ -483,7 +503,19 @@ export function usePouchDb() {
       targets = [...new Set([...subs.map(s => s.id), USER_STATE_ID])].filter(isValidDbId)
     }
 
-    // ① 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用。
+    // ① 增量过滤：挑出真正有变化的源。full 模式跳过 —— 本地库要重建，所有源都得重拉
+    const candidateCount = targets.length
+    if (!opts.full) {
+      const remoteSubs = await fetchRemoteSubs()
+      targets = pickFeedsNeedingSync(targets, remoteSubs, loadSyncedFeeds(), USER_STATE_ID)
+    }
+
+    // 全部跳过：不暂停 live 同步、不发任何复制请求（按钮瞬时完成）
+    if (targets.length === 0) {
+      return { ok: [], failed: [], skipped: candidateCount }
+    }
+
+    // ② 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用。
     // 先等 live 同步启动完成：它要先取库名（异步），否则 handle 还没挂上，暂停会落空
     await pouchState.userStateSyncPromise
     const pausedUserState = syncHandles.has(USER_STATE_ID)
@@ -492,9 +524,8 @@ export function usePouchDb() {
       syncHandles.delete(USER_STATE_ID)
     }
 
-    // ② 入队执行一次性复制（队列内部限制并发，等待全部完成）。
-    // 手动同步强制全量（since: 0）：库重建后 checkpoint 残留旧 seq 会误判无变更
-    const results = await Promise.all(targets.map(id => enqueueReplicate(id, true)))
+    // ③ 入队执行一次性复制（队列内部限制并发，等待全部完成）
+    const results = await Promise.all(targets.map(id => enqueueReplicate(id, opts.full === true)))
     const ok: string[] = []
     const failed: { id: string, error: string }[] = []
     targets.forEach((id, i) => {
@@ -506,12 +537,12 @@ export function usePouchDb() {
       }
     })
 
-    // ③ 恢复用户状态库的 live 同步，保持已读/收藏的实时双向同步
+    // ④ 恢复用户状态库的 live 同步，保持已读/收藏的实时双向同步
     if (pausedUserState) {
       void startUserStateLiveSync()
     }
 
-    return { ok, failed }
+    return { ok, failed, skipped: candidateCount - targets.length }
   }
 
   // ── 集中库查询（Mango 索引，一次查询） ──

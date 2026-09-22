@@ -43,7 +43,7 @@ onMounted(() => {
 })
 
 // 用户状态库（订阅列表）同步版本递增时重新加载侧边栏。
-// syncNow 会先暂停用户状态库的 live 同步、全量复制后恢复，期间拉取的远端订阅
+// syncNow 会先暂停用户状态库的 live 同步、一次性复制后恢复，期间拉取的远端订阅
 // 变化（新增/改名/分类）不会实时推给侧边栏，这里在同步完成后重新读取订阅列表。
 // 防抖：恢复 live 同步会再次触发版本变化，合并为一次刷新。
 let feedsTimer: ReturnType<typeof setTimeout> | null = null
