@@ -13,8 +13,8 @@
  *
  * 前置：后端 :3001、前端 :3000 均已在跑；admin 账号可登录。
  * 用法：node packages/nuxt-client/scripts/verify-lightbox.mjs
- *       环境变量无需手动传，脚本会自己把浏览器目录与缺失的系统库接好（见下方「运行环境自举」）。
- *       想覆盖时仍可用 PLAYWRIGHT_BROWSERS_PATH / LD_LIBRARY_PATH / BASE_URL / OUT_DIR。
+ *       环境变量无需手动传：脚本会自动接好浏览器目录、缺的系统库与中文字体（见「运行环境自举」）。
+ *       想覆盖时仍可用 PLAYWRIGHT_BROWSERS_PATH / LD_LIBRARY_PATH / FONTCONFIG_FILE / BASE_URL / OUT_DIR。
  */
 
 import fs from 'node:fs'
@@ -33,6 +33,45 @@ const REPO_ROOT = path.resolve(SCRIPT_DIR, '../../..')
 const LOCAL_BROWSERS = path.join(REPO_ROOT, 'node_modules/.playwright-browsers')
 /** 缺的系统库：apt-get download + dpkg -x 解包到这里，靠 LD_LIBRARY_PATH 生效 */
 const LOCAL_LIBS = path.join(REPO_ROOT, 'node_modules/.pw-syslibs/usr/lib/x86_64-linux-gnu')
+/** 缺的中文字体：同样解包到这里，靠 FONTCONFIG_FILE 让 Chromium 找到 */
+const LOCAL_FONTS = path.join(REPO_ROOT, 'node_modules/.pw-fonts')
+const LOCAL_FONTS_DIR = path.join(LOCAL_FONTS, 'usr/share/fonts')
+
+/**
+ * 生成 fontconfig 配置（幂等）。
+ *
+ * 系统里一个中文字体都没有，不挂这个的话截图里中文全是方框。
+ * 用 include 保住系统原有配置，再把自己的字体目录加进去，并显式让 zh 优先
+ * 落到 Noto Sans CJK SC —— 只有 <dir> 不够：sans-serif 的 alias 在系统配置里
+ * 指向的都是没装的字体，fc-match 会退到 DejaVu（它没有中文字形）。
+ * cachedir 必须给可写位置，容器里 HOME 下的缓存目录写不了。
+ */
+function ensureFontsConf() {
+  if (!fs.existsSync(LOCAL_FONTS_DIR)) return null
+  const confPath = path.join(LOCAL_FONTS, 'fonts.conf')
+  const cacheDir = path.join(LOCAL_FONTS, 'cache')
+  const content = `<?xml version="1.0"?>
+<!DOCTYPE fontconfig SYSTEM "fonts.dtd">
+<fontconfig>
+  <include ignore_missing="yes">/etc/fonts/fonts.conf</include>
+  <dir>${LOCAL_FONTS_DIR}</dir>
+  <cachedir>${cacheDir}</cachedir>
+  <match target="pattern">
+    <test name="lang" compare="contains"><string>zh</string></test>
+    <edit name="family" mode="prepend" binding="strong"><string>Noto Sans CJK SC</string></edit>
+  </match>
+</fontconfig>
+`
+  try {
+    if (fs.readFileSync(confPath, 'utf8') !== content) {
+      fs.mkdirSync(cacheDir, { recursive: true })
+      fs.writeFileSync(confPath, content)
+    }
+  } catch {
+    return null
+  }
+  return confPath
+}
 
 /** 本地备用目录里真有 chromium 才算数（目录可能只残留别的东西） */
 function hasLocalChromium() {
@@ -65,6 +104,14 @@ if (
 // 缺的系统库只在 sysroot 存在时追加，不覆盖你已有的 LD_LIBRARY_PATH
 if (fs.existsSync(LOCAL_LIBS)) {
   process.env.LD_LIBRARY_PATH = [LOCAL_LIBS, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':')
+}
+// 中文字体：没有它截图里全是方框
+// 注意不要顺手改 XDG_CACHE_HOME —— playwright 会用它推导浏览器缓存目录，
+// 一改就跑去找 $XDG_CACHE_HOME/ms-playwright，直接报「浏览器没装」。
+// fontconfig 的缓存目录在 fonts.conf 里单独指定了。
+const fontsConf = ensureFontsConf()
+if (fontsConf && !process.env.FONTCONFIG_FILE) {
+  process.env.FONTCONFIG_FILE = fontsConf
 }
 
 // 必须在环境接好之后再加载 playwright：它在加载时就会确定浏览器查找目录
@@ -549,6 +596,10 @@ try {
   console.error('报缺 .so（libnspr4 / libnss3 / libasound2）又没有 root：')
   console.error('  cd node_modules && mkdir -p .pw-syslibs/debs')
   console.error('  cd .pw-syslibs/debs && apt-get download libnspr4 libnss3 libasound2t64')
+  console.error('  cd .. && for d in debs/*.deb; do dpkg -x "$d" .; done')
+  console.error('中文显示成方框的话（缺 CJK 字体，同样不需要 root）：')
+  console.error('  cd node_modules && mkdir -p .pw-fonts/debs')
+  console.error('  cd .pw-fonts/debs && apt-get download fonts-noto-cjk')
   console.error('  cd .. && for d in debs/*.deb; do dpkg -x "$d" .; done')
   process.exit(1)
 }
