@@ -23,13 +23,25 @@ import os from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 // ── 运行环境自举 ───────────────────────────────────────────────
-// 本机是容器：没有系统 Chromium，且缺 libnspr4 / libnss3 / libasound2，
-// 而 NoNewPrivs=1 + 非 root 意味着装不了系统包。所以浏览器和这几个库都放在
-// 项目里，这里自动接好，调用方直接 node 跑就行，不必每次拼一长串环境变量。
+// 本机是容器：系统没有 Chromium，且缺 libnspr4 / libnss3 / libasound2，
+// 而 NoNewPrivs=1 + 非 root 意味着装不了系统包。浏览器正常走 playwright 的默认
+// 缓存（pnpm exec playwright install chromium），缺的这几个库则解包到项目里，
+// 这里自动挂上，调用方直接 node 跑就行，不必每次拼一长串环境变量。
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '../../..')
+/** 备用：项目内也放一份浏览器时用它（正常情况下用默认缓存即可） */
 const LOCAL_BROWSERS = path.join(REPO_ROOT, 'node_modules/.playwright-browsers')
-const LOCAL_LIBS = path.join(LOCAL_BROWSERS, 'sysroot/usr/lib/x86_64-linux-gnu')
+/** 缺的系统库：apt-get download + dpkg -x 解包到这里，靠 LD_LIBRARY_PATH 生效 */
+const LOCAL_LIBS = path.join(REPO_ROOT, 'node_modules/.pw-syslibs/usr/lib/x86_64-linux-gnu')
+
+/** 本地备用目录里真有 chromium 才算数（目录可能只残留别的东西） */
+function hasLocalChromium() {
+  try {
+    return fs.readdirSync(LOCAL_BROWSERS).some(name => name.startsWith('chromium'))
+  } catch {
+    return false
+  }
+}
 
 /** playwright 自带浏览器在各平台的默认缓存目录 */
 function defaultBrowserCache() {
@@ -42,11 +54,11 @@ function defaultBrowserCache() {
   return path.join(os.homedir(), '.cache/ms-playwright')
 }
 
-// 浏览器目录优先级：显式指定 > 你自己 playwright install 装的默认缓存 > 项目内这份
+// 浏览器目录优先级：显式指定 > 默认缓存（playwright install 装的）> 项目内备用
 if (
   !process.env.PLAYWRIGHT_BROWSERS_PATH
   && !fs.existsSync(defaultBrowserCache())
-  && fs.existsSync(LOCAL_BROWSERS)
+  && hasLocalChromium()
 ) {
   process.env.PLAYWRIGHT_BROWSERS_PATH = LOCAL_BROWSERS
 }
@@ -140,7 +152,7 @@ async function openEntryWithImage(page, maxTries = 12) {
 
     // 弹窗出现
     const appeared = await page
-      .waitForSelector('.entry-content', { timeout: 10_000 })
+      .waitForSelector('.swiper-slide-active .entry-content, .entry-content', { timeout: 10_000 })
       .then(() => true)
       .catch(() => false)
     if (!appeared) {
@@ -151,12 +163,18 @@ async function openEntryWithImage(page, maxTries = 12) {
 
     await page.waitForTimeout(400)
     // 快路径：正文里压根没图就别等 attach 超时了
-    const imgCount = await page.evaluate(() => document.querySelectorAll('.entry-content img').length)
+    const imgCount = await page.evaluate(() => {
+      const scope = document.querySelector('.swiper-slide-active') || document
+      return scope.querySelectorAll('.entry-content img').length
+    })
     if (imgCount > 0) {
       const attached = await page
         .waitForFunction(
-          () => Array.from(document.querySelectorAll('.entry-content img'))
-            .some(img => img.style.cursor === 'zoom-in'),
+          () => {
+            const scope = document.querySelector('.swiper-slide-active') || document
+            return Array.from(scope.querySelectorAll('.entry-content img'))
+              .some(img => img.style.cursor === 'zoom-in')
+          },
           null,
           { timeout: 10_000 }
         )
@@ -173,47 +191,83 @@ async function openEntryWithImage(page, maxTries = 12) {
 }
 
 /**
- * 取当前弹窗里第一张「已 attach 且在视口内」的图，返回它的 src 与位置。
- * 优先选本地 blob：附件已缓存，图片必定加载成功，滚轮缩放才走得通。
+ * 列出当前弹窗里所有「已 attach 且在视口内」的图，附 src 与点击坐标。
+ * 返回数组而不是单张，调用方才能「换一张再点」来验证 index 传得对不对。
  */
-async function pickZoomable(page) {
-  const info = await page.evaluate(() => {
+async function listZoomable(page) {
+  return page.evaluate(() => {
     const inViewport = (el) => {
       const r = el.getBoundingClientRect()
       return r.width > 0 && r.height > 0 && r.bottom > 0 && r.top < window.innerHeight
     }
-    const all = Array.from(document.querySelectorAll('.entry-content img'))
-      .filter(img => img.style.cursor === 'zoom-in' && inViewport(img))
-    if (!all.length) return null
-    const srcOf = img => img.currentSrc || img.src
-    const img = all.find(i => srcOf(i).startsWith('blob:')) || all[0]
-    const rect = img.getBoundingClientRect()
-    return {
-      count: all.length,
-      src: srcOf(img),
-      isBlob: srcOf(img).startsWith('blob:'),
-      alt: img.getAttribute('alt') || '',
-      x: rect.left + rect.width / 2,
-      y: rect.top + Math.min(rect.height / 2, window.innerHeight / 2)
+    // Swiper 三槽模式会同时渲染相邻条目，必须只看活动 slide，否则会选到
+    // 上一篇/下一篇的图片——点它等于点到视口外，会把条目弹窗一起关掉
+    const scope = document.querySelector('.swiper-slide-active') || document
+    const out = []
+    for (const img of scope.querySelectorAll('.entry-content img')) {
+      if (img.style.cursor !== 'zoom-in' || !inViewport(img)) continue
+      const srcAttr = img.getAttribute('src') || ''
+      const currentSrc = img.currentSrc || ''
+      // 打标记后用 locator 点击：自己算坐标在「图片只有一部分在视口内」时会点偏，
+      // 让 Playwright 负责滚动与取中心点
+      img.setAttribute('data-verify-cand', String(out.length))
+      out.push({
+        idx: out.length,
+        src: currentSrc || srcAttr,
+        srcAttr,
+        currentSrc,
+        isBlob: srcAttr.startsWith('blob:'),
+        alt: img.getAttribute('alt') || ''
+      })
     }
+    return out
   })
-  return info
 }
+
+/** 挑一张来点：优先 blob（附件已缓存、必定加载成功，滚轮缩放才走得通），否则第一张 */
+function chooseZoomable(candidates) {
+  if (!candidates.length) return null
+  return candidates.find(c => c.isBlob) || candidates[0]
+}
+
+/**
+ * 展示的地址是否属于这张图。
+ *
+ * 同一张图会有两个地址：原始的远程 URL（src 属性被替换前的值，可能还留在
+ * currentSrc 里）和替换后的 blob。正文的 img.src 一设置，浏览器要过一会儿才
+ * 更新 currentSrc，attach 与断言读到的时刻不同就会各读到一个，所以按「集合」
+ * 判定，而不是要求字符串相等。
+ */
+function matchesCandidate(shownSrc, cand) {
+  if (!shownSrc) return false
+  return [cand.src, cand.srcAttr, cand.currentSrc].filter(Boolean).includes(shownSrc)
+}
+
+const short = s => (s || '').slice(0, 46)
 
 /** 读取 lightbox wrapper 上的 scale（组件把 transform: translate(-50%,-50%) scale(x) 写在这里） */
 async function readScale(page) {
   return page.evaluate(() => {
-    const el = document.querySelector('.vel-img-wrapper')
+    // 多图时每个 slide 各有一个 wrapper，必须取活动的那一个
+    const el = document.querySelector('.swiper-slide-active .vel-img-wrapper')
+      || document.querySelector('.vel-img-wrapper')
     if (!el) return null
     const m = /scale\(([\d.]+)\)/.exec(el.style.transform || '')
     return m ? Number(m[1]) : null
   })
 }
 
-/** lightbox 当前图的 src 是否已加载成功（loadError 时组件直接忽略滚轮） */
+/**
+ * lightbox 当前展示的那张图。
+ *
+ * 多图时组件用 swiper 渲染，DOM 里同时存在相邻预加载的 .vel-img，
+ * 直接 querySelector('.vel-img') 会读到相邻那张、得出「点 A 显示 B」的假象，
+ * 所以必须认活动 slide。
+ */
 async function currentImageState(page) {
   return page.evaluate(() => {
-    const img = document.querySelector('.vel-img-wrapper img, .vel-img')
+    const img = document.querySelector('.swiper-slide-active .vel-img')
+      || document.querySelector('.vel-img')
     if (!img) return { found: false }
     return {
       found: true,
@@ -227,7 +281,8 @@ async function currentImageState(page) {
 /** 条目弹窗是否还开着（正文仍在且可见） */
 async function entryModalOpen(page) {
   return page.evaluate(() => {
-    const el = document.querySelector('.entry-content')
+    const scope = document.querySelector('.swiper-slide-active') || document
+    const el = scope.querySelector('.entry-content')
     if (!el) return false
     const r = el.getBoundingClientRect()
     return r.width > 0 && r.height > 0
@@ -279,7 +334,8 @@ async function runTheme(browser, theme) {
     `第 ${opened.attempts} 篇，卡片 #${opened.index}，正文图 ${opened.imgCount} 张`
   )
 
-  const pick = await pickZoomable(page)
+  const candidates = await listZoomable(page)
+  const pick = chooseZoomable(candidates)
   if (!pick) {
     check(`[${theme}] 定位可放大图片`, false)
     await context.close()
@@ -293,7 +349,7 @@ async function runTheme(browser, theme) {
   await page.screenshot({ path: path.join(OUT_DIR, `${theme}-1-entry-modal.png`) })
 
   // ── 1. 点击放大 ──────────────────────────────────────────────
-  await page.mouse.click(pick.x, pick.y)
+  await page.locator(`[data-verify-cand="${pick.idx}"]`).click()
   let openedLightbox = true
   await page.waitForSelector('.vel-modal', { state: 'visible', timeout: 8_000 }).catch(() => {
     openedLightbox = false
@@ -309,8 +365,8 @@ async function runTheme(browser, theme) {
   const state = await collectStyle(page)
   check(
     `[${theme}] lightbox 展示的正是被点的那张图`,
-    shown.found && shown.src === pick.src,
-    `shown=${(shown.src || '').slice(0, 50)} vs picked=${pick.src.slice(0, 50)}`
+    shown.found && matchesCandidate(shown.src, pick),
+    `展示=${short(shown.src)} | 被点那张 src=${short(pick.srcAttr)} currentSrc=${short(pick.currentSrc)}`
   )
   check(
     `[${theme}] 遮罩收回了 pointer-events（父级 UModal 会把 body 设为 none）`,
@@ -328,13 +384,43 @@ async function runTheme(browser, theme) {
   )
   await page.screenshot({ path: path.join(OUT_DIR, `${theme}-2-lightbox-open.png`) })
 
+  // ── 1b. index 传递：换一张图点，lightbox 必须跟着换 ──────────────
+  // 只点一张时，即使 index 根本没生效、永远打开第 0 张，看起来也一样「正确」。
+  // 必须点一张不是当前那张的图才能证伪。
+  const other = candidates.find(c => c.src !== pick.src)
+  if (other) {
+    await page.keyboard.press('Escape')
+    // 必须等遮罩彻底消失：淡出中的遮罩会吞掉点击，此时它已卸掉
+    // data-dismissable-layer，UModal 会把这次点击当成外部点击把弹窗关掉
+    await page.waitForSelector('.vel-modal', { state: 'detached', timeout: 6_000 }).catch(() => {})
+    await page.waitForTimeout(300)
+    await page.locator(`[data-verify-cand="${other.idx}"]`).click()
+    const reopened = await page.waitForSelector('.vel-modal', { state: 'visible', timeout: 8_000 })
+      .then(() => true)
+      .catch(() => false)
+    await page.waitForTimeout(900)
+    const shownOther = reopened ? await currentImageState(page) : { found: false, src: '' }
+    check(
+      `[${theme}] 换一张图点，lightbox 跟着换（index 传对了）`,
+      matchesCandidate(shownOther.src, other) && !matchesCandidate(shownOther.src, pick),
+      `点了=${short(other.srcAttr)} 显示=${short(shownOther.src)}`
+    )
+  } else {
+    console.log(`[!]  [${theme}] 视口内只有一张图，跳过 index 传递检查`)
+  }
+
   // ── 2. 滚轮缩放 ──────────────────────────────────────────────
   const scaleBefore = await readScale(page)
   const imgReady = shown.naturalWidth > 0
   check(`[${theme}] lightbox 图片加载成功（缩放可用的前提）`, imgReady, `naturalWidth=${shown.naturalWidth}`)
 
   if (imgReady) {
-    await page.mouse.move(pick.x, pick.y)
+    // 滚轮事件绑在遮罩上，hover 到遮罩中心即可（不用图片坐标，图片可能被裁切）
+    const modalBox = await page.locator('.vel-modal').boundingBox()
+    await page.mouse.move(
+      (modalBox?.x ?? 0) + (modalBox?.width ?? 1440) / 2,
+      (modalBox?.y ?? 0) + (modalBox?.height ?? 900) / 2
+    )
     for (let i = 0; i < 3; i++) {
       await page.mouse.wheel(0, -240)
       await page.waitForTimeout(200) // 组件内部有 80ms 滚轮节流
@@ -363,22 +449,27 @@ async function runTheme(browser, theme) {
   }
 
   // ── 2b. 多图切换（替换 medium-zoom 的主要收益）────────────────
-  const nextBtn = page.locator('.vel-btns-wrapper .btn__next')
-  if (await nextBtn.count() > 0) {
-    const beforeSwitch = await currentImageState(page)
-    await nextBtn.first().click({ force: true }).catch(() => {})
+  // 不假设此刻停在第几张（前面的检查可能已经翻过页）：上一张/下一张哪个能换成
+  // 另一张就算过，两端都换不动才说明确实只有一张图。
+  const beforeSwitch = await currentImageState(page)
+  let switchedTo = ''
+  for (const sel of ['.btn__next', '.btn__prev']) {
+    const btn = page.locator(`.vel-btns-wrapper ${sel}`)
+    if (await btn.count() === 0) continue
+    await btn.first().click({ force: true }).catch(() => {})
     await page.waitForTimeout(900)
     const afterSwitch = await currentImageState(page)
-    check(
-      `[${theme}] 多图可翻到下一张`,
-      !!beforeSwitch.src && !!afterSwitch.src && beforeSwitch.src !== afterSwitch.src,
-      `第 1 张 -> ${afterSwitch.src.slice(0, 46)}`
-    )
-    // 翻页后条目弹窗也不能被关掉（同样是 lightbox 内部点击）
+    if (afterSwitch.src && afterSwitch.src !== beforeSwitch.src) {
+      switchedTo = afterSwitch.src
+      break
+    }
+  }
+  if (switchedTo) {
+    check(`[${theme}] 多图能切到另一张`, true, `${short(beforeSwitch.src)} -> ${short(switchedTo)}`)
     check(`[${theme}] 翻页后条目弹窗仍在`, await entryModalOpen(page))
     await page.screenshot({ path: path.join(OUT_DIR, `${theme}-3b-next-image.png`) })
   } else {
-    console.log(`[!]  [${theme}] 该篇只有一张图，跳过翻页检查`)
+    console.log(`[!]  [${theme}] 没有可切换的相邻图（本篇只有一张），跳过翻页检查`)
   }
 
   // ── 3. 嵌套 UModal：点 lightbox 自己的按钮不能关掉条目弹窗 ────────
@@ -404,7 +495,7 @@ async function runTheme(browser, theme) {
   // ── ESC：只关 lightbox ───────────────────────────────────────
   // 先确保 lightbox 处于打开态（上一步可能因点遮罩而关闭）
   if (!lightboxStill) {
-    await page.mouse.click(pick.x, pick.y)
+    await page.locator(`[data-verify-cand="${pick.idx}"]`).click().catch(() => {})
     await page.waitForSelector('.vel-modal', { state: 'visible', timeout: 8_000 }).catch(() => {})
     await page.waitForTimeout(700)
   }
@@ -456,8 +547,8 @@ try {
   console.error(`\n启动 Chromium 失败：${err.message}\n`)
   console.error('浏览器没装：pnpm exec playwright install chromium')
   console.error('报缺 .so（libnspr4 / libnss3 / libasound2）又没有 root：')
-  console.error('  cd node_modules/.playwright-browsers && mkdir -p sysroot/debs sysroot')
-  console.error('  cd sysroot/debs && apt-get download libnspr4 libnss3 libasound2t64')
+  console.error('  cd node_modules && mkdir -p .pw-syslibs/debs')
+  console.error('  cd .pw-syslibs/debs && apt-get download libnspr4 libnss3 libasound2t64')
   console.error('  cd .. && for d in debs/*.deb; do dpkg -x "$d" .; done')
   process.exit(1)
 }
