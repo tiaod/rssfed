@@ -12,16 +12,55 @@
  * 以及 ESC 只关 lightbox、不关条目弹窗。
  *
  * 前置：后端 :3001、前端 :3000 均已在跑；admin 账号可登录。
- * 用法：PLAYWRIGHT_BROWSERS_PATH=<repo>/node_modules/.playwright-browsers \
- *       node packages/nuxt-client/scripts/verify-lightbox.mjs
+ * 用法：node packages/nuxt-client/scripts/verify-lightbox.mjs
+ *       环境变量无需手动传，脚本会自己把浏览器目录与缺失的系统库接好（见下方「运行环境自举」）。
+ *       想覆盖时仍可用 PLAYWRIGHT_BROWSERS_PATH / LD_LIBRARY_PATH / BASE_URL / OUT_DIR。
  */
 
-import { chromium } from 'playwright'
 import fs from 'node:fs'
 import path from 'node:path'
+import os from 'node:os'
+import { fileURLToPath } from 'node:url'
+
+// ── 运行环境自举 ───────────────────────────────────────────────
+// 本机是容器：没有系统 Chromium，且缺 libnspr4 / libnss3 / libasound2，
+// 而 NoNewPrivs=1 + 非 root 意味着装不了系统包。所以浏览器和这几个库都放在
+// 项目里，这里自动接好，调用方直接 node 跑就行，不必每次拼一长串环境变量。
+const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url))
+const REPO_ROOT = path.resolve(SCRIPT_DIR, '../../..')
+const LOCAL_BROWSERS = path.join(REPO_ROOT, 'node_modules/.playwright-browsers')
+const LOCAL_LIBS = path.join(LOCAL_BROWSERS, 'sysroot/usr/lib/x86_64-linux-gnu')
+
+/** playwright 自带浏览器在各平台的默认缓存目录 */
+function defaultBrowserCache() {
+  if (process.platform === 'win32') {
+    return path.join(process.env.LOCALAPPDATA || os.homedir(), 'ms-playwright')
+  }
+  if (process.platform === 'darwin') {
+    return path.join(os.homedir(), 'Library/Caches/ms-playwright')
+  }
+  return path.join(os.homedir(), '.cache/ms-playwright')
+}
+
+// 浏览器目录优先级：显式指定 > 你自己 playwright install 装的默认缓存 > 项目内这份
+if (
+  !process.env.PLAYWRIGHT_BROWSERS_PATH
+  && !fs.existsSync(defaultBrowserCache())
+  && fs.existsSync(LOCAL_BROWSERS)
+) {
+  process.env.PLAYWRIGHT_BROWSERS_PATH = LOCAL_BROWSERS
+}
+// 缺的系统库只在 sysroot 存在时追加，不覆盖你已有的 LD_LIBRARY_PATH
+if (fs.existsSync(LOCAL_LIBS)) {
+  process.env.LD_LIBRARY_PATH = [LOCAL_LIBS, process.env.LD_LIBRARY_PATH].filter(Boolean).join(':')
+}
+
+// 必须在环境接好之后再加载 playwright：它在加载时就会确定浏览器查找目录
+const { chromium } = await import('playwright')
 
 const BASE = process.env.BASE_URL || 'http://localhost:3000'
-const OUT_DIR = process.env.OUT_DIR || path.resolve(process.cwd(), 'report/lightbox')
+// 产物固定落在仓库根的 report/，不管从哪个目录调用（npm script 的 cwd 是子包）
+const OUT_DIR = process.env.OUT_DIR || path.join(REPO_ROOT, 'report/lightbox')
 const CREDS = { email: 'admin@example.com', password: 'Admin123!' }
 const VIEWPORT = { width: 1440, height: 900 }
 
@@ -410,7 +449,18 @@ async function probeColorMode(browser) {
 }
 
 // ── 主流程 ──────────────────────────────────────────────────────
-const browser = await chromium.launch({ headless: true })
+let browser
+try {
+  browser = await chromium.launch({ headless: true })
+} catch (err) {
+  console.error(`\n启动 Chromium 失败：${err.message}\n`)
+  console.error('浏览器没装：pnpm exec playwright install chromium')
+  console.error('报缺 .so（libnspr4 / libnss3 / libasound2）又没有 root：')
+  console.error('  cd node_modules/.playwright-browsers && mkdir -p sysroot/debs sysroot')
+  console.error('  cd sysroot/debs && apt-get download libnspr4 libnss3 libasound2t64')
+  console.error('  cd .. && for d in debs/*.deb; do dpkg -x "$d" .; done')
+  process.exit(1)
+}
 try {
   const colorMode = await probeColorMode(browser)
   console.log(`色彩模式探测：system 直接生效=${colorMode.bySystem}，最终暗色=${colorMode.isDark}`)

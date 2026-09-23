@@ -9,7 +9,8 @@
     "test": "vitest run",
     "postinstall": "nuxt prepare",
     "lint": "eslint .",
-    "typecheck": "nuxt typecheck"
+    "typecheck": "nuxt typecheck",
+    "verify:lightbox": "node scripts/verify-lightbox.mjs"
   },
   "dependencies": {
     "@iconify-json/lucide": "^1.2.111",
