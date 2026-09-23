@@ -7,6 +7,11 @@ const props = defineProps<{
   loadMore?: () => unknown
   /** 是否还有更多条目可分页 */
   hasMore?: () => boolean
+  /**
+   * 署名用「所属订阅源」而不是条目作者（聚合视图用：时间线、分类页 —— 卡片来自多个源，
+   * 先要知道是哪个源发的）。单源页不传这个 prop —— 源已经写在页面标题里，卡片上保留作者名更有信息量。
+   */
+  showFeed?: boolean
 }>()
 
 const { openEntry } = useEntryModal()
@@ -35,6 +40,11 @@ function getExcerpt(entry: RssEntry): string {
     ? text.slice(0, 150) + '…'
     : text
 }
+
+/** 卡片署名用的订阅源名 */
+function feedNameOf(entry: RssEntry): string {
+  return entry.feed?.title || '未知来源'
+}
 </script>
 
 <template>
@@ -54,12 +64,39 @@ function getExcerpt(entry: RssEntry): string {
         header: 'aspect-auto',
         image: 'h-auto min-h-40 max-h-80 object-cover object-top'
       }"
-      :authors="[{
-        name: entry.author || entry.feed?.title || '未知来源',
-        to: entry.feed?.siteUrl
-      }]"
       class="cursor-pointer"
       @click="handleOpen(entry)"
-    />
+    >
+      <!--
+        署名不用 authors 数组：那条路径渲染 UUser，默认头像 32px（比正文还大），
+        且 to 存在时主题带 group-hover/user:scale-115 的放大动画。
+        这里用插槽自己渲染，图标尺寸和动效都可控。
+      -->
+      <template #authors>
+        <ULink
+          v-if="showFeed"
+          :to="entry.feed?.siteUrl"
+          class="group/feed flex min-w-0 items-center gap-1.5"
+        >
+          <!-- 源图标由 enrichEntries 解析（本地缓存的 AVIF blob URL 优先，离线可用）；
+               没有图标时 UAvatar 用 text 显示名字首字母，不占额外空间 -->
+          <UAvatar
+            :src="entry.feed?.image"
+            :alt="feedNameOf(entry)"
+            :text="feedNameOf(entry).trim()[0] ?? 'R'"
+            size="3xs"
+            class="shrink-0"
+          />
+          <span class="truncate text-sm text-muted transition-colors group-hover/feed:text-highlighted">
+            {{ feedNameOf(entry) }}
+          </span>
+        </ULink>
+        <UUser
+          v-else
+          :name="entry.author || feedNameOf(entry)"
+          :to="entry.feed?.siteUrl"
+        />
+      </template>
+    </UBlogPost>
   </UPageColumns>
 </template>

@@ -16,6 +16,11 @@ const entries = ref<RssEntry[]>([])
 const loading = ref(true)
 const feedLoading = ref(true)
 
+// 顶栏标题优先用用户在订阅列表里设置的名字（本地订阅文档，离线可用）；
+// api.feeds.get 返回的是注册表抓来的原始源标题，只作兜底
+const subscriptionTitle = ref('')
+const feedDisplayName = computed(() => subscriptionTitle.value || feed.value?.title || '')
+
 // ── 无限滚动：查询窗口逐步增大，同步刷新时保留当前深度 ──
 const PAGE_SIZE = 50
 const MAX_ENTRIES = 10000 // 与集中库 find 上限一致，达到后不再加载
@@ -39,6 +44,9 @@ async function refreshEntries() {
 }
 
 onMounted(async () => {
+  // 订阅名先从本地订阅文档取（离线可用，也是侧边栏显示的名字），取不到再回退接口标题
+  subscriptionTitle.value = await pouch.getSubscriptionTitle(feedId).catch(() => null) ?? ''
+
   try {
     // 加载订阅源信息
     feed.value = await api.feeds.get(feedId)
@@ -84,7 +92,7 @@ async function unsubscribe() {
 <template>
   <UDashboardPanel>
     <template #header>
-      <UDashboardNavbar :title="feed?.title || '订阅源'">
+      <UDashboardNavbar :title="feedDisplayName || '订阅源'">
         <template #right>
           <SyncButton :feed-ids="[feedId]" />
           <UButton
@@ -183,7 +191,7 @@ async function unsubscribe() {
         <template #body>
           <p class="text-sm">
             确定要取消订阅
-            <span class="font-semibold">{{ feed?.title ?? '该订阅源' }}</span>
+            <span class="font-semibold">{{ feedDisplayName || '该订阅源' }}</span>
             吗？本地已缓存的条目仍可阅读。
           </p>
         </template>

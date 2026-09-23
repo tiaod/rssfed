@@ -107,6 +107,7 @@ beforeEach(() => {
 
 const STUBS = {
   UModal: {
+    name: 'UModal',
     template: '<div class="umodal"><slot name="body" /><slot name="footer" /></div>',
     props: ['open', 'fullscreen', 'scrollable', 'ui', 'title']
   },
@@ -123,6 +124,26 @@ const STUBS = {
 }
 
 describe('EntryDetailModal', () => {
+  it('顶栏标题显示订阅源名字，而不是文章标题', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(1)
+
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'UModal' }).props('title')).toBe('源')
+  })
+
+  it('源名缺失（FeedDoc 未同步）→ 顶栏回退到文章标题，不出现空白', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = { ...makeEntry(1), feed: { ...makeEntry(1).feed, title: '' } }
+
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    expect(wrapper.findComponent({ name: 'UModal' }).props('title')).toBe('标题 1')
+  })
+
   it('全屏（手机/设置选全屏）→ 改用 Swiper 渲染三槽，并显示当前位置页码', async () => {
     g.isOpen.value = true
     g.currentEntry.value = makeEntry(2)

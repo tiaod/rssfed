@@ -409,6 +409,13 @@ const modalUi = computed(() => {
   return { content: 'min-h-dvh flex flex-col', body: 'flex-1 p-0 sm:p-0', ...TRUNCATE_UI }
 })
 
+/**
+ * 弹窗顶栏标题显示「订阅源名字」而非文章标题（文章标题已在正文区内展示）。
+ * feed.title 已由 enrichEntries 换成用户在订阅列表里设置的名字（与侧边栏一致），
+ * 仅当该源在本地完全没有数据时 title 为空，此时回退到文章标题，避免顶栏空白。
+ */
+const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntry.value?.title)
+
 /** 槽内展示用条目：全文取到后换全文，否则先用列表投影的标题/元信息顶着 */
 function displayOf(raw: RssEntry | null): RssEntry | null {
   if (!raw) return null
@@ -423,7 +430,7 @@ function isLoading(raw: RssEntry | null): boolean {
 <template>
   <UModal
     v-model:open="isOpen"
-    :title="currentEntry?.title"
+    :title="modalTitle"
     :fullscreen="isFullscreen"
     :scrollable="isScrollable"
     :ui="modalUi"

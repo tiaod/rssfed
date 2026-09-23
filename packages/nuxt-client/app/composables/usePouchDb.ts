@@ -580,9 +580,46 @@ export function usePouchDb() {
   const entryCoverBlobs = new Map<string, string>()
 
   /**
+   * 读取用户在订阅列表里自定义的源名（用户状态库 `subscription:{feedId}` 文档的 title）。
+   * 侧边栏展示的正是这个名字，条目上的源名必须与之一致；没订阅过或没改过名时没有对应项，
+   * 调用方回退注册表抓来的标题。按 keys 精确取，只读当前页涉及的源。
+   */
+  async function loadSubscriptionTitles(feedIds: string[]): Promise<Map<string, string>> {
+    const titles = new Map<string, string>()
+    if (feedIds.length === 0) return titles
+    try {
+      const res = await getUserStateDb().allDocs({
+        include_docs: true,
+        keys: feedIds.map(id => `subscription:${id}`)
+      })
+      for (const row of res.rows as Array<{ doc?: StateDoc }>) {
+        const doc = row.doc
+        if (doc?.type === 'subscription' && doc.feedId && doc.title) {
+          titles.set(doc.feedId, doc.title)
+        }
+      }
+    } catch {
+      // 状态库尚未就绪/读取失败：不阻塞条目渲染，源名回退注册表标题
+    }
+    return titles
+  }
+
+  /**
+   * 取某个源在用户订阅列表里的自定义名字（离线可用）。
+   * 单源页/dashboard 顶栏优先显示它，注册表抓来的原始标题只作兜底；
+   * 没订阅过或没改过名时返回 null。
+   */
+  async function getSubscriptionTitle(feedId: string): Promise<string | null> {
+    const titles = await loadSubscriptionTitles([feedId])
+    return titles.get(feedId) ?? null
+  }
+
+  /**
    * 补全条目的 feed 元信息（源名/站点/图标）与封面图 blob。
    * FeedDoc 随库同步到集中库（replicate 无 filter），一次 allDocs 读取全部所需文档；
    * 图标优先本地缓存的 AVIF 附件（blob URL），离线可用；无缓存回退原始 URL。
+   * 源名以用户自定义的订阅名（见 loadSubscriptionTitles）优先，注册表标题仅作兜底，
+   * 保证与侧边栏显示的名字一致（自定义名可覆盖抓取到的原始标题）。
    */
   async function enrichEntries(entries: RssEntry[]): Promise<RssEntry[]> {
     if (entries.length === 0) return entries
@@ -597,6 +634,8 @@ export function usePouchDb() {
       return entries
     }
     const byId = new Map(docs.map(d => [d._id, d]))
+    // 用户自定义订阅名：优先于注册表抓来的标题（与侧边栏一致）
+    const subscriptionTitles = await loadSubscriptionTitles(feedIds)
     for (const entry of entries) {
       // 封面图：images 中 cover 标记的附件 → 本地 blob
       const cover = entry.images?.find(i => i.cover)
@@ -617,14 +656,20 @@ export function usePouchDb() {
         }
       }
       const doc = byId.get(entry.feedId)
-      if (!doc) continue
-      entry.feed = {
-        id: doc._id,
-        title: doc.title ?? '',
-        siteUrl: doc.siteUrl ?? '',
-        feedUrl: doc.url ?? '',
-        image: (await resolveFeedImage(doc)) ?? undefined,
-        lastFetchedAt: doc.lastFetchedAt ?? ''
+      if (doc) {
+        entry.feed = {
+          id: doc._id,
+          title: doc.title ?? '',
+          siteUrl: doc.siteUrl ?? '',
+          feedUrl: doc.url ?? '',
+          image: (await resolveFeedImage(doc)) ?? undefined,
+          lastFetchedAt: doc.lastFetchedAt ?? ''
+        }
+      }
+      // 自定义名覆盖注册表标题；bot 订阅没有 FeedDoc，也能靠这里拿到侧边栏里的名字
+      const customTitle = subscriptionTitles.get(entry.feedId)
+      if (customTitle) {
+        entry.feed = { ...entry.feed, id: entry.feedId, title: customTitle }
       }
     }
     return entries
@@ -1064,6 +1109,7 @@ export function usePouchDb() {
     toggleSaved,
     syncStatuses: syncStatuses as Readonly<Record<string, SyncStatus>>,
     listSubscriptions,
+    getSubscriptionTitle,
     addSubscription,
     addBotSubscription,
     removeSubscription,

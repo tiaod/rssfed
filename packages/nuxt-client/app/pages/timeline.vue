@@ -163,6 +163,7 @@ watch(
           :entries="entries"
           :load-more="loadMore"
           :has-more="hasMoreGetter"
+          show-feed
         />
 
         <!-- 无限滚动：哨兵进入视口触发加载下一批 -->
