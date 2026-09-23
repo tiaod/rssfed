@@ -110,6 +110,36 @@ interface PouchDbState {
   userWatchReady: boolean
 }
 
+/** 构造共享状态（usePouchDb 与 usePouchSyncStatus 共用同一份结构） */
+function createPouchState(): PouchDbState {
+  return {
+    entriesDb: null,
+    userStateDb: null,
+    entriesIndexed: false,
+    syncHandles: new Map<string, PouchDB.Replication.Sync<Record<string, unknown>>>(),
+    syncStatuses: reactive<Record<string, SyncStatus>>({}),
+    replicateWaiting: [],
+    activeReplicates: 0,
+    userStateSyncPromise: null,
+    dbUserId: null,
+    userWatchReady: false
+  }
+}
+
+/**
+ * 只订阅同步状态，不构造整套 PouchDB 操作闭包。
+ *
+ * 给侧边栏图标这类「实例多、只需要知道某个源同步完没有」的小组件用：
+ *   1. 几百个菜单项若各自调 usePouchDb()，会各构造一份闭包（含库管理、复制队列等）；
+ *   2. 若改由侧边栏组件读取 syncStatuses 再透传下去，侧边栏的渲染就依赖了它，
+ *      任何源同步完成都会让整棵导航菜单重新 patch —— 依赖留在小组件内部才不会外溢。
+ */
+export function usePouchSyncStatus(): Readonly<Record<string, SyncStatus>> {
+  const nuxtApp = useNuxtApp() as NuxtAppWithPouchState
+  nuxtApp.$pouchDbState ??= createPouchState()
+  return nuxtApp.$pouchDbState.syncStatuses
+}
+
 /**
  * 管理 PouchDB 集中库同步，提供跨源条目查询能力。
  *
@@ -130,20 +160,7 @@ export function usePouchDb() {
 
   // 通过 nuxtApp 单例化共享状态，避免每次组件挂载都创建新实例
   const nuxtApp = useNuxtApp() as NuxtAppWithPouchState
-  if (!nuxtApp.$pouchDbState) {
-    nuxtApp.$pouchDbState = {
-      entriesDb: null,
-      userStateDb: null,
-      entriesIndexed: false,
-      syncHandles: new Map<string, PouchDB.Replication.Sync<Record<string, unknown>>>(),
-      syncStatuses: reactive<Record<string, SyncStatus>>({}),
-      replicateWaiting: [],
-      activeReplicates: 0,
-      userStateSyncPromise: null,
-      dbUserId: null,
-      userWatchReady: false
-    }
-  }
+  nuxtApp.$pouchDbState ??= createPouchState()
   const { syncHandles, syncStatuses } = nuxtApp.$pouchDbState
   // 队列与集中库字段需通过对象引用读写（解构 number 会丢失状态）
   const pouchState = nuxtApp.$pouchDbState
@@ -275,9 +292,18 @@ export function usePouchDb() {
     }
   }
 
-  /** 复制并发上限：浏览器对同一主机的并发连接有限（约 6），订阅源很多时
-   * （OPML 批量导入可达数百个）并发复制会挤爆连接与 IndexedDB 事务导致卡死。 */
-  const MAX_CONCURRENT_REPLICATE = 3
+  /**
+   * 复制并发上限。
+   *
+   * 浏览器对同一主机的并发连接有限（约 6），订阅源很多时（OPML 批量导入可达数百个）
+   * 并发复制会挤爆连接与 IndexedDB 事务。
+   *
+   * 从 3 降到 2 的依据：在 626 个订阅源的真实数据上采 CPU profile，主线程可归因的
+   * 成本里最大一块是同步落库（IndexedDB 的 put/get/transaction/blob ≈ 300ms）。
+   * 并发越高这段阻塞的峰值越尖；降并发会把总同步时长略微拉长，但主线程峰值更平缓
+   * ——卡顿观感取决于峰值而非总量。
+   */
+  const MAX_CONCURRENT_REPLICATE = 2
 
   /** 消费复制队列：空闲时从等待队列取出任务执行 */
   function pumpReplicateQueue() {

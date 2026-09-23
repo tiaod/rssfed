@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
 import type { SubscriptionItem } from '~/types/rss'
+import type { FeedNavigationMenuItem } from '~/composables/useFeedNavigation'
+import { subscriptionsEqual } from '~/utils/subscriptionsEqual'
+// 显式导入而不是依赖自动导入：项目内 profile.vue / SubscriptionManager.vue 也是这么用的，
+// 组件清单扫描不到时不会静默退化成「Failed to resolve component」
+import FeedIcon from '~/components/FeedIcon.vue'
 
 defineProps<{
   collapsed?: boolean
@@ -18,24 +23,32 @@ const feedUrl = ref('')
 const submitting = ref(false)
 const addError = ref<string | null>(null)
 
-// feed 图标（本地缓存 blob 优先），侧边栏菜单项 avatar 用
-const iconSrcs = ref<Record<string, string>>({})
+// feed 图标不再在这里批量加载：交给 FeedIcon 按可见性懒加载（见 script 末尾的 slot）
 
-/** 从本地用户状态库重新加载订阅列表与各源图标（可被初始挂载与同步后刷新复用） */
+/**
+ * 从本地用户状态库加载订阅列表。
+ *
+ * 增量：user-state 库同时承载订阅与已读/收藏，标记一次已读就会让同步版本递增并触发本函数；
+ * 内容没变就直接跳过赋值，否则 feeds 换成新数组会让 menuItems 重算、整棵导航菜单重渲染
+ * （300 项实测约 30ms），而这类触发绝大多数与订阅无关。
+ */
 async function loadFeeds() {
   try {
-    feeds.value = await pouch.listSubscriptions()
-    // 异步解析各源图标：附件 blob 优先，回退原始 URL；无图标保持纯文字
-    const map: Record<string, string> = {}
-    await Promise.all(feeds.value.map(async (f) => {
-      const url = await pouch.getFeedImageUrl(f.id)
-      if (url) map[f.id] = url
-    }))
-    iconSrcs.value = map
+    const next = await pouch.listSubscriptions()
+    if (!subscriptionsEqual(feeds.value, next)) feeds.value = next
     error.value = null
   } catch (e: unknown) {
     error.value = errorMessage(e, '加载订阅失败')
   }
+}
+
+/** 从菜单项取出 FeedIcon 需要的字段（自定义字段见 useFeedNavigation） */
+function feedIdOf(item: unknown): string {
+  return (item as FeedNavigationMenuItem | undefined)?.feedId ?? ''
+}
+
+function feedTextOf(item: unknown): string {
+  return (item as FeedNavigationMenuItem | undefined)?.fallbackText ?? 'R'
 }
 
 onMounted(() => {
@@ -58,7 +71,40 @@ watch(
   }
 )
 
-const { menuItems, hasFeeds } = useFeedNavigation(computed(() => feeds.value), computed(() => iconSrcs.value))
+const route = useRoute()
+
+/** 当前路由对应的订阅 id / 分类：决定侧边栏默认展开哪个分组 */
+const activeFeedId = computed(() => {
+  const feedMatch = route.path.match(/^\/rss\/feed\/(.+)$/)
+  if (feedMatch?.[1]) return decodeURIComponent(feedMatch[1])
+  const botMatch = route.path.match(/^\/bots\/([^/]+)\/posts$/)
+  if (botMatch?.[1]) return `bot:${botMatch[1]}`
+  return null
+})
+const activeCategory = computed(() => {
+  const match = route.path.match(/^\/rss\/group\/(.+)$/)
+  return match?.[1] ? decodeURIComponent(match[1]) : null
+})
+
+const { menuItems, hasFeeds, activeCategoryGroupValue } = useFeedNavigation(
+  computed(() => feeds.value),
+  { activeFeedId, activeCategory }
+)
+
+/**
+ * 展开的分组（受控）。
+ *
+ * 默认全折叠：几百个订阅源全展开会让几百个菜单项同时进 DOM，实测 433 项约
+ * 120–150ms 的组件创建 + 布局成本，而用户一眼能看的只有十几个。
+ * 只把当前路由所在分组展开，其余由用户点击展开；路由变化时把新分组并入，
+ * 不会折叠用户已手动打开的分组。
+ */
+const openGroups = ref<string[]>([])
+watch(activeCategoryGroupValue, (value) => {
+  if (value && !openGroups.value.includes(value)) {
+    openGroups.value = [...openGroups.value, value]
+  }
+}, { immediate: true })
 
 async function addFeed() {
   const url = feedUrl.value.trim()
@@ -98,12 +144,26 @@ async function addFeed() {
 
       <template v-else>
         <UNavigationMenu
+          v-model="openGroups"
           :collapsed="collapsed"
           :items="menuItems"
           orientation="vertical"
           tooltip
           popover
-        />
+        >
+          <!--
+            feed 项（useFeedNavigation 里标了 slot: 'feed'）的图标：
+            由 FeedIcon 在进入视口时才请求，未就位时显示首字母占位。
+            旧实现会对每个订阅源同步调 getFeedImageUrl，订阅多时一次性占满主线程。
+          -->
+          <template #feed-leading="{ item }">
+            <FeedIcon
+              :feed-id="feedIdOf(item)"
+              :fallback-text="feedTextOf(item)"
+              :load-icon="pouch.getFeedImageUrl"
+            />
+          </template>
+        </UNavigationMenu>
 
         <div
           v-if="!hasFeeds"
