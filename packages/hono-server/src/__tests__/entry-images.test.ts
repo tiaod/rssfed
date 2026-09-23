@@ -1,7 +1,7 @@
 import { describe, it, expect } from "vitest"
 import http from "node:http"
 import sharp from "sharp"
-import { extractImageUrls, compressToAvif, cacheSingleImage, cacheEntryImages } from "../rss/entry-images"
+import { extractImageUrls, compressToAvif, cacheSingleImage, cacheEntryImages, FEED_ICON_CACHE_VERSION } from "../rss/entry-images"
 
 describe("extractImageUrls", () => {
   const html = [
@@ -109,6 +109,30 @@ describe("cacheSingleImage", () => {
     expect(a!.image.url).toBe(url)
     expect(a!.image.attachment).toBe("feed-image.avif")
     expect(a!.data.subarray(4, 12).toString("ascii")).toBe("ftypavif")
+  })
+
+  it("大尺寸源图也会被压到 64px（侧边栏只显示约 20px 头像）", async () => {
+    // 图标若继承正文图片的 1200px 上限，浏览器解码几百张会阻塞主线程数秒：
+    // 实测 300 张 1200px AVIF 解码阻塞 1.0–5.3s，而 64px 只要 0–15ms。
+    const png = await sharp({
+      create: { width: 1200, height: 1200, channels: 3, background: { r: 200, g: 120, b: 40 } },
+    }).png().toBuffer()
+
+    const server = http.createServer((_req, res) => {
+      res.setHeader("Content-Type", "image/png")
+      res.end(png)
+    })
+    await new Promise<void>((r) => server.listen(0, r))
+    const port = (server.address() as { port: number }).port
+    const url = `http://127.0.0.1:${port}/big-icon.png`
+
+    const out = await cacheSingleImage(url)
+    server.close()
+
+    expect(out).not.toBeNull()
+    expect(out!.image.width).toBe(64)
+    // 参数版本要写进元数据，否则老文档不会因参数变化而重新压缩
+    expect(out!.image.v).toBe(FEED_ICON_CACHE_VERSION)
   })
 })
 

@@ -4,7 +4,7 @@ import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
 import { ensureFeedDatabase, ensureBotDatabase, createCouchDb } from "../couchdb/client"
 import { parseFeedUrl, formatFeedError, type ParsedFeed, type ParsedItem } from "../rss/parser"
-import { cacheEntryImages, cacheSingleImage, type EntryImageOptions } from "../rss/entry-images"
+import { cacheEntryImages, cacheSingleImage, FEED_ICON_CACHE_VERSION, type EntryImageOptions } from "../rss/entry-images"
 import { db, feeds, botFeeds, bots as botsTable, type EntryDoc } from "../db"
 
 const connection = new IORedis({
@@ -60,8 +60,13 @@ async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed
       lastFetchedAt: new Date().toISOString(),
       errorMessage: undefined,
     }
-    // feed 图标缓存：URL 变化（或首次有图标）时下载压缩为 AVIF 附件；失败静默跳过
-    if (imageUrl && imageUrl !== existing.imageCached?.url) {
+    // feed 图标缓存：URL 变化、或压缩参数版本升级（见 FEED_ICON_CACHE_VERSION）时
+    // 重新下载压缩为 AVIF 附件；失败静默跳过。
+    // 版本判断不能省：附件名固定为 feed-image.avif，光比 URL 发现不了参数变化。
+    const iconStale = !existing.imageCached
+      || imageUrl !== existing.imageCached.url
+      || existing.imageCached.v !== FEED_ICON_CACHE_VERSION
+    if (imageUrl && iconStale) {
       const cached = await cacheSingleImage(imageUrl)
       if (cached) {
         await feedDb.multipart.insert({ ...doc, imageCached: cached.image } as any,

@@ -171,28 +171,58 @@ export async function compressToAvif(
   }
 }
 
+/**
+ * feed 图标（侧边栏/列表头像）的目标宽度。
+ *
+ * 侧边栏把图标渲染成约 20px 的头像，而 compressToAvif 的默认上限是 1200px（正文图片用），
+ * 两者错配的代价很大：实测 300 张 1200px AVIF 解码会阻塞主线程 1.0–5.3 秒，
+ * 而 64px/190px 都是 0–15ms（AVIF 解码开销随像素数超线性增长）。
+ * 64px 足够覆盖 3x 屏幕密度下的 20px 头像。
+ */
+const FEED_ICON_MAX_WIDTH = parseInt(process.env.FEED_ICON_MAX_WIDTH ?? "64")
+
+/**
+ * feed 图标压缩参数版本。
+ *
+ * 改 FEED_ICON_MAX_WIDTH 或压缩质量时必须 +1：worker 只在
+ * `imageCached.v !== FEED_ICON_CACHE_VERSION` 时重新压缩，
+ * 否则已缓存的图标会一直停留在老参数上（附件名固定为 feed-image.avif，
+ * 光靠 URL 比较发现不了参数变化）。
+ *
+ * v2：图标从「继承正文图片的 1200px 上限」改为 64px。
+ */
+export const FEED_ICON_CACHE_VERSION = 2
+
 /** 单张图片 URL 去重缓存（同进程内相同 URL 只下载压缩一次，如 feed 图标/头像） */
 const singleImageCache = new Map<string, Promise<{ image: CachedImage, data: Buffer } | null>>()
 
 /**
  * 下载并压缩单张图片（feed 图标等），返回附件数据与 CachedImage 元数据。
- * 失败返回 null；同 URL 在进程生命周期内只处理一次。
+ * 失败返回 null；同 URL + 同参数版本在进程生命周期内只处理一次。
  */
 export function cacheSingleImage(url: string): Promise<{ image: CachedImage, data: Buffer } | null> {
-  let pending = singleImageCache.get(url)
+  // 缓存键带上参数版本：同进程内改了压缩参数也要重新压，不能命中旧结果
+  const cacheKey = `${url}|v${FEED_ICON_CACHE_VERSION}`
+  let pending = singleImageCache.get(cacheKey)
   if (!pending) {
     pending = (async () => {
       const raw = await downloadImage(url)
       if (!raw) return null
-      const result = await compressToAvif(raw)
+      const result = await compressToAvif(raw, { maxWidth: FEED_ICON_MAX_WIDTH })
       if (!result) return null
       return {
-        image: { url, attachment: "feed-image.avif", width: result.width, height: result.height },
+        image: {
+          url,
+          attachment: "feed-image.avif",
+          width: result.width,
+          height: result.height,
+          v: FEED_ICON_CACHE_VERSION,
+        },
         data: result.buffer,
       }
     })()
-    singleImageCache.set(url, pending)
-    pending.finally(() => singleImageCache.delete(url)).catch(() => {})
+    singleImageCache.set(cacheKey, pending)
+    pending.finally(() => singleImageCache.delete(cacheKey)).catch(() => {})
   }
   return pending
 }

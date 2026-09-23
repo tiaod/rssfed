@@ -49,6 +49,12 @@ export interface CachedImage {
   height?: number
   /** 是否为封面图（正文中面积最大的一张，列表缩略图用） */
   cover?: boolean
+  /**
+   * 压缩参数版本（目前只有 feed 图标用）。
+   * 改图标的目标尺寸/质量时必须递增，否则老 feed 文档不会重新压缩 ——
+   * 详见 entry-images.ts 的 FEED_ICON_CACHE_VERSION。
+   */
+  v?: number
 }
 
 export interface UserEntryDoc extends EntryDoc {
