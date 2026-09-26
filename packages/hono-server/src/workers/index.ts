@@ -119,6 +119,11 @@ async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedIte
   const newEntries: EntryDoc[] = []
   // 读取该 feed 的 per-feed 图片缓存策略（管理员可覆盖全局默认，未设置则走全局默认）
   const imageOptions = await resolveFeedImageOptions(feedId)
+  // 本次抓取的图片缓存汇总：逐张打日志会把 600+ 源的日志刷爆，所以循环结束后聚合成一行
+  const imgAgg = {
+    candidates: 0, skippedLimit: 0, skippedBudget: 0, cached: 0, failed: 0, bytes: 0,
+    reasons: {} as Record<string, number>,
+  }
   for (const item of items) {
     const guid = item.guid ?? item.link ?? item.title ?? ""
     const entryId = `entry:${feedId}:${crypto.createHash("sha256").update(guid).digest("hex").slice(0, 12)}`
@@ -136,7 +141,16 @@ async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedIte
     // 协议封面（media:thumbnail/图片 enclosure）优先作为封面，正文图回退；
     // 图片缓存失败不阻塞抓取，回退为无图条目（前端保留原 URL 直链）
     try {
-      const { attachments, images } = await cacheEntryImages(entry.content, entry.url, item.coverUrl, imageOptions)
+      const { attachments, images, stats } = await cacheEntryImages(entry.content, entry.url, item.coverUrl, imageOptions)
+      imgAgg.candidates += stats.candidates
+      imgAgg.skippedLimit += stats.skippedByLimit
+      imgAgg.skippedBudget += stats.skippedByBudget
+      imgAgg.cached += stats.cached
+      imgAgg.failed += stats.failed
+      imgAgg.bytes += stats.bytes
+      for (const [reason, count] of Object.entries(stats.reasons)) {
+        imgAgg.reasons[reason] = (imgAgg.reasons[reason] ?? 0) + (count ?? 0)
+      }
       if (images.length > 0) {
         // nano 的 multipart.insert 需在 params 中显式传入 docName
         await feedDb.multipart.insert({ ...entry, images } as any, attachments, { docName: entryId })
@@ -149,6 +163,14 @@ async function insertNewEntries(feedDb: FeedDb, feedId: string, items: ParsedIte
     await feedDb.insert(entry as any)
     newEntries.push(entry)
   }
+  // 仅在有失败时输出，作为「为什么没缓存」的可观测入口（无失败则保持安静）
+  if (imgAgg.failed > 0) {
+    const reasons = Object.entries(imgAgg.reasons).map(([k, v]) => `${k}=${v}`).join(" ") || "-"
+    console.warn(
+      `[EntryImages] feed=${feedId} 候选=${imgAgg.candidates} 缓存=${imgAgg.cached} 失败=${imgAgg.failed} ` +
+      `超张数=${imgAgg.skippedLimit} 超预算=${imgAgg.skippedBudget} 附件=${(imgAgg.bytes / 1024).toFixed(0)}KB 原因[${reasons}]`,
+    )
+  }
   return newEntries
 }
 
@@ -158,6 +180,7 @@ async function resolveFeedImageOptions(feedId: string): Promise<EntryImageOption
     const [feed] = await db.select({
       cacheImages: feeds.cacheImages,
       maxImageCount: feeds.maxImageCount,
+      maxEntryImageBytes: feeds.maxEntryImageBytes,
       maxImageWidth: feeds.maxImageWidth,
       avifQuality: feeds.avifQuality,
       maxSourceImageBytes: feeds.maxSourceImageBytes,
@@ -166,6 +189,7 @@ async function resolveFeedImageOptions(feedId: string): Promise<EntryImageOption
     return {
       cacheAll: feed.cacheImages ?? false,
       maxImageCount: feed.maxImageCount ?? undefined,
+      maxEntryImageBytes: feed.maxEntryImageBytes ?? undefined,
       maxImageWidth: feed.maxImageWidth ?? undefined,
       avifQuality: feed.avifQuality ?? undefined,
       maxSourceImageBytes: feed.maxSourceImageBytes ?? undefined,

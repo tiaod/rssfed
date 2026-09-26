@@ -44,6 +44,7 @@ feedsRouter.get("/", requireAdmin, async (c) => {
     // per-feed 图片缓存策略（见 rss/entry-images.ts）
     cacheImages: f.cacheImages ?? false,
     maxImageCount: f.maxImageCount ?? null,
+    maxEntryImageBytes: f.maxEntryImageBytes ?? null,
     maxImageWidth: f.maxImageWidth ?? null,
     avifQuality: f.avifQuality ?? null,
     maxSourceImageBytes: f.maxSourceImageBytes ?? null,
@@ -195,7 +196,7 @@ feedsRouter.put("/:feedId", requireAdmin, async (c) => {
   const feedId = c.req.param("feedId")!
   const body = await c.req.json()
   // 图片缓存策略字段（数值/布尔；传 null 表示重置回全局默认）
-  const imageKeys = ["maxImageCount", "maxImageWidth", "avifQuality", "maxSourceImageBytes"] as const
+  const imageKeys = ["maxImageCount", "maxEntryImageBytes", "maxImageWidth", "avifQuality", "maxSourceImageBytes"] as const
   type ImageKey = typeof imageKeys[number]
   const patch: Record<string, string | number | boolean | null> = {}
   for (const key of ["title", "url", "description", "siteUrl", "image"] as const) {

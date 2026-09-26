@@ -74,6 +74,7 @@ export interface AdminFeed {
   // per-feed 图片缓存策略（见 rss/entry-images.ts）
   cacheImages: boolean
   maxImageCount: number | null
+  maxEntryImageBytes: number | null
   maxImageWidth: number | null
   avifQuality: number | null
   maxSourceImageBytes: number | null

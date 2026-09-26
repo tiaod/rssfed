@@ -43,6 +43,7 @@ export function useApi() {
         image: string
         cacheImages: boolean
         maxImageCount: number | null
+        maxEntryImageBytes: number | null
         maxImageWidth: number | null
         avifQuality: number | null
         maxSourceImageBytes: number | null
@@ -51,7 +52,7 @@ export function useApi() {
       /** 管理员：触发重新抓取 */
       refetch: (id: string) => apiFetch(`${base}/api/feeds/${id}/refetch`, { method: 'POST' }),
       /** 管理员：获取全局默认图片缓存参数（供输入框 placeholder 展示默认值） */
-      imageDefaults: () => apiFetch<{ maxImageCount: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number }>(
+      imageDefaults: () => apiFetch<{ maxImageCount: number, maxEntryImageBytes: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number }>(
         `${base}/api/feeds/image-defaults`
       ),
       /** 导入 OPML：批量注册订阅源并创建订阅，返回导入汇总 */

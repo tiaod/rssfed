@@ -207,7 +207,7 @@ describe("cacheEntryImages 封面选择", () => {
 })
 
 describe("cacheEntryImages per-feed 配置", () => {
-  // 生成 n 张（比全局默认 5 张多）可缓存的小图，验证 cacheAll 不限张数
+  // 生成 n 张可缓存的小图，用于验证 cacheAll（不限张数与体积）与预算/硬顶行为
   async function serveImages(count: number, prefix: string) {
     const bufs = await Promise.all(
       Array.from({ length: count }, () => sharp({
@@ -225,18 +225,19 @@ describe("cacheEntryImages per-feed 配置", () => {
     const port = (server.address() as { port: number }).port
     return {
       port,
+      bufs,
       content: Array.from({ length: count }, (_, i) =>
         `<img src="http://127.0.0.1:${port}/${prefix}${i}.png">`).join(""),
       close: () => server.close(),
     }
   }
 
-  it("cacheAll 开启时缓存正文全部图片（超过全局默认 5 张）", async () => {
+  it("cacheAll 开启时缓存正文全部图片（不受预算与张数硬顶约束）", async () => {
     const total = 7
     const { port, content, close } = await serveImages(total, "a")
     try {
       const { images } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`, undefined, { cacheAll: true })
-      expect(images.length).toBe(total) // 全部被缓存，未被 5 张上限截断
+      expect(images.length).toBe(total) // 全部被缓存，未被预算/硬顶截断
     } finally {
       close()
     }
@@ -252,11 +253,213 @@ describe("cacheEntryImages per-feed 配置", () => {
     }
   })
 
-  it("不传配置时遵循全局默认上限（5 张）", async () => {
+  it("不传配置时走全局默认：体积预算 1MB 下少量小图全部缓存（不再卡在 5 张）", async () => {
     const { port, content, close } = await serveImages(7, "c")
     try {
-      const { images } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`)
-      expect(images.length).toBe(5)
+      const { images, stats } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`)
+      expect(images.length).toBe(7) // 7 张小图远小于 1MB 预算
+      expect(stats.skippedByBudget).toBe(0)
+    } finally {
+      close()
+    }
+  })
+
+  it("预算生效：累计附件体积超上限后停止缓存后续图片", async () => {
+    const { port, content, close, bufs } = await serveImages(6, "d")
+    try {
+      const single = (await compressToAvif(bufs[0]!))!.buffer.length
+      // 预算够 2 张、不够 3 张（+16 字节余量避免边界抖动）
+      const { images, stats } = await cacheEntryImages(
+        content, `http://127.0.0.1:${port}/post`, undefined,
+        { maxEntryImageBytes: single * 2 + 16 },
+      )
+      expect(images.length).toBe(2)
+      expect(stats.cached).toBe(2)
+      expect(stats.skippedByBudget).toBe(4) // 6 张候选，缓存 2 张，预算跳过 4 张
+      expect(stats.failed).toBe(0) // 预算跳过不算失败
+    } finally {
+      close()
+    }
+  })
+
+  it("首图必留：预算小于单张体积时仍缓存第一张", async () => {
+    const { port, content, close } = await serveImages(4, "e")
+    try {
+      const { images, stats } = await cacheEntryImages(
+        content, `http://127.0.0.1:${port}/post`, undefined,
+        { maxEntryImageBytes: 1 },
+      )
+      expect(images.length).toBe(1)
+      expect(stats.skippedByBudget).toBe(3)
+    } finally {
+      close()
+    }
+  })
+
+  it("协议封面自身超预算也保留（否则整篇没图），并占用预算", async () => {
+    const { port, content, close } = await serveImages(4, "f")
+    try {
+      const cover = `http://127.0.0.1:${port}/f0.png`
+      const { images, stats } = await cacheEntryImages(
+        content, `http://127.0.0.1:${port}/post`, cover,
+        { maxEntryImageBytes: 1 }, // 预算小到只够封面
+      )
+      expect(images).toHaveLength(1)
+      expect(images[0]!.url).toBe(cover)
+      expect(images[0]!.cover).toBe(true)
+      expect(stats.skippedByBudget).toBe(3)
+    } finally {
+      close()
+    }
+  })
+
+  it("协议封面占用预算后，正文图按剩余预算继续填充", async () => {
+    const { port, content, close, bufs } = await serveImages(4, "g")
+    try {
+      const single = (await compressToAvif(bufs[0]!))!.buffer.length
+      const cover = `http://127.0.0.1:${port}/g0.png`
+      const { images, stats } = await cacheEntryImages(
+        content, `http://127.0.0.1:${port}/post`, cover,
+        { maxEntryImageBytes: single * 2 + 16 }, // 封面 + 1 张正文图
+      )
+      expect(images).toHaveLength(2)
+      expect(images[0]!.url).toBe(cover) // 封面排第一
+      expect(images[1]!.url).toContain("/g1.png") // 正文里 g0 重复被跳过，下一张是 g1
+      expect(stats.skippedByBudget).toBe(2)
+    } finally {
+      close()
+    }
+  })
+})
+
+describe("cacheEntryImages Content-Type 兜底与失败统计", () => {
+  /** 起一个本地图床，handler 自定义响应头与状态码 */
+  async function serve(handler: http.RequestListener) {
+    const server = http.createServer(handler)
+    await new Promise<void>((r) => server.listen(0, r))
+    const port = (server.address() as { port: number }).port
+    return { port, close: () => server.close() }
+  }
+
+  async function png(w = 300, h = 200) {
+    return sharp({ create: { width: w, height: h, channels: 3, background: { r: 5, g: 6, b: 7 } } }).png().toBuffer()
+  }
+
+  it("Content-Type 为 application/octet-stream 但 URL 是图片扩展名时仍缓存（storage.googleapis.com 场景）", async () => {
+    const buf = await png()
+    const { port, close } = await serve((_req, res) => {
+      res.setHeader("Content-Type", "application/octet-stream")
+      res.end(buf)
+    })
+    try {
+      const { images, stats } = await cacheEntryImages(
+        `<img src="http://127.0.0.1:${port}/a.png">`,
+        `http://127.0.0.1:${port}/`,
+      )
+      expect(images).toHaveLength(1)
+      expect(stats.cached).toBe(1)
+      expect(stats.failed).toBe(0)
+    } finally {
+      close()
+    }
+  })
+
+  it("Content-Type 为 text/html（防盗链错误页）时拒绝，并记为 content-type 失败", async () => {
+    const { port, close } = await serve((_req, res) => {
+      res.setHeader("Content-Type", "text/html; charset=utf-8")
+      res.end("<html><body>403 Forbidden</body></html>")
+    })
+    try {
+      const { images, stats } = await cacheEntryImages(
+        `<img src="http://127.0.0.1:${port}/a.png">`,
+        `http://127.0.0.1:${port}/`,
+      )
+      expect(images).toHaveLength(0)
+      expect(stats.failed).toBe(1)
+      expect(stats.reasons["content-type"]).toBe(1)
+    } finally {
+      close()
+    }
+  })
+
+  it("octet-stream 且 URL 无图片扩展名时仍拒绝（避免把代理接口的二进制误当图片）", async () => {
+    const buf = await png()
+    const { port, close } = await serve((_req, res) => {
+      res.setHeader("Content-Type", "application/octet-stream")
+      res.end(buf)
+    })
+    try {
+      const { images, stats } = await cacheEntryImages(
+        `<img src="http://127.0.0.1:${port}/img-proxy?id=1">`,
+        `http://127.0.0.1:${port}/`,
+      )
+      expect(images).toHaveLength(0)
+      expect(stats.reasons["content-type"]).toBe(1)
+    } finally {
+      close()
+    }
+  })
+
+  it("统计失败原因：HTTP 404 → http-status，源图超限 → too-large", async () => {
+    const buf = await png()
+    const { port, close } = await serve((req, res) => {
+      if (req.url === "/missing.png") {
+        res.statusCode = 404
+        res.setHeader("Content-Type", "text/plain")
+        res.end("not found")
+        return
+      }
+      res.setHeader("Content-Type", "image/png")
+      res.end(buf)
+    })
+    try {
+      // 极小上限：PNG 头就超过，触发流式截断
+      const { stats } = await cacheEntryImages(
+        `<img src="http://127.0.0.1:${port}/missing.png"><img src="http://127.0.0.1:${port}/big.png">`,
+        `http://127.0.0.1:${port}/`,
+        undefined,
+        { maxSourceImageBytes: 10 },
+      )
+      expect(stats.reasons["http-status"]).toBe(1)
+      expect(stats.reasons["too-large"]).toBe(1)
+      expect(stats.failed).toBe(2)
+    } finally {
+      close()
+    }
+  })
+
+  it("统计因数量上限跳过的张数（与下载失败区分开）", async () => {
+    const buf = await png()
+    const { port, close } = await serve((_req, res) => {
+      res.setHeader("Content-Type", "image/png")
+      res.end(buf)
+    })
+    try {
+      const content = Array.from({ length: 7 }, (_, i) =>
+        `<img src="http://127.0.0.1:${port}/p${i}.png">`).join("")
+      const { stats } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`, undefined, { maxImageCount: 2 })
+      expect(stats.candidates).toBe(2)
+      expect(stats.skippedByLimit).toBe(5) // 7 张候选，上限 2，跳过 5 张
+      expect(stats.failed).toBe(0) // 跳过不算失败
+    } finally {
+      close()
+    }
+  })
+
+  it("统计附件字节与成功张数", async () => {
+    const buf = await png()
+    const { port, close } = await serve((_req, res) => {
+      res.setHeader("Content-Type", "image/png")
+      res.end(buf)
+    })
+    try {
+      const { attachments, images, stats } = await cacheEntryImages(
+        `<img src="http://127.0.0.1:${port}/a.png">`,
+        `http://127.0.0.1:${port}/`,
+      )
+      expect(stats.cached).toBe(images.length)
+      expect(stats.bytes).toBeGreaterThan(0)
+      expect(stats.bytes).toBe(attachments.reduce((a, x) => a + x.data.length, 0))
     } finally {
       close()
     }

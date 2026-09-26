@@ -17,6 +17,7 @@ const editForm = ref({
   cacheImages: false,
   // 高级参数用字符串承载 UI 输入（留空表示「跟随全局默认」），提交时再规范成 number/null
   maxImageCount: '',
+  maxEntryImageBytes: '',
   maxImageWidth: '',
   avifQuality: '',
   maxSourceImageBytes: ''
@@ -30,12 +31,20 @@ const editError = ref<string | null>(null)
 /** 编辑弹窗内是否展开「高级图片缓存参数」 */
 const showAdvancedImages = ref(false)
 /** 全局默认图片缓存参数（来自后端环境变量），用于 placeholder 展示默认值 */
-const imageDefaults = ref<{ maxImageCount: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number } | null>(null)
+const imageDefaults = ref<{ maxImageCount: number, maxEntryImageBytes: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number } | null>(null)
 
 /** 生成高级参数输入框的 placeholder：显示当前全局默认值，未加载到则返回空 */
 function imagePlaceholder(value: number | undefined, unit = ''): string {
   if (value === undefined || value === null) return ''
   return `默认 ${value}${unit}`
+}
+
+/** 字节数转可读体积，用于「每篇附件体积上限」的默认值提示（1MB = 1048576） */
+function formatBytes(bytes: number | undefined): string {
+  if (!bytes) return ''
+  if (bytes < 1024) return `${bytes}B`
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)}KB`
+  return `${(bytes / 1048576).toFixed(bytes % 1048576 === 0 ? 0 : 1)}MB`
 }
 
 const statusMeta: Record<FeedStatus, { label: string, color: 'success' | 'neutral' | 'error', icon: string }> = {
@@ -129,6 +138,7 @@ function openEdit(feed: AdminFeed) {
     image: feed.image ?? '',
     cacheImages: feed.cacheImages ?? false,
     maxImageCount: feed.maxImageCount != null ? String(feed.maxImageCount) : '',
+    maxEntryImageBytes: feed.maxEntryImageBytes != null ? String(feed.maxEntryImageBytes) : '',
     maxImageWidth: feed.maxImageWidth != null ? String(feed.maxImageWidth) : '',
     avifQuality: feed.avifQuality != null ? String(feed.avifQuality) : '',
     maxSourceImageBytes: feed.maxSourceImageBytes != null ? String(feed.maxSourceImageBytes) : ''
@@ -145,6 +155,7 @@ async function saveEdit() {
     const patch = {
       ...editForm.value,
       maxImageCount: toImageNumber(editForm.value.maxImageCount),
+      maxEntryImageBytes: toImageNumber(editForm.value.maxEntryImageBytes),
       maxImageWidth: toImageNumber(editForm.value.maxImageWidth),
       avifQuality: toImageNumber(editForm.value.avifQuality),
       maxSourceImageBytes: toImageNumber(editForm.value.maxSourceImageBytes)
@@ -390,7 +401,7 @@ onMounted(load)
                   缓存全部图片
                 </p>
                 <p class="text-xs text-muted">
-                  开启后每篇条目不限缓存张数，适合漫画等图片密集的源（离线可看）。
+                  开启后每篇条目不限张数、不限体积，适合漫画等图片密集的源（离线可看）。
                 </p>
               </div>
               <USwitch
@@ -426,6 +437,19 @@ onMounted(load)
                   class="w-full"
                 />
               </UFormField>
+              <UFormField label="每篇附件体积上限 (字节)">
+                <UInput
+                  v-model="editForm.maxEntryImageBytes"
+                  type="number"
+                  min="0"
+                  :placeholder="imagePlaceholder(imageDefaults?.maxEntryImageBytes, 'B')"
+                  class="w-full"
+                />
+              </UFormField>
+              <p class="text-xs text-muted sm:col-span-2">
+                主约束是「附件体积上限」：小图多存、大图少存（默认 {{ formatBytes(imageDefaults?.maxEntryImageBytes) || '1MB' }}）；
+                「最多张数」是请求数硬顶，只在图片数量异常多时兜底。
+              </p>
               <UFormField label="压缩最大宽度 (px)">
                 <UInput
                   v-model="editForm.maxImageWidth"

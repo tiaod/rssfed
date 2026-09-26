@@ -90,6 +90,8 @@ export const apiToken = pgTable("api_token", {
   cacheImages: boolean("cache_images"),
   /** 每篇最多缓存图片数（null=跟随全局默认；cacheImages 开启且未设置时视为不限制） */
   maxImageCount: integer("max_image_count"),
+  /** 每篇附件总体积上限字节（null=跟随全局默认 MAX_ENTRY_IMAGE_BYTES，即 1MB） */
+  maxEntryImageBytes: integer("max_entry_image_bytes"),
   /** 压缩后最大宽度 px（null=跟随全局默认 MAX_IMAGE_WIDTH） */
   maxImageWidth: integer("max_image_width"),
   /** AVIF 编码质量（null=跟随全局默认 AVIF_QUALITY） */

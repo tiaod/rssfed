@@ -163,6 +163,21 @@ Bot 与 feed 的关联关系存储在 PostgreSQL `bot_feeds` 表中。浏览器�
 
 正文图片要跟随 feed 库同步进浏览器 PouchDB 以供离线阅读，作为 CouchDB 附件写入时与条目文档天然同源同步，省掉了独立下载与关联的逻辑。代价是放宽了 CouchDB 的附件大小上限（默认 1MB → 8MB，见 `index.ts` 的 `couchdb/max_attachment_size`）。
 
+### 正文图片的缓存策略
+
+抓取时压缩为 AVIF 附件，与条目文档一次写入（`multipart.insert`），失败不阻塞抓取、回退为无图条目。
+取舍的**主约束是「每篇附件总体积预算」**（默认 1MB，per-feed 可覆盖 `max_entry_image_bytes`）：
+压缩后按正文顺序累计，超预算即停止缓存后续图片，首图必留。
+
+为什么用体积而不是张数：小图（实测 p50 约 19KB）能存几十张，大图自然少存，比固定张数更贴近真实成本。
+实测模拟（见 `report/image-cache-diagnosis`，`--simulate`）：1MB 预算覆盖 93.4% 的正文图、被截断 140 条，
+而原来的「每篇 5 张」只有 48.1%、被截断 2420 条。`max_image_count` 因此退化为**请求数硬顶**（默认 200）——
+预算要压完才知道大小，靠它兜住异常多图的源。
+
+诊断与可观测：`scripts/diagnose-image-cache.ts` 只读扫描全部 `feed_*` 库给出命中率/失败归因，
+worker 侧则在有失败时打一行 `[EntryImages] feed=… 候选=… 失败=… 原因[too-large=2 …]`。
+这两处是排查「为什么这张图没缓存」的入口（原先 8 条失败路径全是静默 `return null`）。
+
 ### 头像为什么单独走存储后端
 
 头像与 logo 是**上传类**文件（用户主动提交、需要独立 URL 展示），不适合塞进文档库。它们统一走 `Storage` 接口，有两个可切换的实现：
