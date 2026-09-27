@@ -26,11 +26,11 @@ describe('useFeedNavigation', () => {
     expect(hasFeeds.value).toBe(true)
     expect(menuItems.value).toHaveLength(1)
 
+    // 「订阅源」标题由 FeedNavigation 自己渲染（要固定在滚动区外），不再是菜单项
     const group = menuItems.value[0]
     expect(group).toBeDefined()
-    expect(group![0]).toMatchObject({ label: '订阅源', type: 'label' as const })
-    expect(group![1]).toMatchObject({ label: 'Feed A', to: '/rss/feed/1' })
-    expect(group![2]).toMatchObject({ label: 'Feed B', to: '/rss/feed/2' })
+    expect(group![0]).toMatchObject({ label: 'Feed A', to: '/rss/feed/1' })
+    expect(group![1]).toMatchObject({ label: 'Feed B', to: '/rss/feed/2' })
   })
 
   it('feed 项带上图标懒加载所需的字段，分组项则不带', () => {
@@ -42,7 +42,7 @@ describe('useFeedNavigation', () => {
     const { menuItems } = useFeedNavigation(computed(() => feeds))
 
     const group = menuItems.value[0]!
-    const techGroup = group[1]!
+    const techGroup = group[0]!
     expect(techGroup.children![0]).toMatchObject({
       label: 'Feed A',
       to: '/rss/feed/1',
@@ -51,7 +51,7 @@ describe('useFeedNavigation', () => {
       fallbackText: 'F'
     })
     // bot 订阅走 bot 产出页，同样交给 FeedIcon
-    expect(group[2]).toMatchObject({
+    expect(group[1]).toMatchObject({
       label: 'Bot 产出',
       to: '/bots/42/posts',
       slot: 'feed',
@@ -73,10 +73,8 @@ describe('useFeedNavigation', () => {
     const { menuItems } = useFeedNavigation(computed(() => feeds))
 
     const group = menuItems.value[0]!
-    expect(group).toHaveLength(3) // label + 分组 + 未分类 feed
-
-    const tech = group[1]
-    expect(tech).toMatchObject({
+    expect(group).toHaveLength(2) // 分组 + 未分类 feed
+    expect(group[0]).toMatchObject({
       label: '技术',
       to: `/rss/group/${encodeURIComponent('技术')}`,
       // 默认折叠：几百个源全展开会让几百个菜单项同时进 DOM
@@ -87,7 +85,7 @@ describe('useFeedNavigation', () => {
         { label: 'Feed B', to: '/rss/feed/2' }
       ]
     })
-    expect(group[2]).toMatchObject({ label: 'Feed C', to: '/rss/feed/3' })
+    expect(group[1]).toMatchObject({ label: 'Feed C', to: '/rss/feed/3' })
   })
 
   it('只默认展开当前路由所在的分组', () => {
@@ -129,8 +127,8 @@ describe('useFeedNavigation', () => {
     ]
     const { menuItems } = useFeedNavigation(computed(() => feeds))
     const group = menuItems.value[0]!
-    // label 项 + 技术分组（折叠）+ 未分类的 Feed B
-    expect(group).toHaveLength(3)
-    expect(group[2]).toMatchObject({ label: 'Feed B', feedId: '2' })
+    // 技术分组（折叠）+ 未分类的 Feed B
+    expect(group).toHaveLength(2)
+    expect(group[1]).toMatchObject({ label: 'Feed B', feedId: '2' })
   })
 })

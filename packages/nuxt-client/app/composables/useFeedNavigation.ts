@@ -75,7 +75,9 @@ export function useFeedNavigation(
       }
     }
 
-    const sections: FeedNavigationMenuItem[] = [{ label: '订阅源', type: 'label' }]
+    // 不再把「订阅源」作为 label 项塞进菜单：它需要固定在滚动区之外（侧边栏只滚动列表），
+    // 由 FeedNavigation 自己渲染成区块标题。
+    const sections: FeedNavigationMenuItem[] = []
     const activeFeedId = options.activeFeedId?.value ?? null
     const activeCategory = options.activeCategory?.value ?? null
 

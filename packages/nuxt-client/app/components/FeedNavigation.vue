@@ -9,6 +9,12 @@ import FeedIcon from '~/components/FeedIcon.vue'
 
 defineProps<{
   collapsed?: boolean
+  /**
+   * 只滚动订阅源列表（侧边栏固定头部时用）。
+   * 关闭时退回「整块内容跟着侧边栏一起滚」，供高度不足的小屏 / 横屏使用，
+   * 避免列表被固定的头部与底部挤成一条缝。
+   */
+  scrollable?: boolean
 }>()
 
 const api = useApi()
@@ -131,7 +137,10 @@ async function addFeed() {
 </script>
 
 <template>
-  <div class="mt-4 border-t border-default pt-4">
+  <div
+    class="mt-4 border-t border-default pt-4"
+    :class="scrollable ? 'flex min-h-0 flex-1 flex-col' : ''"
+  >
     <ClientOnly>
       <div
         v-if="error"
@@ -143,53 +152,68 @@ async function addFeed() {
       </div>
 
       <template v-else>
-        <UNavigationMenu
-          v-model="openGroups"
-          :collapsed="collapsed"
-          :items="menuItems"
-          orientation="vertical"
-          tooltip
-          popover
-        >
-          <!--
-            feed 项（useFeedNavigation 里标了 slot: 'feed'）的图标：
-            由 FeedIcon 在进入视口时才请求，未就位时显示首字母占位。
-            旧实现会对每个订阅源同步调 getFeedImageUrl，订阅多时一次性占满主线程。
-          -->
-          <template #feed-leading="{ item }">
-            <FeedIcon
-              :feed-id="feedIdOf(item)"
-              :fallback-text="feedTextOf(item)"
-              :load-icon="pouch.getFeedImageUrl"
-            />
-          </template>
-        </UNavigationMenu>
-
+        <!-- 固定区：区块标题 + 添加订阅入口（靠右的加号按钮；折叠成图标时只留按钮） -->
         <div
-          v-if="!hasFeeds"
-          class="px-2"
+          class="flex shrink-0 items-center gap-2 px-2.5 py-1.5"
+          :class="collapsed ? 'justify-center' : 'justify-between'"
         >
-          <p class="text-xs text-muted">
-            暂无订阅
-          </p>
+          <span
+            v-if="!collapsed"
+            class="text-xs/5 font-semibold text-highlighted"
+          >
+            订阅源
+          </span>
+          <UTooltip
+            text="添加订阅源"
+            :disabled="!collapsed"
+          >
+            <UButton
+              color="neutral"
+              variant="ghost"
+              icon="i-lucide-plus"
+              size="xs"
+              square
+              aria-label="添加订阅源"
+              @click="() => { addOpen = true }"
+            />
+          </UTooltip>
         </div>
 
-        <!-- 添加订阅入口 -->
-        <div class="mt-2 px-2">
-          <UButton
-            color="neutral"
-            variant="soft"
-            size="xs"
-            class="w-full justify-start"
-            :class="collapsed ? 'px-0 justify-center' : ''"
-            @click="() => { addOpen = true }"
+        <!-- 滚动区：订阅源列表 -->
+        <div
+          class="min-w-0"
+          :class="scrollable ? 'min-h-0 flex-1 overflow-y-auto' : ''"
+        >
+          <UNavigationMenu
+            v-model="openGroups"
+            :collapsed="collapsed"
+            :items="menuItems"
+            orientation="vertical"
+            tooltip
+            popover
           >
-            <UIcon
-              name="i-lucide-rss"
-              class="size-4 shrink-0"
-            />
-            <span v-if="!collapsed">添加订阅源</span>
-          </UButton>
+            <!--
+              feed 项（useFeedNavigation 里标了 slot: 'feed'）的图标：
+              由 FeedIcon 在进入视口时才请求，未就位时显示首字母占位。
+              旧实现会对每个订阅源同步调 getFeedImageUrl，订阅多时一次性占满主线程。
+            -->
+            <template #feed-leading="{ item }">
+              <FeedIcon
+                :feed-id="feedIdOf(item)"
+                :fallback-text="feedTextOf(item)"
+                :load-icon="pouch.getFeedImageUrl"
+              />
+            </template>
+          </UNavigationMenu>
+
+          <div
+            v-if="!hasFeeds"
+            class="px-2"
+          >
+            <p class="text-xs text-muted">
+              暂无订阅
+            </p>
+          </div>
         </div>
       </template>
     </ClientOnly>

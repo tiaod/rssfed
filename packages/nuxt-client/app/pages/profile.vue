@@ -69,7 +69,22 @@ const tabs = computed(() => {
   return items
 })
 // 注意：UTabs 的 tab 值内部为字符串（String(index)），需用字符串初始值才能默认激活第一个 tab
-const activeTab = ref('0')
+// 与 URL 的 ?tab= 双向绑定：用户菜单里的「通用设置」直接落到对应标签页，手动切页也同步回地址栏
+const route = useRoute()
+const activeTab = computed({
+  get: () => {
+    const tab = route.query.tab
+    // 越界或非数字（含管理员才有后两个标签页）一律回落到第一个标签页
+    const valid = typeof tab === 'string' && /^\d+$/.test(tab) && Number(tab) < tabs.value.length
+    return valid ? tab : '0'
+  },
+  set: (value: string) => {
+    void navigateTo(
+      { query: { ...route.query, tab: value === '0' ? undefined : value } },
+      { replace: true }
+    )
+  }
+})
 
 const handleLogout = async () => {
   await userStore.logout()
