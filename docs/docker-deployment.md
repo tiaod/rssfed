@@ -382,6 +382,23 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-
 
 > 注意两点：`prune_images: true` 会在部署后清理不再使用的旧镜像，回滚时需要重新从 ghcr 拉（tag 都还在，可行）；而**数据库迁移的固有限制不变** —— `migrate` 已执行过的结构变更不会自动撤销，含破坏性 schema 改动的发布需人工评估。
 
+### 日常发布
+
+发布就是 `git push origin master`，之后无需任何操作：
+
+1. CI 跑测试 → 构建三个镜像推 ghcr；
+2. `record-release` 把 `IMAGE_TAG=sha-<hash>` 写进 `deploy/release.env` 并提交（带 `[skip ci]`）；
+3. Doco CD 最多 3 分钟后轮询到该提交 → 拉镜像 → 先跑 `migrate` → 重建 `server`/`web`。
+   `postgres`/`couchdb`/`redis` 不受影响，全程不会被重建。
+
+> ⚠️ **push 可能被 CI 的自动提交顶掉**：`record-release` 会往 master 提交一次。若你紧接着 push，会得到 `! [rejected] ... (fetch first)`。解决：
+>
+> ```bash
+> git pull --rebase && git push
+> ```
+>
+> 想省事可一次性配置 `git config pull.rebase true`。
+
 ### 排障
 
 ```bash
