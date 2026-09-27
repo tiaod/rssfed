@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { SubscriptionItem, RssEntry } from '~/types/rss'
+import type { SubscriptionItem } from '~/types/rss'
 
 definePageMeta({
   layout: 'default'
@@ -10,7 +10,6 @@ const category = route.params.category as string
 
 const pouch = usePouchDb()
 const feeds = ref<SubscriptionItem[] | null>(null)
-const entries = ref<RssEntry[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 
@@ -23,32 +22,25 @@ const feedTitleMap = computed(() =>
   Object.fromEntries(groupFeeds.value.map(feed => [feed.id, feed.title]))
 )
 
-// ── 无限滚动：查询窗口逐步增大，同步刷新时保留当前深度 ──
-const PAGE_SIZE = 50
-const MAX_ENTRIES = 10000 // 与集中库 find 上限一致，达到后不再加载
-const displayLimit = ref(PAGE_SIZE)
+// 条目数据与同步刷新策略：后台同步到的新条目先累计成「N 条新内容」提示，用户点了才上屏，
+// 避免把正在读的内容推走（用户主动点同步按钮时则直接上屏，见 isUserDrivenSync）。
+const {
+  entries, pendingCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyPending
+} = useSyncedEntryList({
+  // 从集中库查询该分组所有订阅源的条目，并补充分组内 feed 标题便于列表展示来源
+  query: async (limit) => {
+    const result = await pouch.queryGroupEntries(groupFeeds.value.map(feed => feed.id), limit)
+    return result.map(entry => ({
+      ...entry,
+      feed: { ...entry.feed, title: feedTitleMap.value[entry.feedId] ?? '' }
+    }))
+  }
+})
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
-const { sentinelRef, loading: loadingMore, hasMore, loadMore } = useInfiniteList(async () => {
-  if (!hasMore.value) return false
-  displayLimit.value += PAGE_SIZE
-  await refreshEntries()
-  return hasMore.value
-})
+const { sentinelRef, loading: loadingMore, loadMore } = useInfiniteList(() => grow())
 // EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
 const hasMoreGetter = () => hasMore.value
-
-// 从集中库查询该分组所有订阅源的条目
-async function refreshEntries() {
-  const result = await pouch.queryGroupEntries(groupFeeds.value.map(feed => feed.id), displayLimit.value)
-  // 补充分组内 feed 标题，便于条目列表展示来源
-  entries.value = result.map(entry => ({
-    ...entry,
-    feed: { ...entry.feed, title: feedTitleMap.value[entry.feedId] ?? '' }
-  }))
-  // 返回条数达到窗口上限说明可能还有更多；触顶（达到 find 上限）则停止
-  hasMore.value = entries.value.length >= displayLimit.value && displayLimit.value < MAX_ENTRIES
-}
 
 onMounted(async () => {
   try {
@@ -60,14 +52,14 @@ onMounted(async () => {
   }
 
   // 不自动同步：数据来自集中库（时间线页已增量同步），需要最新时点导航栏同步按钮
-  await refreshEntries()
+  await load()
   loading.value = false
 })
 
-// 手动同步（syncNow）完成或有新数据时重新查询
+// 同步完成 / 手动同步后重新查询；新条目先进提示条，用户主动同步时直接上屏
 watch(
   () => groupFeeds.value.map(feed => pouch.syncStatuses[feed.id]?.version ?? 0).join(','),
-  () => refreshEntries()
+  () => void refreshFromSync(pouch.isUserDrivenSync())
 )
 </script>
 
@@ -145,34 +137,43 @@ watch(
       </div>
 
       <template v-else>
-        <EntryList
-          :entries="entries"
-          :load-more="loadMore"
-          :has-more="hasMoreGetter"
-          show-feed
-        />
-
-        <!-- 无限滚动：哨兵进入视口触发加载下一批 -->
-        <div
-          ref="sentinelRef"
-          class="h-px"
-          aria-hidden="true"
-        />
-        <div
-          v-if="loadingMore"
-          class="flex justify-center py-6"
-        >
-          <UIcon
-            name="i-lucide-loader-circle"
-            class="size-5 animate-spin text-muted"
+        <!-- listAnchorRef 供应用「N 条新内容」时定位滚动容器并回到顶部 -->
+        <div ref="listAnchorRef">
+          <NewEntriesBanner
+            v-if="pendingCount"
+            :count="pendingCount"
+            @apply="applyPending"
           />
+
+          <EntryList
+            :entries="entries"
+            :load-more="loadMore"
+            :has-more="hasMoreGetter"
+            show-feed
+          />
+
+          <!-- 无限滚动：哨兵进入视口触发加载下一批 -->
+          <div
+            ref="sentinelRef"
+            class="h-px"
+            aria-hidden="true"
+          />
+          <div
+            v-if="loadingMore"
+            class="flex justify-center py-6"
+          >
+            <UIcon
+              name="i-lucide-loader-circle"
+              class="size-5 animate-spin text-muted"
+            />
+          </div>
+          <p
+            v-else-if="!hasMore"
+            class="py-6 text-center text-xs text-muted"
+          >
+            已加载全部条目
+          </p>
         </div>
-        <p
-          v-else-if="!hasMore"
-          class="py-6 text-center text-xs text-muted"
-        >
-          已加载全部条目
-        </p>
       </template>
     </template>
   </UDashboardPanel>

@@ -1,6 +1,4 @@
 <script setup lang="ts">
-import type { RssEntry } from '~/types/rss'
-
 definePageMeta({
   layout: 'default'
 })
@@ -12,37 +10,31 @@ const virtualFeedId = `bot:${botId}`
 const pouch = usePouchDb()
 const toast = useToast()
 const bot = ref<{ id: string, name: string, description?: string, avatarUrl?: string } | null>(null)
-const entries = ref<RssEntry[]>([])
 const loading = ref(true)
 const subscribed = ref(false)
+const loadingMore = ref(false)
+
+// 条目数据与同步刷新策略：后台同步到的新条目先累计成「N 条新内容」提示，用户点了才上屏，
+// 避免把正在读的内容推走（用户主动点同步按钮时则直接上屏，见 isUserDrivenSync）。
+const {
+  entries, pendingCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyPending
+} = useSyncedEntryList({
+  // bot 产出以虚拟 feedId `bot:{id}` 入库
+  query: limit => pouch.queryFeedEntries(virtualFeedId, limit)
+})
 
 // ── 分页加载：查询窗口逐步增大（不用 useInfiniteScroll，避免 SSR 兼容问题）──
-const PAGE_SIZE = 50
-const MAX_ENTRIES = 10000 // 与集中库 find 上限一致，达到后不再加载
-const displayLimit = ref(PAGE_SIZE)
-const loadingMore = ref(false)
-const hasMore = ref(true)
-
-// 从集中库查询该 bot 的产出（bot 产出以虚拟 feedId `bot:{id}` 入库）
-async function refreshEntries() {
-  try {
-    entries.value = await pouch.queryFeedEntries(virtualFeedId, displayLimit.value)
-    // 返回条数达到窗口上限说明可能还有更多；触顶（达到 find 上限）则停止
-    hasMore.value = entries.value.length >= displayLimit.value && displayLimit.value < MAX_ENTRIES
-  } finally {
-    loadingMore.value = false
-  }
-}
-
 let fetchingNext = false // 防重入：弹窗尾部预加载与「加载更多」按钮共用同一入口
-function loadMore() {
+async function loadMore() {
   if (fetchingNext || !hasMore.value) return
   fetchingNext = true
   loadingMore.value = true
-  displayLimit.value += PAGE_SIZE
-  void refreshEntries().finally(() => {
+  try {
+    await grow()
+  } finally {
     fetchingNext = false
-  })
+    loadingMore.value = false
+  }
 }
 // EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
 const hasMoreGetter = () => hasMore.value
@@ -63,14 +55,14 @@ onMounted(async () => {
   } catch {
     // bot 信息不要求强依赖
   }
-  await refreshEntries()
+  await load()
   loading.value = false
 })
 
-// 手动同步（syncNow）完成或有新数据时重新查询
+// 同步完成 / 手动同步后重新查询；新条目先进提示条，用户主动同步时直接上屏
 watch(
   () => pouch.syncStatuses[virtualFeedId]?.version ?? 0,
-  () => refreshEntries()
+  () => void refreshFromSync(pouch.isUserDrivenSync())
 )
 
 async function toggleSubscribe() {
@@ -152,42 +144,51 @@ async function toggleSubscribe() {
       </div>
 
       <template v-else>
-        <EntryList
-          :entries="entries || []"
-          :load-more="loadMore"
-          :has-more="hasMoreGetter"
-        />
-
-        <!-- 分页加载：滚动到底部附近或点击按钮加载下一批 -->
-        <div
-          v-if="loadingMore"
-          class="flex justify-center py-6"
-        >
-          <UIcon
-            name="i-lucide-loader-circle"
-            class="size-5 animate-spin text-muted"
+        <!-- listAnchorRef 供应用「N 条新内容」时定位滚动容器并回到顶部 -->
+        <div ref="listAnchorRef">
+          <NewEntriesBanner
+            v-if="pendingCount"
+            :count="pendingCount"
+            @apply="applyPending"
           />
-        </div>
-        <div
-          v-else-if="hasMore"
-          class="flex justify-center py-4"
-        >
-          <UButton
-            variant="outline"
-            color="neutral"
-            size="sm"
-            icon="i-lucide-chevrons-down"
-            @click="loadMore"
+
+          <EntryList
+            :entries="entries || []"
+            :load-more="loadMore"
+            :has-more="hasMoreGetter"
+          />
+
+          <!-- 分页加载：滚动到底部附近或点击按钮加载下一批 -->
+          <div
+            v-if="loadingMore"
+            class="flex justify-center py-6"
           >
-            加载更多
-          </UButton>
+            <UIcon
+              name="i-lucide-loader-circle"
+              class="size-5 animate-spin text-muted"
+            />
+          </div>
+          <div
+            v-else-if="hasMore"
+            class="flex justify-center py-4"
+          >
+            <UButton
+              variant="outline"
+              color="neutral"
+              size="sm"
+              icon="i-lucide-chevrons-down"
+              @click="loadMore"
+            >
+              加载更多
+            </UButton>
+          </div>
+          <p
+            v-else
+            class="py-6 text-center text-xs text-muted"
+          >
+            已加载全部产出
+          </p>
         </div>
-        <p
-          v-else
-          class="py-6 text-center text-xs text-muted"
-        >
-          已加载全部产出
-        </p>
       </template>
     </template>
   </UDashboardPanel>

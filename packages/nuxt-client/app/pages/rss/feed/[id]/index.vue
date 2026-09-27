@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { RssEntry, RssFeed } from '~/types/rss'
+import type { RssFeed } from '~/types/rss'
 
 definePageMeta({
   layout: 'default'
@@ -12,7 +12,6 @@ const api = useApi()
 const pouch = usePouchDb()
 const toast = useToast()
 const feed = ref<RssFeed | null>(null)
-const entries = ref<RssEntry[]>([])
 const loading = ref(true)
 const feedLoading = ref(true)
 
@@ -21,27 +20,18 @@ const feedLoading = ref(true)
 const subscriptionTitle = ref('')
 const feedDisplayName = computed(() => subscriptionTitle.value || feed.value?.title || '')
 
-// ── 无限滚动：查询窗口逐步增大，同步刷新时保留当前深度 ──
-const PAGE_SIZE = 50
-const MAX_ENTRIES = 10000 // 与集中库 find 上限一致，达到后不再加载
-const displayLimit = ref(PAGE_SIZE)
+// 条目数据与同步刷新策略：后台同步到的新条目先累计成「N 条新内容」提示，用户点了才上屏，
+// 避免把正在读的内容推走（用户主动点同步按钮时则直接上屏，见 isUserDrivenSync）。
+const {
+  entries, pendingCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyPending
+} = useSyncedEntryList({
+  query: limit => pouch.queryFeedEntries(feedId, limit)
+})
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
-const { sentinelRef, loading: loadingMore, hasMore, loadMore } = useInfiniteList(async () => {
-  if (!hasMore.value) return false
-  displayLimit.value += PAGE_SIZE
-  await refreshEntries()
-  return hasMore.value
-})
+const { sentinelRef, loading: loadingMore, loadMore } = useInfiniteList(() => grow())
 // EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
 const hasMoreGetter = () => hasMore.value
-
-// 从集中库查询该订阅源的条目
-async function refreshEntries() {
-  entries.value = await pouch.queryFeedEntries(feedId, displayLimit.value)
-  // 返回条数达到窗口上限说明可能还有更多；触顶（达到 find 上限）则停止
-  hasMore.value = entries.value.length >= displayLimit.value && displayLimit.value < MAX_ENTRIES
-}
 
 onMounted(async () => {
   // 订阅名先从本地订阅文档取（离线可用，也是侧边栏显示的名字），取不到再回退接口标题
@@ -57,14 +47,14 @@ onMounted(async () => {
   }
 
   // 不自动同步：数据来自集中库（时间线页已增量同步），需要最新时点导航栏同步按钮
-  await refreshEntries()
+  await load()
   loading.value = false
 })
 
-// 手动同步（syncNow）完成或有新数据时重新查询
+// 同步完成 / 手动同步后重新查询
 watch(
   () => pouch.syncStatuses[feedId]?.version ?? 0,
-  () => refreshEntries()
+  () => void refreshFromSync(pouch.isUserDrivenSync())
 )
 
 // 取消订阅
@@ -153,33 +143,42 @@ async function unsubscribe() {
       </div>
 
       <template v-else>
-        <EntryList
-          :entries="entries || []"
-          :load-more="loadMore"
-          :has-more="hasMoreGetter"
-        />
-
-        <!-- 无限滚动：哨兵进入视口触发加载下一批 -->
-        <div
-          ref="sentinelRef"
-          class="h-px"
-          aria-hidden="true"
-        />
-        <div
-          v-if="loadingMore"
-          class="flex justify-center py-6"
-        >
-          <UIcon
-            name="i-lucide-loader-circle"
-            class="size-5 animate-spin text-muted"
+        <!-- listAnchorRef 供应用「N 条新内容」时定位滚动容器并回到顶部 -->
+        <div ref="listAnchorRef">
+          <NewEntriesBanner
+            v-if="pendingCount"
+            :count="pendingCount"
+            @apply="applyPending"
           />
+
+          <EntryList
+            :entries="entries || []"
+            :load-more="loadMore"
+            :has-more="hasMoreGetter"
+          />
+
+          <!-- 无限滚动：哨兵进入视口触发加载下一批 -->
+          <div
+            ref="sentinelRef"
+            class="h-px"
+            aria-hidden="true"
+          />
+          <div
+            v-if="loadingMore"
+            class="flex justify-center py-6"
+          >
+            <UIcon
+              name="i-lucide-loader-circle"
+              class="size-5 animate-spin text-muted"
+            />
+          </div>
+          <p
+            v-else-if="!hasMore"
+            class="py-6 text-center text-xs text-muted"
+          >
+            已加载全部条目
+          </p>
         </div>
-        <p
-          v-else-if="!hasMore"
-          class="py-6 text-center text-xs text-muted"
-        >
-          已加载全部条目
-        </p>
       </template>
 
       <!-- 取消订阅确认弹窗 -->

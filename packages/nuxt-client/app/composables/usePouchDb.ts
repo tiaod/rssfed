@@ -108,7 +108,17 @@ interface PouchDbState {
   dbUserId: string | null
   /** 账号切换监听是否已注册（多个组件都会调用 usePouchDb，只需注册一次） */
   userWatchReady: boolean
+  /** 用户主动同步（SyncButton）的结束时间：列表页据此把新条目直接上屏 */
+  userSyncAt: number
+  /** 用户主动同步是否进行中：长同步期间每个源完成都算「用户主动」，不受时间窗口限制 */
+  userSyncActive: boolean
 }
+
+/**
+ * 「用户主动同步」的宽限期：点击同步按钮后这段时间内到达的新条目视为用户想立刻看到，
+ * 列表页直接上屏；超时后的新条目仍走「N 条新内容」提示，不打断阅读。
+ */
+const USER_SYNC_APPLY_WINDOW = 10_000
 
 /** 构造共享状态（usePouchDb 与 usePouchSyncStatus 共用同一份结构） */
 function createPouchState(): PouchDbState {
@@ -122,7 +132,9 @@ function createPouchState(): PouchDbState {
     activeReplicates: 0,
     userStateSyncPromise: null,
     dbUserId: null,
-    userWatchReady: false
+    userWatchReady: false,
+    userSyncAt: 0,
+    userSyncActive: false
   }
 }
 
@@ -519,6 +531,24 @@ export function usePouchDb() {
     feedIds?: string[],
     opts: { full?: boolean } = {}
   ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number }> {
+    // 用户主动同步：列表页据此把新条目直接上屏，而不弹「N 条新内容」提示条。
+    // active 覆盖长同步全程（数百个源可能耗时数十秒，光靠时间窗口会中途失效）；
+    // 结束时刷新 userSyncAt，兜住同步收尾阶段才到达的复制结果。
+    pouchState.userSyncActive = true
+    pouchState.userSyncAt = Date.now()
+    try {
+      return await runSyncNow(feedIds, opts)
+    } finally {
+      pouchState.userSyncActive = false
+      pouchState.userSyncAt = Date.now()
+    }
+  }
+
+  /** syncNow 的实际逻辑（触发范围与降级规则见其上方文档注释） */
+  async function runSyncNow(
+    feedIds?: string[],
+    opts: { full?: boolean } = {}
+  ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number }> {
     // 目标集合：显式传入的 feed，或当前已订阅的全部源 + 用户状态库。
     // 订阅列表从 user-state 库读取（syncStatuses 是会话状态，刷新后为空，不能作为依据）
     let targets: string[]
@@ -569,6 +599,14 @@ export function usePouchDb() {
     }
 
     return { ok, failed, skipped: candidateCount - targets.length }
+  }
+
+  /**
+   * 用户是否主动触发了同步（点同步按钮、或「重置本地缓存」后的全量重建），或刚结束不久。
+   * 列表页据此判定：主动同步期望立即看到新内容 → 直接上屏；后台同步 → 转「N 条新内容」提示。
+   */
+  function isUserDrivenSync(): boolean {
+    return pouchState.userSyncActive || Date.now() - pouchState.userSyncAt < USER_SYNC_APPLY_WINDOW
   }
 
   // ── 集中库查询（Mango 索引，一次查询） ──
@@ -1123,6 +1161,7 @@ export function usePouchDb() {
     syncFeed,
     syncFeedsIfChanged,
     syncNow,
+    isUserDrivenSync,
     queryTimeline,
     queryFeedEntries,
     queryGroupEntries,
