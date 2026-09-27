@@ -28,6 +28,23 @@
 #    **doco-cd 进程自己读**的（不是交给 daemon），所以文件必须在容器内可见。
 #    这正是 .doco-cd.yml 里 RSSFED_ENV_FILE 指向 /config/... 的原因；
 #    而 RSSFED_DEPLOY_DIR 走的是宿主机路径（bind mount 由 daemon 解析），两者不能混。
+#
+# 6. **宿主机上的文件权限有讲究**，都是 cap_drop: ALL 的连锁反应。
+#    cap_drop 会一并移除 CAP_DAC_OVERRIDE，于是容器内的 root 不再能绕过文件属主权限 ——
+#    这与「root 什么都能读」的直觉相反，实测在这里卡了两次：
+#
+#      .env.production   需要 `chown ubuntu:root` + `chmod 640`（owner 可读写、
+#                        group(root) 可读、other 无权限）。用 600 会让 doco-cd 报
+#                        permission denied；chown 给 root 又会让宿主上的手工兜底
+#                        （ubuntu 用户跑 docker compose）失去读权限。640 两头兼顾。
+#
+#      SSH 私钥          同理需要 `chown root:root` + `chmod 600`（属主 root 时容器内
+#                        root 才读得到）。代价是宿主上轮换密钥要 sudo。
+#
+#      known_hosts       **必须包含 ecdsa key**。只扫 ed25519/rsa 时，Go 的 SSH 客户端
+#                        一旦协商到 ecdsa 就报 "knownhosts: key mismatch"，看起来像
+#                        host key 被篡改，实际只是缺了对应类型。用不加 -t 的
+#                        `ssh-keyscan github.com` 扫全类型即可。
 
 name: doco-cd
 

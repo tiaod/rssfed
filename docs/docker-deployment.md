@@ -385,12 +385,26 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-
 ### 排障
 
 ```bash
-docker compose -f doco-cd.yml logs --tail=200 doco-cd     # 部署日志
-docker compose -f docker-compose.prod.yml ps              # 应用容器状态
+docker compose -f doco-cd.yml logs --tail=200 doco-cd      # 部署日志（阶段推进会反复打印）
+docker compose -f docker-compose.prod.yml ps               # 应用容器状态
 docker compose -f docker-compose.prod.yml logs --tail=200 server
+docker inspect doco-cd --format '{{.RestartCount}} {{.State.OOMKilled}}'
 ```
 
-常见现象：doco-cd 反复部署失败，多半是没有可用的 `deploy/release.env`（指针指向不存在的镜像），或 `.env.production` 没挂进 doco-cd 容器（`RSSFED_ENV_FILE` 指向的文件不存在）。
+**首次接入时实际踩到的四个坑**（按出现顺序记录，避免重复排查）：
+
+| 现象 | 原因 | 处置 |
+| --- | --- | --- |
+| `SSH_PRIVATE_KEY_FILE … permission denied` | `cap_drop: ALL` 一并移除了 `CAP_DAC_OVERRIDE`，容器内 root 读不了属主为 ubuntu 的 600 文件 | 私钥 `chown root:root` + `chmod 600` |
+| `knownhosts: key mismatch`（但指纹核对是对的） | keyscan 只扫了 `ed25519,rsa`，漏了 `ecdsa`，而 Go 的 SSH 客户端会协商到 ecdsa | 用**不加 `-t`** 的 `ssh-keyscan github.com` 扫全类型 |
+| compose 插值报 `required variable PUBLIC_URL is missing` | `env_file` 只给容器设变量，**完全不参与 compose 的 `${}` 插值** | 把 `.env.production` 加进 `.doco-cd.yml` 的 `env_files` |
+| `/config/.env.production: permission denied` | 同第一条的 cap_drop 问题 | `.env.production` 设 `chown ubuntu:root` + `chmod 640` |
+
+**其它常见现象**：
+
+- 反复报「镜像不存在」→ `deploy/release.env` 的指针指向了尚未构建的 sha，或 `record-release` job 未成功。
+- `pulling images` 阶段超时 → 默认 `timeout` 是 180s，本项目设为 300s；带宽慢时首次拉大镜像仍可能不够，按需调大。
+- 容器被反复重建 → `reconciliation` 默认监听 `unhealthy` 事件并重启容器；先看应用自身日志确认是否真的不健康。
 
 ### 包可见性
 
