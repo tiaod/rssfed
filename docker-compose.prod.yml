@@ -1,10 +1,13 @@
 # =============================================================================
 # RSSFed 生产编排（单机 Docker Compose）
 #
-# 用法：
-#   cp .env.production.example .env.production     # 填好 PUBLIC_URL 与各密钥
-#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
+# 用法（生产）：由 Doco CD 自动部署，见 docs/docker-compose-deployment.md。
+#   手工兜底：
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build
 #   需要编排自带 Caddy 自动 HTTPS 时追加：--profile tls
+#
+# ⚠️ 本文件刻意**不含 build: 段**：镜像一律由 CI 构建（在 2G 生产机上构建 Nuxt 会 OOM），
+#    而 Doco CD 每次部署都会无条件触发 compose 的构建阶段，留下 build 段会直接把它打挂。
 #
 # 拓扑：
 #   Caddy / Nginx (443)
@@ -65,7 +68,11 @@ services:
       #      COUCHDB_PROXY_SECRET 被写进仓库里的这个文件。
       # 副作用：容器首次启动后宿主机的这个文件会被 chown 成 couchdb(5984)，
       # 以后更新它要 `sudo rm` 后再传，或直接 `sudoedit`。
-      - ./deploy/couchdb-proxy-auth.ini:/opt/couchdb/etc/local.d/00-proxy-auth.ini
+      # 路径同样要可覆盖：Doco CD 的 clone 目录会随 revision 变化，用相对路径会让
+      # bind mount 源每次部署都漂移，couchdb 会被反复重建。
+      # 注意这里的路径是交给 Docker daemon 解析的，要用**宿主机**路径 ——
+      # 与上面 env_file（由 Doco CD 进程自己读，用容器内路径）不是一回事。
+      - ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-proxy-auth.ini:/opt/couchdb/etc/local.d/00-proxy-auth.ini
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:5984/"]
       interval: 10s
@@ -119,11 +126,16 @@ services:
   # 应用镜像重建时该容器会一并重建并重跑；镜像未变而要手动重跑：
   #   docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate
   migrate:
-    # 镜像由 CI 构建后推送到 ghcr（见 .github/workflows/build-images.yml）
-    image: ghcr.io/tiaod/rssfed/migrate:latest
-    build:
-      context: .
-      target: migrate
+    # 镜像由 CI 构建后推送到 ghcr（见 .github/workflows/build-images.yml），
+    # 由 Doco CD 依据 .doco-cd.yml 部署（见 docs/docker-deployment.md 第 10 节）。
+    # IMAGE_TAG 来自 deploy/release.env —— CI 构建成功后写入的 sha-<完整 40 位 hash>，
+    # 三个服务认同一个值，保证一次部署里 server / web / migrate 同属一个 commit。
+    # 不传时退回 latest，保留手工 pull 作为兜底路径。
+    #
+    # ⚠️ 这里刻意**不写 build:** 段。Doco CD 每次部署都会无条件调用 compose 的构建
+    # （源码 internal/docker/compose_deploy.go: service.Build），只要存在 build 段，
+    # 它就会在 2G 内存的生产机上尝试构建 Nuxt → OOM。生产镜像一律来自 CI。
+    image: ghcr.io/tiaod/rssfed/migrate:${IMAGE_TAG:-latest}
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://rssfed:${POSTGRES_PASSWORD}@postgres:5432/rssfed}
     depends_on:
@@ -134,13 +146,18 @@ services:
 
   # ── 后端：API + ActivityPub + worker ───────────────────────────────────────
   server:
-    image: ghcr.io/tiaod/rssfed/server:latest
-    build:
-      context: .
-      target: server
+    # 版本号与「为什么没有 build: 段」见 migrate 服务处
+    image: ghcr.io/tiaod/rssfed/server:${IMAGE_TAG:-latest}
     env_file:
-      # 缺文件时不报错：必填变量由下面的 ${VAR:?} 把关，避免"文件不存在"掩盖真正的问题
-      - path: .env.production
+      # 缺文件时不报错：必填变量由下面的 ${VAR:?} 把关，避免"文件不存在"掩盖真正的问题。
+      #
+      # ⚠️ 路径必须可覆盖：Doco CD 是把仓库 clone 到自己的目录后再执行 compose，
+      # 相对路径会指向 clone 目录，而那里**没有** .env.production（含密钥，不入库）。
+      # 因为写了 required: false，缺失不会报错，只会安静地少传变量 ——
+      # BETTER_AUTH_SECRET / ADMIN_* / STORAGE_S3_* 全部丢失，表现为认证异常、
+      # 对象存储失灵，而不是启动失败，极难排查。
+      # Doco CD 侧用 .doco-cd.yml 的 environment 把 RSSFED_ENV_FILE 指向容器内挂载点。
+      - path: ${RSSFED_ENV_FILE:-.env.production}
         required: false
     environment:
       NODE_ENV: production
@@ -180,10 +197,8 @@ services:
 
   # ── 前端：Nuxt SSR ─────────────────────────────────────────────────────────
   web:
-    image: ghcr.io/tiaod/rssfed/web:latest
-    build:
-      context: .
-      target: web
+    # 版本号与「为什么没有 build: 段」见 migrate 服务处
+    image: ghcr.io/tiaod/rssfed/web:${IMAGE_TAG:-latest}
     environment:
       NODE_ENV: production
       NITRO_PORT: "3000"

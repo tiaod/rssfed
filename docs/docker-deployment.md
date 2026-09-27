@@ -264,7 +264,7 @@ console.log("bucket ready");
 
 排障：用未签名请求探测 SeaweedFS 的 S3 端口会返回 403 `AccessDenied` —— 这说明服务在正常监听，不是故障。
 
-## 10. 镜像仓库与 CI
+## 10. 镜像仓库与 CI/CD
 
 镜像由 GitHub Actions 构建并推送到 **GitHub Container Registry**（[build-images.yml](../.github/workflows/build-images.yml)，push `master` 触发）：
 
@@ -274,25 +274,127 @@ console.log("bucket ready");
 | `ghcr.io/tiaod/rssfed/web` | 前端（Nuxt SSR） |
 | `ghcr.io/tiaod/rssfed/migrate` | 数据库结构对齐（一次性任务） |
 
-每次构建打两个 tag：`latest` 与 `sha-<短hash>`。
+每次构建打两个 tag：
 
-**为什么在 CI 构建**：生产服务器内存只有 ~2G，容器内构建 Nuxt 会 OOM（见第 2 节）。服务器只负责拉取与运行。
+| tag | 说明 |
+| --- | --- |
+| `latest` | 仅作「最新」指针，兼容手工 `pull` |
+| `sha-<完整 40 位 hash>` | **不可变版本号，部署与回滚都认它** |
 
-**为什么不让 CI 直接 SSH 部署**：那要求把生产私钥交给云端 Runner，而构建阶段会执行第三方依赖的代码 —— 供应链一旦出问题，等于把服务器钥匙一并交出去。当前是「CI 只推镜像 + 服务器手工拉取」：三个镜像包是**公开可见**的，服务器不持有任何 registry 凭证。
+> ⚠️ 是**完整 40 位** sha，不是短 hash。早期本文与 workflow 注释都写成 `sha-<短hash>`，但按短 hash 拼 tag 会 404（ghcr 上并不存在 `sha-5c4f5ce` 这种 tag）。
 
-### 部署与回滚
+### 部署链路
+
+```
+push master
+   │
+   ├─► ci.yml                    typecheck + test（所有分支）
+   │
+   └─► build-images.yml
+         ├─ job test             needs 门禁：测试不过就不构建
+         ├─ job build            构建 server/web/migrate 并推送 ghcr（latest + sha-<hash>）
+         └─ job record-release   把 IMAGE_TAG=sha-<hash> 写进 deploy/release.env 并提交
+                                       │
+                                       ▼
+                              Doco CD（服务器上常驻，轮询 master）
+                                 检测到新提交 → clone → docker compose up
+                                 按 compose 的 depends_on 先跑完 migrate
+                                       │
+                                       ▼
+                                 server / web 起来 → 宿主机 Caddy 反代
+```
+
+### 为什么是「服务器主动拉」而不是「CI 推过去」
+
+CI 反连服务器部署，要求把生产私钥交给云端 Runner；而构建阶段会执行第三方依赖的代码，供应链一旦出问题，等于把服务器钥匙一并交出去。实测本机 `ghcr.io` 可达、到 `github.com` 的 **SSH(22) 通**（而 HTTPS 443 超时），所以走「服务器自己 clone + 自己拉镜像」，CI 全程不持有任何服务器凭证。
+
+### 组件
+
+| 组件 | 位置 | 作用 |
+| --- | --- | --- |
+| [`.doco-cd.yml`](../.doco-cd.yml) | 仓库根 | 告诉 Doco CD 怎么部署这个 stack |
+| [`deploy/doco-cd.yml`](../deploy/doco-cd.yml) | 服务器 `~/rssfed/` | 拉起 doco-cd 容器本身 |
+| [`deploy/release.env`](../deploy/release.env) | 仓库（**由 CI 写**） | 携带 `IMAGE_TAG=sha-<hash>`，即发布指针 |
+
+Doco CD 容器：`ghcr.io/kimdre/doco-cd:0.122.0`（**必须 ≥ 0.121.0**，见下方第 3 条契约），纯轮询、不发布任何端口、`cap_drop: ALL`、`mem_limit: 256m`。
+
+启动与查看：
 
 ```bash
 cd ~/rssfed
-
-# 常规发布：拉取新镜像，重建变化了的容器
-docker compose --env-file .env.production -f docker-compose.prod.yml pull
-docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build
-
-# 回滚：把 compose 里三个服务的 :latest 换成目标提交的 :sha-<短hash>，再执行上面两条
+docker compose -f doco-cd.yml up -d
+docker compose -f doco-cd.yml logs -f
 ```
 
-> **当前状态（2026-09-21）**：`rssfed/server`、`rssfed/web`、`rssfed/migrate` 三个包已设为 **public**，服务器直接 `pull` 即可，无需登录。若将来改回 private，再补一次登录：
+### 三条不能碰的契约
+
+这三条都是实际踩过或从源码确认的，改动 compose 或 CI 时务必留意。
+
+**① compose 里不能有 `build:` 段**
+
+Doco CD 每次部署都会**无条件**调用 compose 的构建阶段（源码 `internal/docker/compose_deploy.go` 里 `service.Build` 直接跟在 pull 之后，没有条件分支）。而生产机只有 2G 内存，构建 Nuxt 必然 OOM —— 这正是「镜像改由 CI 构建」的初衷。所以 [`docker-compose.prod.yml`](../docker-compose.prod.yml) 里刻意删掉了 migrate/server/web 的 `build:` 段。本地要构建镜像时直接打 `docker build --target server .`，不要走这个文件。
+
+**② `env_file` 与 bind mount 的路径语义不同，都要可用变量覆盖**
+
+Doco CD 是把仓库 clone 到**自己的目录**再执行 compose，所以：
+
+- `env_file: .env.production` 会指向 clone 目录，而该文件含密钥、**不在仓库里**。更糟的是它写了 `required: false`，缺失不会报错，只会安静地少传变量——`BETTER_AUTH_SECRET` / `ADMIN_*` / `STORAGE_S3_*` 全部丢失，表现为认证异常、对象存储失灵而不是启动失败。这条路径由 `RSSFED_ENV_FILE` 覆盖，指向**容器内**挂载点（该指令是 doco-cd 进程自己读文件）。
+- `./deploy/couchdb-proxy-auth.ini` 这种 bind mount 源会随 revision 的 clone 目录漂移，导致 couchdb 每次部署都被重建。这条由 `RSSFED_DEPLOY_DIR` 覆盖，指向**宿主机**固定路径（bind mount 源由 Docker daemon 解析）。
+
+两个变量看着重复，实际指向不同的命名空间，不能合并。
+
+**③ 触发信号必须晚于镜像就绪**
+
+Doco CD 的触发信号是 **git 变更**，而镜像要等 CI 构建完（实测约 4 分钟）才存在。如果让它直接跟随 `master`：
+
+```
+t0        push
+t0+几秒    Doco CD 轮询到新提交 → up → 但 ghcr 上还是上一版镜像 → 部署"成功"
+t0+4min   CI 构建完成
+          ← 提交没有再变，Doco CD 不再触发 → 线上永久停在旧版本
+```
+
+失败的是「部署成功但内容旧」，日志完全正常。所以 `build-images.yml` 里加了 `record-release` job：构建**成功后**才把 sha 写进 `deploy/release.env` 并提交（带 `[skip ci]` 防循环）。这样触发信号天然落在镜像就绪之后，顺带拿到不可变版本号与精确回滚能力。**这个顺序不能倒过来。**
+
+### 首次接管现有 stack
+
+现有 stack 是用 `docker compose` CLI 手工创建的，交给 Doco CD 时：
+
+- **project 名必须保持 `rssfed-prod`**（`.doco-cd.yml` 的 `name` 与 compose 的 `name` 一致）。Docker 不支持修改容器 labels，改名只能新建 project 并手工迁移数据；名字一致才能复用既有具名卷（`rssfed-prod_postgres-data` 等），**数据不丢**。
+- 现有容器没有 `cd.doco.*` 标签，Doco CD 会视为「未部署」，首次部署会写入标签，因此**容器会被重建一次**。具名卷不受影响。
+- `remove_orphans` 默认开启。compose 里的 `seaweedfs` 属于 `profiles: ["s3"]`，而 `.doco-cd.yml` 没启用该 profile，因此它会被当作不存在（当前实例用 `STORAGE_DRIVER=fs`，本就没跑它）。要启用 S3 后端时，记得同步在 `.doco-cd.yml` 里加 `profiles: ["s3"]`。
+
+### 手工兜底与回滚
+
+不经过 Doco CD 也能操作（例如 doco-cd 本身出问题）：
+
+```bash
+cd ~/rssfed
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build
+```
+
+回滚 = 让部署源指回旧版本：
+
+```bash
+# 把 deploy/release.env 的 IMAGE_TAG 改成目标历史 sha，提交后 Doco CD 会自动部署回去
+# 历史版本号用 ghcr 的 tag 列表查，或用「最近构建成功」的 run 记录
+```
+
+> 注意两点：`prune_images: true` 会在部署后清理不再使用的旧镜像，回滚时需要重新从 ghcr 拉（tag 都还在，可行）；而**数据库迁移的固有限制不变** —— `migrate` 已执行过的结构变更不会自动撤销，含破坏性 schema 改动的发布需人工评估。
+
+### 排障
+
+```bash
+docker compose -f doco-cd.yml logs --tail=200 doco-cd     # 部署日志
+docker compose -f docker-compose.prod.yml ps              # 应用容器状态
+docker compose -f docker-compose.prod.yml logs --tail=200 server
+```
+
+常见现象：doco-cd 反复部署失败，多半是没有可用的 `deploy/release.env`（指针指向不存在的镜像），或 `.env.production` 没挂进 doco-cd 容器（`RSSFED_ENV_FILE` 指向的文件不存在）。
+
+### 包可见性
+
+> **当前状态（2026-09-21）**：`rssfed/server`、`rssfed/web`、`rssfed/migrate` 三个包已设为 **public**，服务器直接 `pull` 即可，无需登录，doco-cd 也不需要任何 registry 凭证。若将来改回 private，再补一次登录：
 
 ```bash
 echo "<PAT>" | docker login ghcr.io -u tiaod --password-stdin

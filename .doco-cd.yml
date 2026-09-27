@@ -1,0 +1,55 @@
+# Doco CD 部署配置 —— 放在仓库根目录，Doco CD clone/fetch 后读取。
+#
+# 部署源：git over SSH（本机 github.com 的 HTTPS 超时不通，SSH 22 可用）。
+# 触发方式：纯轮询，不需要暴露任何端口（宿主机 80/443 已被 Caddy 占用）。
+#
+# ── 四条必须遵守的契约 ──────────────────────────────────────────────────────
+#
+# 1. name 必须与 compose 里的 project name 完全一致（rssfed-prod）。
+#    Docker 不支持修改容器 labels，改名只能新建 project 并手工迁移数据；
+#    而名字一致才能复用既有的具名卷（rssfed-prod_postgres-data 等），数据不丢。
+#
+# 2. compose_files 必须显式列出 docker-compose.prod.yml ——
+#    Doco CD 的默认列表是 compose.yaml / compose.yml / docker-compose.yml /
+#    docker-compose.yaml，**不包含**这个名字。
+#
+# 3. IMAGE_TAG 由 deploy/release.env 提供（CI 构建成功后写入 sha-<完整 40 位 hash>）。
+#    这是消除竞态的关键，别改成直接跟随 master：
+#    Doco CD 的触发信号是 git 变更，而镜像要等 CI 构建完（约 4 分钟）才存在。
+#    若直接跟随 master，CI 还没构建完就可能被触发，那时 pull 到的是旧镜像，
+#    部署"成功"后 commit 不再变化 —— 结果是**线上永远停在旧版本**。
+#    让 CI 在构建成功之后再写 release.env，触发信号就天然落在镜像就绪之后，
+#    顺带拿到不可变版本号与精确回滚能力。
+#
+# 4. 两个 RSSFED_* 变量看似重复但指向不同命名空间，别合并：
+#    - RSSFED_ENV_FILE 由 Doco CD 进程自己读取（compose 的 env_file 指令），
+#      所以是**容器内**路径；
+#    - RSSFED_DEPLOY_DIR 会交给 Docker daemon 解析（bind mount 源），
+#      所以必须是**宿主机**路径。
+
+name: rssfed-prod
+
+compose_files:
+  - docker-compose.prod.yml
+
+# 由 CI 在构建成功后写入：IMAGE_TAG=sha-<hash>
+env_files:
+  - deploy/release.env
+
+environment:
+  # 容器内路径：该文件含密钥、不入库，通过 volumes 挂进 doco-cd 容器
+  RSSFED_ENV_FILE: /config/.env.production
+  # 宿主机路径：couchdb-proxy-auth.ini 所在目录
+  RSSFED_DEPLOY_DIR: /home/ubuntu/rssfed/deploy
+
+# 默认 180s 偏紧：首次拉 sha-<hash> 的镜像 + 跑迁移 + Nuxt 冷启动会超。
+# 超时会被判为部署失败，所以给足。
+timeout: 300
+
+# 即使 compose 未变也去核对 registry 上的镜像 digest。
+# 本方案用不可变 sha tag，理论上引用变化即可触发；开着是冗余保险。
+force_image_pull: true
+
+# 部署后清理不再被使用的旧镜像，避免每次发布都堆一份 700MB+ 的镜像。
+# 代价：回滚到较早版本时需要重新从 ghcr 拉取（tag 仍在，可行）。
+prune_images: true

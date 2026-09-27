@@ -1,0 +1,94 @@
+# Doco CD 自身的运行编排 —— 放在**服务器**上（~/rssfed/doco-cd.yml），
+# 用它拉起 doco-cd 容器，由后者负责部署 rssfed-prod 这个 stack。
+#
+# 启动：
+#   cd ~/rssfed && docker compose -f doco-cd.yml up -d
+# 看日志：
+#   docker compose -f doco-cd.yml logs -f
+#   docker compose -f doco-cd.yml exec doco-cd /doco-cd --help
+#
+# ── 几个刻意的选择 ──────────────────────────────────────────────────────────
+#
+# 1. **pin 版本，不用 latest**。一次性容器（migrate）的语义在 v0.121.0 才修好：
+#    之前的版本会把「migrate 正常退出、退出码 0」判成部署失败
+#    （kimdre/doco-cd#1115 → #1896）。网上老教程里的 sleep 变通就是绕这个 bug 的。
+#    用 latest 会在某次自动升级后突然回归，所以固定 0.122.0。
+#
+# 2. **纯轮询，不发布任何端口**。宿主 80/443 已被 Caddy 占用；轮询模式不需要
+#    GitHub 反过来访问本机，所以既不用开端口也不用配 webhook。
+#
+# 3. **走 SSH 而不是 HTTPS**。本机 github.com 的 443 超时不通，SSH 22 可用。
+#    用一把**只读 Deploy Key**，只对这一个仓库有效，随时可单独吊销。
+#
+# 4. **挂 docker.sock**。这等于把宿主的 root 权限交给 doco-cd（官方文档明确写了
+#    这一点，socket proxy 只能缩小爆炸半径、不能变成只读）。因此配套：容器不加端口、
+#    cap_drop: ALL、镜像 pin 版本。单机自用场景下这是可接受的取舍。
+#
+# 5. `.env.production` 以只读方式挂进容器 —— 因为 compose 的 env_file 指令是
+#    **doco-cd 进程自己读**的（不是交给 daemon），所以文件必须在容器内可见。
+#    这正是 .doco-cd.yml 里 RSSFED_ENV_FILE 指向 /config/... 的原因；
+#    而 RSSFED_DEPLOY_DIR 走的是宿主机路径（bind mount 由 daemon 解析），两者不能混。
+
+name: doco-cd
+
+services:
+  doco-cd:
+    image: ghcr.io/kimdre/doco-cd:0.122.0
+    container_name: doco-cd
+    restart: unless-stopped
+
+    environment:
+      TZ: Asia/Shanghai
+
+      # 轮询 rssfed 仓库的 master 分支。180s 一轮：
+      # 只在 git 有新提交时才会真正部署，平时开销就是一次 git fetch。
+      POLL_CONFIG: |
+        - url: git@github.com:tiaod/rssfed.git
+          reference: refs/heads/master
+          interval: 180
+
+      # SSH 私钥与 host key 校验（由 compose secrets 挂到 /run/secrets/）
+      SSH_PRIVATE_KEY_FILE: /run/secrets/doco_cd_ssh_key
+      SSH_KNOWN_HOSTS_FILE: /run/secrets/known_hosts
+
+    volumes:
+      # 管理容器必须持有的能力入口。注意：挂上它 = 宿主 root 等价权限
+      - /var/run/docker.sock:/var/run/docker.sock
+      # doco-cd 的克隆目录与 artifact 存储，必须持久化（每次部署都依赖它做变更检测）
+      - doco-cd-data:/data
+      # 含密钥，只读挂入；供 .doco-cd.yml 里 RSSFED_ENV_FILE 指向
+      - /home/ubuntu/rssfed/.env.production:/config/.env.production:ro
+
+    secrets:
+      - doco_cd_ssh_key
+      - known_hosts
+
+    # 不需要任何额外 capability
+    cap_drop:
+      - ALL
+
+    # 内存护栏：官方未公布实测占用，只给了「tiny RAM」的说法。
+    # 2G 机器上给它封顶，避免异常时把内存吃光拖垮应用容器。
+    mem_limit: 256m
+
+    healthcheck:
+      test: ["CMD", "/doco-cd", "healthcheck"]
+      start_period: 15s
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+secrets:
+  doco_cd_ssh_key:
+    file: /home/ubuntu/.ssh/doco-cd/id_ed25519
+  known_hosts:
+    file: /home/ubuntu/.ssh/doco-cd/known_hosts
+
+volumes:
+  doco-cd-data:

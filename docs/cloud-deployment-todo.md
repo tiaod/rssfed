@@ -246,6 +246,7 @@ compose 层已统一配 `json-file` 轮转（单文件 10MB × 3），Caddy 访�
 本次部署遇到的限制与结论：
 
 - `github.com` 的 HTTPS 与 Docker Hub 直连都超时（国内云主机常见）；GitHub **SSH(22) 可用**，镜像拉取依赖容器运行时已配置的内网加速源。换机器时先确认这两条通路，否则会卡在构建阶段。
+  - **复测更新（2026-09-27）**：这条只对了一半。逐域名实测：`api.github.com` ✅ 200 / 0.40s（**已通**）、`ghcr.io` ✅ 通且可匿名取 token（`/v2/` 返回 401 属正常握手）、`git@github.com:22` ✅ 网络通（只是未配部署密钥）、`raw.githubusercontent.com` ⚠️ 时通时断（3 次里偶发 25s 超时，DNS 只返回 IPv6，链路抖动）、`github.com` 网页 ❌ 仍超时。**这个差异直接决定部署方案选型**：正因为 `api.github.com` 与 `ghcr.io` 可达，才能让服务器主动发现新版本，而不必把生产私钥交给 CI（见 [docker-deployment.md](docker-deployment.md) 第 10 节）。换机器时请按这几个域名**分别**复测，只看 `github.com` 通不通会得出错误结论。
 - 内存只有 2G 左右，容器内构建 Nuxt 极易 OOM，因此镜像改由 **CI 构建并推送到 ghcr**，服务器只 `compose pull` 拉取运行（见 [docker-deployment.md](docker-deployment.md) 第 10 节）。
 - 反代复用宿主机已有的 Caddy：只在其配置**末尾追加**一个站点段，不动既有站点；TLS 由 Caddy 自动签发。
 

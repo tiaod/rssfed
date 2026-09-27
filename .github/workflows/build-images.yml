@@ -4,15 +4,22 @@
 # 所以镜像一律在这里构建，服务器只负责拉起运行。
 #
 # 镜像名：ghcr.io/<owner>/<repo>/<target>，带两个 tag：
-#   latest       —— 常规发布用
-#   sha-<短hash> —— 便于回滚到任意一次提交（改 compose 里的 tag 即可）
-name: build-images
-
-# 只做「构建 + 推送镜像」，部署是手工的：
-#   docker compose --env-file .env.production -f docker-compose.prod.yml pull
-#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build
+#   latest                 —— 仅作「最新」指针；compose 里默认值也用它，兼容手工 pull
+#   sha-<完整 40 位 hash>   —— 不可变版本号，部署与回滚都认它（见 .doco-cd.yml）
+#
+#   注意是**完整 40 位** sha，不是短 hash —— 早期注释与文档写的「sha-<短hash>」有误，
+#   按短 hash 拼回滚 tag 会 404（ghcr 上不存在 `sha-5c4f5ce` 这种 tag）。
+#
+# 部署：由 Doco CD 自动完成（服务器上的 doco-cd 轮询本仓库；配置见 .doco-cd.yml，
+# 说明见 docs/docker-deployment.md 第 10 节）。完整链路：
+#   push master → 本 workflow 跑测试 → 构建并推送镜像 → record-release 提交 deploy/release.env
+#   → Doco CD 轮询到该提交 → 按 release.env 里的 sha-<hash> 拉镜像 → 部署
+# 「先构建完、再提交指针」这个顺序不能颠倒，理由见 record-release job 的注释。
+#
 # 不让 CI 直接 SSH 部署的原因：那要求把生产私钥交给云端 Runner，而构建阶段会执行
 # 第三方依赖的代码，供应链一旦出问题，等于把服务器钥匙一并交出去。
+# 服务器能直连 ghcr.io、且到 github.com 的 SSH 可用，所以让服务器自己拉更划算。
+name: build-images
 
 on:
   push:
@@ -20,7 +27,46 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ── 构建前置门禁 ────────────────────────────────────────────────────────────
+  #
+  # 为什么把测试放在这里，而不是复用 ci.yml：ci.yml 与 build-images.yml 由同一次
+  # push **并行**触发，两者之间没有任何依赖关系 —— 测试挂了镜像照样会被推上 ghcr。
+  # 部署自动化一旦接上，这就等于把红灯代码直接送上生产。
+  # 用 needs 把门禁串进构建路径，才保证「ghcr 上存在的镜像 = 测试通过的镜像」。
+  # 这条不变式是发布指针可信的前提：record-release 只在构建成功后才推进
+  # deploy/release.env，因此 Doco CD 拉到的版本必然已通过 typecheck + test。
+  #
+  # 代价：master 的测试会跑两遍（ci.yml 一次 + 这里一次）。刻意接受这个重复，
+  # 换来的是显式、不易被静默破坏的依赖 —— workflow_run 那种隐式触发方式，
+  # 一旦 ci.yml 改名或改动触发条件，构建会静默不再发生，很难排查。
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install node
+        uses: actions/setup-node@v6
+        with:
+          # 与 ci.yml 保持一致
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+  # ── 构建并推送 ──────────────────────────────────────────────────────────────
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -53,5 +99,70 @@ jobs:
           tags: |
             ghcr.io/${{ github.repository }}/${{ matrix.target }}:latest
             ghcr.io/${{ github.repository }}/${{ matrix.target }}:sha-${{ github.sha }}
+          # OCI 标签：让线上任意一个镜像都能反查它来自哪个 commit。
+          # 没有它就只能靠比对构建时间猜版本 —— 2026-09-27 排查线上时正好撞上这点：
+          # 三个镜像的构建时间对不上（server 是 085dabb、web/migrate 是 4502878），
+          # 而镜像里没有任何字段能确认这件事。
+          # 不写 created 时间戳，保持同 commit 重复构建的结果可复现。
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=sha-${{ github.sha }}
+            org.opencontainers.image.title=rssfed-${{ matrix.target }}
           cache-from: type=gha,scope=${{ matrix.target }}
           cache-to: type=gha,mode=max,scope=${{ matrix.target }}
+
+  # ── 发布版本指针 ────────────────────────────────────────────────────────────
+  #
+  # 为什么需要这个 job：Doco CD 的触发信号是 **git 变更**，而镜像必须等 build job
+  # 跑完才存在（实测约 4 分钟）。如果让 Doco CD 直接跟随 master，它可能在 CI 还没
+  # 构建完时就被触发，此时 pull 到的是上一版镜像，部署"成功"后 commit 不再变化，
+  # 结果线上**永远停在旧版本**，而且日志看不出问题。
+  #
+  # 把 sha 写进 deploy/release.env 再提交，触发信号就天然落在镜像就绪之后；
+  # Doco CD 通过 .doco-cd.yml 的 env_files 读到 IMAGE_TAG，三个镜像被钉在同一 commit。
+  #
+  # needs: build 意味着任一 target 构建失败都不会走到这里 —— 不会记录一个残缺版本
+  # （否则出现"指针指向不存在镜像"的状态，Doco CD 会一直部署失败重试）。
+  record-release:
+    needs: build
+    # workflow_dispatch 时 github.sha 是手动选的 ref，不该被当成 master 的发布指针
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 提交 release.env 需要
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: 写入并提交版本指针
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "IMAGE_TAG=sha-${SHA}" > deploy/release.env
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add deploy/release.env
+
+          # 内容没变就别制造空提交（重复触发 workflow_dispatch 等情况）
+          if git diff --cached --quiet; then
+            echo "release.env 已是 sha-${SHA}，无需提交"
+            exit 0
+          fi
+
+          # [skip ci] 避免这次提交再触发一轮 CI，形成循环
+          git commit -m "chore(deploy): 记录镜像版本 sha-${SHA} [skip ci]"
+
+          # 连续 push 时可能有并发，push 被拒就 rebase 后重试
+          for attempt in 1 2 3; do
+            if git push; then
+              echo "已提交发布指针：sha-${SHA}"
+              exit 0
+            fi
+            echo "push 被拒（第 ${attempt} 次），rebase 后重试"
+            git pull --rebase origin master
+          done
+          echo "连续 3 次推送失败" >&2
+          exit 1
