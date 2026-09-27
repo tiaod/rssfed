@@ -32,8 +32,16 @@ name: rssfed-prod
 compose_files:
   - docker-compose.prod.yml
 
-# 由 CI 在构建成功后写入：IMAGE_TAG=sha-<hash>
+# 供 compose 做 ${} 插值用的 dotenv 列表。**注意这与服务级 env_file 是两回事**：
+# env_file 只给容器设变量，完全不参与 compose 文件本身的变量插值；
+# 而 compose 里 ${PUBLIC_URL:?...} / ${POSTGRES_PASSWORD:?...} 这些必填项必须在
+# 这一层提供，否则加载 compose 时就直接报「required variable ... is missing」。
+#
+# 顺序有意义：后加载的覆盖先加载的，所以指针放在最后。
 env_files:
+  # 绝对路径 —— 该文件含密钥、不在仓库里，通过 volumes 挂到容器内 /config/
+  - /config/.env.production
+  # 相对仓库根：CI 在构建成功后写入的发布指针（IMAGE_TAG=sha-<hash>）
   - deploy/release.env
 
 environment:

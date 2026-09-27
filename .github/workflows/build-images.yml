@@ -24,6 +24,14 @@ name: build-images
 on:
   push:
     branches: [master]
+    # 只改文档或部署配置时不必重建镜像 —— Doco CD 是直接轮询 git 的，
+    # 不依赖本 workflow 就能感知 .doco-cd.yml 的变化，所以跳过构建是安全的。
+    # 语义：只有**全部**改动都落在这些路径里时才跳过。
+    paths-ignore:
+      - 'docs/**'
+      - '**/*.md'
+      - '.doco-cd.yml'
+      - 'deploy/release.env' # 由 record-release 自己写，双保险防循环
   workflow_dispatch:
 
 jobs:
