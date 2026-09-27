@@ -14,8 +14,6 @@ const props = withDefaults(defineProps<{ feedIds?: string[] }>(), {
 })
 
 const pouch = usePouchDb()
-const toast = useToast()
-const syncing = ref(false)
 
 // 相关库的 id 集合（缺省 = 所有已激活的库）
 const relatedIds = computed(() => {
@@ -23,9 +21,10 @@ const relatedIds = computed(() => {
   return Object.keys(pouch.syncStatuses)
 })
 
-// 仅在手动同步进行中禁用按钮；live 同步的 syncing 状态只驱动全局进度条，
+// 手动同步逻辑与侧边栏的状态指示器共用（toast 文案只有一处）。
+// isSyncing 只表示手动同步进行中：live 同步的 syncing 状态只驱动全局进度条，
 // 否则初始同步因连接竞争卡住时按钮也会禁用，用户将无法重试。
-const isSyncing = computed(() => syncing.value)
+const { syncing: isSyncing, sync: handleSync } = useManualSync(() => props.feedIds)
 
 const hasError = computed(() =>
   relatedIds.value.some(id => pouch.syncStatuses[id]?.status === 'error')
@@ -61,31 +60,6 @@ const tooltipText = computed(() => {
   if (lastSyncedAt.value) return `上次同步：${formatRelativeTime(lastSyncedAt.value)}`
   return '同步'
 })
-
-async function handleSync() {
-  syncing.value = true
-  try {
-    const result = await pouch.syncNow(props.feedIds)
-    if (result.failed.length > 0) {
-      toast.add({
-        title: '同步失败',
-        description: result.failed.map(f => f.error).join('；'),
-        color: 'error'
-      })
-    } else if (result.ok.length > 0) {
-      toast.add({
-        title: '同步完成',
-        // 被增量过滤跳过的源也报出来，避免「点了一下没反应」的困惑
-        description: result.skipped > 0 ? `另有 ${result.skipped} 个订阅源无更新，已跳过` : undefined,
-        color: 'success'
-      })
-    } else {
-      toast.add({ title: '已是最新', description: '所选订阅源都没有新内容', color: 'success' })
-    }
-  } finally {
-    syncing.value = false
-  }
-}
 </script>
 
 <template>

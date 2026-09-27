@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui'
+// 显式导入：与 FeedNavigation 的 FeedIcon 一致，避免组件清单扫描不到时静默退化
+import SyncStatusIndicator from '~/components/SyncStatusIndicator.vue'
 
 const userStore = useUserStore()
 // 必须保持响应式：登录 / 登出 / 换账号后 session 会更新，快照取值不会跟着刷新
@@ -85,91 +87,93 @@ const items = computed<DropdownMenuItem[][]>(() => [
     </span>
   </UButton>
 
-  <UDropdownMenu
+  <div
     v-else
-    :items="items"
-    :content="{ side: 'top', align: 'start', sideOffset: 8 }"
-    :ui="{ content: 'w-72' }"
+    class="flex w-full items-center gap-1"
   >
-    <UButton
-      variant="ghost"
-      :size="collapsed ? 'xs' : 'sm'"
-      class="w-full justify-start"
+    <UDropdownMenu
+      :items="items"
+      :content="{ side: 'top', align: 'start', sideOffset: 8 }"
+      :ui="{ content: 'w-72' }"
     >
-      <UAvatar
-        v-if="user?.image"
-        :src="user.image"
-        :alt="user.name"
-        size="xs"
-      />
-      <UAvatar
-        v-else
-        :text="user?.name?.[0] || 'U'"
-        size="xs"
-        color="primary"
-      />
-      <span
-        v-if="!collapsed"
-        class="ml-2 truncate"
+      <UButton
+        variant="ghost"
+        :size="collapsed ? 'xs' : 'sm'"
+        class="min-w-0 flex-1 justify-start"
       >
-        {{ displayName }}
-      </span>
-      <UIcon
-        v-if="!collapsed"
-        name="i-lucide-chevron-up"
-        class="ml-auto size-4 text-muted"
-      />
-    </UButton>
-
-    <!-- 菜单顶部：账户概要（头像 / 昵称 / 角色徽标 / 邮箱） -->
-    <template #content-top>
-      <div class="mb-1 flex items-center gap-3 border-b border-default px-3 py-2.5">
         <UAvatar
           v-if="user?.image"
           :src="user.image"
           :alt="user.name"
-          size="md"
+          size="xs"
         />
         <UAvatar
           v-else
           :text="user?.name?.[0] || 'U'"
-          size="md"
+          size="xs"
           color="primary"
         />
-        <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2">
-            <span class="truncate text-sm font-medium">{{ displayName }}</span>
-            <UBadge
-              :color="isAdmin ? 'primary' : 'neutral'"
-              variant="subtle"
-              size="xs"
-            >
-              {{ isAdmin ? '管理员' : '普通用户' }}
-            </UBadge>
-          </div>
-          <p
-            v-if="user?.email"
-            class="truncate text-xs text-muted"
-          >
-            {{ user.email }}
-          </p>
-        </div>
-      </div>
-    </template>
-
-    <!-- 菜单底部：退出登录 -->
-    <template #content-bottom>
-      <div class="px-3 pb-3 pt-1">
-        <UButton
-          block
-          color="neutral"
-          variant="soft"
-          icon="i-lucide-log-out"
-          @click="handleLogout"
+        <span
+          v-if="!collapsed"
+          class="ml-2 truncate"
         >
-          退出登录
-        </UButton>
-      </div>
-    </template>
-  </UDropdownMenu>
+          {{ displayName }}
+        </span>
+      </UButton>
+
+      <!-- 菜单顶部：账户概要（头像 / 昵称 / 角色徽标 / 邮箱） -->
+      <template #content-top>
+        <div class="mb-1 flex items-center gap-3 border-b border-default px-3 py-2.5">
+          <UAvatar
+            v-if="user?.image"
+            :src="user.image"
+            :alt="user.name"
+            size="md"
+          />
+          <UAvatar
+            v-else
+            :text="user?.name?.[0] || 'U'"
+            size="md"
+            color="primary"
+          />
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2">
+              <span class="truncate text-sm font-medium">{{ displayName }}</span>
+              <UBadge
+                :color="isAdmin ? 'primary' : 'neutral'"
+                variant="subtle"
+                size="xs"
+              >
+                {{ isAdmin ? '管理员' : '普通用户' }}
+              </UBadge>
+            </div>
+            <p
+              v-if="user?.email"
+              class="truncate text-xs text-muted"
+            >
+              {{ user.email }}
+            </p>
+          </div>
+        </div>
+      </template>
+
+      <!-- 菜单底部：退出登录 -->
+      <template #content-bottom>
+        <div class="px-3 pb-3 pt-1">
+          <UButton
+            block
+            color="neutral"
+            variant="soft"
+            icon="i-lucide-log-out"
+            @click="handleLogout"
+          >
+            退出登录
+          </UButton>
+        </div>
+      </template>
+    </UDropdownMenu>
+
+    <!-- 同步状态指示器：占据原来那个没用的 chevron 的位置，悬停弹出同步详情 -->
+    <SyncStatusIndicator v-if="!collapsed" />
+  </div>
 </template>
