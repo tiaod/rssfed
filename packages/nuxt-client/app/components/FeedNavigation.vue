@@ -137,10 +137,7 @@ async function addFeed() {
 </script>
 
 <template>
-  <div
-    class="mt-4 border-t border-default pt-4"
-    :class="scrollable ? 'flex min-h-0 flex-1 flex-col' : ''"
-  >
+  <div :class="scrollable ? 'flex min-h-0 flex-1 flex-col' : ''">
     <ClientOnly>
       <div
         v-if="error"

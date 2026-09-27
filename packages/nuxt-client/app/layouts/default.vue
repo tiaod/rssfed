@@ -21,7 +21,8 @@ function syncCompactSidebar() {
   compactSidebar.value = window.innerHeight < 600
 }
 
-// 正常：body 不滚动，只让订阅源列表内部滚动；紧凑：用主题默认的 overflow-y-auto 整块滚动
+// 正常：body 不滚动，只让订阅源列表内部滚动；紧凑：用主题默认的 overflow-y-auto 整块滚动。
+// 间距一律用主题默认值（gap-4），不再自定义收紧
 const sidebarUi = computed(() => ({
   body: compactSidebar.value ? undefined : 'flex-1 min-h-0 overflow-hidden',
   footer: 'lg:border-t lg:border-default'
