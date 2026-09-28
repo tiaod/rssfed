@@ -27,6 +27,8 @@ const feedTitleMap = computed(() =>
 const {
   entries, pendingCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyPending
 } = useSyncedEntryList({
+  // stateKey 让列表在切走再点回该分组时原样恢复：回来是「接着读」，新条目先进提示条
+  stateKey: `group:${category}`,
   // 从集中库查询该分组所有订阅源的条目，并补充分组内 feed 标题便于列表展示来源
   query: async (limit) => {
     const result = await pouch.queryGroupEntries(groupFeeds.value.map(feed => feed.id), limit)
@@ -139,12 +141,11 @@ watch(
       <template v-else>
         <!-- listAnchorRef 供应用「N 条新内容」时定位滚动容器并回到顶部 -->
         <div ref="listAnchorRef">
+          <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
           <NewEntriesBanner
-            v-if="pendingCount"
             :count="pendingCount"
             @apply="applyPending"
           />
-
           <EntryList
             :entries="entries"
             :load-more="loadMore"

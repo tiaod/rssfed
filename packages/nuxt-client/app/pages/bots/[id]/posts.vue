@@ -19,6 +19,8 @@ const loadingMore = ref(false)
 const {
   entries, pendingCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyPending
 } = useSyncedEntryList({
+  // stateKey 让列表在切走再点回该 bot 页时原样恢复：回来是「接着读」，新条目先进提示条
+  stateKey: `bot-posts:${botId}`,
   // bot 产出以虚拟 feedId `bot:{id}` 入库
   query: limit => pouch.queryFeedEntries(virtualFeedId, limit)
 })
@@ -146,12 +148,11 @@ async function toggleSubscribe() {
       <template v-else>
         <!-- listAnchorRef 供应用「N 条新内容」时定位滚动容器并回到顶部 -->
         <div ref="listAnchorRef">
+          <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
           <NewEntriesBanner
-            v-if="pendingCount"
             :count="pendingCount"
             @apply="applyPending"
           />
-
           <EntryList
             :entries="entries || []"
             :load-more="loadMore"

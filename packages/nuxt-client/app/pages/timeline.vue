@@ -9,17 +9,22 @@ const api = useApi()
 const pouch = usePouchDb()
 const subs = ref<SubscriptionItem[]>([])
 const feedIds = computed(() => subs.value.map(s => s.id))
-const loading = ref(true)
 const error = ref<string | null>(null)
 
 // 条目数据与同步刷新策略：后台同步到的新条目先累计成「N 条新内容」提示，用户点了才上屏，
 // 避免把正在读的内容推走；订阅源多时逐个同步完成会密集触发重查，用防抖合并成一次。
+// stateKey 让列表在切走再点回时间线（甚至整页刷新）时按上次读到的位置摆回来，
+// 期间同步到的新条目同样先进提示条。
 const {
   entries, pendingCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyPending
 } = useSyncedEntryList({
+  stateKey: 'timeline',
   query: limit => pouch.queryTimeline(limit),
   debounceMs: 200
 })
+
+// 同一会话里切回来时列表内容已在（内存快照），不必再用 loading 盖住；刷新后要等重查
+const loading = ref(!entries.value.length)
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
 const { sentinelRef, loading: loadingMore, loadMore } = useInfiniteList(() => grow())
@@ -103,16 +108,18 @@ watch(
     </template>
 
     <template #body>
+      <!-- 错误只做提示，不遮挡已有内容：从上次的列表恢复时照样能接着读 -->
       <UAlert
         v-if="error"
         color="error"
         variant="soft"
         title="加载失败"
         :description="error"
+        class="mb-4"
       />
 
       <div
-        v-else-if="loading"
+        v-if="loading"
         class="flex justify-center py-12"
       >
         <UIcon
@@ -144,12 +151,11 @@ watch(
       <template v-else>
         <!-- listAnchorRef 供应用「N 条新内容」时定位滚动容器并回到顶部 -->
         <div ref="listAnchorRef">
+          <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
           <NewEntriesBanner
-            v-if="pendingCount"
             :count="pendingCount"
             @apply="applyPending"
           />
-
           <EntryList
             :entries="entries"
             :load-more="loadMore"

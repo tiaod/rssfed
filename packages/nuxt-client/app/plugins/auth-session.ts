@@ -1,4 +1,5 @@
 import type { SessionUser } from '~/types/auth'
+import { SESSION_USER_STATE_KEY } from '~/utils/sessionState'
 
 /**
  * 服务端预取 better-auth 会话，写入 useState 供 store 读取。
@@ -15,7 +16,7 @@ import type { SessionUser } from '~/types/auth'
  * （前端 :3000 → 后端 :3001），服务端拿到的永远是空会话，必须像下面这样显式带上。
  */
 export default defineNuxtPlugin(async () => {
-  const sessionUser = useState<SessionUser | null>('auth-session-user', () => null)
+  const sessionUser = useState<SessionUser | null>(SESSION_USER_STATE_KEY, () => null)
 
   if (!import.meta.server) return
 

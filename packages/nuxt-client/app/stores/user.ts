@@ -1,6 +1,7 @@
 import { defineStore } from 'pinia'
 import { computed } from 'vue'
 import { useCouchTargets } from '~/composables/useCouchTargets'
+import { SESSION_USER_STATE_KEY } from '~/utils/sessionState'
 import type { SessionUser } from '~/types/auth'
 
 export const useUserStore = defineStore('user', () => {
@@ -9,7 +10,7 @@ export const useUserStore = defineStore('user', () => {
 
   // SSR 阶段由 plugins/auth-session.ts 写入的会话，随 payload 下发并在客户端 hydration 时恢复。
   // 客户端首帧 nanostore 还是 isPending，用它让两端的首帧渲染结果一致，避免 hydration mismatch。
-  const sessionUser = useState<SessionUser | null>('auth-session-user', () => null)
+  const sessionUser = useState<SessionUser | null>(SESSION_USER_STATE_KEY, () => null)
 
   // nanostore 一旦有结论（isPending 为 false）就以它为准：登录、登出、跨标签页同步都靠它实时更新；
   // 有结论之前（SSR 与客户端首帧）回退到 payload 里的会话。
