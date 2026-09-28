@@ -8,6 +8,8 @@ import type { MaybeRefOrGetter } from 'vue'
  * 避免两处各写一份 toast 文案。不传 feedIds 时作用于所有已激活的库。
  *
  * 同步走增量：没有新内容的源会被跳过（见 syncNow），因此点击通常很快完成。
+ * 同步途中用户点了「暂停同步」（左下角指示器）时，本轮剩余任务被取消：
+ * 这里静默收尾，不弹失败提示 —— 暂停动作本身已有 toast 反馈。
  */
 export function useManualSync(feedIds?: MaybeRefOrGetter<string[] | undefined>) {
   const pouch = usePouchDb()
@@ -19,6 +21,8 @@ export function useManualSync(feedIds?: MaybeRefOrGetter<string[] | undefined>) 
     syncing.value = true
     try {
       const result = await pouch.syncNow(toValue(feedIds))
+      // 用户中途暂停：本轮剩余目标已被取消，交给暂停的 toast，不在这里报「失败」
+      if (result.cancelled > 0) return
       if (result.failed.length > 0) {
         toast.add({
           title: '同步失败',

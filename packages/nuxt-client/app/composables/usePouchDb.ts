@@ -1,6 +1,7 @@
 import PouchDB from 'pouchdb'
 import * as PouchDBFindNS from 'pouchdb-find'
-import { reactive, watch } from 'vue'
+import { reactive, ref, watch } from 'vue'
+import type { Ref } from 'vue'
 import type { FeedSubscriptionItem, RssCachedImage, RssEntry, SubscriptionItem } from '~/types/rss'
 import { useCouchTargets, USER_STATE_ID } from '~/composables/useCouchTargets'
 import { useApi } from '~/composables/useApi'
@@ -23,6 +24,29 @@ export interface SyncStatus {
   error?: string
   /** 最近一次成功同步的时间，供 UI 展示 */
   lastSyncedAt?: string
+}
+
+/**
+ * 一次复制的结果。
+ *
+ * cancelled 表示「用户主动暂停同步」而非失败：调用方据此不弹失败提示，
+ * 也不写 error 状态（暂停时状态已被统一归位）。
+ */
+export interface ReplicateResult {
+  ok: boolean
+  error?: string
+  cancelled?: boolean
+}
+
+/**
+ * 进行中的一次性复制：任务句柄 + 取消标记。
+ *
+ * 取消（task.cancel）会让复制的 Promise 以错误 reject，光看错误分不清「用户暂停」
+ * 与真正的同步失败，因此必须带上这个标记（见 replicateDb / pauseSync）。
+ */
+interface ActiveReplication {
+  task: { cancel: () => void }
+  markCancelled: () => void
 }
 
 /** 集中库里的 feed 文档（订阅源元信息，由远端 feed 库同步过来） */
@@ -99,9 +123,13 @@ interface PouchDbState {
   /** 同步状态（响应式，供组件 watch） */
   syncStatuses: Record<string, SyncStatus>
   /** 复制任务队列（限制并发，避免大量订阅源同时复制挤爆连接与 IndexedDB） */
-  replicateWaiting: Array<{ id: string, full?: boolean, resolve: (r: { ok: boolean, error?: string }) => void }>
+  replicateWaiting: Array<{ id: string, full?: boolean, resolve: (r: ReplicateResult) => void }>
   /** 当前正在执行的复制数 */
   activeReplicates: number
+  /** 进行中的一次性复制（用户暂停 / 切换账号时逐一取消） */
+  activeReplications: Set<ActiveReplication>
+  /** 用户暂停同步（左下角指示器点击暂停）：暂停期间不再入队新的复制 */
+  paused: Ref<boolean>
   /** 用户状态库 live 同步的启动 Promise（syncNow 暂停它之前必须先等它挂上 handle） */
   userStateSyncPromise: Promise<void> | null
   /** 当前本地实例所属的账号 id：本地库按账号隔离，见 switchUser */
@@ -130,6 +158,8 @@ function createPouchState(): PouchDbState {
     syncStatuses: reactive<Record<string, SyncStatus>>({}),
     replicateWaiting: [],
     activeReplicates: 0,
+    activeReplications: new Set<ActiveReplication>(),
+    paused: ref(false),
     userStateSyncPromise: null,
     dbUserId: null,
     userWatchReady: false,
@@ -150,6 +180,20 @@ export function usePouchSyncStatus(): Readonly<Record<string, SyncStatus>> {
   const nuxtApp = useNuxtApp() as NuxtAppWithPouchState
   nuxtApp.$pouchDbState ??= createPouchState()
   return nuxtApp.$pouchDbState.syncStatuses
+}
+
+/** 取消全部进行中的一次性复制（暂停同步 / 切换账号时用） */
+function cancelActiveReplications(state: PouchDbState) {
+  // 先快照再清空：cancel() 可能同步触发复制的 error 回调，回调里会回读这个集合
+  for (const item of [...state.activeReplications]) {
+    item.markCancelled()
+    try {
+      item.task.cancel()
+    } catch {
+      // 任务已结束时的 cancel 可能抛错，忽略
+    }
+  }
+  state.activeReplications.clear()
 }
 
 /**
@@ -186,12 +230,44 @@ export function usePouchDb() {
   }
 
   /**
+   * 暂停同步（左下角指示器在「正在同步」时点击）：取消进行中的复制、清空排队任务，
+   * 并阻止新的复制入队，直到用户点同步恢复。
+   *
+   * 只作用于「一次性复制」——即进度条统计的那部分（页面自动同步与手动同步共用同一队列）；
+   * 用户状态库的 live 双向同步不动：它是已读/收藏的实时通道，暂停拉取新条目不该顺带
+   * 停掉状态回写。
+   *
+   * 被中断的库状态归位为 idle：它们在 UI 上不再是「同步中」（顶部进度条随之消失），
+   * 也不递增 version（不触发列表重查）。
+   */
+  function pauseSync() {
+    pouchState.paused.value = true
+    cancelActiveReplications(pouchState)
+    // 排队未开始的任务必须回执「已取消」，否则调用方（syncNow 的 Promise.all）会一直挂着
+    for (const item of pouchState.replicateWaiting.splice(0)) {
+      item.resolve({ ok: false, cancelled: true })
+    }
+    for (const [key, status] of Object.entries(syncStatuses)) {
+      if (status.status === 'syncing' || status.status === 'queued') {
+        syncStatuses[key] = { ...status, status: 'idle' }
+      }
+    }
+  }
+
+  /** 恢复同步：清除暂停标记，之后的 syncNow / 自动同步可以正常入队 */
+  function resumeSync() {
+    pouchState.paused.value = false
+  }
+
+  /**
    * 切换到某个账号的本地库：关掉上一个账号的实例与同步句柄，下次访问时懒重建。
    * 不删库 —— 各账号的离线数据留着，换回来还能用。
    */
   function switchUser(uid: string | null) {
     for (const [, handle] of syncHandles.entries()) handle.cancel?.()
     syncHandles.clear()
+    // 在途的一次性复制对着上一个账号的库，一并取消（否则结果会写进新账号的状态）
+    cancelActiveReplications(pouchState)
     // 队列里排队的复制必须回执，否则调用方（如 syncNow 的 Promise.all）会一直挂着
     for (const item of pouchState.replicateWaiting.splice(0)) {
       item.resolve({ ok: false, error: '账号已切换，同步已取消' })
@@ -212,6 +288,8 @@ export function usePouchDb() {
       Reflect.deleteProperty(syncStatuses, key)
     }
     pouchState.dbUserId = uid
+    // 换账号后重新开始同步，不继承上一个账号的暂停状态
+    pouchState.paused.value = false
   }
 
   /** 把本地实例对齐到当前账号（会话就绪前是 null → guest 库，登录后再切到该账号的库） */
@@ -349,7 +427,11 @@ export function usePouchDb() {
    *  入队即标记为 queued，供进度条统计剩余数量；成功完成后记录同步时间。
    *  full=true 时强制全量同步（since: 0），用于手动同步按钮——库被删重建后
    *  checkpoint 的 seq 会大于远端（旧 seq 残留），增量同步会误判"无新变更"。 */
-  function enqueueReplicate(id: string, full = false): Promise<{ ok: boolean, error?: string }> {
+  function enqueueReplicate(id: string, full = false): Promise<ReplicateResult> {
+    // 用户已暂停同步：不排队、不发请求；以「已取消」回报，调用方不该当作失败
+    if (pouchState.paused.value) {
+      return Promise.resolve({ ok: false, cancelled: true })
+    }
     // 兜底：无效 id 直接拒绝，不发出注定失败的复制请求（上游已过滤，这里防漏网）
     if (!isValidDbId(id)) {
       return Promise.resolve({
@@ -384,8 +466,11 @@ export function usePouchDb() {
    *
    * 复制归属的账号在开头固定：期间若切换账号，本地实例已被关闭、结果一律作废，
    * 也不再往新账号的同步状态里写（否则进度条会留下一条永不结束的记录）。
+   *
+   * 用户暂停同步（pauseSync）会 cancel 本任务，结果以 cancelled 回报：
+   * 既不算失败，也不递增 version。
    */
-  async function replicateDb(id: string, full = false): Promise<{ ok: boolean, error?: string }> {
+  async function replicateDb(id: string, full = false): Promise<ReplicateResult> {
     const ownerUserId = pouchState.dbUserId
     /** 只有账号没变时才写同步状态 */
     function setStatus(status: SyncStatus) {
@@ -404,6 +489,11 @@ export function usePouchDb() {
     } catch (e: unknown) {
       lookupError = errorMessage(e)
     }
+
+    // 用户在这期间点了暂停：这个任务已经从队列移出（pause 清空队列时取消不到它），
+    // 直接放弃 —— 不发起复制，也不上报失败（暂停不是失败）
+    if (pouchState.paused.value) return { ok: false, cancelled: true }
+
     if (!remoteUrl) {
       const error = lookupError ?? `未取到订阅对应的 CouchDB 库名（${id}），已跳过同步`
       setStatus({
@@ -421,8 +511,32 @@ export function usePouchDb() {
       version: syncStatuses[id]?.version ?? 0
     })
 
+    // 取消标记 + 任务句柄：用户暂停时 pauseSync 会标记并 cancel。
+    // cancel 会让下面的 await 以错误 reject，光看错误分不清「暂停」与真失败，靠标记区分。
+    let cancelled = false
+    const entry: ActiveReplication = {
+      // 占位任务：replicate.from 返回真实句柄后立即替换。暂停恰好发生在这两步之间时，
+      // markCancelled 已置位，由 await 之后的兜底检查取消这个刚创建的任务
+      task: { cancel: () => {} },
+      markCancelled: () => {
+        cancelled = true
+      }
+    }
+    pouchState.activeReplications.add(entry)
+
     try {
-      const res = await db.replicate.from(remoteUrl, full ? { since: 0 } : undefined)
+      const task = db.replicate.from(remoteUrl, full ? { since: 0 } : undefined)
+      entry.task = task
+      if (cancelled) {
+        // 任务创建期间用户点了暂停：立刻取消，状态保持 pauseSync 归位后的 idle
+        try {
+          task.cancel()
+        } catch {
+          // 忽略：任务可能已自行结束
+        }
+        return { ok: false, cancelled: true }
+      }
+      const res = await task
       if (!res.ok) {
         throw new Error(`同步失败（HTTP ${res.status}）`)
       }
@@ -434,6 +548,8 @@ export function usePouchDb() {
       })
       return { ok: true }
     } catch (e: unknown) {
+      // 用户暂停导致的取消：不记失败、不写 error（状态已由 pauseSync 归位）
+      if (cancelled) return { ok: false, cancelled: true }
       setStatus({
         feedId: id,
         status: 'error',
@@ -441,6 +557,8 @@ export function usePouchDb() {
         error: errorMessage(e)
       })
       return { ok: false, error: errorMessage(e) }
+    } finally {
+      pouchState.activeReplications.delete(entry)
     }
   }
 
@@ -489,6 +607,9 @@ export function usePouchDb() {
   }
 
   async function syncFeedsIfChanged(feeds: Array<{ feedId: string, lastNewEntryAt?: string }>) {
+    // 用户已暂停同步：本轮自动同步（页面挂载时的增量同步）直接跳过，点指示器可恢复
+    if (pouchState.paused.value) return 0
+
     // 等待迁移清理完成：首次迁移时旧增量记录会导致误跳过，需清空后全量同步一次
     await ensureCleanup()
 
@@ -525,12 +646,18 @@ export function usePouchDb() {
    * 暂停它的 live 双向同步（避免两条链路抢连接），复制完成后恢复实时同步。
    * 复制统一走并发受限队列（见 enqueueReplicate），订阅源很多时不会挤爆连接。
    *
-   * 返回值 skipped 是被增量过滤跳过的目标数，供 UI 提示「无更新」，避免点了按钮像没反应。
+   * 返回值 skipped 是被增量过滤跳过的目标数，供 UI 提示「无更新」，避免点了按钮像没反应；
+   * cancelled 是本轮被用户暂停中断的目标数（不算失败，UI 不弹失败提示）。
+   *
+   * 用户主动调用即视为「恢复同步」：暂停状态下点同步会先清掉暂停标记，否则复制会被拦在
+   * 队列外（见 enqueueReplicate）。
    */
   async function syncNow(
     feedIds?: string[],
     opts: { full?: boolean } = {}
-  ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number }> {
+  ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number, cancelled: number }> {
+    // 用户主动同步 = 恢复：先清掉暂停标记
+    resumeSync()
     // 用户主动同步：列表页据此把新条目直接上屏，而不弹「N 条新内容」提示条。
     // active 覆盖长同步全程（数百个源可能耗时数十秒，光靠时间窗口会中途失效）；
     // 结束时刷新 userSyncAt，兜住同步收尾阶段才到达的复制结果。
@@ -548,7 +675,7 @@ export function usePouchDb() {
   async function runSyncNow(
     feedIds?: string[],
     opts: { full?: boolean } = {}
-  ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number }> {
+  ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number, cancelled: number }> {
     // 目标集合：显式传入的 feed，或当前已订阅的全部源 + 用户状态库。
     // 订阅列表从 user-state 库读取（syncStatuses 是会话状态，刷新后为空，不能作为依据）
     let targets: string[]
@@ -568,7 +695,7 @@ export function usePouchDb() {
 
     // 全部跳过：不暂停 live 同步、不发任何复制请求（按钮瞬时完成）
     if (targets.length === 0) {
-      return { ok: [], failed: [], skipped: candidateCount }
+      return { ok: [], failed: [], skipped: candidateCount, cancelled: 0 }
     }
 
     // ② 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用。
@@ -584,9 +711,13 @@ export function usePouchDb() {
     const results = await Promise.all(targets.map(id => enqueueReplicate(id, opts.full === true)))
     const ok: string[] = []
     const failed: { id: string, error: string }[] = []
+    const cancelled: string[] = []
     targets.forEach((id, i) => {
       const r = results[i]!
-      if (r.ok) {
+      if (r.cancelled) {
+        // 用户暂停导致的中断：既不算成功也不算失败
+        cancelled.push(id)
+      } else if (r.ok) {
         ok.push(id)
       } else {
         failed.push({ id, error: r.error ?? '未知错误' })
@@ -598,7 +729,7 @@ export function usePouchDb() {
       void startUserStateLiveSync()
     }
 
-    return { ok, failed, skipped: candidateCount - targets.length }
+    return { ok, failed, skipped: candidateCount - targets.length, cancelled: cancelled.length }
   }
 
   /**
@@ -1162,6 +1293,12 @@ export function usePouchDb() {
     syncFeedsIfChanged,
     syncNow,
     isUserDrivenSync,
+    /** 暂停同步（左下角指示器在同步中点击） */
+    pauseSync,
+    /** 恢复同步（暂停后点击指示器，或调用 syncNow） */
+    resumeSync,
+    /** 是否处于用户暂停状态（响应式，供指示器显示「已暂停」） */
+    paused: pouchState.paused,
     queryTimeline,
     queryFeedEntries,
     queryGroupEntries,

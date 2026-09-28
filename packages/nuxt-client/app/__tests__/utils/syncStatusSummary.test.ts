@@ -64,6 +64,18 @@ describe('summarizeSyncStatuses', () => {
     }
     expect(summarizeSyncStatuses(statuses).state).toBe('syncing')
   })
+
+  it('用户暂停同步时整体为 paused，且优先于同步中/失败', () => {
+    // 暂停由 pauseSync 保证：状态已被归位为 idle，但这里刻意留一个 syncing，
+    // 验证 paused 的优先级最高（UIIndicator 据此显示「同步已暂停」）
+    const statuses: Record<string, SyncStatusLike> = {
+      a: { status: 'error', error: '请求超时' },
+      b: { status: 'syncing' }
+    }
+    expect(summarizeSyncStatuses(statuses, { paused: true }).state).toBe('paused')
+    // 未暂停时行为不变
+    expect(summarizeSyncStatuses(statuses).state).toBe('syncing')
+  })
 })
 
 describe('formatSyncedAt', () => {
@@ -127,5 +139,14 @@ describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
     const s = summarizeSyncStatuses({})
     expect(syncStatusLabel(s.state)).toBe('尚未同步')
     expect(syncStatusDetails(s, now)).toEqual(['本次会话还没有同步记录'])
+  })
+
+  it('已暂停：标题与恢复提示（不再显示上轮失败原因）', () => {
+    const s = summarizeSyncStatuses(
+      { a: { status: 'error', error: '请求超时' } },
+      { paused: true }
+    )
+    expect(syncStatusLabel(s.state)).toBe('同步已暂停')
+    expect(syncStatusDetails(s, now)).toEqual(['已停止拉取新内容'])
   })
 })

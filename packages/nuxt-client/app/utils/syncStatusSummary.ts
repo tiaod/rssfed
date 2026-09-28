@@ -12,10 +12,10 @@ export interface SyncStatusLike {
   lastSyncedAt?: string
 }
 
-export type SyncState = 'syncing' | 'error' | 'success' | 'idle'
+export type SyncState = 'syncing' | 'error' | 'success' | 'idle' | 'paused'
 
 export interface SyncStatusSummary {
-  /** 整体状态：同步中 / 失败 / 成功 / 尚无记录 */
+  /** 整体状态：同步中 / 失败 / 成功 / 已暂停 / 尚无记录 */
   state: SyncState
   /** 参与同步的库总数 */
   total: number
@@ -38,11 +38,13 @@ export interface SyncStatusSummary {
 /**
  * 汇总所有库的同步状态。
  *
- * 状态优先级：同步中 > 失败 > 成功 > 无记录 —— 只要还有一个库在排队/进行中，
- * 就先显示「正在同步」；这轮全部结束后失败优先于成功，避免把失败盖掉。
+ * 状态优先级：暂停 > 同步中 > 失败 > 成功 > 无记录。paused 由调用方从共享状态传入
+ * （用户点了「暂停同步」）；只要还有一个库在排队/进行中就先显示「正在同步」；
+ * 这轮全部结束后失败优先于成功，避免把失败盖掉。
  */
 export function summarizeSyncStatuses(
-  statuses: Record<string, SyncStatusLike>
+  statuses: Record<string, SyncStatusLike>,
+  options: { paused?: boolean } = {}
 ): SyncStatusSummary {
   const list = Object.values(statuses)
   const syncing = list.filter(s => s.status === 'syncing').length
@@ -59,13 +61,15 @@ export function summarizeSyncStatuses(
   const remaining = syncing + queued
   const total = list.length
 
-  const state: SyncState = remaining > 0
-    ? 'syncing'
-    : errorCount > 0
-      ? 'error'
-      : lastSyncedAt
-        ? 'success'
-        : 'idle'
+  const state: SyncState = options.paused
+    ? 'paused'
+    : remaining > 0
+      ? 'syncing'
+      : errorCount > 0
+        ? 'error'
+        : lastSyncedAt
+          ? 'success'
+          : 'idle'
 
   return {
     state,
@@ -96,19 +100,25 @@ const LABELS: Record<SyncState, string> = {
   syncing: '正在同步',
   error: '同步失败',
   success: '同步成功',
-  idle: '尚未同步'
+  idle: '尚未同步',
+  paused: '同步已暂停'
 }
 
-/** 弹层标题：成功 / 失败 / 同步中 / 无记录 */
+/** 弹层标题：成功 / 失败 / 同步中 / 已暂停 / 无记录 */
 export function syncStatusLabel(state: SyncState): string {
   return LABELS[state]
 }
 
-/** 弹层明细行：同步中看进度，失败看原因，成功看时间与覆盖范围 */
+/** 弹层明细行：同步中看进度，失败看原因，成功看时间与覆盖范围，已暂停看提示 */
 export function syncStatusDetails(
   summary: SyncStatusSummary,
   now: number = Date.now()
 ): string[] {
+  // 暂停优先于其它状态：此时库里可能还留着上一轮的失败记录，但用户此刻关心的是「不再拉取」
+  if (summary.state === 'paused') {
+    return ['已停止拉取新内容']
+  }
+
   if (summary.state === 'syncing') {
     return [`剩余 ${summary.remaining} / ${summary.total} 个订阅源（${summary.progress}%）`]
   }

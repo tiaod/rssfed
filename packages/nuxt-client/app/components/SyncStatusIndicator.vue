@@ -2,16 +2,18 @@
 /**
  * 同步状态指示器：侧边栏左下角用户菜单右侧的图标按钮（原先是那个没用的 chevron）。
  *
- * 只订阅同步状态（usePouchSyncStatus），不构造整套 PouchDB 操作闭包 —— 任何库同步
- * 完成都只会重渲染这一个小组件，不会波及侧边栏其余部分（依赖留在小组件内部）。
- * 悬停弹出详情：同步中看进度，失败看原因，成功看上次同步时间；点击立即手动同步。
- * 状态判定与文案都在 utils/syncStatusSummary 里，做成纯函数以便单测。
+ * 悬停弹出详情：同步中看进度，失败看原因，成功看上次同步时间；点击行为随状态而变 ——
+ * 同步中 → 暂停同步，已暂停 → 继续同步，其余 → 立即同步。
+ * 状态判定与文案在 utils/syncStatusSummary 里（纯函数，便于单测）。
  */
+import { computed } from 'vue'
+import { usePouchDb } from '~/composables/usePouchDb'
+import { useManualSync } from '~/composables/useManualSync'
 import { summarizeSyncStatuses, syncStatusLabel, syncStatusDetails } from '~/utils/syncStatusSummary'
 import type { SyncState } from '~/utils/syncStatusSummary'
 
-const syncStatuses = usePouchSyncStatus()
-const summary = computed(() => summarizeSyncStatuses(syncStatuses))
+const pouch = usePouchDb()
+const summary = computed(() => summarizeSyncStatuses(pouch.syncStatuses, { paused: pouch.paused.value }))
 const label = computed(() => syncStatusLabel(summary.value.state))
 const details = computed(() => syncStatusDetails(summary.value))
 
@@ -19,9 +21,11 @@ const details = computed(() => syncStatusDetails(summary.value))
 // 这里不给按钮挂 loading —— 按钮一旦变 disabled 就会丢焦点，悬停中的弹层也会跟着收起；
 // 同步中的反馈由状态图标本身（refresh-cw + 旋转）和 toast 承担。
 const { sync } = useManualSync()
+const toast = useToast()
 
 const ICONS: Record<SyncState, string> = {
   syncing: 'i-lucide-refresh-cw',
+  paused: 'i-lucide-circle-pause',
   error: 'i-lucide-alert-circle',
   success: 'i-lucide-circle-check',
   idle: 'i-lucide-cloud'
@@ -29,9 +33,35 @@ const ICONS: Record<SyncState, string> = {
 
 const COLORS: Record<SyncState, string> = {
   syncing: 'text-primary',
+  paused: 'text-warning',
   error: 'text-error',
   success: 'text-success',
   idle: 'text-muted'
+}
+
+/** 点击会做什么：同步中→暂停，已暂停→继续，其余→立即同步（同时用作 aria-label） */
+const actionLabel = computed(() => {
+  if (summary.value.state === 'syncing') return '暂停同步'
+  if (summary.value.state === 'paused') return '继续同步'
+  return '立即同步'
+})
+
+/**
+ * 点击：正在同步时点击是「暂停」——立即取消在途复制并清空队列（见 usePouchDb 的
+ * pauseSync）；已暂停时点击是「继续」，顺手发起一次同步。
+ */
+function handleClick() {
+  if (summary.value.state === 'syncing') {
+    pouch.pauseSync()
+    toast.add({
+      title: '已暂停同步',
+      description: '剩余订阅源不再拉取，点击图标可继续',
+      color: 'neutral'
+    })
+    return
+  }
+  if (summary.value.state === 'paused') pouch.resumeSync()
+  void sync()
 }
 </script>
 
@@ -48,8 +78,8 @@ const COLORS: Record<SyncState, string> = {
       color="neutral"
       size="xs"
       square
-      aria-label="立即同步"
-      @click="sync"
+      :aria-label="actionLabel"
+      @click="handleClick"
     >
       <UIcon
         :name="ICONS[summary.state]"
@@ -77,7 +107,7 @@ const COLORS: Record<SyncState, string> = {
         >
           {{ line }}
         </span>
-        <span class="text-dimmed">点击立即同步</span>
+        <span class="text-dimmed">点击{{ actionLabel }}</span>
       </div>
     </template>
   </UTooltip>
