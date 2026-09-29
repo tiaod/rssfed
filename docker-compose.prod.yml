@@ -113,14 +113,43 @@ services:
     logging: *default-logging
     restart: unless-stopped
 
-  # 可选：自建 RSSHub（需要浏览器渲染的路由请换 diygod/rsshub:chromium-bundled）
-  # rsshub:
-  #   image: diygod/rsshub:latest
-  #   environment:
-  #     NODE_ENV: production
-  #   logging: *default-logging
-  #   restart: unless-stopped
-  #   然后在 .env.production 设置 RSSHUB_BASE_URL=http://rsshub:1200
+  # ── 自建 RSSHub（仅内网使用，不开放公网）──────────────────────────────────
+  # 服务对象有两个：
+  #   1. 本机 Miniflux —— 它是**另一个 compose 项目**，必须把其容器接入
+  #      rssfed-prod_default 网络后才能按服务名访问 http://rsshub:1200/...；
+  #   2. 本项目 server —— 由 .env.production 的 RSSHUB_BASE_URL 指向本实例，
+  #      抓取时把订阅里的 https://rsshub.app/... 改写过来
+  #      （实现见 packages/hono-server/src/rss/rsshub.ts）。
+  #
+  # 三个刻意选择：
+  #   - 宿主端口只绑回环：公网不可达，留一个口子给宿主机 curl 排障；
+  #   - 缓存复用本项目 redis 的 db 1（db 0 是 BullMQ 队列），比默认内存缓存省内存；
+  #   - 不用 chromium-bundled：本机只有 2G 内存，chromium 版会把宿主拖进 swap；
+  #     确需渲染型路由时再换镜像，并同步下调 mem_limit 之外的并发。
+  rsshub:
+    image: diygod/rsshub:latest
+    environment:
+      NODE_ENV: production
+      TZ: Asia/Shanghai
+      # 缓存走 compose 网络内的 redis，避免进程内缓存随源数量膨胀
+      CACHE_TYPE: redis
+      REDIS_URL: redis://redis:6379/1
+    ports:
+      # 仅宿主机回环，公网不可达；容器之间走 compose 网络按服务名访问
+      - "127.0.0.1:1200:1200"
+    depends_on:
+      redis:
+        condition: service_healthy
+    # 抓取源变多时内存会上涨，设上限保护 2G 的宿主；超限被 kill 后靠 restart 拉起
+    mem_limit: 512m
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:1200/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    restart: unless-stopped
 
   # ── 数据库结构对齐（一次性，成功后才启动 server）───────────────────────────
   # 应用镜像重建时该容器会一并重建并重跑；镜像未变而要手动重跑：
