@@ -143,7 +143,10 @@ services:
     # 抓取源变多时内存会上涨，设上限保护 2G 的宿主；超限被 kill 后靠 restart 拉起
     mem_limit: 512m
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:1200/"]
+      # 镜像里**没有 wget**（只有 curl / node）：用 wget 会让健康检查永远
+      # exec 失败 → 容器一直 unhealthy → Doco CD 每轮轮询都判定状态偏离并重建容器。
+      # 用 127.0.0.1 而不是 localhost，避开容器内 localhost 解析到不可达 IPv6 的情形。
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:1200/"]
       interval: 30s
       timeout: 5s
       retries: 3
