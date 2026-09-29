@@ -114,6 +114,10 @@ const STUBS = {
   UButton: true,
   UIcon: true,
   USkeleton: true,
+  EntryDetailSkeleton: {
+    name: 'EntryDetailSkeleton',
+    template: '<div class="entry-detail-skeleton" aria-busy="true" />'
+  },
   EntryDetail: {
     props: ['entry'],
     template: '<div class="entry-detail">{{ entry.title }}</div>'
@@ -177,6 +181,26 @@ describe('EntryDetailModal', () => {
     expect(wrapper.find('.swiper-stub').exists()).toBe(false)
     expect(wrapper.find('.swiper-slide-stub').exists()).toBe(false)
     expect(wrapper.find('.entry-detail').exists()).toBe(true)
+  })
+
+  it('全文未到位时正文区显示骨架屏，不把只有标题的投影当正文上屏', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(2)
+    g.entries.value = [makeEntry(1), makeEntry(2), makeEntry(3)]
+    // 模拟「投影已到、全文还在路上」：读取一直不落地
+    const realPouch = testGlobals.usePouchDb
+    testGlobals.usePouchDb = () => ({ getEntry: vi.fn(() => new Promise(() => {})) })
+
+    try {
+      const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+      await flushPromises()
+
+      // 投影（标题/元信息）不上屏，避免框体先塌成一小条再弹回全文高度
+      expect(wrapper.find('.entry-detail').exists()).toBe(false)
+      expect(wrapper.find('.entry-detail-skeleton').exists()).toBe(true)
+    } finally {
+      testGlobals.usePouchDb = realPouch
+    }
   })
 
   it('全屏第一篇 → 左侧不铺空槽占位，也不出现「已经是第一篇了」提示页', async () => {

@@ -50,32 +50,76 @@ function onScreenChange(event: MediaQueryListEvent) {
 // 切换条目时把 window 与正文所在的所有可滚动祖先统一归零，避免停留在上一篇的阅读位置
 const bodyRef = ref<HTMLElement | null>(null)
 
-// 列表行来自 map view 投影（为省内存刻意不携带正文全文 content），弹窗需按 id 拉完整文档再渲染，
-// 否则正文区永远空白。切换上一篇/下一篇时同步加载新条目的全文；竞态由 id 比对防止旧结果覆盖。
 const pouch = usePouchDb()
+
+// 条目全文也是懒取的：按 id 缓存，命中的直接复用（见 hydrateSlots）
+const details = reactive(new Map<string, RssEntry | null>())
+const loadingIds = reactive(new Set<string>())
+
+/**
+ * 非全屏正文区当前渲染的条目。
+ *
+ * 列表行来自 map view 投影（为省内存刻意不携带正文全文 content），只有标题与元信息：
+ * 直接把它当正文上屏的话，切篇瞬间框体会先塌成一小条、等全文到位再弹回原高度——就是那一下闪烁。
+ * 因此全文没到位前 detailEntry 保持 null（正文区显示骨架屏），只认真正取到的全文；
+ * 邻篇全文已由 hydrateSlots 预取，命中缓存时整篇直接换掉，连骨架屏都不会闪。
+ */
 const detailEntry = ref<RssEntry | null>(null)
+/** 全文是否还在取：true 时正文区渲染骨架屏 */
+const detailLoading = ref(false)
+/**
+ * 当前正显示的正文高度（px）。
+ *
+ * 切篇时全文要先加载，这段时间让骨架屏按这个高度铺开撑住弹窗尺寸，
+ * 就不会出现「先缩成小骨架、再弹成新正文」的两次尺寸变化。
+ */
+const detailSkeletonHeight = ref(0)
 
 watch(
-  () => currentEntry.value?.id,
-  (id) => {
+  [isOpen, () => currentEntry.value?.id],
+  ([open, id]) => {
     if (isFullscreen.value) {
-      scheduleAlign(false)
-    } else {
-      nextTick(resetScroll)
-      loadDetail(id)
+      if (open) scheduleAlign(false)
+      return
     }
+    if (!open) return
+    // 记下此刻（DOM 还是上一篇正文）的高度给骨架屏用。
+    // 只记有效值：关闭后正文节点已卸载、量不到高度，就沿用上一次的值，
+    // 这样重新打开弹窗也会按上次阅读的正文尺寸撑住，而不是先缩成小骨架再弹开。
+    const shownHeight = bodyRef.value?.offsetHeight ?? 0
+    if (shownHeight) detailSkeletonHeight.value = shownHeight
+    nextTick(resetScroll)
+    loadDetail(id)
   },
   { immediate: true }
 )
 
 async function loadDetail(id: string | undefined) {
-  detailEntry.value = currentEntry.value
+  const cached = id ? details.get(id) : null
+  if (cached) {
+    // 预取命中：整篇直接切换，不经过「只有标题的投影」那一帧
+    detailEntry.value = cached
+    detailLoading.value = false
+    return
+  }
+  detailEntry.value = null
+  detailLoading.value = !!id
   if (!id) return
   const full = await pouch.getEntry(id)
-  if (currentEntry.value?.id === id) {
-    detailEntry.value = full ?? currentEntry.value
-  }
+  if (currentEntry.value?.id !== id) return // 竞态：已切到别的条目，旧结果作废
+  // 取不到全文时退回投影（至少能看标题），其余情况用全文
+  detailEntry.value = full ?? currentEntry.value
+  detailLoading.value = false
 }
+
+// ── 正文切换的淡入淡出 ──
+//
+// 弹窗高度由正文长度决定，切篇时框体尺寸必然要变。给高度本身做过渡观感并不好
+// （长文收短像被「抽走」），所以尺寸就让它一步到位，只让内容交叉淡入淡出：
+// 新内容（或骨架屏）立刻占据正常流、框体高度随之确定，旧内容退场时改为绝对定位并裁切，
+// 两层叠着淡入淡出，既不会出现空窗，也不会先塌再弹。
+/** 正文区的渲染态：加载中是骨架屏，否则是条目 id；变化即触发淡入淡出 */
+const detailViewKey = computed(() => (detailLoading.value ? 'loading' : detailEntry.value?.id ?? 'empty'))
 
 function resetScroll() {
   if (!import.meta.client || typeof window === 'undefined') return
@@ -276,10 +320,7 @@ const slots = computed<Slot[]>(() => {
   return arr
 })
 
-// 槽内全文也是懒取的：按 id 缓存，命中的直接复用，未命中先展示投影 + 骨架
-const details = reactive(new Map<string, RssEntry | null>())
-const loadingIds = reactive(new Set<string>())
-
+// 槽内全文懒取：给三槽的每个条目补齐全文（命中缓存的跳过），未命中先展示投影 + 骨架
 function hydrateSlots() {
   if (!isOpen.value) return
   for (const s of slots.value) {
@@ -386,16 +427,19 @@ const TRUNCATE_UI = {
   title: 'truncate'
 }
 
+// 弹窗内容节点的标记类：桌面端翻页浮钮靠它量出弹窗的左右边缘（见 syncNavInset）
+const MODAL_CONTENT_CLASS = 'entry-detail-modal-content'
+
 // 全屏 + 固定顶/底栏：content 铺满视口，body 内部滚动、header/footer 固定
 // 全屏 + 不固定：整个模态（含 header/footer）随 overlay 一起滚动，短内容至少铺满高度
 // 非全屏：按设置的宽度控制
 const modalUi = computed(() => {
   if (!isFullscreen.value) {
-    return { content: settings.value.entryModalSize, ...TRUNCATE_UI }
+    return { content: `${MODAL_CONTENT_CLASS} ${settings.value.entryModalSize}`, ...TRUNCATE_UI }
   }
   if (settings.value.fixedBars) {
     return {
-      content: 'h-dvh flex flex-col',
+      content: `${MODAL_CONTENT_CLASS} h-dvh flex flex-col`,
       header: 'relative shrink-0 min-h-12 py-2.5 px-4 sm:px-6',
       // UModal body 基础类是 p-4 sm:p-6 且 ui 覆盖只做合并不会替换，必须显式 p-0 清掉，
       // 否则和 slide 内的 px-4 sm:px-6 叠出双倍水平边距
@@ -406,8 +450,104 @@ const modalUi = computed(() => {
     }
   }
   // 同样的原因，全屏不固定栏这条路径也要清掉 body 默认的内边距
-  return { content: 'min-h-dvh flex flex-col', body: 'flex-1 p-0 sm:p-0', ...TRUNCATE_UI }
+  return { content: `${MODAL_CONTENT_CLASS} min-h-dvh flex flex-col`, body: 'flex-1 p-0 sm:p-0', ...TRUNCATE_UI }
 })
+
+// ── 电脑端翻页浮钮的横向落点 ──
+//
+// 浮钮原先固定贴屏幕两端：桌面窗口越宽、弹窗越窄（如 sm:max-w-6xl），
+// 按钮离弹窗边缘就越远，鼠标要长距离移动才点得到。
+// 这里量一次弹窗内容的布局几何，把浮钮摆到弹窗左右边缘外侧。
+//
+// 用 offsetLeft/offsetWidth 而不是 getBoundingClientRect：入场动画是 scale(.95→1)，
+// 缩放会污染 rect 的读数，而布局盒尺寸不受 transform 影响，因此不必等动画结束再对齐。
+// offsetParent 是铺满视口的遮罩层，故 offsetLeft 即内容在视口中的横坐标。
+// 全屏档弹窗铺满视口，直接退化为贴屏幕两侧的最小留白（与旧行为一致）。
+const NAV_BUTTON_SPAN = 52 // 浮钮边长(40) + 浮钮与弹窗边缘的间距(12)
+const NAV_EDGE_MIN = 12 // 浮钮到屏幕边缘的最小留白（全屏或窗口过窄时的兜底）
+
+/** 浮钮容器到视口左右两侧的距离 */
+const navInset = reactive({ left: NAV_EDGE_MIN, right: NAV_EDGE_MIN })
+
+/** 等待弹窗内容挂载的逐帧重试句柄 */
+let navSyncRaf = 0
+
+function syncNavInset(retry = 0) {
+  if (!import.meta.client || !isOpen.value) return
+  cancelAnimationFrame(navSyncRaf)
+  if (isFullscreen.value) {
+    navInset.left = NAV_EDGE_MIN
+    navInset.right = NAV_EDGE_MIN
+    return
+  }
+  // reka-ui 的内容节点挂载晚于 isOpen 变化，首帧可能还查不到，逐帧重试到出现为止
+  const content = document.querySelector<HTMLElement>(`[data-slot="content"].${MODAL_CONTENT_CLASS}`)
+  if (!content) {
+    if (retry < 20) navSyncRaf = requestAnimationFrame(() => syncNavInset(retry + 1))
+    return
+  }
+  const left = content.offsetLeft
+  const right = left + content.offsetWidth
+  // 弹窗两侧各留出「按钮 + 间距」；窗口太窄时空间不足，退化为贴屏幕边缘。
+  // 此时浮钮会轻微压住弹窗边缘，但总比被挤出屏幕点不到强。
+  navInset.left = Math.max(NAV_EDGE_MIN, Math.round(left - NAV_BUTTON_SPAN))
+  navInset.right = Math.max(
+    NAV_EDGE_MIN,
+    Math.round(document.documentElement.clientWidth - right - NAV_BUTTON_SPAN)
+  )
+}
+
+/** 关闭时复位，避免下次打开先用上一次的落点闪一帧 */
+function resetNavInset() {
+  cancelAnimationFrame(navSyncRaf)
+  navInset.left = NAV_EDGE_MIN
+  navInset.right = NAV_EDGE_MIN
+}
+
+/**
+ * 入场动画结束后才露出浮钮。
+ *
+ * 浮钮已经是弹窗内容（content）的 fixed 子元素，而入场动画正是 content 自身的 scale(.95→1)：
+ * 动画期间 content 会成为 fixed 子元素的包含块，浮钮会被按「相对弹窗」而非「相对视口」摆放，
+ * 位置会瞬时跑偏，所以先不渲染，等 after:enter 再显示。
+ * 万一该事件没来（例如动画被跳过）则由定时器兜底，避免浮钮一直不出现。
+ * 监听名必须写成 @after:enter：UModal 抛的是带冒号的 after:enter，写成 @after-enter 收不到。
+ */
+const navRevealed = ref(false)
+let navRevealTimer = 0
+
+function revealNav() {
+  clearTimeout(navRevealTimer)
+  navRevealed.value = true
+}
+
+// 打开/关闭、弹窗宽度设置变化时重新对齐；窗口尺寸变化走 resize 监听。
+// 整块只在客户端注册：浮钮本就不参与 SSR，服务端没有 rAF 与视口几何。
+if (import.meta.client) {
+  // flush: 'post' 让首次量测落在本轮回调后的 DOM 更新之后：弹窗内容与浮钮同批挂载，
+  // 量到之后才绘制，浮钮不会先用兜底落点在屏幕边缘闪一帧。
+  // isFullscreen 一并监听：小屏↔桌面的临界切换（浮钮隐藏↔出现）也要重新量，
+  // 否则从窄窗口拉宽回来时，浮钮会停在「全屏兜底」的贴屏位置。
+  watch([isOpen, isFullscreen, () => settings.value.entryModalSize, () => currentEntry.value?.id], ([open]) => {
+    clearTimeout(navRevealTimer)
+    if (open) {
+      syncNavInset()
+      // after:enter 的兜底：事件没来也要能露出浮钮（动画只有 200ms，等 400ms 足够）
+      navRevealTimer = window.setTimeout(revealNav, 400)
+    } else {
+      resetNavInset()
+      navRevealed.value = false
+    }
+  }, { immediate: true, flush: 'post' })
+
+  const onViewportResize = () => syncNavInset()
+  window.addEventListener('resize', onViewportResize)
+  onBeforeUnmount(() => {
+    window.removeEventListener('resize', onViewportResize)
+    clearTimeout(navRevealTimer)
+    cancelAnimationFrame(navSyncRaf)
+  })
+}
 
 /**
  * 弹窗顶栏标题显示「订阅源名字」而非文章标题（文章标题已在正文区内展示）。
@@ -434,6 +574,7 @@ function isLoading(raw: RssEntry | null): boolean {
     :fullscreen="isFullscreen"
     :scrollable="isScrollable"
     :ui="modalUi"
+    @after:enter="revealNav"
   >
     <template #body>
       <!-- 全屏（手机恒定全屏，桌面选全屏档也是）：Swiper 三槽划卡 -->
@@ -473,21 +614,7 @@ function isLoading(raw: RssEntry | null): boolean {
                 v-else
                 class="px-4 sm:px-6 py-4 sm:py-6"
               >
-                <div
-                  v-if="isLoading(slot.raw)"
-                  class="space-y-4"
-                  aria-busy="true"
-                >
-                  <USkeleton class="h-7 w-[85%]" />
-                  <USkeleton class="h-3 w-44" />
-                  <div class="pt-2 space-y-3">
-                    <USkeleton class="h-4 w-full" />
-                    <USkeleton class="h-4 w-[94%]" />
-                    <USkeleton class="h-4 w-[88%]" />
-                    <USkeleton class="h-4 w-[97%]" />
-                    <USkeleton class="h-4 w-[64%]" />
-                  </div>
-                </div>
+                <EntryDetailSkeleton v-if="isLoading(slot.raw)" />
                 <EntryDetail
                   v-else
                   :entry="displayOf(slot.raw)!"
@@ -511,14 +638,71 @@ function isLoading(raw: RssEntry | null): boolean {
       <div
         v-else
         ref="bodyRef"
-        class="min-h-full"
+        class="relative min-h-full"
         @touchstart.passive="onTouchStart"
         @touchend.passive="onTouchEnd"
       >
-        <EntryDetail
-          v-if="detailEntry"
-          :entry="detailEntry"
-        />
+        <!--
+          全文未到位时只显示骨架屏：投影（只有标题）不上屏，否则框体会先塌再弹。
+          外层 div 只负责给 :key，切换条目/加载态时由 .entry-fade 做交叉淡入淡出。
+        -->
+        <Transition name="entry-fade">
+          <div :key="detailViewKey">
+            <EntryDetailSkeleton
+              v-if="detailLoading"
+              :height="detailSkeletonHeight"
+            />
+            <EntryDetail
+              v-else-if="detailEntry"
+              :entry="detailEntry"
+            />
+          </div>
+        </Transition>
+      </div>
+
+      <!--
+        电脑端：贴近弹窗左右边缘的上一篇/下一篇浮钮；小屏不渲染，改用触屏滑动。
+        必须挂在弹窗内容里（而不是 Teleport 到 body）：reka-ui 的 DismissableLayer 按
+        pointerdown 是否落在 content 子树内判断「点击了弹窗外部」，放在外面的浮钮会被当成
+        外部点击，一点就顺带把弹窗关掉。位置用 fixed 固定在视口垂直中央（见 navInset）。
+      -->
+      <div
+        v-if="isOpen && !isSmallScreen && navRevealed"
+        class="pointer-events-none fixed inset-y-0 z-[70] flex items-center justify-between"
+        :style="{ left: `${navInset.left}px`, right: `${navInset.right}px` }"
+      >
+        <UButton
+          square
+          size="lg"
+          color="neutral"
+          variant="soft"
+          class="pointer-events-auto rounded-full shadow-md"
+          :disabled="!canGoPrev"
+          aria-label="上一篇"
+          title="上一篇"
+          @click="navWithHint(-1)"
+        >
+          <UIcon
+            name="i-lucide-chevron-left"
+            class="size-6"
+          />
+        </UButton>
+        <UButton
+          square
+          size="lg"
+          color="neutral"
+          variant="soft"
+          class="pointer-events-auto rounded-full shadow-md"
+          :disabled="!canGoNext"
+          aria-label="下一篇"
+          title="下一篇"
+          @click="navWithHint(1)"
+        >
+          <UIcon
+            name="i-lucide-chevron-right"
+            class="size-6"
+          />
+        </UButton>
       </div>
     </template>
 
@@ -545,45 +729,6 @@ function isLoading(raw: RssEntry | null): boolean {
       </div>
     </template>
   </UModal>
-
-  <!-- 电脑端：弹窗两侧的上一篇/下一篇浮钮；小屏不渲染，改用触屏滑动 -->
-  <Teleport to="body">
-    <div
-      v-if="isOpen && !isSmallScreen"
-      class="pointer-events-none fixed inset-y-0 left-0 right-0 z-[70] flex items-center justify-between px-3 sm:px-6"
-    >
-      <UButton
-        square
-        color="neutral"
-        variant="soft"
-        class="pointer-events-auto rounded-full shadow-md"
-        :disabled="!canGoPrev"
-        aria-label="上一篇"
-        title="上一篇"
-        @click="navWithHint(-1)"
-      >
-        <UIcon
-          name="i-lucide-chevron-left"
-          class="size-5"
-        />
-      </UButton>
-      <UButton
-        square
-        color="neutral"
-        variant="soft"
-        class="pointer-events-auto rounded-full shadow-md"
-        :disabled="!canGoNext"
-        aria-label="下一篇"
-        title="下一篇"
-        @click="navWithHint(1)"
-      >
-        <UIcon
-          name="i-lucide-chevron-right"
-          class="size-5"
-        />
-      </UButton>
-    </div>
-  </Teleport>
 </template>
 
 <!-- swiper 输出的节点不在内层作用域内，需要全局样式：把三槽撑满高度，正文在各自槽内纵向滚动 -->
@@ -608,5 +753,24 @@ function isLoading(raw: RssEntry | null): boolean {
 .counter-fade-enter-from,
 .counter-fade-leave-to {
   opacity: 0;
+}
+
+/* 正文切换的交叉淡入淡出：新内容正常占位（框体高度即时到位），
+   退场层改为绝对定位铺满正文区并裁切，不参与撑高，因此不会出现空窗或高度反复 */
+.entry-fade-enter-active,
+.entry-fade-leave-active {
+  transition: opacity 0.18s ease;
+}
+
+.entry-fade-enter-from,
+.entry-fade-leave-to {
+  opacity: 0;
+}
+
+.entry-fade-leave-active {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
 }
 </style>
