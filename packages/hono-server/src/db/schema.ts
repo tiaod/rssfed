@@ -42,6 +42,23 @@ export const siteSettings = pgTable("site_settings", {
   primaryColor: text("primary_color"),
   /** 皮肤标识（占位：皮肤体系尚未定义枚举，先存自由字符串） */
   skin: text("skin"),
+
+  // ── PWA（可安装到手机）专项配置 ─────────────────────────────────────────
+  // 由 /api/site-settings/manifest.webmanifest 动态渲染 Web App Manifest，
+  // 全部字段留空时回退 siteTitle / primaryColor / 内置默认图标，保证开箱即可安装。
+  /** 主屏幕图标下的短名（建议 ≤12 字符）；未设置时回退 siteTitle */
+  pwaShortName: text("pwa_short_name"),
+  /** 显示模式：standalone | minimal-ui | fullscreen | browser；未设置时 standalone */
+  pwaDisplay: text("pwa_display"),
+  /** manifest 的 theme_color（hex）；未设置时回退 primaryColor */
+  pwaThemeColor: text("pwa_theme_color"),
+  /** manifest 的 background_color，同时用作图标底色（hex，须不透明）；未设置时回退 primaryColor */
+  pwaBackgroundColor: text("pwa_background_color"),
+  /** PWA 方形图标公开 URL。与 logoUrl 分开：站点 logo 多为横版，裁方会变形或被切字 */
+  pwaIconUrl: text("pwa_icon_url"),
+  /** PWA 图标附件外键（定位 attachments 行以删除旧 S3 文件） */
+  pwaIconAttachmentId: text("pwa_icon_attachment_id").references(() => attachments.id, { onDelete: "set null" }),
+
   /** 预留扩展项（新配置字段暂写此处，避免频繁改表结构） */
   extras: jsonb("extras").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at").notNull().defaultNow(),
