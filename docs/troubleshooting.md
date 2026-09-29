@@ -194,6 +194,41 @@ JS
 - **解法**：本地库名与同步记录 key 都带上账号 id（[utils/localDbName.ts](../packages/nuxt-client/app/utils/localDbName.ts)），换账号等于换一套本地库；会话未就绪或未登录落到 `guest`，那段时间的数据不会被任何账号继承。启动清理会**删除**旧的固定库名（`rssfed-entries` / `rssfed-user-state`）而不是把它们搬进新库 —— 旧库里可能混着多个账号的数据，搬进去反而会把上一个账号的数据固化下来再推上远端。
 - **已经被写脏的远端库怎么办**：查该账号 user-state 库里的 `subscription:` 文档（`GET /api/couchdb/proxy/<库名>/_all_docs?startkey="subscription:"&endkey="subscription:\uffff"&include_docs=true`，库名从 `GET /api/couchdb/targets` 拿），确认哪些订阅不属于该账号后删除对应文档即可；本地 PouchDB 侧因为换了库名，会重新全量同步一次。
 
+## PWA 与安装到手机
+
+### 手机上「添加到主屏幕」后图标是网页截图、打开还带地址栏
+
+- **现象**：iOS 加完主屏幕后图标是页面缩略图，点开仍是带 Safari 地址栏的普通网页。
+- **原因**：`<link rel="manifest">` 没被读到（404 或路径跨域），iOS 就退化成「用页面截图当图标 + 普通浏览器窗口打开」。
+- **排查**（**必须用站点自身的同源地址**，别拿 `localhost:3000` 去测 3001 的接口）：
+
+  ```bash
+  curl -sI https://你的域名/api/site-settings/manifest.webmanifest   # 期望 200 application/manifest+json
+  curl -s  https://你的域名/api/site-settings/manifest.webmanifest   # 看 name / icons 是否来自站点配置
+  curl -sI https://你的域名/api/site-settings/icon/512.png           # 期望 200 image/png
+  ```
+
+- **反代**：这三条路径都在 `/api/site-settings` 下，落在既有的 `/api/*` 转发规则内，通常无需额外配置。若把 manifest 改挂到域名根下（`/manifest.webmanifest`），必须同步加一条转发，否则它会落到 Nuxt 上 404。
+- **开发环境**：前端 3000、后端 3001 分端口，靠 `nuxt.config.ts` 的 `nitro.routeRules` 把 `/api/site-settings/**` 代理到后端，同源路径才通。⚠️ 这条规则**必须保持精确前缀**：写成 `/api/**` 会连带抢走 `/api/_nuxt_icon/*`，导致页面图标整片空白（同「反向代理与网络」章节那条）。
+
+### 图标装上后显示异常，或干脆装不上
+
+- **尺寸不符是最常见原因**：manifest 声明 `512x512` 而实际输出别的像素时，Chrome 会**静默丢弃**该图标，表现就是「manifest 看着完全正确，但安装入口不出现」。核对实际像素：
+
+  ```bash
+  curl -s https://你的域名/api/site-settings/icon/512.png -o /tmp/i.png && file /tmp/i.png
+  ```
+
+- **Android 图标边缘被裁**：maskable 必须缩进中心 20% 安全区并铺不透明底，不能拿普通方图顶替。用 `/api/site-settings/icon/maskable-512.png`。
+- **iOS 图标发黑**：iOS 把透明区域填黑，apple-touch 图标必须不透明。用 `/api/site-settings/icon/apple-touch-180.png`。
+- **改了配置但手机上还是旧图标**：已安装的 PWA 会缓存图标，需要先移除再重新「添加到主屏幕」。
+
+### 改了站点设置，manifest 没更新
+
+- manifest 响应是 `Cache-Control: no-cache` + ETag，浏览器每次都会带 `If-None-Match` 回来验证，正常应立即生效。
+- 图标 URL 带 `?v=<配置版本>`（版本 = 更新时间戳 + 图标源签名的哈希），配置一变 URL 就变，绕开长缓存；不带 `v` 的手工访问只短缓存 5 分钟。
+- 若中间层 CDN 强行缓存了 `/api/site-settings/*`，需要为该路径放行或缩短 TTL。
+
 ## 数据库与迁移
 
 ### `drizzle-kit push` 要 DROP `fedify_kv_v2`，会删掉 Bot 私钥

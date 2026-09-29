@@ -91,6 +91,7 @@ docker build --target web    -t rssfed-web:latest    .
 | 路径 | 去向 |
 | --- | --- |
 | `/api/*` | server（含 `/api/health`、`/api/couchdb` 代理、`/api/files/*`） |
+| `/api/site-settings/*` | server —— 上面一条已覆盖。**PWA 的 Manifest 与图标也在这里**（`/api/site-settings/manifest.webmanifest`、`/api/site-settings/icon/*`），因此反代无需为 PWA 追加任何规则；注意它们必须是**同源**路径，不要改挂到域名根下 |
 | `/mcp`、`/mcp/*` | server，**不做 301/307**（重定向会让 MCP 客户端丢掉 `Authorization` 头） |
 | `/.well-known/*` | server（webfinger） |
 | `/nodeinfo/*` | server |
