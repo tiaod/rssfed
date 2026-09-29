@@ -34,8 +34,10 @@ const SHADE_MIX: Record<Shade, { ref: 'white' | 'black', ratio: number }> = {
   950: { ref: 'black', ratio: 40 }
 }
 
-/** 把 #rgb 归一化为 #rrggbb 小写；非法输入返回 null */
-export function normalizeHexColor(input: string): string | null {
+/** 把 #rgb 归一化为 #rrggbb 小写；非法或空输入返回 null */
+export function normalizeHexColor(input: string | null | undefined): string | null {
+  // 站点配置字段全部可空（未设置即回退默认），调用方直接透传即可，不必各自判空
+  if (typeof input !== 'string') return null
   const value = input.trim()
   if (!PRIMARY_COLOR_RE.test(value)) return null
   if (value.length === 7) return value.toLowerCase()

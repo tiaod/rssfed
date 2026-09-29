@@ -123,7 +123,17 @@ export function useApi() {
           form.append('file', file)
           return apiFetch<{ logoUrl: string }>(`${base}/api/admin/site-settings/logo`, { method: 'POST', body: form })
         },
-        deleteLogo: () => apiFetch(`${base}/api/admin/site-settings/logo`, { method: 'DELETE' })
+        deleteLogo: () => apiFetch(`${base}/api/admin/site-settings/logo`, { method: 'DELETE' }),
+        /**
+         * 上传 PWA 方形图标（multipart），返回 { pwaIconUrl }。
+         * 与站点 logo 分开：logo 多为横版（页头用），直接裁方会变形或切字。
+         */
+        uploadIcon: (file: File) => {
+          const form = new FormData()
+          form.append('file', file)
+          return apiFetch<{ pwaIconUrl: string }>(`${base}/api/admin/site-settings/icon`, { method: 'POST', body: form })
+        },
+        deleteIcon: () => apiFetch(`${base}/api/admin/site-settings/icon`, { method: 'DELETE' })
       }
     }
   }

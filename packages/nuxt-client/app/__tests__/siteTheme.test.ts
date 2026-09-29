@@ -25,6 +25,12 @@ describe('normalizeHexColor', () => {
       expect(normalizeHexColor(bad)).toBeNull()
     }
   })
+
+  // 站点配置字段（如 PWA 主题色）在未设置时是 null/undefined，调用方可直接透传
+  it('空值返回 null 而不是抛错', () => {
+    expect(normalizeHexColor(null)).toBeNull()
+    expect(normalizeHexColor(undefined)).toBeNull()
+  })
 })
 
 describe('buildPrimaryColorCss', () => {

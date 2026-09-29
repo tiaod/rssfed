@@ -1,6 +1,23 @@
 // https://nuxt.com/docs/api/configuration/nuxt-config
 import { generateServiceWorkerManifest } from './build/generate-sw-manifest'
 
+/**
+ * 只有开发环境需要把 /api/site-settings/** 代理到后端（见下方 routeRules）：
+ * dev 前后端分端口，而 PWA 的 manifest 与图标必须同源。
+ *
+ * 判据是 NODE_ENV，且这个保证来自 nuxi 本身而不是 Dockerfile：`nuxi build` 会在加载
+ * 本配置**之前**强制 `process.env.NODE_ENV = 'production'`（`nuxi dev` 则设 development，
+ * 见 @nuxt/cli 的 overrideEnv），所以这条规则不会进入生产构建 —— 生产由 Caddy 把
+ * /api/* 分流到 Hono，请求到不了 Nuxt，规则留着只会在「直连 web 容器排障」时表现为
+ * 难以理解的 502。故构建镜像无需额外声明 NODE_ENV。
+ *
+ * 但若将来绕过 nuxi 改用编程式构建（@nuxt/kit 的 loadNuxt + build），NODE_ENV 不再被
+ * 强制设置，需自行保证为 production，否则这条代理规则会被打进生产产物。
+ */
+const isDev = process.env.NODE_ENV !== 'production'
+/** 后端地址：与 runtimeConfig.public.apiBaseUrl 的默认值保持一致 */
+const backendBaseUrl = process.env.NUXT_PUBLIC_API_BASE_URL ?? 'http://localhost:3001'
+
 export default defineNuxtConfig({
   modules: [
     '@nuxt/eslint',
@@ -42,6 +59,19 @@ export default defineNuxtConfig({
       routes: ['/offline']
     },
     routeRules: {
+      // PWA 的 manifest 与图标必须是**同源**路径：manifest 里的 start_url / scope 语义
+      // 基于它所在的 origin，用跨域地址（http://localhost:3001）会让浏览器拒绝或按
+      // 错误的 origin 处理，iOS Safari 更是基本不认。
+      //
+      // 但开发环境前后端分端口（前端 3000、后端 3001），/api/site-settings/* 会打到
+      // Nuxt 上 404 —— 手机上通过局域网访问 dev 时「添加到主屏幕」就读不到 manifest。
+      // 故只在这一条前缀上做代理，且**仅限开发环境**（生产由 Caddy 分流，见文件头 isDev）。
+      //
+      // ⚠️ 必须是精确前缀，不能写成 /api/**:那会连着 /api/_nuxt_icon/* 一起转给 Hono，
+      // 于是线上图标整片空白（见下方注释与 deploy/Caddyfile）。
+      ...(isDev
+        ? { '/api/site-settings/**': { proxy: `${backendBaseUrl}/api/site-settings/**` } }
+        : {})
       // 注意：不要在这里添加 /api/** 的全局代理规则，
       // 否则会覆盖 @nuxt/icon 等模块的服务端路由。
       // 生产反代同理：/api/_nuxt_icon/* 必须留在 Nuxt 上，不能跟着 /api/* 转给后端，
