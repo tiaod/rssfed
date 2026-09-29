@@ -283,6 +283,8 @@ worker 侧则在有失败时打一行 `[EntryImages] feed=… 候选=… 失败=
 | `background_color` | `pwa_background_color` → `primary_color` → 白 |
 | `display` | `pwa_display` → `standalone`（非法值一律回退） |
 
+上表是**字段级**回退。另有一层**读取级**兜底：`loadPwaRow()` 查库失败时（连接抖动、迁移还没落地导致 `pwa_*` 列尚不存在、发布窗口期）按「全空配置」处理，manifest 与图标照样返回内置默认值。安装 PWA 是纯读路径，降级成默认应用比整个端点 500 更有价值；写入路径不降级，管理员的保存失败仍会明确报错，避免配置静默丢失。
+
 管理入口：「个人资料 → 站点设置」（管理员）。
 
 ### 与 Service Worker 的关系

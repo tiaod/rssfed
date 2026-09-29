@@ -166,25 +166,39 @@ const EMPTY_PWA_ROW: PwaSettingsRow = {
   updatedAt: new Date(0)
 }
 
-/** 读取渲染 PWA 所需的整行配置（含不外发的附件外键与更新时间） */
+/**
+ * 读取渲染 PWA 所需的整行配置（含不外发的附件外键与更新时间）。
+ *
+ * 查询失败时回退「全空配置」而不是把错误抛给调用方：manifest 与图标是安装 PWA 的必经
+ * 路径，而它们所有字段本来就有内置默认值（应用名 RSSFed、内置几何图标、内置主题色），
+ * 所以数据库暂时不可用（连接抖动、迁移未落地导致 pwa_* 列还不存在、发布窗口期）时，
+ * 降级成默认 manifest 让「装得上」不受影响，比整个端点 500 更有价值。
+ *
+ * 只降级读路径：管理员的写入照常报错，避免配置静默丢失却无人察觉。
+ */
 async function loadPwaRow(): Promise<PwaSettingsRow> {
-  const [row] = await db
-    .select({
-      siteTitle: siteSettings.siteTitle,
-      description: siteSettings.description,
-      primaryColor: siteSettings.primaryColor,
-      pwaShortName: siteSettings.pwaShortName,
-      pwaDisplay: siteSettings.pwaDisplay,
-      pwaThemeColor: siteSettings.pwaThemeColor,
-      pwaBackgroundColor: siteSettings.pwaBackgroundColor,
-      pwaIconUrl: siteSettings.pwaIconUrl,
-      pwaIconAttachmentId: siteSettings.pwaIconAttachmentId,
-      logoUrl: siteSettings.logoUrl,
-      logoAttachmentId: siteSettings.logoAttachmentId,
-      updatedAt: siteSettings.updatedAt
-    })
-    .from(siteSettings).where(eq(siteSettings.id, SITE_ID)).limit(1)
-  return row ?? EMPTY_PWA_ROW
+  try {
+    const [row] = await db
+      .select({
+        siteTitle: siteSettings.siteTitle,
+        description: siteSettings.description,
+        primaryColor: siteSettings.primaryColor,
+        pwaShortName: siteSettings.pwaShortName,
+        pwaDisplay: siteSettings.pwaDisplay,
+        pwaThemeColor: siteSettings.pwaThemeColor,
+        pwaBackgroundColor: siteSettings.pwaBackgroundColor,
+        pwaIconUrl: siteSettings.pwaIconUrl,
+        pwaIconAttachmentId: siteSettings.pwaIconAttachmentId,
+        logoUrl: siteSettings.logoUrl,
+        logoAttachmentId: siteSettings.logoAttachmentId,
+        updatedAt: siteSettings.updatedAt
+      })
+      .from(siteSettings).where(eq(siteSettings.id, SITE_ID)).limit(1)
+    return row ?? EMPTY_PWA_ROW
+  } catch (error) {
+    console.warn("[PWA] 读取站点配置失败，manifest 与图标回退内置默认值", error)
+    return EMPTY_PWA_ROW
+  }
 }
 
 /**
