@@ -5,10 +5,10 @@ import type { Ref } from 'vue'
 import type { FeedSubscriptionItem, RssCachedImage, RssEntry, SubscriptionItem } from '~/types/rss'
 import { useCouchTargets, USER_STATE_ID } from '~/composables/useCouchTargets'
 import { useApi } from '~/composables/useApi'
-import { needsSync, pickFeedsNeedingSync } from '~/utils/syncDecision'
+import { needsSync, pickFeedsNeedingSync, isStorageFailure, normalizeMark, type RetryMap, type SyncedMap } from '~/utils/syncDecision'
 import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
-import { localDbName, syncedFeedsKey, LEGACY_LOCAL_DB_NAMES } from '~/utils/localDbName'
+import { localDbName, syncedFeedsKey, syncRetryKey, LEGACY_LOCAL_DB_NAMES } from '~/utils/localDbName'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 
 // 注册 Mango 查询插件（db.find / createIndex）。
@@ -24,6 +24,19 @@ export interface SyncStatus {
   error?: string
   /** 最近一次成功同步的时间，供 UI 展示 */
   lastSyncedAt?: string
+  /**
+   * 单个订阅源内部的拉取进度（0-100，整数）。
+   *
+   * 来自复制任务的 `change` 事件（见 replicateDb）：`docs_written` 是已写入数，
+   * `pending` 是服务端 `_changes` 返回的剩余变更数（CouchDB 2.0+ 才带）。
+   * undefined 表示还没有可用的进度信息（刚入队、或服务端没返回 pending），
+   * UI 不能把 undefined 当作 0 来确定地展示。
+   */
+  progress?: number
+  /** 本次复制已写入的文档数（change 事件的 docs_written，供 UI 显示「已同步 N 条」） */
+  docsWritten?: number
+  /** 本次复制在服务端剩余待拉取的变更数（change 事件的 pending，0 表示已拉完） */
+  pending?: number
 }
 
 /**
@@ -39,13 +52,28 @@ export interface ReplicateResult {
 }
 
 /**
+ * 复制任务的句柄中本模块用到的部分。
+ *
+ * 除 cancel 外还要 on / removeListener：源内进度来自复制的 change 事件。
+ *
+ * 这里**故意不直接用 PouchDB 的 Replication 类型**：它的 `on` 是按事件名
+ * （`'change'` / `'error'` / …）重载的，与本模块只关心 change 的简化签名不兼容，
+ * 直接约束会在赋值处报错（见 replicateDb 里的显式断言）。
+ */
+interface ReplicationTaskHandle {
+  cancel: () => void
+  on?: (event: 'change', listener: (info: { docs_written?: number, pending?: number }) => void) => unknown
+  removeListener?: (event: 'change', listener: (info: { docs_written?: number, pending?: number }) => void) => unknown
+}
+
+/**
  * 进行中的一次性复制：任务句柄 + 取消标记。
  *
  * 取消（task.cancel）会让复制的 Promise 以错误 reject，光看错误分不清「用户暂停」
  * 与真正的同步失败，因此必须带上这个标记（见 replicateDb / pauseSync）。
  */
 interface ActiveReplication {
-  task: { cancel: () => void }
+  task: ReplicationTaskHandle
   markCancelled: () => void
 }
 
@@ -123,7 +151,7 @@ interface PouchDbState {
   /** 同步状态（响应式，供组件 watch） */
   syncStatuses: Record<string, SyncStatus>
   /** 复制任务队列（限制并发，避免大量订阅源同时复制挤爆连接与 IndexedDB） */
-  replicateWaiting: Array<{ id: string, full?: boolean, resolve: (r: ReplicateResult) => void }>
+  replicateWaiting: Array<{ id: string, full?: boolean, seen?: string, resolve: (r: ReplicateResult) => void }>
   /** 当前正在执行的复制数 */
   activeReplicates: number
   /** 进行中的一次性复制（用户暂停 / 切换账号时逐一取消） */
@@ -140,6 +168,13 @@ interface PouchDbState {
   userSyncAt: number
   /** 用户主动同步是否进行中：长同步期间每个源完成都算「用户主动」，不受时间窗口限制 */
   userSyncActive: boolean
+  /**
+   * 本地存储故障（IndexedDB 配额耗尽 / 库进入 global failure）的说明文案。
+   *
+   * 非 null 表示本轮同步已熔断：不再入队新复制，也不再发起在途复制 ——
+   * 此时唯一有效动作是重置本地缓存。会话级状态，刷新页面即清空。
+   */
+  storageBroken: Ref<string | null>
 }
 
 /**
@@ -147,6 +182,61 @@ interface PouchDbState {
  * 列表页直接上屏；超时后的新条目仍走「N 条新内容」提示，不打断阅读。
  */
 const USER_SYNC_APPLY_WINDOW = 10_000
+
+/**
+ * 由复制的 change 事件推算单个源内部的拉取进度（0-100 整数）。
+ *
+ * 可用字段（PouchDB 在每批文档写入后 emit）：
+ *   - `docs_written`：本次复制累计写入的文档数；
+ *   - `pending`：服务端 `_changes` 返回的剩余变更数（CouchDB 2.0+ 才带，
+ *     PouchDB 只在**本批有文档写入**时才把 pending 挂到事件对象上）。
+ *
+ * 因此 pending 缺失时**不能**当作 0 —— 那会把进度谎报成 100%。缺 pending 时
+ * 只能返回上次的值（`prev`），维持单调不回退；pending 明确为 0 才表示已经拉完。
+ *
+ * 不用 `last_seq` 做减法：CouchDB 3.x 的 seq 是 `"1234-abc..."` 形态的字符串
+ * （切片后无法做算术），且它是远端库的全局序列号，与本次复制的起点之差没有
+ * 「占总量的几分之几」的含义。
+ */
+export function computeReplicateProgress(
+  info: { docs_written?: number, pending?: number },
+  prev = 0
+): number {
+  const written = typeof info.docs_written === 'number' ? info.docs_written : 0
+  const pending = info.pending
+  let next: number
+  if (pending === 0) {
+    // 服务端明确表示没有剩余变更：无论已写入多少，本轮拉取已完成
+    next = 100
+  } else if (typeof pending === 'number' && pending > 0) {
+    next = Math.round(written / (written + pending) * 100)
+  } else {
+    // pending 缺失（老服务端 / 本批无写入）：没有新信息，沿用上次进度
+    return prev
+  }
+  // 严格单调：pending 是每批返回时的瞬时值，批间可能出现小幅回弹，
+  // 进度条倒着走会被当成卡死或异常
+  return Math.min(100, Math.max(prev, next))
+}
+
+/**
+ * 单次复制的拉取批大小（PouchDB 默认 100）。
+ *
+ * 集中库的文档带 AVIF 附件，单篇上限 1MB；一批 100 篇在极端情况下是上百 MB 的
+ * 单次事务，实测在 495MB 数据量时直接触发 QuotaExceededError 把整个库打成
+ * global failure。降到 20 让写入峰值可控，代价只是每批多几个请求。
+ */
+const REPLICATE_BATCH_SIZE = 20
+
+/**
+ * 每批入队的订阅源数量。
+ *
+ * 首轮（或本地缓存重建后）可能有几百个源同时需要同步：一次性全入队意味着
+ * 队列里堆着几百个任务、失败时几百条错误一次性涌出，而且 IndexedDB 压力集中在
+ * 同一段时间。分批入队让「暂停 / 存储故障熔断」能在批与批之间立刻生效，
+ * 剩余批次直接不再发起。
+ */
+const SYNC_BATCH_SIZE = 50
 
 /** 构造共享状态（usePouchDb 与 usePouchSyncStatus 共用同一份结构） */
 function createPouchState(): PouchDbState {
@@ -164,7 +254,8 @@ function createPouchState(): PouchDbState {
     dbUserId: null,
     userWatchReady: false,
     userSyncAt: 0,
-    userSyncActive: false
+    userSyncActive: false,
+    storageBroken: ref<string | null>(null)
   }
 }
 
@@ -288,8 +379,10 @@ export function usePouchDb() {
       Reflect.deleteProperty(syncStatuses, key)
     }
     pouchState.dbUserId = uid
-    // 换账号后重新开始同步，不继承上一个账号的暂停状态
+    // 换账号后重新开始同步，不继承上一个账号的暂停状态；
+    // 存储故障也一并清掉 —— 新账号可能对应另一套（更小的）本地库，值得重新尝试
     pouchState.paused.value = false
+    pouchState.storageBroken.value = null
   }
 
   /** 把本地实例对齐到当前账号（会话就绪前是 null → guest 库，登录后再切到该账号的库） */
@@ -395,8 +488,27 @@ export function usePouchDb() {
    */
   const MAX_CONCURRENT_REPLICATE = 2
 
+  /**
+   * 标记本地存储已不可用并熔断本轮同步。
+   *
+   * 只在第一次故障时记录原因：后续同一库上的操作会以 message 为空的 Error 立即失败，
+   * 那些错误没有可读信息，堆在 UI 上只会淹没真正的原因。
+   */
+  function setStorageBroken(detail: string) {
+    if (pouchState.storageBroken.value) return
+    pouchState.storageBroken.value = detail
+  }
+
   /** 消费复制队列：空闲时从等待队列取出任务执行 */
   function pumpReplicateQueue() {
+    // 本地存储已不可用：不再发起任何复制，把排队任务就地结束
+    // （否则它们会在 global failure 的库上逐个快速失败，白白刷几百条错误）
+    if (pouchState.storageBroken.value) {
+      for (const item of pouchState.replicateWaiting.splice(0)) {
+        item.resolve({ ok: false, error: pouchState.storageBroken.value })
+      }
+      return
+    }
     while (pouchState.activeReplicates < MAX_CONCURRENT_REPLICATE && pouchState.replicateWaiting.length > 0) {
       const item = pouchState.replicateWaiting.shift()!
       pouchState.activeReplicates++
@@ -426,11 +538,17 @@ export function usePouchDb() {
   /** 将一次复制加入队列执行（限制并发，返回该库的复制结果）。
    *  入队即标记为 queued，供进度条统计剩余数量；成功完成后记录同步时间。
    *  full=true 时强制全量同步（since: 0），用于手动同步按钮——库被删重建后
-   *  checkpoint 的 seq 会大于远端（旧 seq 残留），增量同步会误判"无新变更"。 */
-  function enqueueReplicate(id: string, full = false): Promise<ReplicateResult> {
+   *  checkpoint 的 seq 会大于远端（旧 seq 残留），增量同步会误判"无新变更"。
+   *  seen 是本次入队时远端该源的 lastNewEntryAt，同步成功后会连同完成时间一起
+   *  写进水位表，作为下一轮增量判断的依据（见 utils/syncDecision）。 */
+  function enqueueReplicate(id: string, full = false, seen?: string): Promise<ReplicateResult> {
     // 用户已暂停同步：不排队、不发请求；以「已取消」回报，调用方不该当作失败
     if (pouchState.paused.value) {
       return Promise.resolve({ ok: false, cancelled: true })
+    }
+    // 本地存储已熔断：不再排队（复制注定写不进去，还会刷几百条错误）
+    if (pouchState.storageBroken.value) {
+      return Promise.resolve({ ok: false, error: pouchState.storageBroken.value })
     }
     // 兜底：无效 id 直接拒绝，不发出注定失败的复制请求（上游已过滤，这里防漏网）
     if (!isValidDbId(id)) {
@@ -450,13 +568,48 @@ export function usePouchDb() {
       pouchState.replicateWaiting.push({
         id,
         full,
+        seen,
         resolve: (r) => {
-          if (r.ok && pouchState.dbUserId === ownerUserId) markSynced(id)
+          if (r.ok && pouchState.dbUserId === ownerUserId) markSynced(id, seen)
           resolve(r)
         }
       })
       pumpReplicateQueue()
     })
+  }
+
+  /**
+   * 分批入队并等待每批完成。
+   *
+   * 首轮可能有几百个源需要同步：一次性全入队会让队列长期堆着几百个任务，
+   * 且「暂停 / 存储故障」要等所有任务都轮完才生效。分批后每批 50 个，
+   * 批与批之间检查暂停与熔断状态，剩余批次直接不再发起。
+   *
+   * 返回值与 ids 等长：被中断而未执行的批次补 `cancelled`（用户暂停）或
+   * `error`（存储熔断），调用方不必处理下标缺失。
+   */
+  async function enqueueInBatches(
+    ids: string[],
+    full: boolean,
+    seenOf: (id: string) => string | undefined
+  ): Promise<ReplicateResult[]> {
+    const results: ReplicateResult[] = []
+    for (let i = 0; i < ids.length; i += SYNC_BATCH_SIZE) {
+      const broken = pouchState.storageBroken.value
+      if (pouchState.paused.value || broken) {
+        // 未执行的批次统一按「本轮中断」上报（不是失败）：暂停由用户操作解释，
+        // 存储熔断由 storageBroken 状态解释（UI 会给出专门提示），
+        // 这样不会把几百条「未尝试」的源刷成失败项淹没真正的原因。
+        for (let j = i; j < ids.length; j++) {
+          results.push({ ok: false, cancelled: true })
+        }
+        break
+      }
+      const batch = ids.slice(i, i + SYNC_BATCH_SIZE)
+      const settled = await Promise.all(batch.map(id => enqueueReplicate(id, full, seenOf(id))))
+      results.push(...settled)
+    }
+    return results
   }
 
   /**
@@ -502,13 +655,17 @@ export function usePouchDb() {
         version: syncStatuses[id]?.version ?? 0,
         error
       })
+      // 取不到库名也是「尝试失败」：同样进退避表，避免每轮对同一批脏订阅反复打接口
+      markAttemptFailed(id)
       return { ok: false, error }
     }
 
     setStatus({
       feedId: id,
       status: 'syncing',
-      version: syncStatuses[id]?.version ?? 0
+      version: syncStatuses[id]?.version ?? 0,
+      // 进度从 0 起算：本轮的 change 事件会在第一批写入后把它推上去
+      progress: 0
     })
 
     // 取消标记 + 任务句柄：用户暂停时 pauseSync 会标记并 cancel。
@@ -524,9 +681,52 @@ export function usePouchDb() {
     }
     pouchState.activeReplications.add(entry)
 
+    /**
+     * 复制的 change 监听器：由 utils 的 computeReplicateProgress 推算源内进度，
+     * 只推进 progress / docsWritten / pending 三个字段。
+     *
+     * 关键约束：**绝不在这里递增 version** —— 列表页 watch version 变化就重查条目，
+     * 一批数据就重查一次会让长同步期间列表反复抖动（几秒内几十次查询）。
+     * 真正需要上屏的数据变化在复制完成时由 version +1 统一触发。
+     *
+     * 每批都写一次响应式状态，但先比掉重复的整数值：PouchDB 的批大小是 20，
+     * 一个几百条的源会 emit 十几次，值不变时不必触发组件重渲染。
+     */
+    const onChange = (info: { docs_written?: number, pending?: number }) => {
+      // 暂停/换账号后状态已归位，迟到的 change 不该把它改回 syncing
+      const current = syncStatuses[id]
+      if (pouchState.dbUserId !== ownerUserId || current?.status !== 'syncing') return
+      const progress = computeReplicateProgress(info, current.progress ?? 0)
+      const docsWritten = info.docs_written
+      const pending = info.pending
+      if (progress === current.progress && docsWritten === current.docsWritten && pending === current.pending) {
+        return
+      }
+      setStatus({
+        feedId: id,
+        status: 'syncing',
+        version: current.version,
+        progress,
+        ...(typeof docsWritten === 'number' ? { docsWritten } : {}),
+        ...(typeof pending === 'number' ? { pending } : {})
+      })
+    }
+
     try {
-      const task = db.replicate.from(remoteUrl, full ? { since: 0 } : undefined)
-      entry.task = task
+      // batch_size 调小：集中库文档带 AVIF 附件，默认 100 篇一批在数据量大时
+      // 会把单次写入峰值顶到配额上限（见 REPLICATE_BATCH_SIZE 说明）
+      const task = db.replicate.from(remoteUrl, full
+        ? { since: 0, batch_size: REPLICATE_BATCH_SIZE }
+        : { batch_size: REPLICATE_BATCH_SIZE })
+      // Replication 的重载式 on 与本模块的简化句柄类型不兼容（见 ReplicationTaskHandle），
+      // 这里按实际用到的能力断言：只 subscribe change，其余行为不变
+      const handle = task as unknown as ReplicationTaskHandle
+      entry.task = handle
+      // on 可能不存在（测试里的假任务、极端环境下被剥掉的原型）。
+      // 进度只是观感增强，拿不到就不能影响复制本身。
+      if (typeof handle.on === 'function') {
+        handle.on('change', onChange)
+      }
       if (cancelled) {
         // 任务创建期间用户点了暂停：立刻取消，状态保持 pauseSync 归位后的 idle
         try {
@@ -537,6 +737,11 @@ export function usePouchDb() {
         return { ok: false, cancelled: true }
       }
       const res = await task
+      // 用户在这批数据落库期间点了暂停：cancel 会与「复制刚好完成」撞车 ——
+      // PouchDB 的 cancel 只在任务未完成时以错误 reject，已经拿到结果的 task 会正常
+      // resolve。此时必须按取消上报：否则 syncNow 会把「用户已经放弃的源」算成成功
+      // （toast 报同步完成、水位表被往前推），而状态早已被 pauseSync 归位为 idle。
+      if (cancelled) return { ok: false, cancelled: true }
       if (!res.ok) {
         throw new Error(`同步失败（HTTP ${res.status}）`)
       }
@@ -545,19 +750,38 @@ export function usePouchDb() {
         status: 'idle',
         version: (syncStatuses[id]?.version ?? 0) + 1,
         lastSyncedAt: new Date().toISOString()
+        // 完成后不再带 progress/docsWritten/pending：状态是「已完成」，
+        // 留着进度字段会让进度条把它当成一次进行中的复制重复计入
       })
       return { ok: true }
     } catch (e: unknown) {
       // 用户暂停导致的取消：不记失败、不写 error（状态已由 pauseSync 归位）
       if (cancelled) return { ok: false, cancelled: true }
+      const message = errorMessage(e)
+      // 本地存储故障（配额耗尽 / IndexedDB 崩溃）：熔断整轮同步，避免把剩余几百个
+      // 任务逐个砸在同一块坏掉的库上；用户需要重置本地缓存才能真正恢复
+      if (isStorageFailure(e)) {
+        setStorageBroken('本地缓存写入失败（存储空间不足或数据库已损坏），已暂停本轮同步。请到「我的 → 重置本地缓存」清理后重试')
+      }
+      // 记入退避表：下一轮不会立刻再对这条源重试（指数退避，见 utils/syncDecision）
+      markAttemptFailed(id)
       setStatus({
         feedId: id,
         status: 'error',
         version: syncStatuses[id]?.version ?? 0,
-        error: errorMessage(e)
+        error: message
       })
-      return { ok: false, error: errorMessage(e) }
+      return { ok: false, error: message }
     } finally {
+      // 摘掉监听器：任务结束后 change 不会再触发，但句柄可能被外部引用（如 entry.task），
+      // 留着闭包会让整轮复制的中间状态多活一份
+      if (typeof entry.task.on === 'function') {
+        try {
+          entry.task.removeListener?.('change', onChange)
+        } catch {
+          // 任务可能已自行清理监听器，忽略
+        }
+      }
       pouchState.activeReplications.delete(entry)
     }
   }
@@ -570,28 +794,86 @@ export function usePouchDb() {
   }
 
   /**
-   * 增量同步的水位记录：每个源上次同步完成的时间，持久化在 localStorage
-   * （key 按账号隔离 —— 否则 A 的同步记录会让 B 以为自己已经同步过，直接跳过）。
-   * 与远端 feeds.lastNewEntryAt 的对比规则见 utils/syncDecision：
+   * 增量同步的水位表：每个源「上次成功同步的时间 + 当时看到的服务端 lastNewEntryAt」，
+   * 持久化在 localStorage（key 按账号隔离 —— 否则 A 的同步记录会让 B 以为自己已经
+   * 同步过，直接跳过）。对比规则见 utils/syncDecision：
    * 自动同步（syncFeedsIfChanged）与手动同步（syncNow）共用同一套判断。
+   *
+   * 兼容 v1：旧记录是纯 ISO 字符串，读取时按时间比较处理，下次成功后写回 v2。
    */
-  function loadSyncedFeeds(): Record<string, string> {
+  function loadSyncedFeeds(): SyncedMap {
     try {
-      return JSON.parse(localStorage.getItem(syncedFeedsKey(pouchState.dbUserId)) ?? '{}') as Record<string, string>
+      return JSON.parse(localStorage.getItem(syncedFeedsKey(pouchState.dbUserId)) ?? '{}') as SyncedMap
     } catch {
       return {}
     }
   }
 
-  /** 记录某个源本次同步完成时间（仅同步成功时） */
-  function markSynced(feedId: string) {
+  /**
+   * 记录某个源本次同步成功（仅成功时）。
+   *
+   * `seen` 是本次入队时远端该源的 lastNewEntryAt：下一轮直接比这个服务端值，
+   * 不再拿「服务端时间 vs 浏览器时间」比较（跨机器时钟偏差会误判成永远有新内容）。
+   * 本次拿不到 seen（如离线降级 / full 重建）时保留旧值，避免把水位记录降级回 v1。
+   */
+  function markSynced(feedId: string, seen?: string) {
     try {
       const map = loadSyncedFeeds()
-      map[feedId] = new Date().toISOString()
+      const prev = normalizeMark(map[feedId])
+      // 本次没拿到 seen（离线降级 / full 重建）时沿用旧值，避免把 v2 记录降级回 v1
+      const seenValue = seen ?? prev?.seen
+      map[feedId] = seenValue
+        ? { at: new Date().toISOString(), seen: seenValue }
+        : { at: new Date().toISOString() }
       localStorage.setItem(syncedFeedsKey(pouchState.dbUserId), JSON.stringify(map))
+      // 成功即清退避：下次该源有新内容时立刻同步，不必等退避窗口
+      clearRetryMark(feedId)
     } catch {
       // localStorage 不可用时忽略（同步本身不受影响）
     }
+  }
+
+  /** 读取失败退避表（key 按账号隔离，与水位表同规则） */
+  function loadRetryMarks(): RetryMap {
+    try {
+      return JSON.parse(localStorage.getItem(syncRetryKey(pouchState.dbUserId)) ?? '{}') as RetryMap
+    } catch {
+      return {}
+    }
+  }
+
+  function saveRetryMarks(map: RetryMap) {
+    try {
+      localStorage.setItem(syncRetryKey(pouchState.dbUserId), JSON.stringify(map))
+    } catch {
+      // localStorage 不可用时忽略
+    }
+  }
+
+  /**
+   * 记录一次失败尝试：连续失败次数 +1，下次重试时间随次数指数退避。
+   *
+   * 这是「每次打开都几百个源要同步」的关键修复：原先失败的源不会留下任何记录，
+   * 下一轮仍被判为「从未同步过」而全量重试，形成死循环。
+   */
+  function markAttemptFailed(feedId: string) {
+    if (feedId === USER_STATE_ID) return // 用户状态库必须同步，不进退避表
+    const map = loadRetryMarks()
+    const prev = map[feedId]
+    map[feedId] = {
+      attempts: (prev?.attempts ?? 0) + 1,
+      lastAttemptAt: new Date().toISOString()
+    }
+    saveRetryMarks(map)
+  }
+
+  /** 清除某个源的退避记录（同步成功后调用） */
+  function clearRetryMark(feedId: string) {
+    const map = loadRetryMarks()
+    if (!(feedId in map)) return
+    // 与 syncStatuses 同一处理：动态键用 Reflect.deleteProperty，避免破坏 V8 的对象形状优化
+    Reflect.deleteProperty(map, feedId)
+    saveRetryMarks(map)
   }
 
   /**
@@ -613,20 +895,24 @@ export function usePouchDb() {
     // 等待迁移清理完成：首次迁移时旧增量记录会导致误跳过，需清空后全量同步一次
     await ensureCleanup()
 
-    // 水位表只读一次：订阅源可达数百个，逐个读 localStorage + JSON.parse 是白开销
+    // 水位表与退避表各只读一次：订阅源可达数百个，逐个读 localStorage + JSON.parse 是白开销
     const synced = loadSyncedFeeds()
+    const retry = loadRetryMarks()
     const needSync: string[] = []
+    // 本次入队时各源的 lastNewEntryAt：同步成功后写回水位表，作为下一轮的比较基准
+    const seenById = new Map<string, string | undefined>()
 
     for (const f of feeds) {
       // 脏订阅文档（feedId 为空/缺失）无法定位远端库，跳过
       if (!isValidDbId(f.feedId)) continue
-      if (!needsSync(f.feedId, f.lastNewEntryAt, synced)) continue
+      seenById.set(f.feedId, f.lastNewEntryAt)
+      if (!needsSync(f.feedId, f.lastNewEntryAt, synced, retry)) continue
       needSync.push(f.feedId)
     }
 
-    for (const id of needSync) {
-      void enqueueReplicate(id)
-    }
+    // 分批入队且不等待全量：调用方是页面挂载流程，不能被几百个源的复制堵住首屏
+    // （复制完成后的列表刷新由 syncStatuses 的 version 变化触发）
+    void enqueueInBatches(needSync, false, id => seenById.get(id))
     return needSync.length
   }
 
@@ -688,9 +974,12 @@ export function usePouchDb() {
 
     // ① 增量过滤：挑出真正有变化的源。full 模式跳过 —— 本地库要重建，所有源都得重拉
     const candidateCount = targets.length
+    // 本次入队时各源的 lastNewEntryAt：同步成功后写回水位表（full 模式下拿不到，保留旧值）
+    const seenById = new Map<string, string | undefined>()
     if (!opts.full) {
       const remoteSubs = await fetchRemoteSubs()
-      targets = pickFeedsNeedingSync(targets, remoteSubs, loadSyncedFeeds(), USER_STATE_ID)
+      for (const s of remoteSubs ?? []) seenById.set(s.feedId, s.lastNewEntryAt)
+      targets = pickFeedsNeedingSync(targets, remoteSubs, loadSyncedFeeds(), USER_STATE_ID, loadRetryMarks())
     }
 
     // 全部跳过：不暂停 live 同步、不发任何复制请求（按钮瞬时完成）
@@ -707,8 +996,8 @@ export function usePouchDb() {
       syncHandles.delete(USER_STATE_ID)
     }
 
-    // ③ 入队执行一次性复制（队列内部限制并发，等待全部完成）
-    const results = await Promise.all(targets.map(id => enqueueReplicate(id, opts.full === true)))
+    // ③ 分批入队执行一次性复制（队列内部限制并发，批间可被暂停/熔断中断）
+    const results = await enqueueInBatches(targets, opts.full === true, id => seenById.get(id))
     const ok: string[] = []
     const failed: { id: string, error: string }[] = []
     const cancelled: string[] = []
@@ -888,9 +1177,13 @@ export function usePouchDb() {
     // 清掉增量同步记录，确保下次同步不因「已同步过」而跳过
     try {
       localStorage.removeItem(syncedFeedsKey(pouchState.dbUserId))
+      // 失败退避记录一并清掉：库已重建，之前的失败（很可能就是存储故障本身）不再适用
+      localStorage.removeItem(syncRetryKey(pouchState.dbUserId))
     } catch {
       // localStorage 不可用时忽略
     }
+    // 存储故障已通过重建本地库解除：清掉熔断标记，让后续同步可以继续
+    pouchState.storageBroken.value = null
     // 同步状态重置为未同步（relatedIds 依赖它判断全量同步目标）
     // 用 Reflect.deleteProperty 而不是 delete：后者对动态键会破坏 V8 的对象形状优化
     for (const key of Object.keys(syncStatuses)) {
@@ -1299,6 +1592,11 @@ export function usePouchDb() {
     resumeSync,
     /** 是否处于用户暂停状态（响应式，供指示器显示「已暂停」） */
     paused: pouchState.paused,
+    /**
+     * 本地存储故障说明（非 null 表示本轮同步已熔断，需重置本地缓存）。
+     * 供进度条 / 状态指示器展示与手动同步提示。
+     */
+    storageBroken: pouchState.storageBroken,
     queryTimeline,
     queryFeedEntries,
     queryGroupEntries,

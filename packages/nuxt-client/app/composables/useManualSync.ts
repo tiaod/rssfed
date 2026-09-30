@@ -21,6 +21,16 @@ export function useManualSync(feedIds?: MaybeRefOrGetter<string[] | undefined>) 
     syncing.value = true
     try {
       const result = await pouch.syncNow(toValue(feedIds))
+      // 本地存储故障（配额耗尽 / 数据库损坏）：本轮已被熔断，剩余目标并没有真的尝试，
+      // 此时报「N 个失败」没有意义，直接给出可操作的提示
+      if (pouch.storageBroken.value) {
+        toast.add({
+          title: '本地缓存写入失败',
+          description: pouch.storageBroken.value,
+          color: 'error'
+        })
+        return
+      }
       // 用户中途暂停：本轮剩余目标已被取消，交给暂停的 toast，不在这里报「失败」
       if (result.cancelled > 0) return
       if (result.failed.length > 0) {

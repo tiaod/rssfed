@@ -26,5 +26,15 @@ export function syncedFeedsKey(userId: string | null | undefined): string {
   return `rssfed-synced-feeds-${dbSuffix(userId)}`
 }
 
+/**
+ * 同步失败退避记录（localStorage）的 key。
+ *
+ * 单独一张表：水位表只在「同步成功」时更新，退避表只在「失败」时更新，
+ * 两者语义不同，混在一起会让失败次数污染水位记录。
+ */
+export function syncRetryKey(userId: string | null | undefined): string {
+  return `rssfed-sync-retry-${dbSuffix(userId)}`
+}
+
 /** 账号隔离之前使用的固定库名（升级时清理，见 usePouchDb 的 cleanupLegacyDbs） */
 export const LEGACY_LOCAL_DB_NAMES = ['rssfed-entries', 'rssfed-user-state'] as const

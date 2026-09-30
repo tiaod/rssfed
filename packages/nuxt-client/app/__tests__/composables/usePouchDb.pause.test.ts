@@ -48,6 +48,7 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (kind: string, uid: string | null) => `fake-${kind}-${uid ?? 'guest'}`,
   syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
+  syncRetryKey: (uid: string | null) => `rssfed-test-retry-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: []
 }))
 

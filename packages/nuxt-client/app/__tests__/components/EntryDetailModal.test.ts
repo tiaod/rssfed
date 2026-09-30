@@ -292,8 +292,12 @@ describe('EntryDetailModal', () => {
       expect(fake.inst.slides.length).toBe(0) // 复现冷启动首帧：实例就绪但子槽未挂载
 
       fake.inst.__fill(2) // 子槽异步补上
-      pumpRaf() // 下一帧应看到槽位就绪并执行对齐
-      await flushPromises()
+      // 逐帧推进到对齐发生：并发跑测试时微任务与帧的落地时机有抖动，
+      // 固定只推一帧会偶发看不到「槽位就绪后的对齐」（断言本身不变）
+      for (let i = 0; i < 5; i++) {
+        pumpRaf()
+        await flushPromises()
+      }
 
       const slideToMeta = fake.history
         .filter((h: [string, unknown]) => h[0] === 'slideTo')

@@ -11,12 +11,14 @@ import SyncStatusIndicator from '../../components/SyncStatusIndicator.vue'
  * 状态文案（含「同步已暂停」）走 utils/syncStatusSummary 的纯函数，另有单测。
  */
 
-// 只替换掉指示器真正依赖的三样东西：同步状态、暂停开关、手动同步
+// 只替换掉指示器真正依赖的几样东西：同步状态、暂停开关、本地存储故障、手动同步
 const H = vi.hoisted(() => ({
   statuses: null as Record<string, { status: string, version: number, lastSyncedAt?: string }> | null,
   paused: null as { value: boolean } | null,
+  storageBroken: null as { value: string | null } | null,
   pauseSync: vi.fn(),
   resumeSync: vi.fn(),
+  resetLocalData: vi.fn(async () => {}),
   sync: vi.fn(),
   toastAdd: vi.fn()
 }))
@@ -27,8 +29,10 @@ vi.mock('~/composables/usePouchDb', async () => {
     usePouchDb: () => ({
       syncStatuses: (H.statuses ??= r({})),
       paused: (H.paused ??= rf(false) as unknown as { value: boolean }),
+      storageBroken: (H.storageBroken ??= rf(null) as unknown as { value: string | null }),
       pauseSync: H.pauseSync,
-      resumeSync: H.resumeSync
+      resumeSync: H.resumeSync,
+      resetLocalData: H.resetLocalData
     })
   }
 })
@@ -73,8 +77,10 @@ function setSyncing() {
 beforeEach(() => {
   H.statuses = null
   H.paused = null
+  H.storageBroken = null
   H.pauseSync.mockClear()
   H.resumeSync.mockClear()
+  H.resetLocalData.mockClear()
   H.sync.mockClear()
   H.toastAdd.mockClear()
 })
@@ -137,5 +143,26 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
 
     expect(H.sync).toHaveBeenCalledTimes(1)
     expect(H.pauseSync).not.toHaveBeenCalled()
+  })
+
+  it('本地存储故障：优先于同步中/暂停，点击走「重置本地缓存 + 重新同步」', async () => {
+    const wrapper = mountIndicator()
+    setSyncing()
+    H.paused!.value = true
+    H.storageBroken!.value = '本地缓存写入失败（存储空间不足或数据库已损坏）'
+    await wrapper.vm.$nextTick()
+
+    expect(wrapper.find('button').attributes('aria-label')).toBe('重置本地缓存')
+    expect(wrapper.text()).toContain('本地缓存写入失败')
+    expect(wrapper.text()).toContain('点击可重置本地缓存并重新同步')
+
+    await wrapper.find('button').trigger('click')
+    await vi.waitFor(() => expect(H.sync).toHaveBeenCalledTimes(1))
+
+    expect(H.resetLocalData).toHaveBeenCalledTimes(1)
+    // 重置是异步的：必须等库销毁重建完成后才发起同步，否则复制会退回同一个坏库
+    expect(H.resetLocalData.mock.invocationCallOrder[0]!)
+      .toBeLessThan(H.sync.mock.invocationCallOrder[0]!)
+    expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({ title: '本地缓存已重置' }))
   })
 })

@@ -13,7 +13,10 @@ import { summarizeSyncStatuses, syncStatusLabel, syncStatusDetails } from '~/uti
 import type { SyncState } from '~/utils/syncStatusSummary'
 
 const pouch = usePouchDb()
-const summary = computed(() => summarizeSyncStatuses(pouch.syncStatuses, { paused: pouch.paused.value }))
+const summary = computed(() => summarizeSyncStatuses(pouch.syncStatuses, {
+  paused: pouch.paused.value,
+  storageError: pouch.storageBroken.value
+}))
 const label = computed(() => syncStatusLabel(summary.value.state))
 const details = computed(() => syncStatusDetails(summary.value))
 
@@ -24,31 +27,37 @@ const { sync } = useManualSync()
 const toast = useToast()
 
 const ICONS: Record<SyncState, string> = {
-  syncing: 'i-lucide-refresh-cw',
-  paused: 'i-lucide-circle-pause',
-  error: 'i-lucide-alert-circle',
-  success: 'i-lucide-circle-check',
-  idle: 'i-lucide-cloud'
+  'syncing': 'i-lucide-refresh-cw',
+  'paused': 'i-lucide-circle-pause',
+  'error': 'i-lucide-alert-circle',
+  'success': 'i-lucide-circle-check',
+  'idle': 'i-lucide-cloud',
+  'storage-error': 'i-lucide-alert-triangle'
 }
 
 const COLORS: Record<SyncState, string> = {
-  syncing: 'text-primary',
-  paused: 'text-warning',
-  error: 'text-error',
-  success: 'text-success',
-  idle: 'text-muted'
+  'syncing': 'text-primary',
+  'paused': 'text-warning',
+  'error': 'text-error',
+  'success': 'text-success',
+  'idle': 'text-muted',
+  'storage-error': 'text-error'
 }
 
-/** 点击会做什么：同步中→暂停，已暂停→继续，其余→立即同步（同时用作 aria-label） */
+/** 点击会做什么：同步中→暂停，已暂停→继续，本地存储故障→重置本地缓存，其余→立即同步 */
 const actionLabel = computed(() => {
   if (summary.value.state === 'syncing') return '暂停同步'
   if (summary.value.state === 'paused') return '继续同步'
+  if (summary.value.state === 'storage-error') return '重置本地缓存'
   return '立即同步'
 })
 
 /**
  * 点击：正在同步时点击是「暂停」——立即取消在途复制并清空队列（见 usePouchDb 的
  * pauseSync）；已暂停时点击是「继续」，顺手发起一次同步。
+ *
+ * 本地存储故障时点击是「重置本地缓存」：条目库已写不进去（配额/损坏），
+ * 销毁重建是唯一有效的恢复动作，重置后自动重新同步。
  */
 function handleClick() {
   if (summary.value.state === 'syncing') {
@@ -61,6 +70,18 @@ function handleClick() {
     return
   }
   if (summary.value.state === 'paused') pouch.resumeSync()
+  if (summary.value.state === 'storage-error') {
+    // 先等本地库销毁重建完成再发起同步：否则新库还没建好就复制，会退回同一个坏库
+    void pouch.resetLocalData().then(() => {
+      toast.add({
+        title: '本地缓存已重置',
+        description: '正在重新同步，请保持页面打开',
+        color: 'neutral'
+      })
+      return sync()
+    })
+    return
+  }
   void sync()
 }
 </script>
