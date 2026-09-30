@@ -192,3 +192,50 @@ describe('单源复制进度（usePouchDb）', () => {
     expect(result.cancelled).toBe(1)
   })
 })
+
+/**
+ * 「已同步 N 条」的记账：列表页把它显示成提示条，条数来自复制 change 事件的 docs_written。
+ * 这份计数只增不减，且必须和 version 同一时刻落地 —— 列表页 watch 到 version 变化时读的
+ * 就是它。
+ */
+describe('已同步条数（syncedDocsByFeed）', () => {
+  it('复制成功后按 change 报出的累计写入数记账，两次同步依次累加', async () => {
+    const first = pouch.syncNow(['feed-a'], { full: true })
+    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
+    const task = H.pending[0]!
+    // docs_written 是本次复制的累计值：最后一次就是总数，不能把 20 + 60 加起来
+    task.emitChange({ docs_written: 20, pending: 80 })
+    task.emitChange({ docs_written: 60, pending: 20 })
+    task.finish({ ok: true })
+    await first
+
+    expect(pouch.syncedDocsByFeed['feed-a']).toBe(60)
+
+    const second = pouch.syncNow(['feed-a'], { full: true })
+    await vi.waitFor(() => expect(H.pending).toHaveLength(2))
+    H.pending[1]!.emitChange({ docs_written: 5, pending: 0 })
+    H.pending[1]!.finish({ ok: true })
+    await second
+
+    expect(pouch.syncedDocsByFeed['feed-a']).toBe(65)
+  })
+
+  it('复制失败不记账（用户看到的「已同步」不能报未落库的条数）', async () => {
+    const failed = pouch.syncNow(['feed-b'], { full: true })
+    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
+    H.pending[0]!.emitChange({ docs_written: 10, pending: 0 })
+    H.pending[0]!.finish({ ok: false })
+    await failed
+
+    expect(pouch.syncedDocsByFeed['feed-b']).toBeUndefined()
+  })
+
+  it('没有写入的复制不记账', async () => {
+    const none = pouch.syncNow(['feed-c'], { full: true })
+    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
+    H.pending[0]!.finish({ ok: true })
+    await none
+
+    expect(pouch.syncedDocsByFeed['feed-c']).toBeUndefined()
+  })
+})

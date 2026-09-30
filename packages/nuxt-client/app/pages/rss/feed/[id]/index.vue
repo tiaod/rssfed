@@ -20,14 +20,13 @@ const feedLoading = ref(true)
 const subscriptionTitle = ref('')
 const feedDisplayName = computed(() => subscriptionTitle.value || feed.value?.title || '')
 
-// 条目数据与同步刷新策略：后台同步到的新条目先累计成「N 条新内容」提示，用户点了才上屏，
-// 避免把正在读的内容推走（用户主动点同步按钮时则直接上屏，见 isUserDrivenSync）。
+// 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
+// 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
 const {
-  entries, pendingCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyPending
+  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew
 } = useSyncedEntryList({
-  // stateKey 让列表在切走再点回该订阅源时原样恢复：回来是「接着读」，新条目先进提示条
-  stateKey: `feed:${feedId}`,
-  query: limit => pouch.queryFeedEntries(feedId, limit)
+  query: limit => pouch.queryFeedEntries(feedId, limit),
+  syncedDocs: () => pouch.syncedDocsByFeed[feedId] ?? 0
 })
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
@@ -53,10 +52,10 @@ onMounted(async () => {
   loading.value = false
 })
 
-// 同步完成 / 手动同步后重新查询
+// 该源同步完成时累计「已同步 N 条」；列表不动，等用户点提示条
 watch(
   () => pouch.syncStatuses[feedId]?.version ?? 0,
-  () => void refreshFromSync(pouch.isUserDrivenSync())
+  () => refreshFromSync()
 )
 
 // 取消订阅
@@ -145,12 +144,12 @@ async function unsubscribe() {
       </div>
 
       <template v-else>
-        <!-- listAnchorRef 供应用「N 条新内容」时定位滚动容器并回到顶部 -->
+        <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
         <div ref="listAnchorRef">
           <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
           <NewEntriesBanner
-            :count="pendingCount"
-            @apply="applyPending"
+            :count="newCount"
+            @apply="applyNew"
           />
           <EntryList
             :entries="entries || []"

@@ -1,9 +1,9 @@
 <script setup lang="ts">
 /**
- * 「N 条新内容」提示条。
+ * 「已同步 N 条」提示条。
  *
- * 后台同步拿到的新条目不再直接插进列表（会把用户正在阅读的内容推走），
- * 而是在这里累计，用户点「显示」才上屏并回到列表顶部。
+ * 同步（后台或手动）只负责把数据拉到本地并报数，绝不改列表；用户点「查看」才重新
+ * 从本地库加载最新内容并回到顶部。这样同步永远不会把用户正在读的内容推走。
  *
  * 形态用 Nuxt UI 的 USeparator（中间插槽）：一条分隔线把「还没看的新内容」和下面的列表
  * 划开，中间放条数和操作按钮——条数在左、按钮在右，比整块横幅轻得多。
@@ -18,7 +18,7 @@
  * 列表仍保持原本的 24px 上边距。
  */
 const props = defineProps<{
-  /** 待上屏的新条目数（0 表示收起） */
+  /** 待查看的新条目数（0 表示收起） */
   count: number
 }>()
 
@@ -48,10 +48,10 @@ const expanded = computed(() => props.count > 0)
             class="size-3.5 text-primary"
           />
           <span class="text-sm text-primary">
-            {{ props.count }} 条新内容
+            已同步 {{ props.count }} 条
           </span>
           <UButton
-            label="显示"
+            label="查看"
             color="primary"
             variant="soft"
             size="xs"

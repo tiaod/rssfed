@@ -7,20 +7,6 @@ import type { RssEntry } from '../../types/rss'
 const nuxtGlobals = globalThis as unknown as Record<string, unknown>
 nuxtGlobals.ref = ref
 
-// 复刻 Nuxt 应用级 state：同 key 的多次读取读写同一个槽位，用来模拟页面切走再点回来
-const nuxtState = new Map<string, unknown>()
-nuxtGlobals.useState = <T>(key: string, init?: () => T) => {
-  if (!nuxtState.has(key)) nuxtState.set(key, init ? init() : null)
-  return {
-    get value(): T {
-      return nuxtState.get(key) as T
-    },
-    set value(next: T) {
-      nuxtState.set(key, next)
-    }
-  }
-}
-
 function makeEntry(id: string): RssEntry {
   return {
     id,
@@ -38,11 +24,16 @@ function makeEntry(id: string): RssEntry {
 
 const ids = (list: { entries: { value: RssEntry[] } }) => list.entries.value.map(e => e.id)
 
+/** 可控的「已同步写入文档数」源，对应页面传入的 syncedDocs() */
+function syncedCounter(initial = 0) {
+  const count = ref(initial)
+  return { count, docs: () => count.value }
+}
+
 describe('useSyncedEntryList', () => {
   beforeEach(() => {
-    // applyPending 会滚回列表顶部；测试不关心滚动，替换掉避免依赖 happy-dom 实现
+    // applyNew 会滚回列表顶部；测试不关心滚动，替换掉避免依赖 happy-dom 实现
     window.scrollTo = (() => {}) as typeof window.scrollTo
-    nuxtState.clear()
   })
 
   it('首屏加载直接上屏，不产生提示', async () => {
@@ -51,142 +42,161 @@ describe('useSyncedEntryList', () => {
     await list.load()
 
     expect(ids(list)).toEqual(['c', 'b'])
-    expect(list.pendingCount.value).toBe(0)
+    expect(list.newCount.value).toBe(0)
     // 返回条数未达窗口上限 → 没有更多
     expect(list.hasMore.value).toBe(false)
   })
 
-  it('列表已有内容后，同步拿到头部新条目：不上屏、只提示，用户点击后才上屏', async () => {
+  it('同步完成只累计条数：列表一个条目都不动，也不发查询', async () => {
     let rows = [makeEntry('b'), makeEntry('a')]
-    const list = useSyncedEntryList({ query: async () => rows })
+    const docs = syncedCounter(2)
+    const query = vi.fn(async () => rows)
+    const list = useSyncedEntryList({ query, syncedDocs: docs.docs })
+    await list.load()
+    const queriesAfterLoad = query.mock.calls.length
+
+    // 同步拿到 3 条新内容（计数 2 → 5）
+    rows = [makeEntry('e'), makeEntry('d'), makeEntry('c'), makeEntry('b'), makeEntry('a')]
+    docs.count.value = 5
+    list.refreshFromSync()
+
+    expect(ids(list)).toEqual(['b', 'a']) // 正在读的内容没被推走
+    expect(list.newCount.value).toBe(3) // 3 条待查看
+    expect(query.mock.calls.length).toBe(queriesAfterLoad) // 同步不触发查询
+  })
+
+  it('用户点「查看」才整体换成最新内容并归零', async () => {
+    let rows = [makeEntry('b'), makeEntry('a')]
+    const docs = syncedCounter(0)
+    const list = useSyncedEntryList({ query: async () => rows, syncedDocs: docs.docs })
     await list.load()
 
     rows = [makeEntry('c'), makeEntry('b'), makeEntry('a')]
-    await list.refreshFromSync()
-
-    // 正在读的列表没被推动（不管用户此刻滚到哪，新条目都先收纳）
+    docs.count.value = 1
+    list.refreshFromSync()
     expect(ids(list)).toEqual(['b', 'a'])
-    expect(list.pendingCount.value).toBe(1)
+    expect(list.newCount.value).toBe(1)
 
-    list.applyPending()
-    expect(ids(list)).toEqual(['c', 'b', 'a'])
-    expect(list.pendingCount.value).toBe(0)
-  })
-
-  it('新增排在当前列表之后：静默上屏（阅读位置不变）', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const list = useSyncedEntryList({ query: async () => rows })
-    await list.load()
-
-    rows = [makeEntry('b'), makeEntry('a'), makeEntry('z')]
-    await list.refreshFromSync()
-
-    expect(ids(list)).toEqual(['b', 'a', 'z'])
-    expect(list.pendingCount.value).toBe(0)
-  })
-
-  it('用户主动点同步按钮：新条目直接上屏', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const list = useSyncedEntryList({ query: async () => rows })
-    await list.load()
-
-    rows = [makeEntry('c'), makeEntry('b'), makeEntry('a')]
-    await list.refreshFromSync(true)
+    await list.applyNew()
 
     expect(ids(list)).toEqual(['c', 'b', 'a'])
-    expect(list.pendingCount.value).toBe(0)
+    expect(list.newCount.value).toBe(0)
   })
 
-  it('用户主动同步只放行那一次，之后的新条目照样先收纳', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const list = useSyncedEntryList({ query: async () => rows })
+  it('查看后基线对齐：旧的同步不再弹提示，只有新的增量计入', async () => {
+    let rows = [makeEntry('a')]
+    const docs = syncedCounter(0)
+    const list = useSyncedEntryList({ query: async () => rows, syncedDocs: docs.docs })
     await list.load()
 
-    rows = [makeEntry('c'), makeEntry('b'), makeEntry('a')]
-    await list.refreshFromSync(true)
-    expect(ids(list)).toEqual(['c', 'b', 'a'])
+    docs.count.value = 3
+    list.refreshFromSync()
+    expect(list.newCount.value).toBe(3)
 
-    // 同步收尾阶段又有源完成，带来新条目 d
     rows = [makeEntry('d'), makeEntry('c'), makeEntry('b'), makeEntry('a')]
-    await list.refreshFromSync()
+    await list.applyNew()
+    expect(list.newCount.value).toBe(0)
 
-    expect(ids(list)).toEqual(['c', 'b', 'a'])
-    expect(list.pendingCount.value).toBe(1)
+    // 列表已是最新、计数没再涨：不弹提示
+    list.refreshFromSync()
+    expect(list.newCount.value).toBe(0)
+
+    // 又同步进来 2 条
+    docs.count.value = 5
+    list.refreshFromSync()
+    expect(list.newCount.value).toBe(2)
   })
 
-  it('加载更多时头部未确认的新条目不会顺带上屏，只接上尾部扩展', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const list = useSyncedEntryList({ query: async () => rows, pageSize: 2 })
+  it('同步没有带来新内容时不弹提示', async () => {
+    const docs = syncedCounter(7)
+    const list = useSyncedEntryList({
+      query: async () => [makeEntry('a')],
+      syncedDocs: docs.docs
+    })
     await list.load()
 
-    // 窗口扩到 4：头部来了新条目 c，尾部多了更旧的 z
+    list.refreshFromSync()
+    list.refreshFromSync()
+
+    expect(list.newCount.value).toBe(0)
+  })
+
+  it('不传 syncedDocs 的列表永远不显示提示条', async () => {
+    const list = useSyncedEntryList({ query: async () => [makeEntry('a')] })
+    await list.load()
+
+    list.refreshFromSync()
+
+    expect(list.newCount.value).toBe(0)
+  })
+
+  it('加载更多只接上尾部旧条目，头部新条目仍留给提示条', async () => {
+    let rows = [makeEntry('b'), makeEntry('a')]
+    const docs = syncedCounter(0)
+    const list = useSyncedEntryList({
+      query: async (limit: number) => rows.slice(0, limit),
+      pageSize: 2,
+      syncedDocs: docs.docs
+    })
+    await list.load()
+    expect(ids(list)).toEqual(['b', 'a'])
+
+    // 窗口扩到 4：头部来了新条目 c，尾部多了更旧的 z，同时后台也报了 1 条
     rows = [makeEntry('c'), makeEntry('b'), makeEntry('a'), makeEntry('z')]
+    docs.count.value = 1
+    list.refreshFromSync()
     await list.grow()
 
-    expect(ids(list)).toEqual(['b', 'a', 'z'])
-    expect(list.pendingCount.value).toBe(1) // 只算还没上屏的 c
+    expect(ids(list)).toEqual(['b', 'a', 'z']) // 头部没被推动
+    expect(list.newCount.value).toBe(1) // 加载更多不会清掉提示条
     expect(list.hasMore.value).toBe(true)
 
-    list.applyPending()
+    await list.applyNew()
     expect(ids(list)).toEqual(['c', 'b', 'a', 'z'])
+    expect(list.newCount.value).toBe(0)
   })
 
-  it('尾部扩展已上屏的条目不重复计入提示数', async () => {
+  it('尾部没有更多内容时加载更多不改动列表', async () => {
+    const list = useSyncedEntryList({
+      query: async () => [makeEntry('b'), makeEntry('a')],
+      pageSize: 3
+    })
+    await list.load()
+    expect(list.hasMore.value).toBe(false)
+
+    const again = await list.grow()
+
+    expect(again).toBe(false)
+    expect(ids(list)).toEqual(['b', 'a'])
+  })
+
+  it('加载更多时数据源整批换掉（一条都对不上）按新内容整体上屏', async () => {
     let rows = [makeEntry('b'), makeEntry('a')]
-    const list = useSyncedEntryList({ query: async () => rows, pageSize: 2 })
+    const list = useSyncedEntryList({
+      query: async (limit: number) => rows.slice(0, limit),
+      pageSize: 2
+    })
     await list.load()
 
-    rows = [makeEntry('c'), makeEntry('d'), makeEntry('b'), makeEntry('a')]
+    // 换账号 / 本地库重建：新窗口与当前列表毫无交集
+    rows = [makeEntry('y'), makeEntry('x')]
     await list.grow()
 
-    expect(ids(list)).toEqual(['b', 'a'])
-    expect(list.pendingCount.value).toBe(2) // c、d 都还没上屏
-
-    list.applyPending()
-    expect(ids(list)).toEqual(['c', 'd', 'b', 'a'])
+    expect(ids(list)).toEqual(['y', 'x'])
   })
 
-  it('后台同步查询结果与当前列表一致时不替换数组（避免无谓的整列重排）', async () => {
-    const list = useSyncedEntryList({ query: async () => [makeEntry('b'), makeEntry('a')] })
+  it('查询异常返回空数组时不清空已有列表', async () => {
+    let failing = false
+    const list = useSyncedEntryList({
+      // usePouchDb.queryByView 查询失败时返回空数组
+      query: async () => (failing ? [] : [makeEntry('b'), makeEntry('a')])
+    })
     await list.load()
-    const before = list.entries.value
 
-    await list.refreshFromSync()
-
-    expect(list.entries.value).toBe(before)
-  })
-
-  it('用户主动同步即便内容一致也会重新读一遍', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const list = useSyncedEntryList({ query: async () => rows.map(e => ({ ...e })) })
+    failing = true
     await list.load()
-    const before = list.entries.value
 
-    rows = [makeEntry('b'), makeEntry('a')]
-    await list.refreshFromSync(true)
-
-    expect(list.entries.value).not.toBe(before)
     expect(ids(list)).toEqual(['b', 'a'])
-  })
-
-  it('密集同步完成只重查一次（防抖）', async () => {
-    vi.useFakeTimers()
-    try {
-      const query = vi.fn(async () => [makeEntry('a')])
-      const list = useSyncedEntryList({ query, debounceMs: 200 })
-      await list.load()
-      expect(query).toHaveBeenCalledTimes(1)
-
-      void list.refreshFromSync()
-      void list.refreshFromSync()
-      void list.refreshFromSync()
-      expect(query).toHaveBeenCalledTimes(1)
-
-      await vi.advanceTimersByTimeAsync(200)
-      expect(query).toHaveBeenCalledTimes(2)
-    } finally {
-      vi.useRealTimers()
-    }
   })
 
   it('并发重查时旧查询结果不覆盖新结果', async () => {
@@ -206,173 +216,5 @@ describe('useSyncedEntryList', () => {
     pendingResolvers[0]!([makeEntry('x')]) // 慢查询姗姗来迟，应被作废
     await first
     expect(ids(list)).toEqual(['b', 'a'])
-  })
-})
-
-describe('useSyncedEntryList 列表快照（切走再回来）', () => {
-  beforeEach(() => {
-    window.scrollTo = (() => {}) as typeof window.scrollTo
-    nuxtState.clear()
-    sessionStorage.clear()
-  })
-
-  it('重新进入列表时恢复上次内容，期间同步到的新条目进提示条', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const before = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await before.load()
-    expect(ids(before)).toEqual(['b', 'a'])
-
-    // 离开页面，期间同步到了新条目 c；再点回时间线（组件重新挂载）
-    rows = [makeEntry('c'), makeEntry('b'), makeEntry('a')]
-    const after = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-
-    // 挂载即恢复上次列表（因此也不需要 loading 遮罩）
-    expect(ids(after)).toEqual(['b', 'a'])
-
-    await after.load()
-
-    // 页面刚挂载时滚动位置必在顶部，但这里是「回来接着读」，新条目不该直接插进列表
-    expect(ids(after)).toEqual(['b', 'a'])
-    expect(after.pendingCount.value).toBe(1)
-
-    after.applyPending()
-    expect(ids(after)).toEqual(['c', 'b', 'a'])
-    expect(after.pendingCount.value).toBe(0)
-  })
-
-  it('首次进入（没有快照）时首屏照常直接上屏', async () => {
-    const list = useSyncedEntryList({
-      query: async () => [makeEntry('b'), makeEntry('a')],
-      stateKey: 'timeline'
-    })
-
-    await list.load()
-
-    expect(ids(list)).toEqual(['b', 'a'])
-    expect(list.pendingCount.value).toBe(0)
-  })
-
-  it('换账号后不复用上一个账号的列表快照', async () => {
-    nuxtState.set('auth-session-user', { id: 'user-a' })
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const before = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await before.load()
-
-    // 换账号后本地库也换了一批条目
-    nuxtState.set('auth-session-user', { id: 'user-b' })
-    rows = [makeEntry('y'), makeEntry('x')]
-    const after = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await after.load()
-
-    expect(ids(after)).toEqual(['y', 'x'])
-    expect(after.pendingCount.value).toBe(0)
-  })
-
-  it('数据源整批换掉时直接按新内容上屏，不把快照内容拼进来', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const before = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await before.load()
-
-    // 同一账号但条目被整批替换（本地库重建）：一条都对不上
-    rows = [makeEntry('y'), makeEntry('x')]
-    const after = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await after.load()
-
-    expect(ids(after)).toEqual(['y', 'x'])
-    expect(after.pendingCount.value).toBe(0)
-  })
-
-  it('用户主动同步时把恢复的列表换成最新内容', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const before = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await before.load()
-
-    rows = [makeEntry('c'), makeEntry('b'), makeEntry('a')]
-    const after = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await after.load()
-    expect(after.pendingCount.value).toBe(1)
-
-    // 用户点了同步按钮：他此刻就是要看最新内容
-    await after.refreshFromSync(true)
-
-    expect(ids(after)).toEqual(['c', 'b', 'a'])
-    expect(after.pendingCount.value).toBe(0)
-  })
-})
-
-describe('useSyncedEntryList 刷新恢复（落盘阅读基准）', () => {
-  beforeEach(() => {
-    window.scrollTo = (() => {}) as typeof window.scrollTo
-    nuxtState.clear()
-    sessionStorage.clear()
-  })
-
-  it('整页刷新后（内存快照没了）仍把新条目收进提示条', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const before = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await before.load()
-    expect(ids(before)).toEqual(['b', 'a'])
-
-    // 刷新：Nuxt 应用级 state 清空，只剩 sessionStorage 里的阅读基准
-    nuxtState.clear()
-    rows = [makeEntry('c'), makeEntry('b'), makeEntry('a')]
-    const after = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await after.load()
-
-    // 摆回来的是刷新前那批内容，新条目在提示条里
-    expect(ids(after)).toEqual(['b', 'a'])
-    expect(after.pendingCount.value).toBe(1)
-
-    after.applyPending()
-    expect(ids(after)).toEqual(['c', 'b', 'a'])
-  })
-
-  it('刷新恢复时放大窗口重查，列表不会因为切掉新条目而变短', async () => {
-    const old = ['old-0', 'old-1', 'old-2'].map(makeEntry)
-    let rows = [...old]
-    // 真实 query 会按 limit 截断窗口
-    const query = async (limit: number) => rows.slice(0, limit)
-    const before = useSyncedEntryList({ query, stateKey: 'feed:x', pageSize: 3 })
-    await before.load()
-    expect(ids(before)).toEqual(['old-0', 'old-1', 'old-2'])
-
-    nuxtState.clear()
-    rows = [makeEntry('new-0'), makeEntry('new-1'), ...old, makeEntry('older-0')]
-    const after = useSyncedEntryList({ query, stateKey: 'feed:x', pageSize: 3 })
-    await after.load()
-
-    // 2 条新内容进提示条，列表仍是完整一页（放大到 5 条后切出基准起的 3 条）
-    expect(ids(after)).toEqual(['old-0', 'old-1', 'old-2'])
-    expect(after.pendingCount.value).toBe(2)
-  })
-
-  it('基准条目已不在本地库时退回常规上屏，不会一直卡着', async () => {
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const before = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await before.load()
-
-    nuxtState.clear()
-    rows = [makeEntry('y'), makeEntry('x')]
-    const after = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await after.load()
-
-    expect(ids(after)).toEqual(['y', 'x'])
-    expect(after.pendingCount.value).toBe(0)
-  })
-
-  it('换账号后不认上一个账号的阅读基准', async () => {
-    nuxtState.set('auth-session-user', { id: 'user-a' })
-    let rows = [makeEntry('b'), makeEntry('a')]
-    const before = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await before.load()
-
-    // 刷新 + 换账号：本地库与基准归属都对不上
-    nuxtState.clear()
-    nuxtState.set('auth-session-user', { id: 'user-b' })
-    rows = [makeEntry('y'), makeEntry('x')]
-    const after = useSyncedEntryList({ query: async () => rows, stateKey: 'timeline' })
-    await after.load()
-
-    expect(ids(after)).toEqual(['y', 'x'])
   })
 })

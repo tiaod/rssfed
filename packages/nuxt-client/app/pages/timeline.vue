@@ -11,20 +11,18 @@ const subs = ref<SubscriptionItem[]>([])
 const feedIds = computed(() => subs.value.map(s => s.id))
 const error = ref<string | null>(null)
 
-// 条目数据与同步刷新策略：后台同步到的新条目先累计成「N 条新内容」提示，用户点了才上屏，
-// 避免把正在读的内容推走；订阅源多时逐个同步完成会密集触发重查，用防抖合并成一次。
-// stateKey 让列表在切走再点回时间线（甚至整页刷新）时按上次读到的位置摆回来，
-// 期间同步到的新条目同样先进提示条。
+// 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
+// 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部——同步因此永远不会把正在
+// 读的内容推走。syncedDocs 把计数限定在本页订阅源的范围内，别的源同步不该惊动这个列表。
 const {
-  entries, pendingCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyPending
+  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew
 } = useSyncedEntryList({
-  stateKey: 'timeline',
   query: limit => pouch.queryTimeline(limit),
-  debounceMs: 200
+  syncedDocs: () => feedIds.value.reduce((n, id) => n + (pouch.syncedDocsByFeed[id] ?? 0), 0)
 })
 
-// 同一会话里切回来时列表内容已在（内存快照），不必再用 loading 盖住；刷新后要等重查
-const loading = ref(!entries.value.length)
+// 首屏要等本地库重查一次
+const loading = ref(true)
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
 const { sentinelRef, loading: loadingMore, loadMore } = useInfiniteList(() => grow())
@@ -80,11 +78,11 @@ onMounted(async () => {
   }
 })
 
-// 任一订阅源同步完成时重新查询。首屏之后拿到的新条目一律先进提示条（见 useSyncedEntryList），
-// 只有用户主动点过同步按钮（isUserDrivenSync）才直接上屏——他此刻就是要看最新内容。
+// 任一订阅源同步完成时累计「已同步 N 条」。列表不动：新条目什么时候进列表由用户点提示条决定
+// （见 useSyncedEntryList），因此这里不需要判断这次同步是不是用户按的按钮。
 watch(
   () => feedIds.value.map(id => pouch.syncStatuses[id]?.version ?? 0).join(','),
-  () => void refreshFromSync(pouch.isUserDrivenSync())
+  () => refreshFromSync()
 )
 </script>
 
@@ -149,12 +147,12 @@ watch(
       </div>
 
       <template v-else>
-        <!-- listAnchorRef 供应用「N 条新内容」时定位滚动容器并回到顶部 -->
+        <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
         <div ref="listAnchorRef">
           <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
           <NewEntriesBanner
-            :count="pendingCount"
-            @apply="applyPending"
+            :count="newCount"
+            @apply="applyNew"
           />
           <EntryList
             :entries="entries"

@@ -5,7 +5,7 @@ import type { RssEntry } from '~/types/rss'
  * 弹窗滑近列表末尾时用它预加载下一页；hasMore 用来区分「正在路上」和「真没有更多了」。
  */
 export interface EntryListLoader {
-  /** 拉取下一页数据并入列（列表页自身的单飞保护负责折叠并发调用） */
+  /** 拉取下一页数据并入列（列表页自身的单飞保护负责合并并发调用） */
   loadMore(): unknown
   /** 是否还可能加载出更多条目 */
   hasMore(): boolean

@@ -164,10 +164,14 @@ interface PouchDbState {
   dbUserId: string | null
   /** 账号切换监听是否已注册（多个组件都会调用 usePouchDb，只需注册一次） */
   userWatchReady: boolean
-  /** 用户主动同步（SyncButton）的结束时间：列表页据此把新条目直接上屏 */
-  userSyncAt: number
-  /** 用户主动同步是否进行中：长同步期间每个源完成都算「用户主动」，不受时间窗口限制 */
-  userSyncActive: boolean
+  /**
+   * 各订阅源「累计同步写入的文档数」（只增不减）。
+   *
+   * 数字来自复制任务的 change 事件（`docs_written`，见 replicateDb）。条目列表页据此
+   * 显示「已同步 N 条」：同步只负责拉数据并报数，列表什么时候换成最新由用户点提示条决定
+   * （见 composables/useSyncedEntryList）。
+   */
+  syncedDocsByFeed: Record<string, number>
   /**
    * 本地存储故障（IndexedDB 配额耗尽 / 库进入 global failure）的说明文案。
    *
@@ -176,12 +180,6 @@ interface PouchDbState {
    */
   storageBroken: Ref<string | null>
 }
-
-/**
- * 「用户主动同步」的宽限期：点击同步按钮后这段时间内到达的新条目视为用户想立刻看到，
- * 列表页直接上屏；超时后的新条目仍走「N 条新内容」提示，不打断阅读。
- */
-const USER_SYNC_APPLY_WINDOW = 10_000
 
 /**
  * 由复制的 change 事件推算单个源内部的拉取进度（0-100 整数）。
@@ -253,8 +251,7 @@ function createPouchState(): PouchDbState {
     userStateSyncPromise: null,
     dbUserId: null,
     userWatchReady: false,
-    userSyncAt: 0,
-    userSyncActive: false,
+    syncedDocsByFeed: reactive<Record<string, number>>({}),
     storageBroken: ref<string | null>(null)
   }
 }
@@ -377,6 +374,9 @@ export function usePouchDb() {
     entryCoverBlobs.clear()
     for (const key of Object.keys(syncStatuses)) {
       Reflect.deleteProperty(syncStatuses, key)
+    }
+    for (const key of Object.keys(pouchState.syncedDocsByFeed)) {
+      Reflect.deleteProperty(pouchState.syncedDocsByFeed, key)
     }
     pouchState.dbUserId = uid
     // 换账号后重新开始同步，不继承上一个账号的暂停状态；
@@ -692,12 +692,19 @@ export function usePouchDb() {
      * 每批都写一次响应式状态，但先比掉重复的整数值：PouchDB 的批大小是 20，
      * 一个几百条的源会 emit 十几次，值不变时不必触发组件重渲染。
      */
+    /**
+     * 本次复制累计写入的文档数：`docs_written` 是本次复制的累计值（不是本批增量），
+     * 所以每次覆盖即可，复制成功时把它加进「已同步条数」。只有进度用途时它会被丢掉。
+     */
+    let replicatedDocs = 0
+
     const onChange = (info: { docs_written?: number, pending?: number }) => {
       // 暂停/换账号后状态已归位，迟到的 change 不该把它改回 syncing
       const current = syncStatuses[id]
       if (pouchState.dbUserId !== ownerUserId || current?.status !== 'syncing') return
       const progress = computeReplicateProgress(info, current.progress ?? 0)
       const docsWritten = info.docs_written
+      if (typeof docsWritten === 'number') replicatedDocs = docsWritten
       const pending = info.pending
       if (progress === current.progress && docsWritten === current.docsWritten && pending === current.pending) {
         return
@@ -744,6 +751,10 @@ export function usePouchDb() {
       if (cancelled) return { ok: false, cancelled: true }
       if (!res.ok) {
         throw new Error(`同步失败（HTTP ${res.status}）`)
+      }
+      // 先累加「已同步条数」再写状态：列表页 watch 的是 version 变化，回调执行时计数必须已是新值
+      if (replicatedDocs > 0) {
+        pouchState.syncedDocsByFeed[id] = (pouchState.syncedDocsByFeed[id] ?? 0) + replicatedDocs
       }
       setStatus({
         feedId: id,
@@ -944,17 +955,7 @@ export function usePouchDb() {
   ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number, cancelled: number }> {
     // 用户主动同步 = 恢复：先清掉暂停标记
     resumeSync()
-    // 用户主动同步：列表页据此把新条目直接上屏，而不弹「N 条新内容」提示条。
-    // active 覆盖长同步全程（数百个源可能耗时数十秒，光靠时间窗口会中途失效）；
-    // 结束时刷新 userSyncAt，兜住同步收尾阶段才到达的复制结果。
-    pouchState.userSyncActive = true
-    pouchState.userSyncAt = Date.now()
-    try {
-      return await runSyncNow(feedIds, opts)
-    } finally {
-      pouchState.userSyncActive = false
-      pouchState.userSyncAt = Date.now()
-    }
+    return runSyncNow(feedIds, opts)
   }
 
   /** syncNow 的实际逻辑（触发范围与降级规则见其上方文档注释） */
@@ -1019,14 +1020,6 @@ export function usePouchDb() {
     }
 
     return { ok, failed, skipped: candidateCount - targets.length, cancelled: cancelled.length }
-  }
-
-  /**
-   * 用户是否主动触发了同步（点同步按钮、或「重置本地缓存」后的全量重建），或刚结束不久。
-   * 列表页据此判定：主动同步期望立即看到新内容 → 直接上屏；后台同步 → 转「N 条新内容」提示。
-   */
-  function isUserDrivenSync(): boolean {
-    return pouchState.userSyncActive || Date.now() - pouchState.userSyncAt < USER_SYNC_APPLY_WINDOW
   }
 
   // ── 集中库查询（Mango 索引，一次查询） ──
@@ -1188,6 +1181,9 @@ export function usePouchDb() {
     // 用 Reflect.deleteProperty 而不是 delete：后者对动态键会破坏 V8 的对象形状优化
     for (const key of Object.keys(syncStatuses)) {
       Reflect.deleteProperty(syncStatuses, key)
+    }
+    for (const key of Object.keys(pouchState.syncedDocsByFeed)) {
+      Reflect.deleteProperty(pouchState.syncedDocsByFeed, key)
     }
     // 代理寻址信息一并失效：服务端库重建后库名可能已变
     invalidateTargets()
@@ -1585,7 +1581,11 @@ export function usePouchDb() {
     syncFeed,
     syncFeedsIfChanged,
     syncNow,
-    isUserDrivenSync,
+    /**
+     * 各订阅源累计同步写入的文档数（响应式，只增不减）。
+     * 列表页据此显示「已同步 N 条」提示条。
+     */
+    syncedDocsByFeed: pouchState.syncedDocsByFeed,
     /** 暂停同步（左下角指示器在同步中点击） */
     pauseSync,
     /** 恢复同步（暂停后点击指示器，或调用 syncNow） */
