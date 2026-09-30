@@ -216,6 +216,46 @@ worker 侧则在有失败时打一行 `[EntryImages] feed=… 候选=… 失败=
 
    > **为什么 Bot 产出库里不放压缩图片？** 两个场景的消费者不同：PouchDB 同步 feed 库中的条目供离线阅读，需要下载并压缩图片嵌入文档；ActivityPub outbox 返回的是轻量分发元数据，远程实例会自行拉取原始图片 URL，不需要也不应该处理压缩版本。Bot 产出库只存标题、摘要、原文链接即可。
 
+## 前端列表渲染（虚拟化瀑布流 + 无限滚动）
+
+时间线、分类页、单源页、Bot 产出页共用 `packages/nuxt-client/app/components/EntryList.vue`：
+虚拟化瀑布流 + 页尾骨架触底加载。数据侧由 `useSyncedEntryList`（列表只在 `load()` 里整体替换，
+`grow()` 只往末尾接更旧的条目）与 `useInfiniteList`（单飞防重入）提供。
+
+### 虚拟化（为什么必须做）
+
+列表用 **Nuxt UI 的 `ScrollArea`**（`items` + `virtualize`，内部就是 `@tanstack/vue-virtual` 的
+官方封装，见 `packages/nuxt-client/app/components/EntryList.vue`），只渲染视口附近的条目：
+`lanes` 按断点给列数（窄屏 1 列就是普通线性虚拟列表），`estimateSize` 估算未测量过的条目，
+真实高度由 ScrollArea 内部 `measureElement` 在渲染后记住。
+
+选它而不是自己接 virtualizer：虚拟化这层逻辑（测量、overscan、scrollMargin、lanes 分配）
+交给官方组件维护，升级 Nuxt UI 自动跟进。**没有用 `ScrollArea` 的地方只剩一点**：它自带滚动
+容器，所以外层要给它确定高度（页面里是 `flex-1 min-h-0` 的列表容器 + 组件内 `h-full`）。
+
+瓶颈不在滚动本身（滚动由合成器线程负责，DOM 多少都一样是满帧），而在**追加一批时要把整棵
+已有 DOM 重新布局**，成本随条数线性上涨。手机视口（393px → 1 列）+ CDP CPU 降速 6x 实测：
+
+| 条数 | DOM 节点（前 → 后） | 加载时长任务（前 → 后） |
+| --- | --- | --- |
+| 600 | 6975 → **196** | 5 次 / 76ms → **0** |
+| 1200 | 13937 → **196** | 12 次 / 133ms → 1 次 / 50ms |
+
+桌面 8 列同样恒定（801 节点，0 掉帧）。
+
+> `content-visibility: auto` 那类"跳过视口外元素"的取巧方案试过，不够用：600 条有效，1200 条
+> 仍有 111ms，而且滚动 P95 从 18ms 涨到 25ms（视口外元素滚进来要即时布局）。已放弃。
+
+### 页尾加载骨架 = 触底信号
+
+列表末尾排 6 条加载骨架（`hasMore` 为 true 时），它们当作普通条目参与虚拟化。**最后一条进入
+渲染窗口就等于「用户滚到底了」**，由 `MasonryColumns` 发 `reach-end` 事件触发加载。
+
+不用 `rootMargin` 提前 N 屏的原因：IntersectionObserver 的相交判定还要与 target 的所有滚动
+祖先裁剪框求交，root 用隐式视口时内部滚动容器会把它挡住——实测「必须滚到底才触发」，把 root
+换成滚动容器才有效，但真实布局里到底哪个元素在滚并不好判断。骨架可见这个信号本身就在容器
+可视区内，绕开了这一整类问题。
+
 ## 离线可用（Service Worker）
 
 「离线优先」在数据上由 PouchDB 保证，但**页面本身也得打得开**——否则断网后连壳都没有。这一层由 `packages/nuxt-client/public/sw.js` 承担，配置见 `nuxt.config.ts`（`nitro.prerender` 与 `nitro:build:public-assets` 钩子），注册见 `app/plugins/service-worker.client.ts`。
