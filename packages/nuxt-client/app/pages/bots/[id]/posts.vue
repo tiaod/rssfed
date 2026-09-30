@@ -12,7 +12,6 @@ const toast = useToast()
 const bot = ref<{ id: string, name: string, description?: string, avatarUrl?: string } | null>(null)
 const loading = ref(true)
 const subscribed = ref(false)
-const loadingMore = ref(false)
 
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
@@ -24,19 +23,8 @@ const {
   syncedDocs: () => pouch.syncedDocsByFeed[virtualFeedId] ?? 0
 })
 
-// ── 分页加载：查询窗口逐步增大（不用 useInfiniteScroll，避免 SSR 兼容问题）──
-let fetchingNext = false // 防重入：弹窗尾部预加载与「加载更多」按钮共用同一入口
-async function loadMore() {
-  if (fetchingNext || !hasMore.value) return
-  fetchingNext = true
-  loadingMore.value = true
-  try {
-    await grow()
-  } finally {
-    fetchingNext = false
-    loadingMore.value = false
-  }
-}
+// 分页加载：查询窗口逐步增大；页尾骨架进入视口就加载下一批（与其它列表页一致）
+const { loadMore } = useInfiniteList(() => grow())
 // EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
 const hasMoreGetter = () => hasMore.value
 
@@ -89,7 +77,7 @@ async function toggleSubscribe() {
 </script>
 
 <template>
-  <UDashboardPanel>
+  <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
       <UDashboardNavbar :title="bot?.name || 'Bot 产出'">
         <template #right>
@@ -146,48 +134,23 @@ async function toggleSubscribe() {
 
       <template v-else>
         <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
-        <div ref="listAnchorRef">
+        <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
+        <div
+          ref="listAnchorRef"
+          class="flex h-full min-h-0 flex-col"
+        >
           <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
           <NewEntriesBanner
+            class="mx-4 sm:mx-6"
             :count="newCount"
             @apply="applyNew"
           />
           <EntryList
+            class="min-h-0 flex-1"
             :entries="entries || []"
             :load-more="loadMore"
             :has-more="hasMoreGetter"
           />
-
-          <!-- 分页加载：滚动到底部附近或点击按钮加载下一批 -->
-          <div
-            v-if="loadingMore"
-            class="flex justify-center py-6"
-          >
-            <UIcon
-              name="i-lucide-loader-circle"
-              class="size-5 animate-spin text-muted"
-            />
-          </div>
-          <div
-            v-else-if="hasMore"
-            class="flex justify-center py-4"
-          >
-            <UButton
-              variant="outline"
-              color="neutral"
-              size="sm"
-              icon="i-lucide-chevrons-down"
-              @click="loadMore"
-            >
-              加载更多
-            </UButton>
-          </div>
-          <p
-            v-else
-            class="py-6 text-center text-xs text-muted"
-          >
-            已加载全部产出
-          </p>
         </div>
       </template>
     </template>

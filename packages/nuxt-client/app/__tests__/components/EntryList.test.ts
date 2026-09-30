@@ -14,9 +14,17 @@ import type { RssEntry } from '../../types/rss'
 
 const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useEntryModal = () => ({ openEntry: vi.fn() })
+// EntryList 用 IntersectionObserver 观察页尾骨架（骨架可见即触底加载）
+testGlobals.useIntersectionObserver = vi.fn(() => ({ pause: vi.fn(), resume: vi.fn(), stop: vi.fn() }))
 
 const STUBS = {
-  UPageColumns: { template: '<div class="page-columns"><slot /></div>' },
+  // ScrollArea（虚拟化）在单测里退化成「把 items 全渲染出来」
+  UScrollArea: {
+    name: 'ScrollArea',
+    props: ['items', 'virtualize', 'ui'],
+    template: '<div class="scroll-area"><div v-for="(item, index) in items" :key="item.id ?? index" class="cell"><slot :item="item" :index="index" /></div></div>'
+  },
+  USkeleton: { template: '<div class="skeleton" />' },
   UBlogPost: {
     name: 'UBlogPost',
     props: ['title', 'description', 'date', 'image', 'authors', 'ui'],
@@ -107,5 +115,42 @@ describe('EntryList 卡片署名', () => {
     const wrapper = mountList([makeEntry({ author: undefined })])
 
     expect(wrapper.get('.user').text()).toBe('某科技周刊')
+  })
+})
+
+describe('EntryList 页尾加载骨架', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('还有更多时把骨架排在列表末尾（虚拟化靠它触发加载）', () => {
+    const wrapper = mount(EntryList, {
+      props: { entries: [makeEntry()], loadMore: vi.fn(), hasMore: () => true },
+      global: { stubs: STUBS }
+    })
+
+    // 真实条目 + 页尾骨架：骨架排在最后
+    const cells = wrapper.findAll('.cell')
+    expect(cells.length).toBeGreaterThan(1)
+    expect(wrapper.find('.skeleton').exists()).toBe(true)
+    expect(cells.at(-1)!.find('.skeleton').exists()).toBe(true)
+  })
+
+  it('没有更多时不渲染骨架', () => {
+    const wrapper = mount(EntryList, {
+      props: { entries: [makeEntry()], loadMore: vi.fn(), hasMore: () => false },
+      global: { stubs: STUBS }
+    })
+
+    expect(wrapper.find('.skeleton').exists()).toBe(false)
+  })
+
+  it('静态列表（不传 loadMore）时不渲染骨架', () => {
+    const wrapper = mount(EntryList, {
+      props: { entries: [makeEntry()] },
+      global: { stubs: STUBS }
+    })
+
+    expect(wrapper.find('.skeleton').exists()).toBe(false)
   })
 })

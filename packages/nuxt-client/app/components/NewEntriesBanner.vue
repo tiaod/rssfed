@@ -33,7 +33,7 @@ const expanded = computed(() => props.count > 0)
   <div
     class="grid transition-all duration-300 ease-out"
     :class="expanded
-      ? '-mt-3 grid-rows-[1fr] opacity-100'
+      ? 'mt-4 sm:mt-6 grid-rows-[1fr] opacity-100'
       : 'grid-rows-[0fr] opacity-0'"
     :aria-hidden="!expanded"
   >

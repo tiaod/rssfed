@@ -39,7 +39,7 @@ const {
 })
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
-const { sentinelRef, loading: loadingMore, loadMore } = useInfiniteList(() => grow())
+const { loadMore } = useInfiniteList(() => grow())
 // EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
 const hasMoreGetter = () => hasMore.value
 
@@ -65,7 +65,7 @@ watch(
 </script>
 
 <template>
-  <UDashboardPanel>
+  <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
       <UDashboardNavbar :title="category">
         <template #right>
@@ -139,40 +139,24 @@ watch(
 
       <template v-else>
         <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
-        <div ref="listAnchorRef">
+        <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
+        <div
+          ref="listAnchorRef"
+          class="flex h-full min-h-0 flex-col"
+        >
           <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
           <NewEntriesBanner
+            class="mx-4 sm:mx-6"
             :count="newCount"
             @apply="applyNew"
           />
           <EntryList
+            class="min-h-0 flex-1"
             :entries="entries"
             :load-more="loadMore"
             :has-more="hasMoreGetter"
             show-feed
           />
-
-          <!-- 无限滚动：哨兵进入视口触发加载下一批 -->
-          <div
-            ref="sentinelRef"
-            class="h-px"
-            aria-hidden="true"
-          />
-          <div
-            v-if="loadingMore"
-            class="flex justify-center py-6"
-          >
-            <UIcon
-              name="i-lucide-loader-circle"
-              class="size-5 animate-spin text-muted"
-            />
-          </div>
-          <p
-            v-else-if="!hasMore"
-            class="py-6 text-center text-xs text-muted"
-          >
-            已加载全部条目
-          </p>
         </div>
       </template>
     </template>
