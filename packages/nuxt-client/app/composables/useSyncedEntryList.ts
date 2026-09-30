@@ -1,4 +1,5 @@
 import type { RssEntry } from '~/types/rss'
+import { resolveScrollContainer } from '~/utils/scrollContainer'
 
 export interface UseSyncedEntryListOptions {
   /** 按窗口大小查询本地集中库（时间线 / 单源 / 分组 / bot 产出各不同） */
@@ -137,25 +138,16 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
   }
 }
 
-/** 从锚点向上找第一个可滚动祖先（页面滚动容器可能是 window，也可能是面板内的滚动区） */
-function findScrollParent(el: HTMLElement | null): HTMLElement | null {
-  let node: HTMLElement | null = el?.parentElement ?? null
-  while (node) {
-    const overflowY = window.getComputedStyle(node).overflowY
-    if ((overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay')
-      && node.scrollHeight > node.clientHeight) {
-      return node
-    }
-    node = node.parentElement
-  }
-  return null
-}
-
-/** 应用待更新后回到列表顶部（点了「查看」就是要看它） */
+/**
+ * 应用待更新后回到列表顶部（点了「查看」就是要看它）。
+ *
+ * 列表是自己滚的（EntryList 的 UScrollArea 在锚点子树里），不是页面级滚动，所以要靠
+ * resolveScrollContainer 先在子树里找；它返回 null 才说明真的轮到 window。
+ */
 function scrollListToTop(anchor: HTMLElement | null) {
   if (typeof window === 'undefined') return
   try {
-    const scroller = anchor ? findScrollParent(anchor) : null
+    const scroller = resolveScrollContainer(anchor)
     if (scroller) {
       scroller.scrollTo({ top: 0, behavior: 'smooth' })
     } else {
