@@ -20,6 +20,9 @@ const feedLoading = ref(true)
 const subscriptionTitle = ref('')
 const feedDisplayName = computed(() => subscriptionTitle.value || feed.value?.title || '')
 
+// 页头（描述 + 访问网站）只在有内容时渲染；有条目时它作为列表首项随列表滚动
+const hasFeedHeader = computed(() => Boolean(feed.value?.description || feed.value?.siteUrl))
+
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
 const {
@@ -114,38 +117,24 @@ async function unsubscribe() {
     </template>
 
     <template #body>
-      <div
-        v-if="feed"
-        class="mb-6"
-      >
-        <p class="text-sm text-muted">
-          {{ feed.description }}
-        </p>
-        <UButton
-          v-if="feed.siteUrl"
-          :to="feed.siteUrl"
-          target="_blank"
-          variant="ghost"
-          size="sm"
-          icon="i-lucide-external-link"
-          class="mt-2"
-        >
-          访问网站
-        </UButton>
-      </div>
-
-      <div
-        v-if="!entries.length && !loading"
-        class="flex flex-col items-center py-12 gap-4"
-      >
-        <UIcon
-          name="i-lucide-file-text"
-          class="size-12 text-muted"
+      <template v-if="!entries.length && !loading">
+        <!-- 空列表：没有可滚动的内容，页头固定在空态上方 -->
+        <FeedHeader
+          v-if="feed"
+          :feed="feed"
+          class="mb-2 px-4 sm:px-6"
         />
-        <p class="text-muted">
-          暂无条目
-        </p>
-      </div>
+
+        <div class="flex flex-col items-center py-12 gap-4">
+          <UIcon
+            name="i-lucide-file-text"
+            class="size-12 text-muted"
+          />
+          <p class="text-muted">
+            暂无条目
+          </p>
+        </div>
+      </template>
 
       <template v-else>
         <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
@@ -165,7 +154,19 @@ async function unsubscribe() {
             :entries="entries || []"
             :load-more="loadMore"
             :has-more="hasMoreGetter"
-          />
+            :header="hasFeedHeader"
+          >
+            <!-- 页头作为列表首项：跟条目一起滚动，读长列表时不再固定占住视图 -->
+            <template
+              v-if="hasFeedHeader && feed"
+              #header
+            >
+              <FeedHeader
+                :feed="feed"
+                class="pb-2"
+              />
+            </template>
+          </EntryList>
         </div>
       </template>
 

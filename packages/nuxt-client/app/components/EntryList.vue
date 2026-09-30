@@ -13,6 +13,11 @@ const props = defineProps<{
    * 先要知道是哪个源发的）。单源页不传这个 prop —— 源已经写在页面标题里，卡片上保留作者名更有信息量。
    */
   showFeed?: boolean
+  /**
+   * 是否把 `#header` 插槽当作列表首项渲染：页面级信息块（如单源页的订阅源描述）放进来，
+   * 就会和条目一起滚动，而不是固定占住视图顶部。见下方 HeaderItem 的说明。
+   */
+  header?: boolean
 }>()
 
 /**
@@ -29,10 +34,22 @@ interface EndItem {
   end: true
 }
 
+/**
+ * 页头项（`#header` 插槽的内容）。
+ *
+ * 虚拟化把条目按泳道摆到各列，单个 item 无法跨列，所以页头按列数渲染同样多份：
+ * 只有第一份可见并撑满整行宽度，其余 `invisible` 但同样占高 —— 于是每一列都从页头
+ * 下方开始，视觉上就是一条贯穿整行的页头，而不是被挤进第一列的一个格子。
+ */
+interface HeaderItem {
+  id: string
+  header: true
+}
+
 /** 收尾项引用固定，避免每次渲染生成新对象把虚拟化测量打散 */
 const endItem: EndItem = { id: '__list-end__', end: true }
 
-type ListItem = RssEntry | SkeletonItem | EndItem
+type ListItem = RssEntry | SkeletonItem | HeaderItem | EndItem
 
 function isSkeleton(item: ListItem): item is SkeletonItem {
   return 'skeleton' in item
@@ -42,9 +59,13 @@ function isEnd(item: ListItem): item is EndItem {
   return 'end' in item
 }
 
-/** 真条目（把两种占位项排除掉，模板最后一段靠它收窄类型） */
+function isHeader(item: ListItem): item is HeaderItem {
+  return 'header' in item
+}
+
+/** 真条目（把占位项都排除掉，模板最后一段靠它收窄类型） */
 function isEntry(item: ListItem): item is RssEntry {
-  return !isSkeleton(item) && !isEnd(item)
+  return !isSkeleton(item) && !isEnd(item) && !isHeader(item)
 }
 
 const showSkeleton = computed(() =>
@@ -66,6 +87,9 @@ const BREAKPOINTS: ReadonlyArray<readonly [number, number]> = [
 ]
 
 const laneCount = ref(1)
+
+/** 虚拟化条目间距，同时也是页头跨列宽度的换算依据（见 headerSpanStyle） */
+const LIST_GAP = 16
 
 /**
  * 页尾加载骨架：**每列一个**。
@@ -89,12 +113,26 @@ function resolveLanes(width: number): number {
   return 1
 }
 
-/** 交给虚拟化的是「真实条目 + 每列一个页尾骨架」（或收尾提示） */
+/** 页头项：每列一份，id 稳定，虚拟化测量不会因为重渲染而丢 */
+const headerItems = computed<HeaderItem[]>(() =>
+  props.header
+    ? Array.from({ length: Math.max(1, laneCount.value) }, (_, i) => ({
+        id: `__list-header-${i}`,
+        header: true as const
+      }))
+    : []
+)
+
+/** 页头跨列宽度：item 的宽度是「一列」，这里按列数与间隙换算回整行宽度 */
+const headerSpanStyle = computed(() => ({
+  inlineSize: `calc(${laneCount.value} * 100% + ${(laneCount.value - 1) * LIST_GAP}px)`
+}))
+
+/** 交给虚拟化的是「页头 + 真实条目 + 每列一个页尾骨架」（或收尾提示） */
 const listItems = computed<ListItem[]>(() => {
-  if (!props.entries.length) return props.entries
-  return showSkeleton.value
-    ? [...props.entries, ...skeletonItems.value]
-    : [...props.entries, endItem]
+  if (!props.entries.length) return []
+  const tail = showSkeleton.value ? skeletonItems.value : [endItem]
+  return [...headerItems.value, ...props.entries, ...tail]
 })
 
 function handleResize() {
@@ -114,6 +152,7 @@ onBeforeUnmount(() => window.removeEventListener('resize', handleResize))
  */
 function estimateHeight(item: ListItem | undefined): number {
   if (!item || isEnd(item)) return 72
+  if (isHeader(item)) return 96
   if (isSkeleton(item)) return 280
   return item.coverUrl ? 320 : 180
 }
@@ -131,7 +170,7 @@ function estimateHeight(item: ListItem | undefined): number {
  */
 const virtualize = computed(() => ({
   lanes: laneCount.value,
-  gap: 16,
+  gap: LIST_GAP,
   overscan: 6,
   /**
    * 滚动区铺满整个面板（页面的 body 已经 p-0），内边距改由这里承担，滚动条才会像以前那样
@@ -210,10 +249,23 @@ function feedNameOf(entry: RssEntry): string {
     class="h-full"
     :ui="{ root: 'h-full px-4 sm:px-6' }"
   >
-    <template #default="{ item }">
+    <template #default="{ item, index }">
+      <!--
+        页头：只有第一份可见，其余同内容的副本 invisible 占位（见 HeaderItem 说明），
+        宽度都按整行算，各列高度才一致、条目才会从页头下方整齐开始。
+      -->
+      <div
+        v-if="isHeader(item)"
+        :style="headerSpanStyle"
+        :class="index === 0 ? undefined : 'invisible'"
+        :aria-hidden="index === 0 ? undefined : 'true'"
+      >
+        <slot name="header" />
+      </div>
+
       <!-- 页尾加载骨架 -->
       <div
-        v-if="isSkeleton(item)"
+        v-else-if="isSkeleton(item)"
         :ref="registerSkeleton"
         class="flex flex-col gap-3"
         aria-hidden="true"
