@@ -20,7 +20,7 @@ const feedLoading = ref(true)
 const subscriptionTitle = ref('')
 const feedDisplayName = computed(() => subscriptionTitle.value || feed.value?.title || '')
 
-// 页头（描述 + 访问网站）只在有内容时渲染；有条目时它作为列表首项随列表滚动
+// 页头（描述 + 访问网站）只在有内容时渲染
 const hasFeedHeader = computed(() => Boolean(feed.value?.description || feed.value?.siteUrl))
 
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
@@ -31,6 +31,18 @@ const {
 } = useSyncedEntryList({
   query: limit => pouch.queryFeedEntries(feedId, limit),
   syncedDocs: () => pouch.syncedDocsByFeed[feedId] ?? 0
+})
+
+/**
+ * 「已同步 N 条」提示条是浮层：盖在列表顶部、不占布局高度，展开不会推动正在读的内容。
+ * 代价是它会挡住最上面一条内容，所以按滚动方向让位——往下读（内容往上走）时收起，
+ * 往上滚或回到顶部时露出（逻辑见 useScrollHideOnDown）。
+ */
+const { visible: bannerVisible, reveal: revealBanner } = useScrollHideOnDown(listAnchorRef)
+
+// 新提示出现时先露一次：否则用户正在往下读的话，这次通知会被"下滑隐藏"直接吃掉
+watch(newCount, (n, prev) => {
+  if (n > 0 && n !== prev) revealBanner()
 })
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
@@ -141,12 +153,16 @@ async function unsubscribe() {
         <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
         <div
           ref="listAnchorRef"
-          class="flex h-full min-h-0 flex-col"
+          class="relative flex h-full min-h-0 flex-col"
         >
-          <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
+          <!--
+            提示条盖在滚动区顶部（浮层，不占布局），滚动方向由页面控制显隐；
+            水平内边距在组件里自带，与滚动区的 px-4 sm:px-6 对齐。
+          -->
           <NewEntriesBanner
-            class="mx-4 sm:mx-6"
+            floating
             :count="newCount"
+            :visible="bannerVisible"
             @apply="applyNew"
           />
           <EntryList
@@ -156,7 +172,7 @@ async function unsubscribe() {
             :has-more="hasMoreGetter"
             :header="hasFeedHeader"
           >
-            <!-- 页头作为列表首项：跟条目一起滚动，读长列表时不再固定占住视图 -->
+            <!-- 页头作为列表首项：跟条目一起滚走，读长列表时不再固定占住视图 -->
             <template
               v-if="hasFeedHeader && feed"
               #header

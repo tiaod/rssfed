@@ -6,9 +6,9 @@ import NewEntriesBanner from '../../components/NewEntriesBanner.vue'
 /**
  * 「已同步 N 条」提示条的形态与交互。
  *
- * 定性：一条常驻的细线——不按滚动方向隐藏（塌高度会让虚拟化抽风，留占位等于没隐藏），
- * 所以它靠把高度压到最紧来少占内容的地方；底部再压一条渐隐带，滚动经过的内容在它下缘
- * 淡出，不至于被一条硬边切断。
+ * 定性：一条细线，两种形态——常驻（参与布局，靠把高度压到最紧少占内容的地方）与浮层
+ * （绝对定位盖在滚动区顶部，不占布局，能安全地按滚动方向显隐）。两种形态底部都压一条
+ * 渐隐带，滚动经过的内容在它下缘淡出，不至于被一条硬边切断。
  */
 
 const STUBS = {
@@ -28,11 +28,20 @@ const STUBS = {
 /** 宿主复刻列表页布局：提示条与列表是兄弟 */
 const Host = defineComponent({
   components: { NewEntriesBanner },
-  props: { count: { type: Number, default: 0 } },
+  props: {
+    count: { type: Number, default: 0 },
+    floating: { type: Boolean, default: false },
+    visible: { type: Boolean, default: true }
+  },
   emits: ['apply'],
   template: `
     <div class="panel">
-      <NewEntriesBanner :count="count" @apply="$emit('apply')" />
+      <NewEntriesBanner
+        :count="count"
+        :floating="floating"
+        :visible="visible"
+        @apply="$emit('apply')"
+      />
       <div class="list"><div class="filler" /></div>
     </div>
   `
@@ -45,8 +54,8 @@ afterEach(() => {
   wrapper = undefined
 })
 
-function mountBanner(count: number) {
-  wrapper = mount(Host, { props: { count }, global: { stubs: STUBS } })
+function mountBanner(count: number, extra: Record<string, unknown> = {}) {
+  wrapper = mount(Host, { props: { count, ...extra }, global: { stubs: STUBS } })
   return wrapper
 }
 
@@ -137,5 +146,45 @@ describe('NewEntriesBanner', () => {
     await wrapper!.setProps({ count: 5 })
     expect(wrapper!.text()).toContain('已同步 5 条')
     expect(bannerEl().className).toContain('grid-rows-[1fr]')
+  })
+
+  it('浮层形态：绝对定位盖在滚动区顶部、自带底色，且不带外边距（不参与布局才不会推动内容）', () => {
+    mountBanner(3, { floating: true })
+
+    const classes = bannerEl().className.split(' ')
+    expect(classes).toContain('absolute')
+    expect(classes).toContain('inset-x-0')
+    expect(classes).toContain('top-0')
+    // 互斥：relative 与 absolute 同时出现时谁生效取决于 CSS 顺序，浮层就白写了
+    expect(classes).not.toContain('relative')
+    // 盖在内容上必须有底色，否则文字会和下面的卡片叠在一起
+    expect(bannerEl().className).toContain('bg-[var(--ui-bg)]')
+    expect(classes).not.toContain('mt-2')
+  })
+
+  it('常驻形态保持参与布局的 relative 定位', () => {
+    mountBanner(3)
+
+    expect(bannerEl().className.split(' ')).toContain('relative')
+    expect(bannerEl().className.split(' ')).not.toContain('absolute')
+  })
+
+  it('外部要求隐藏（visible=false）时按「无新条目」折叠：条数还在，但不可见也不可聚焦', () => {
+    mountBanner(3, { visible: false })
+
+    expect(wrapper!.text()).toContain('已同步 3 条')
+    expect(bannerEl().className).toContain('grid-rows-[0fr]')
+    expect(bannerEl().className).toContain('opacity-0')
+    expect(bannerEl().getAttribute('aria-hidden')).toBe('true')
+    expect(bannerEl().hasAttribute('inert')).toBe(true)
+  })
+
+  it('从隐藏切回可见时重新展开（滚动方向由页面决定）', async () => {
+    mountBanner(3, { visible: false })
+    expect(bannerEl().className).toContain('grid-rows-[0fr]')
+
+    await wrapper!.setProps({ visible: true })
+    expect(bannerEl().className).toContain('grid-rows-[1fr]')
+    expect(bannerEl().getAttribute('aria-hidden')).toBeNull()
   })
 })
