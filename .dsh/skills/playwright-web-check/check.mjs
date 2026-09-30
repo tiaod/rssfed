@@ -16,10 +16,10 @@
 
 'use strict';
 
-const os = require('os');
-const path = require('path');
-const fs = require('fs');
-const { chromium } = require('playwright');
+import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
+import { chromium } from 'playwright';
 
 const TARGET_URL = process.env.CHECK_URL || 'http://localhost:3000';
 const OUT_DIR = process.env.OUT_DIR || path.join(process.cwd(), 'report');
