@@ -52,6 +52,23 @@ export interface ReplicateResult {
 }
 
 /**
+ * 手动同步（syncNow）的结果。
+ *
+ * ok / failed 是逐目标的复制结果，skipped 是被增量过滤跳过（远端无更新）的目标数。
+ *
+ * added 是本轮**真正写入本地的文档数**（按目标前后差值统计）。它是「这次同步有没有带来
+ * 新条目」的唯一判据：为 0 时列表页可以放心把攒着的新条目上屏（同步什么都没带来，
+ * 不会把用户正在读的内容推走）。
+ */
+export interface SyncNowResult {
+  ok: string[]
+  failed: Array<{ id: string, error: string }>
+  skipped: number
+  cancelled: number
+  added: number
+}
+
+/**
  * 复制任务的句柄中本模块用到的部分。
  *
  * 除 cancel 外还要 on / removeListener：源内进度来自复制的 change 事件。
@@ -944,7 +961,8 @@ export function usePouchDb() {
    * 复制统一走并发受限队列（见 enqueueReplicate），订阅源很多时不会挤爆连接。
    *
    * 返回值 skipped 是被增量过滤跳过的目标数，供 UI 提示「无更新」，避免点了按钮像没反应；
-   * cancelled 是本轮被用户暂停中断的目标数（不算失败，UI 不弹失败提示）。
+   * cancelled 是本轮被用户暂停中断的目标数（不算失败，UI 不弹失败提示）；
+   * added 是本轮真正写入本地的文档数（0 = 这次同步没有带来任何新条目）。
    *
    * 用户主动调用即视为「恢复同步」：暂停状态下点同步会先清掉暂停标记，否则复制会被拦在
    * 队列外（见 enqueueReplicate）。
@@ -952,7 +970,7 @@ export function usePouchDb() {
   async function syncNow(
     feedIds?: string[],
     opts: { full?: boolean } = {}
-  ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number, cancelled: number }> {
+  ): Promise<SyncNowResult> {
     // 用户主动同步 = 恢复：先清掉暂停标记
     resumeSync()
     return runSyncNow(feedIds, opts)
@@ -962,7 +980,7 @@ export function usePouchDb() {
   async function runSyncNow(
     feedIds?: string[],
     opts: { full?: boolean } = {}
-  ): Promise<{ ok: string[], failed: { id: string, error: string }[], skipped: number, cancelled: number }> {
+  ): Promise<SyncNowResult> {
     // 目标集合：显式传入的 feed，或当前已订阅的全部源 + 用户状态库。
     // 订阅列表从 user-state 库读取（syncStatuses 是会话状态，刷新后为空，不能作为依据）
     let targets: string[]
@@ -985,7 +1003,7 @@ export function usePouchDb() {
 
     // 全部跳过：不暂停 live 同步、不发任何复制请求（按钮瞬时完成）
     if (targets.length === 0) {
-      return { ok: [], failed: [], skipped: candidateCount, cancelled: 0 }
+      return { ok: [], failed: [], skipped: candidateCount, cancelled: 0, added: 0 }
     }
 
     // ② 临时暂停用户状态库的 live 同步，释放长轮询连接给一次性复制使用。
@@ -998,6 +1016,11 @@ export function usePouchDb() {
     }
 
     // ③ 分批入队执行一次性复制（队列内部限制并发，批间可被暂停/熔断中断）
+    // 复制前记下各目标的「已同步文档数」基线，结束后做差得到本轮真正写入的条数（见 ⑤）
+    const docsBefore = new Map<string, number>()
+    for (const id of targets) {
+      docsBefore.set(id, pouchState.syncedDocsByFeed[id] ?? 0)
+    }
     const results = await enqueueInBatches(targets, opts.full === true, id => seenById.get(id))
     const ok: string[] = []
     const failed: { id: string, error: string }[] = []
@@ -1019,7 +1042,14 @@ export function usePouchDb() {
       void startUserStateLiveSync()
     }
 
-    return { ok, failed, skipped: candidateCount - targets.length, cancelled: cancelled.length }
+    // ⑤ 本轮真正写入本地的文档数。只看本轮目标：别的源（后台自动同步）并发写入不会算进来。
+    //    被熔断/重置本地缓存时计数可能变小，用 Math.max 兜底为 0，不报负数。
+    let added = 0
+    for (const id of targets) {
+      added += Math.max(0, (pouchState.syncedDocsByFeed[id] ?? 0) - (docsBefore.get(id) ?? 0))
+    }
+
+    return { ok, failed, skipped: candidateCount - targets.length, cancelled: cancelled.length, added }
   }
 
   // ── 集中库查询（Mango 索引，一次查询） ──

@@ -16,7 +16,8 @@ const subscribed = ref(false)
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
 const {
-  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew
+  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew,
+  applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   // bot 产出以虚拟 feedId `bot:{id}` 入库
   query: limit => pouch.queryFeedEntries(virtualFeedId, limit),
@@ -81,7 +82,10 @@ async function toggleSubscribe() {
     <template #header>
       <UDashboardNavbar :title="bot?.name || 'Bot 产出'">
         <template #right>
-          <SyncButton :feed-ids="[virtualFeedId]" />
+          <SyncButton
+            :feed-ids="[virtualFeedId]"
+            @synced="applyNewIfSyncAddedNothing"
+          />
           <UButton
             size="sm"
             :color="subscribed ? 'neutral' : 'primary'"

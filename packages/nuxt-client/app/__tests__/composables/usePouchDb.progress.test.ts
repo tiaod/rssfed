@@ -23,7 +23,9 @@ interface FakeTask {
 
 const H = vi.hoisted(() => ({
   pending: [] as FakeTask[],
-  remoteUrlForId: null as null | ((id: string) => Promise<string>)
+  remoteUrlForId: null as null | ((id: string) => Promise<string>),
+  /** 远端订阅列表（含 lastNewEntryAt）：syncNow 的增量过滤依据，用例可替换 */
+  subscriptions: async () => [] as Array<{ feedId: string, lastNewEntryAt?: string }>
 }))
 
 vi.mock('pouchdb', () => {
@@ -91,7 +93,9 @@ vi.mock('~/composables/useCouchTargets', () => ({
 }))
 
 vi.mock('~/composables/useApi', () => ({
-  useApi: () => ({ feeds: { subscriptions: vi.fn(async () => []) } })
+  // 转发而不是直接引用 H.subscriptions：usePouchDb 在创建时就把该函数抓进闭包，
+  // 用例体内再替换 H.subscriptions 也要能生效
+  useApi: () => ({ feeds: { subscriptions: () => H.subscriptions() } })
 }))
 
 vi.mock('~/stores/user', () => ({
@@ -108,6 +112,7 @@ let pouch: ReturnType<typeof usePouchDb>
 beforeEach(() => {
   H.pending.length = 0
   H.remoteUrlForId = async (id: string) => `http://remote.test/${id}`
+  H.subscriptions = async () => []
   Reflect.deleteProperty(sharedApp, '$pouchDbState')
   pouch = usePouchDb()
   // 对齐账号（同 pause 测试：真实应用在同步前已读过用户状态库）
@@ -237,5 +242,44 @@ describe('已同步条数（syncedDocsByFeed）', () => {
     await none
 
     expect(pouch.syncedDocsByFeed['feed-c']).toBeUndefined()
+  })
+})
+
+/**
+ * syncNow 的 added（本轮真正写入本地的文档数）：列表页拿它判断「这次点同步有没有带来
+ * 新条目」——为 0 时才会顺手把折叠着的「已同步 N 条」展开上屏。
+ */
+describe('syncNow 的本轮写入数（added）', () => {
+  it('按目标前后差值报出本轮写入的文档数', async () => {
+    const syncPromise = pouch.syncNow(['feed-a'], { full: true })
+    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
+    H.pending[0]!.emitChange({ docs_written: 3, pending: 0 })
+    H.pending[0]!.finish({ ok: true })
+
+    const result = await syncPromise
+
+    expect(result.added).toBe(3)
+    expect(pouch.syncedDocsByFeed['feed-a']).toBe(3)
+  })
+
+  it('复制成功但没有写入任何文档 → added 为 0（不算「有新条目」）', async () => {
+    const syncPromise = pouch.syncNow(['feed-b'], { full: true })
+    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
+    H.pending[0]!.finish({ ok: true })
+
+    const result = await syncPromise
+
+    expect(result.ok).toEqual(['feed-b'])
+    expect(result.added).toBe(0)
+  })
+
+  it('源全部被增量过滤跳过（按钮瞬时完成）→ 不发复制、added 为 0', async () => {
+    // 远端该源没有新条目（lastNewEntryAt 缺失）→ needsSync 为假，整轮没有目标
+    H.subscriptions = async () => [{ feedId: 'feed-skip', lastNewEntryAt: '' }]
+
+    const result = await pouch.syncNow(['feed-skip'])
+
+    expect(result).toEqual({ ok: [], failed: [], skipped: 1, cancelled: 0, added: 0 })
+    expect(H.pending).toHaveLength(0)
   })
 })

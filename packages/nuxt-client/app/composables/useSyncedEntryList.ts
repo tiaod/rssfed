@@ -18,6 +18,23 @@ export interface UseSyncedEntryListOptions {
 }
 
 /**
+ * 手动同步结果里本模块用到的最小字段。
+ *
+ * 结构兼容 useManualSync 的 ManualSyncOutcome：这里不收窄耦合，列表只关心
+ * 「本轮有没有写入新条目」以及「同步有没有正常收尾」。
+ */
+export interface SyncOutcomeLike {
+  /** 本轮真正写入本地的文档数（0 = 这次同步没有带来新条目） */
+  added: number
+  /** 复制失败的目标数 */
+  failed: number
+  /** 被用户暂停中断的目标数 */
+  cancelled: number
+  /** 本地存储故障导致本轮熔断（结果不完整） */
+  storageBroken: boolean
+}
+
+/**
  * 条目列表的数据源与刷新策略。
  *
  * 只有一条规则：**列表是一份快照，只在 `load()` 里整体替换**。
@@ -126,6 +143,28 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
     scrollListToTop(listAnchorRef.value)
   }
 
+  /**
+   * 手动同步结束后的入口（SyncButton 的 `synced` 事件）。
+   *
+   * 平时同步只报数、列表一个字都不动；唯独「这一轮什么都没拉到」时可以顺手展开：
+   * 既然同步没带来任何新条目，把攒着的「已同步 N 条」上屏既不会把用户正在读的内容推走，
+   * 又省掉用户再点一次「查看」。三个条件同时满足才动列表：
+   *
+   *   1. 本轮同步正常收尾（无失败、未被用户暂停、未触发存储熔断）——
+   *      异常状态下不替用户改列表，先让 toast 把问题说清楚；
+   *   2. 本轮没有新条目写入（added = 0，即「同步马上就结束了」这一情形）；
+   *   3. 列表里确实还折叠着待查看条目（newCount > 0），否则无事可做。
+   *
+   * 返回是否真的展开了，便于调用方与测试判断。
+   */
+  async function applyNewIfSyncAddedNothing(outcome: SyncOutcomeLike): Promise<boolean> {
+    if (outcome.storageBroken || outcome.failed > 0 || outcome.cancelled > 0) return false
+    if (outcome.added > 0) return false
+    if (newCount.value <= 0) return false
+    await applyNew()
+    return true
+  }
+
   return {
     entries,
     newCount,
@@ -134,7 +173,8 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
     load,
     grow,
     refreshFromSync,
-    applyNew
+    applyNew,
+    applyNewIfSyncAddedNothing
   }
 }
 

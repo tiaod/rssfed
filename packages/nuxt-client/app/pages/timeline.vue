@@ -15,7 +15,8 @@ const error = ref<string | null>(null)
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部——同步因此永远不会把正在
 // 读的内容推走。syncedDocs 把计数限定在本页订阅源的范围内，别的源同步不该惊动这个列表。
 const {
-  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew
+  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew,
+  applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   query: limit => pouch.queryTimeline(limit),
   syncedDocs: () => feedIds.value.reduce((n, id) => n + (pouch.syncedDocsByFeed[id] ?? 0), 0)
@@ -91,7 +92,7 @@ watch(
     <template #header>
       <UDashboardNavbar title="时间线">
         <template #right>
-          <SyncButton />
+          <SyncButton @synced="applyNewIfSyncAddedNothing" />
           <UButton
             v-if="loading"
             loading

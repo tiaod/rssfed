@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { ref } from 'vue'
 import { useSyncedEntryList } from '../../composables/useSyncedEntryList'
+import type { SyncOutcomeLike } from '../../composables/useSyncedEntryList'
 import type { RssEntry } from '../../types/rss'
 
 // 复刻 Nuxt auto-import：composable 内部直接引用全局 ref
@@ -216,5 +217,84 @@ describe('useSyncedEntryList', () => {
     pendingResolvers[0]!([makeEntry('x')]) // 慢查询姗姗来迟，应被作废
     await first
     expect(ids(list)).toEqual(['b', 'a'])
+  })
+
+  /**
+   * 手动同步结束后的快捷路径（SyncButton 的 synced 事件）。
+   *
+   * 同步没带来任何新条目时可以顺手展开折叠着的「已同步 N 条」；只要本轮真的拉到了
+   * 新条目、或同步没正常收尾，就必须维持「列表不动、等用户点查看」的原有行为。
+   */
+  describe('applyNewIfSyncAddedNothing（本轮没有新条目就顺手展开）', () => {
+    const noNewEntries = { added: 0, failed: 0, cancelled: 0, storageBroken: false }
+
+    /** 攒下 1 条待查看新条目的列表（此时列表仍停在旧快照） */
+    async function listWithPending() {
+      let rows = [makeEntry('b'), makeEntry('a')]
+      const docs = syncedCounter(0)
+      const query = vi.fn(async () => rows)
+      const list = useSyncedEntryList({ query, syncedDocs: docs.docs })
+      await list.load()
+
+      // 后台/上一次同步拿进来 1 条新内容（c）
+      rows = [makeEntry('c'), makeEntry('b'), makeEntry('a')]
+      docs.count.value = 1
+      list.refreshFromSync()
+      return { list, query }
+    }
+
+    it('本轮没有新条目 → 把攒着的待查看条目直接上屏并归零', async () => {
+      const { list } = await listWithPending()
+      expect(list.newCount.value).toBe(1)
+
+      const applied = await list.applyNewIfSyncAddedNothing(noNewEntries)
+
+      expect(applied).toBe(true)
+      expect(ids(list)).toEqual(['c', 'b', 'a'])
+      expect(list.newCount.value).toBe(0)
+    })
+
+    it('本轮拉到了新条目 → 列表一个字都不动，连查询都不发', async () => {
+      const { list, query } = await listWithPending()
+      const queriesBefore = query.mock.calls.length
+
+      const applied = await list.applyNewIfSyncAddedNothing({ ...noNewEntries, added: 2 })
+
+      expect(applied).toBe(false)
+      expect(ids(list)).toEqual(['b', 'a']) // 正在读的内容没被推走
+      expect(list.newCount.value).toBe(1)
+      expect(query.mock.calls.length).toBe(queriesBefore)
+    })
+
+    it('没有折叠着的待查看条目 → 不重查也不回顶', async () => {
+      const list = useSyncedEntryList({
+        query: async () => [makeEntry('a')],
+        syncedDocs: () => 0
+      })
+      await list.load()
+
+      const applied = await list.applyNewIfSyncAddedNothing(noNewEntries)
+
+      expect(applied).toBe(false)
+      expect(ids(list)).toEqual(['a'])
+    })
+
+    const abortedOutcomes: Array<[string, SyncOutcomeLike]> = [
+      ['有源失败', { added: 0, failed: 1, cancelled: 0, storageBroken: false }],
+      ['用户中途暂停', { added: 0, failed: 0, cancelled: 1, storageBroken: false }],
+      ['本地存储熔断', { added: 0, failed: 0, cancelled: 0, storageBroken: true }]
+    ]
+
+    for (const [name, outcome] of abortedOutcomes) {
+      it(`同步没有正常收尾（${name}）→ 不替用户改列表`, async () => {
+        const { list } = await listWithPending()
+
+        const applied = await list.applyNewIfSyncAddedNothing(outcome)
+
+        expect(applied).toBe(false)
+        expect(ids(list)).toEqual(['b', 'a'])
+        expect(list.newCount.value).toBe(1)
+      })
+    }
   })
 })

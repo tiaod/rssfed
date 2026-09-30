@@ -8,10 +8,24 @@
  * - 同步中：按钮转圈
  * - 失败：图标变红，tooltip 显示错误详情（可点击重试）
  * - 成功：tooltip 显示上次同步时间
+ *
+ * 同步结束后把结果以 `synced` 事件抛出（附带本轮是否写入新条目）。列表页据此决定：
+ * 本轮没有新条目时可以顺手把攒着的「已同步 N 条」展开上屏（见 useSyncedEntryList
+ * 的 applyNewIfSyncAddedNothing），免得用户再点一次「查看」。
  */
+import { computed } from 'vue'
+import { usePouchDb } from '~/composables/usePouchDb'
+import { useManualSync } from '~/composables/useManualSync'
+import type { ManualSyncOutcome } from '~/composables/useManualSync'
+
 const props = withDefaults(defineProps<{ feedIds?: string[] }>(), {
   feedIds: undefined
 })
+
+const emit = defineEmits<{
+  /** 本轮手动同步结束（重入导致的空转不发事件） */
+  synced: [outcome: ManualSyncOutcome]
+}>()
 
 const pouch = usePouchDb()
 
@@ -24,7 +38,13 @@ const relatedIds = computed(() => {
 // 手动同步逻辑与侧边栏的状态指示器共用（toast 文案只有一处）。
 // isSyncing 只表示手动同步进行中：live 同步的 syncing 状态只驱动全局进度条，
 // 否则初始同步因连接竞争卡住时按钮也会禁用，用户将无法重试。
-const { syncing: isSyncing, sync: handleSync } = useManualSync(() => props.feedIds)
+const { syncing: isSyncing, sync } = useManualSync(() => props.feedIds)
+
+/** 点击同步：结束后把本轮结果交给页面（null = 上一轮还在跑，本轮没执行） */
+async function handleSync() {
+  const outcome = await sync()
+  if (outcome) emit('synced', outcome)
+}
 
 const hasError = computed(() =>
   relatedIds.value.some(id => pouch.syncStatuses[id]?.status === 'error')

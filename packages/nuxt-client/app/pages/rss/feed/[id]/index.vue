@@ -23,7 +23,8 @@ const feedDisplayName = computed(() => subscriptionTitle.value || feed.value?.ti
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
 const {
-  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew
+  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew,
+  applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   query: limit => pouch.queryFeedEntries(feedId, limit),
   syncedDocs: () => pouch.syncedDocsByFeed[feedId] ?? 0
@@ -85,7 +86,10 @@ async function unsubscribe() {
     <template #header>
       <UDashboardNavbar :title="feedDisplayName || '订阅源'">
         <template #right>
-          <SyncButton :feed-ids="[feedId]" />
+          <SyncButton
+            :feed-ids="[feedId]"
+            @synced="applyNewIfSyncAddedNothing"
+          />
           <UButton
             v-if="loading"
             loading
