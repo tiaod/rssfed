@@ -1,11 +1,22 @@
 <script setup lang="ts">
-import type { FeedSubscriptionItem } from '~/types/rss'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 
-const props = defineProps<{ subscription: FeedSubscriptionItem | null }>()
+/**
+ * 弹窗只用这几个字段，所以不绑定完整的 FeedSubscriptionItem：
+ * 订阅管理页给它注册表拉来的完整对象，单源页 / bot 产出页则从本地订阅文档拼最小集。
+ */
+export interface EditableSubscription {
+  feedId: string
+  title?: string
+  category?: string
+  /** 该订阅源的默认视图（未设置为 undefined = 跟随分组 / 全局） */
+  view?: ListView
+}
+
+const props = defineProps<{ subscription: EditableSubscription | null }>()
 const emit = defineEmits<{
   close: []
-  saved: [item: FeedSubscriptionItem]
+  saved: [item: EditableSubscription]
 }>()
 
 const pouch = usePouchDb()

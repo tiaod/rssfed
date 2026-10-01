@@ -30,7 +30,7 @@ const STUBS = {
   UBlogPost: {
     name: 'UBlogPost',
     props: ['title', 'description', 'date', 'image', 'authors', 'ui'],
-    template: '<div class="blog-post"><slot name="header" /><slot name="authors" /></div>'
+    template: '<div class="blog-post"><slot name="badge" /><slot name="header" /><slot name="authors" /></div>'
   },
   ULink: {
     name: 'ULink',
@@ -315,5 +315,40 @@ describe('EntryList 视图切换', () => {
     expect(wrapper.get('button[style]').attributes('style')).toContain(String(4 / 3))
     // 兜底高度 = 泳道宽度 / (4/3)，泳道宽度量不到时用 160 兜底 → 120
     expect(virtualizeOf(wrapper).estimateSize(0)).toBe(120)
+  })
+})
+
+describe('EntryList 已读态', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('瀑布流卡片：未读带圆点，已读淡显且没有圆点', () => {
+    const unread = mountList([makeEntry({ read: false })])
+    expect(unread.find('.blog-post [data-unread]').exists()).toBe(true)
+    expect(unread.get('[data-entry-id]').classes()).not.toContain('opacity-60')
+
+    const read = mountList([makeEntry({ read: true })])
+    expect(read.find('.blog-post [data-unread]').exists()).toBe(false)
+    expect(read.get('[data-entry-id]').classes()).toContain('opacity-60')
+  })
+
+  it('列表行：未读带圆点，已读整行淡显', () => {
+    const unread = mountList([makeEntry({ read: false })], undefined, 'list')
+    expect(unread.find('article [data-unread]').exists()).toBe(true)
+    expect(unread.get('article').attributes('data-entry-id')).toBe('entry-1')
+
+    const read = mountList([makeEntry({ read: true })], undefined, 'list')
+    expect(read.find('article [data-unread]').exists()).toBe(false)
+    expect(read.get('article').classes()).toContain('opacity-60')
+  })
+
+  it('图片图块：未读左上角有圆点，已读淡显', () => {
+    const unread = mountList([makeEntry({ read: false, coverUrl: 'blob:cover' })], undefined, 'image')
+    expect(unread.find('button[style] [data-unread]').exists()).toBe(true)
+
+    const read = mountList([makeEntry({ read: true, coverUrl: 'blob:cover' })], undefined, 'image')
+    expect(read.find('button[style] [data-unread]').exists()).toBe(false)
+    expect(read.get('button[style]').classes()).toContain('opacity-60')
   })
 })

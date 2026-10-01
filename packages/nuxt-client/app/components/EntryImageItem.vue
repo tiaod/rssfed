@@ -27,10 +27,20 @@ const aspect = computed(() => entryCoverAspect(props.entry) ?? IMAGE_TILE_FALLBA
 <template>
   <button
     type="button"
+    :data-entry-id="entry.id"
     :style="{ aspectRatio: String(aspect) }"
     class="group relative block w-full cursor-pointer overflow-hidden rounded-lg bg-elevated ring-1 ring-default transition-shadow hover:ring-accented focus-visible:ring-2 focus-visible:ring-primary"
+    :class="{ 'opacity-60': entry.read }"
     @click="emit('open', entry)"
   >
+    <!-- 未读圆点：压在图片左上角，加一圈 ring 保证浅色图上也看得见 -->
+    <span
+      v-if="!entry.read"
+      class="absolute left-1.5 top-1.5 z-10 size-2 rounded-full bg-primary ring-2 ring-default"
+      data-unread="true"
+    >
+      <span class="sr-only">未读</span>
+    </span>
     <img
       v-if="image"
       :src="image.src"

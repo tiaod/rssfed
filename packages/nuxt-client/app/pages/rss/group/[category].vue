@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
+import ListActionsMenu from '~/components/ListActionsMenu.vue'
 import type { SubscriptionItem } from '~/types/rss'
 
 definePageMeta({
@@ -52,6 +53,9 @@ const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnch
 // 列表视图：分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
 const { view, overridden, setView, resetView } = useGroupView(category)
 
+// 「全部标记为已读」：只标当前已加载的这批（见 useMarkAllRead）
+const markAllRead = useMarkAllRead(entries)
+
 onMounted(async () => {
   try {
     feeds.value = await pouch.listSubscriptions()
@@ -78,15 +82,17 @@ watch(
     <template #header>
       <UDashboardNavbar :title="category">
         <template #right>
-          <SyncButton
-            :feed-ids="groupFeeds.map(f => f.id)"
-            @synced="applyNewIfSyncAddedNothing"
-          />
           <ListViewSwitcher
             :view="view"
             :overridden="overridden"
             @update:view="setView"
             @reset="resetView"
+          />
+          <ListActionsMenu
+            :feed-ids="groupFeeds.map(f => f.id)"
+            :has-entries="entries.length > 0"
+            @synced="applyNewIfSyncAddedNothing"
+            @mark-all-read="markAllRead"
           />
           <UButton
             v-if="loading"

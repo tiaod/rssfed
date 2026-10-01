@@ -37,47 +37,67 @@ const date = computed(() => new Date(props.entry.publishedAt))
 </script>
 
 <template>
-  <UBlogPost
-    :title="entry.title"
-    :description="excerpt"
-    :date="date"
-    :ui="{
-      // 高度不写在 header 上，交给插槽里的子元素决定（见下），header 才能在单列时自然塌成 0 高
-      header: 'aspect-auto shrink-0',
-      title: 'line-clamp-2',
-      description: 'line-clamp-2'
-    }"
-    :class="uniformHeight ? 'h-[22rem] cursor-pointer' : 'cursor-pointer'"
-    @click="emit('open', entry)"
+  <!--
+    包裹一层：UBlogPost 的根是 Primitive，不透传 data-* 属性（class 是 Vue 的特例），
+    而列表外围（验证脚本、测试）要能按条目 id 精确核对已读态；淡显也顺带落在这里。
+  -->
+  <div
+    :data-entry-id="entry.id"
+    :class="{ 'opacity-60': entry.read }"
   >
-    <!--
-      UBlogPost 的 #header 是「覆盖」而不是「追加」：给了插槽就不再渲染内置图片，
-      所以这里自己渲染封面图。没有封面时：多列补一条同高占位带（为了行对齐），
-      单列它 hidden，header 因此塌成 0 高，条目只剩文字。
-    -->
-    <template #header>
-      <img
-        v-if="image"
-        v-bind="image"
-        class="h-36 w-full object-cover object-top"
-      >
-      <div
-        v-else
-        class="h-36 w-full items-center justify-center bg-elevated/60"
-        :class="uniformHeight ? 'flex' : 'hidden'"
-      >
-        <UIcon
-          name="i-lucide-newspaper"
-          class="size-6 text-dimmed"
-        />
-      </div>
-    </template>
+    <UBlogPost
+      :title="entry.title"
+      :description="excerpt"
+      :date="date"
+      :ui="{
+        // 高度不写在 header 上，交给插槽里的子元素决定（见下），header 才能在单列时自然塌成 0 高
+        header: 'aspect-auto shrink-0',
+        title: 'line-clamp-2',
+        description: 'line-clamp-2'
+      }"
+      :class="[uniformHeight ? 'h-[22rem]' : '', 'cursor-pointer']"
+      @click="emit('open', entry)"
+    >
+      <!-- 未读圆点：UBlogPost 的 badge 插槽渲染在日期之前，正好当状态标记 -->
+      <template #badge>
+        <span
+          v-if="!entry.read"
+          class="size-2 shrink-0 rounded-full bg-primary"
+          data-unread="true"
+        >
+          <span class="sr-only">未读</span>
+        </span>
+      </template>
 
-    <template #authors>
-      <EntryAttribution
-        :entry="entry"
-        :show-feed="showFeed"
-      />
-    </template>
-  </UBlogPost>
+      <!--
+        UBlogPost 的 #header 是「覆盖」而不是「追加」：给了插槽就不再渲染内置图片，
+        所以这里自己渲染封面图。没有封面时：多列补一条同高占位带（为了行对齐），
+        单列它 hidden，header 因此塌成 0 高，条目只剩文字。
+      -->
+      <template #header>
+        <img
+          v-if="image"
+          v-bind="image"
+          class="h-36 w-full object-cover object-top"
+        >
+        <div
+          v-else
+          class="h-36 w-full items-center justify-center bg-elevated/60"
+          :class="uniformHeight ? 'flex' : 'hidden'"
+        >
+          <UIcon
+            name="i-lucide-newspaper"
+            class="size-6 text-dimmed"
+          />
+        </div>
+      </template>
+
+      <template #authors>
+        <EntryAttribution
+          :entry="entry"
+          :show-feed="showFeed"
+        />
+      </template>
+    </UBlogPost>
+  </div>
 </template>

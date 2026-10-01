@@ -63,7 +63,8 @@ export function useFeedView(feedId: string) {
   const feedDefault = ref<ListView | null>(null)
   const groupDefault = ref<ListView | null>(null)
 
-  onMounted(async () => {
+  /** 读一次订阅源 / 分组的默认值；编辑订阅之后重读一次，改动不用刷新页面就能生效 */
+  async function refreshPrefs() {
     try {
       const prefs = await pouch.getSubscriptionViewPrefs(feedId)
       feedDefault.value = prefs.view
@@ -71,7 +72,9 @@ export function useFeedView(feedId: string) {
     } catch {
       // 读取失败按「未配置」处理，回退全局默认
     }
-  })
+  }
+
+  onMounted(refreshPrefs)
 
   return {
     ...useListViewState(
@@ -79,7 +82,8 @@ export function useFeedView(feedId: string) {
       () => feedDefault.value ?? groupDefault.value ?? settings.value.view ?? DEFAULT_LIST_VIEW
     ),
     feedDefault,
-    groupDefault
+    groupDefault,
+    refreshPrefs
   }
 }
 

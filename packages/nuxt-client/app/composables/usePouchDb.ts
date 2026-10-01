@@ -1132,6 +1132,83 @@ export function usePouchDb() {
   }
 
   /**
+   * 合并条目的已读 / 收藏状态。
+   *
+   * 条目本体在集中库、用户状态在另一个库（`entry-state:{entryId}`），列表要显示已读态就得单独取一次。
+   * 只按**当前窗口**的 id 批量 allDocs（页大小几十条），不扫全库；取不到就当作未读，
+   * 列表照常渲染 —— 已读态是锦上添花，不该因为用户状态库没就绪而让列表空掉。
+   */
+  async function attachReadState(entries: RssEntry[]): Promise<void> {
+    if (entries.length === 0) return
+    try {
+      const res = await getUserStateDb().allDocs({
+        include_docs: true,
+        keys: entries.map(e => `entry-state:${e.id}`)
+      })
+      const byEntry = new Map<string, StateDoc>()
+      for (const row of res.rows as Array<{ doc?: StateDoc }>) {
+        if (row.doc?.type === 'entry-state' && row.doc.entryId) byEntry.set(row.doc.entryId, row.doc)
+      }
+      for (const entry of entries) {
+        const state = byEntry.get(entry.id)
+        if (!state) continue
+        entry.read = state.read === true
+        entry.starred = state.saved === true
+      }
+    } catch {
+      // 用户状态库不可用：保持未读，不影响列表
+    }
+  }
+
+  /**
+   * 批量标记已读 / 未读（列表页「全部标记为已读」用）。
+   *
+   * 先按 id 取一次现有 entry-state 拿 `_rev`（没有的补建、已经是目标状态的跳过），再一次性
+   * bulkDocs 落盘：避免逐条 get+put 的 N 次往返，也不会把已读过的条目重复写一遍同步出去。
+   * 返回真正写入的条数（0 = 这批本来就都是目标状态）。
+   */
+  async function markManyRead(
+    entries: Array<Pick<RssEntry, 'id' | 'feedId'>>,
+    read = true
+  ): Promise<number> {
+    if (entries.length === 0) return 0
+    const stateDb = getUserStateDb()
+    const now = new Date().toISOString()
+    const existing = new Map<string, StateDoc>()
+    try {
+      const res = await stateDb.allDocs({
+        include_docs: true,
+        keys: entries.map(e => `entry-state:${e.id}`)
+      })
+      for (const row of res.rows as Array<{ doc?: StateDoc }>) {
+        if (row.doc?.type === 'entry-state' && row.doc.entryId) existing.set(row.doc.entryId, row.doc)
+      }
+    } catch {
+      // 取不到就当全都没有状态文档，下面按新建处理（put 冲突会在结果里体现）
+    }
+    const writes = entries
+      .filter(e => (existing.get(e.id)?.read === true) !== read)
+      .map((e) => {
+        const prev = existing.get(e.id)
+        return prev
+          ? { ...prev, read, readAt: read ? now : undefined }
+          : {
+              _id: `entry-state:${e.id}`,
+              type: 'entry-state',
+              entryId: e.id,
+              feedId: e.feedId,
+              read,
+              readAt: read ? now : undefined,
+              saved: false
+            }
+      })
+    if (writes.length === 0) return 0
+    const results = await stateDb.bulkDocs(writes)
+    // 个别冲突（同一条在别处刚被改过）不算整体失败，只记未写入
+    return results.filter(r => !('error' in r && r.error)).length
+  }
+
+  /**
    * 补全条目的 feed 元信息（源名/站点/图标）与封面图 blob。
    * FeedDoc 随库同步到集中库（replicate 无 filter），一次 allDocs 读取全部所需文档；
    * 图标优先本地缓存的 AVIF 附件（blob URL），离线可用；无缓存回退原始 URL。
@@ -1140,6 +1217,8 @@ export function usePouchDb() {
    */
   async function enrichEntries(entries: RssEntry[]): Promise<RssEntry[]> {
     if (entries.length === 0) return entries
+    // 先合已读状态：它来自用户状态库，与下面的 feed 元信息互不依赖
+    await attachReadState(entries)
     const feedIds = [...new Set(entries.map(e => e.feedId))]
     let docs: FeedDoc[] = []
     try {
@@ -1745,6 +1824,7 @@ export function usePouchDb() {
     resetLocalData,
     getUserStateDb,
     markRead,
+    markManyRead,
     toggleSaved,
     syncStatuses: syncStatuses as Readonly<Record<string, SyncStatus>>,
     listSubscriptions,

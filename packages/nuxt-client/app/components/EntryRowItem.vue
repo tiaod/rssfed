@@ -31,7 +31,11 @@ const date = computed(() => {
 
 <template>
   <!-- 固定高度放在 article 上（行高一致是列表视图的前提）；点击区用真正的 button，键盘也能打开 -->
-  <article class="h-24 min-w-0 border-b border-default/60">
+  <article
+    :data-entry-id="entry.id"
+    class="h-24 min-w-0 border-b border-default/60"
+    :class="{ 'opacity-60': entry.read }"
+  >
     <button
       type="button"
       class="flex size-full min-w-0 cursor-pointer items-center gap-3 text-left transition-colors hover:bg-elevated/40 focus-visible:bg-elevated/40 focus-visible:outline-none"
@@ -61,6 +65,13 @@ const date = computed(() => {
           {{ excerpt }}
         </p>
         <p class="mt-1 flex items-center gap-1.5 text-[11px] text-dimmed">
+          <span
+            v-if="!entry.read"
+            class="size-1.5 shrink-0 rounded-full bg-primary"
+            data-unread="true"
+          >
+            <span class="sr-only">未读</span>
+          </span>
           <span class="truncate">{{ byline }}</span>
           <template v-if="date">
             <span aria-hidden="true">·</span>

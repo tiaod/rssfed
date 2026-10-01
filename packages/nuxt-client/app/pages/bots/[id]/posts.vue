@@ -1,6 +1,9 @@
 <script setup lang="ts">
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
+import ListActionsMenu from '~/components/ListActionsMenu.vue'
+import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.vue'
+import type { EditableSubscription } from '~/components/settings/EditSubscriptionModal.vue'
 
 definePageMeta({
   layout: 'default'
@@ -37,7 +40,31 @@ const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnch
 
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
 // （bot 产出用虚拟 feedId 入库，订阅文档同样是 subscription:bot:<id>，规则完全一致）
-const { view, overridden, setView, resetView } = useFeedView(virtualFeedId)
+const { view, overridden, setView, resetView, refreshPrefs } = useFeedView(virtualFeedId)
+
+// 「全部标记为已读」：只标当前已加载的这批（见 useMarkAllRead）
+const markAllRead = useMarkAllRead(entries)
+
+/** bot 订阅文档与普通订阅同形，编辑弹窗直接复用（名字 / 分类 / 默认视图） */
+const editingItem = ref<EditableSubscription | null>(null)
+
+async function openEdit() {
+  const prefs = await pouch.getSubscriptionViewPrefs(virtualFeedId).catch(() => null)
+  editingItem.value = {
+    feedId: virtualFeedId,
+    title: bot.value?.name ?? '',
+    category: prefs?.category ?? undefined,
+    view: prefs?.view ?? undefined
+  }
+}
+
+async function onEdited() {
+  editingItem.value = null
+  const subs = await pouch.listSubscriptions().catch(() => [])
+  const sub = subs.find(s => s.id === virtualFeedId)
+  if (sub && bot.value) bot.value = { ...bot.value, name: sub.title, description: sub.description, avatarUrl: sub.image }
+  await refreshPrefs()
+}
 
 onMounted(async () => {
   try {
@@ -92,25 +119,24 @@ async function toggleSubscribe() {
     <template #header>
       <UDashboardNavbar :title="bot?.name || 'Bot 产出'">
         <template #right>
-          <SyncButton
-            :feed-ids="[virtualFeedId]"
-            @synced="applyNewIfSyncAddedNothing"
-          />
           <ListViewSwitcher
             :view="view"
             :overridden="overridden"
             @update:view="setView"
             @reset="resetView"
           />
-          <UButton
-            size="sm"
-            :color="subscribed ? 'neutral' : 'primary'"
-            :variant="subscribed ? 'outline' : 'solid'"
-            :icon="subscribed ? 'i-lucide-bell-off' : 'i-lucide-bell-plus'"
-            @click="toggleSubscribe"
-          >
-            {{ subscribed ? '已订阅' : '订阅' }}
-          </UButton>
+          <ListActionsMenu
+            :feed-ids="[virtualFeedId]"
+            sync-label="刷新订阅"
+            :feed-id="virtualFeedId"
+            :subscribed="subscribed"
+            :has-entries="entries.length > 0"
+            @synced="applyNewIfSyncAddedNothing"
+            @mark-all-read="markAllRead"
+            @edit="openEdit"
+            @subscribe="toggleSubscribe"
+            @unsubscribe="toggleSubscribe"
+          />
         </template>
       </UDashboardNavbar>
     </template>
@@ -175,6 +201,14 @@ async function toggleSubscribe() {
           :has-more="hasMoreGetter"
         />
       </div>
+
+      <!-- 编辑订阅（名字 / 分类 / 默认视图）。必须留在 #body 里：
+           UDashboardPanel 的默认插槽会整块替换 header+body，放到外面会把导航栏和列表顶掉。 -->
+      <EditSubscriptionModal
+        :subscription="editingItem"
+        @close="editingItem = null"
+        @saved="onEdited"
+      />
     </template>
   </UDashboardPanel>
 </template>

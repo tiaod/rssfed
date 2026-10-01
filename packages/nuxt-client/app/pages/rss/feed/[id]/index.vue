@@ -1,5 +1,9 @@
 <script setup lang="ts">
 import type { RssFeed } from '~/types/rss'
+import type { EditableSubscription } from '~/components/settings/EditSubscriptionModal.vue'
+import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.vue'
+// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
+import ListActionsMenu from '~/components/ListActionsMenu.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 
@@ -42,7 +46,10 @@ const {
 const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
 
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
-const { view, overridden, setView, resetView } = useFeedView(feedId)
+const { view, overridden, setView, resetView, refreshPrefs } = useFeedView(feedId)
+
+// 「全部标记为已读」：只标当前已加载的这批（见 useMarkAllRead）
+const markAllRead = useMarkAllRead(entries)
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
 const { loadMore } = useInfiniteList(() => grow())
@@ -73,6 +80,29 @@ watch(
   () => refreshFromSync()
 )
 
+/**
+ * 编辑订阅：弹窗只用到名字 / 分类 / 默认视图，所以从本地订阅文档拼一个最小集，
+ * 不必等接口把注册表那份完整对象拿回来（离线也能改）。
+ */
+const editingItem = ref<EditableSubscription | null>(null)
+
+async function openEdit() {
+  const prefs = await pouch.getSubscriptionViewPrefs(feedId).catch(() => null)
+  editingItem.value = {
+    feedId,
+    title: feedDisplayName.value,
+    category: prefs?.category ?? undefined,
+    view: prefs?.view ?? undefined
+  }
+}
+
+/** 保存后名字与默认视图都可能变了：就地重读，不用刷新页面 */
+async function onEdited() {
+  editingItem.value = null
+  subscriptionTitle.value = await pouch.getSubscriptionTitle(feedId).catch(() => null) ?? ''
+  await refreshPrefs()
+}
+
 // 取消订阅
 const unsubscribeOpen = ref(false)
 const unsubscribing = ref(false)
@@ -100,15 +130,21 @@ async function unsubscribe() {
     <template #header>
       <UDashboardNavbar :title="feedDisplayName || '订阅源'">
         <template #right>
-          <SyncButton
-            :feed-ids="[feedId]"
-            @synced="applyNewIfSyncAddedNothing"
-          />
           <ListViewSwitcher
             :view="view"
             :overridden="overridden"
             @update:view="setView"
             @reset="resetView"
+          />
+          <ListActionsMenu
+            :feed-ids="[feedId]"
+            sync-label="刷新订阅"
+            :feed-id="feedId"
+            :has-entries="entries.length > 0"
+            @synced="applyNewIfSyncAddedNothing"
+            @mark-all-read="markAllRead"
+            @edit="openEdit"
+            @unsubscribe="openUnsubscribe"
           />
           <UButton
             v-if="loading"
@@ -118,16 +154,6 @@ async function unsubscribe() {
             size="sm"
           >
             加载中…
-          </UButton>
-          <UButton
-            v-else
-            icon="i-lucide-bell-off"
-            variant="ghost"
-            color="error"
-            size="sm"
-            @click="openUnsubscribe"
-          >
-            取消订阅
           </UButton>
         </template>
       </UDashboardNavbar>
@@ -195,6 +221,13 @@ async function unsubscribe() {
           </EntryList>
         </template>
       </div>
+
+      <!-- 编辑订阅（名字 / 分类 / 默认视图） -->
+      <EditSubscriptionModal
+        :subscription="editingItem"
+        @close="editingItem = null"
+        @saved="onEdited"
+      />
 
       <!-- 取消订阅确认弹窗 -->
       <UModal
