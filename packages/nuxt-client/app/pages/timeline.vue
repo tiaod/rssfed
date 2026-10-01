@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { SubscriptionItem, FeedSubscriptionItem } from '~/types/rss'
+// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
+import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 
 definePageMeta({
   layout: 'default'
@@ -32,6 +34,9 @@ const hasMoreGetter = () => hasMore.value
 
 // 提示条是浮层（盖在列表顶部、不占布局），按滚动方向让位——下滑收起、上滑或回顶部露出
 const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
+
+// 列表视图：默认取全局设置（默认瀑布流）；切换按钮只改本次会话，不落盘
+const { view, overridden, setView, resetView } = useTimelineView()
 
 onMounted(async () => {
   try {
@@ -96,6 +101,12 @@ watch(
       <UDashboardNavbar title="时间线">
         <template #right>
           <SyncButton @synced="applyNewIfSyncAddedNothing" />
+          <ListViewSwitcher
+            :view="view"
+            :overridden="overridden"
+            @update:view="setView"
+            @reset="resetView"
+          />
           <UButton
             v-if="loading"
             loading
@@ -167,6 +178,7 @@ watch(
         <EntryList
           v-else
           class="min-h-0 flex-1"
+          :view="view"
           :entries="entries"
           :load-more="loadMore"
           :has-more="hasMoreGetter"

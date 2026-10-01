@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import type { RssFeed } from '~/types/rss'
+// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
+import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 
 definePageMeta({
   layout: 'default'
@@ -38,6 +40,9 @@ const {
  * 代价是它会挡住最上面一条内容，所以按滚动方向让位（见 useEntriesBannerVisibility）。
  */
 const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
+
+// 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
+const { view, overridden, setView, resetView } = useFeedView(feedId)
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
 const { loadMore } = useInfiniteList(() => grow())
@@ -98,6 +103,12 @@ async function unsubscribe() {
           <SyncButton
             :feed-ids="[feedId]"
             @synced="applyNewIfSyncAddedNothing"
+          />
+          <ListViewSwitcher
+            :view="view"
+            :overridden="overridden"
+            @update:view="setView"
+            @reset="resetView"
           />
           <UButton
             v-if="loading"
@@ -165,6 +176,7 @@ async function unsubscribe() {
         <template v-else>
           <EntryList
             class="min-h-0 flex-1"
+            :view="view"
             :entries="entries || []"
             :load-more="loadMore"
             :has-more="hasMoreGetter"

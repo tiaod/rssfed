@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import type { FeedSubscriptionItem, FeedStatus } from '~/types/rss'
+import type { DropdownMenuItem } from '@nuxt/ui'
 import SubscriptionItem from '~/components/settings/SubscriptionItem.vue'
 import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.vue'
 import OpmlImportModal from '~/components/settings/OpmlImportModal.vue'
+import { LIST_VIEWS, LIST_VIEW_META, type ListView } from '~/utils/listViews'
 
 const api = useApi()
 const toast = useToast()
@@ -19,6 +21,48 @@ const keyword = ref('')
 // ── 分组视图 ──
 const grouped = ref(true)
 const collapsedGroups = ref<Set<string>>(new Set())
+
+/**
+ * 各分组的默认列表视图（分组名 -> 视图）。
+ *
+ * 分组是订阅文档上的自由文本 category，偏好单独存一条用户状态库文档（见 pouch.setGroupView）。
+ * 未配置的分组不出现在这里，列表页回退全局默认。
+ */
+const groupViews = ref<Record<string, ListView>>({})
+
+/** 分组行右侧菜单：四种视图 + （已配置时）跟随全局默认 */
+function groupViewItems(name: string): DropdownMenuItem[][] {
+  const current = groupViews.value[name]
+  const groups: DropdownMenuItem[][] = [
+    LIST_VIEWS.map(value => ({
+      label: LIST_VIEW_META[value].label,
+      icon: LIST_VIEW_META[value].icon,
+      type: 'checkbox' as const,
+      checked: current === value,
+      // 不走 toggle 语义：点任意一项都把该分组的默认视图设为该项
+      onUpdateChecked: () => { void saveGroupView(name, value) }
+    }))
+  ]
+  if (current) {
+    groups.push([
+      {
+        label: '跟随全局默认',
+        icon: 'i-lucide-undo-2',
+        onSelect: () => { void saveGroupView(name, null) }
+      }
+    ])
+  }
+  return groups
+}
+
+async function saveGroupView(name: string, value: ListView | null) {
+  try {
+    await pouch.setGroupView(name, value)
+    groupViews.value = await pouch.listGroupViews()
+  } catch (e) {
+    toast.add({ title: '保存失败', description: errorMessage(e), color: 'error' })
+  }
+}
 
 function toggleGroup(name: string) {
   if (collapsedGroups.value.has(name)) {
@@ -121,9 +165,13 @@ async function load() {
         createdAt: sub.createdAt,
         status: st?.status ?? 'active',
         errorMessage: st?.errorMessage,
-        lastFetchedAt: st?.lastFetchedAt
+        lastFetchedAt: st?.lastFetchedAt,
+        view: sub.view
       } as FeedSubscriptionItem
     })
+
+    // 分组偏好与订阅一起读：分组行的菜单要显示当前配置的是哪个视图
+    groupViews.value = await pouch.listGroupViews()
   } catch (e) {
     error.value = errorMessage(e)
   } finally {
@@ -265,27 +313,54 @@ onMounted(load)
           :key="group.name"
           class="space-y-2"
         >
-          <!-- 分组标题 -->
-          <button
-            class="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-elevated transition-colors"
-            @click="toggleGroup(group.name)"
-          >
-            <UIcon
-              :name="collapsedGroups.has(group.name) ? 'i-lucide-chevron-right' : 'i-lucide-chevron-down'"
-              class="size-4 text-muted"
-            />
-            <UIcon
-              :name="group.name === '未分类' ? 'i-lucide-inbox' : 'i-lucide-folder'"
-              class="size-4 text-muted"
-            />
-            <span class="text-sm font-medium">{{ group.name }}</span>
-            <UBadge
-              :label="String(group.items.length)"
-              color="neutral"
-              variant="subtle"
-              size="xs"
-            />
-          </button>
+          <!-- 分组标题：折叠按钮与右侧菜单并列（菜单不能嵌在按钮里，否则是嵌套可交互元素） -->
+          <div class="flex items-center gap-1">
+            <button
+              class="flex min-w-0 flex-1 items-center gap-2 rounded-lg px-2 py-1.5 hover:bg-elevated transition-colors"
+              @click="toggleGroup(group.name)"
+            >
+              <UIcon
+                :name="collapsedGroups.has(group.name) ? 'i-lucide-chevron-right' : 'i-lucide-chevron-down'"
+                class="size-4 text-muted"
+              />
+              <UIcon
+                :name="group.name === '未分类' ? 'i-lucide-inbox' : 'i-lucide-folder'"
+                class="size-4 text-muted"
+              />
+              <span class="text-sm font-medium">{{ group.name }}</span>
+              <UBadge
+                :label="String(group.items.length)"
+                color="neutral"
+                variant="subtle"
+                size="xs"
+              />
+              <!-- 已配置默认视图时给个提示，否则要展开菜单才知道 -->
+              <UBadge
+                v-if="groupViews[group.name]"
+                :label="LIST_VIEW_META[groupViews[group.name]!].label"
+                :icon="LIST_VIEW_META[groupViews[group.name]!].icon"
+                color="primary"
+                variant="subtle"
+                size="xs"
+              />
+            </button>
+
+            <!-- 「未分类」不是可导航的分组（没有对应的聚合页），也就没有默认视图可配 -->
+            <UDropdownMenu
+              v-if="group.name !== '未分类'"
+              :items="groupViewItems(group.name)"
+              :content="{ align: 'end' }"
+            >
+              <UButton
+                icon="i-lucide-ellipsis-vertical"
+                variant="ghost"
+                color="neutral"
+                size="xs"
+                :aria-label="`${group.name} 的默认视图`"
+                :title="`${group.name} 的默认视图`"
+              />
+            </UDropdownMenu>
+          </div>
 
           <!-- 分组内容 -->
           <TransitionGroup

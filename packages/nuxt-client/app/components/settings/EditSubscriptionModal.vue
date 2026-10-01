@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { FeedSubscriptionItem } from '~/types/rss'
+import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 
 const props = defineProps<{ subscription: FeedSubscriptionItem | null }>()
 const emit = defineEmits<{
@@ -15,14 +16,38 @@ const open = computed({
   set: (v: boolean) => { if (!v) emit('close') }
 })
 
-const form = ref({ title: '', category: '' })
+/**
+ * 「跟随上级」用一个哨兵值，不能用空串。
+ *
+ * reka 的 Select 明确禁止选项值为空串（空串被它当作「清空选择」：
+ * `A <SelectItem /> must have a value prop that is not an empty string`），
+ * 传了空串整个下拉都打不开。保存时再把哨兵值翻译成 null（删掉文档里的 view 字段）。
+ */
+const INHERIT_VIEW = '__inherit__'
+
+type ViewChoice = ListView | typeof INHERIT_VIEW
+
+const viewOptions = [
+  { label: '跟随分组 / 全局默认', value: INHERIT_VIEW },
+  ...LIST_VIEW_OPTIONS
+]
+
+const form = ref<{ title: string, category: string, view: ViewChoice }>({
+  title: '',
+  category: '',
+  view: INHERIT_VIEW
+})
 const saving = ref(false)
 const formError = ref<string | null>(null)
 
 // 弹窗打开时初始化表单
 watch(() => props.subscription, (sub) => {
   if (sub) {
-    form.value = { title: sub.title ?? '', category: sub.category ?? '' }
+    form.value = {
+      title: sub.title ?? '',
+      category: sub.category ?? '',
+      view: sub.view ?? INHERIT_VIEW
+    }
     formError.value = null
   }
 }, { immediate: true })
@@ -34,7 +59,9 @@ async function save() {
   try {
     await pouch.updateSubscription(props.subscription.feedId, {
       title: form.value.title.trim() || undefined,
-      category: form.value.category.trim() || undefined
+      category: form.value.category.trim() || undefined,
+      // null 是「清除该订阅源的默认视图」：页面回退到分组 / 全局默认
+      view: form.value.view === INHERIT_VIEW ? null : form.value.view
     })
     toast.add({ title: '已保存', description: props.subscription.title, color: 'success' })
     emit('saved', props.subscription)
@@ -70,6 +97,18 @@ async function save() {
           <UInput
             v-model="form.category"
             placeholder="如：技术 / 新闻（留空则不分类）"
+            class="w-full"
+          />
+        </UFormField>
+
+        <UFormField
+          label="默认视图"
+          description="打开这个订阅源时用哪种版式；「跟随」会依次取分组默认、全局默认"
+        >
+          <USelect
+            v-model="form.view"
+            :items="viewOptions"
+            value-key="value"
             class="w-full"
           />
         </UFormField>

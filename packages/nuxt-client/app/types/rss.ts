@@ -1,3 +1,5 @@
+import type { ListView } from '~/utils/listViews'
+
 export interface RssFeed {
   id: string
   title: string
@@ -94,6 +96,8 @@ export interface FeedSubscriptionItem {
   lastFetchedAt?: string
   /** 最后抓到新条目的时间：前端据此只同步「上次同步后有过新内容」的源 */
   lastNewEntryAt?: string
+  /** 该订阅源配置的默认列表视图（未配置 = 跟随分组 / 全局） */
+  view?: ListView
 }
 
 /**
@@ -111,4 +115,6 @@ export interface SubscriptionItem {
   createdAt: string
   /** 订阅类型：feed 订阅源 / bot 产出（默认 feed） */
   kind?: 'feed' | 'bot'
+  /** 该订阅源配置的默认列表视图（未配置 = 跟随分组 / 全局） */
+  view?: ListView
 }

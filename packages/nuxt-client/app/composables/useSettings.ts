@@ -1,3 +1,5 @@
+import { DEFAULT_LIST_VIEW, isListView, type ListView } from '~/utils/listViews'
+
 export type EntryModalSize = 'sm:max-w-xl' | 'sm:max-w-2xl' | 'sm:max-w-4xl' | 'sm:max-w-6xl' | 'fullscreen'
 
 const VALID_MODAL_SIZES: EntryModalSize[] = ['sm:max-w-xl', 'sm:max-w-2xl', 'sm:max-w-4xl', 'sm:max-w-6xl', 'fullscreen']
@@ -7,11 +9,19 @@ export interface AppSettings {
   entryModalSize: EntryModalSize
   /** 全屏时固定顶部栏和底部栏（关闭后随正文一起滚动） */
   fixedBars: boolean
+  /**
+   * 列表页默认视图。
+   *
+   * 时间线页直接用它（默认瀑布流）；单个订阅源 / 分组没有单独配置默认视图时也用它兜底。
+   * 页面上的切换按钮只改本次会话，不会写回这里 —— 默认值只由显式配置入口修改。
+   */
+  view: ListView
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   entryModalSize: 'sm:max-w-6xl',
-  fixedBars: true
+  fixedBars: true,
+  view: DEFAULT_LIST_VIEW
 }
 
 // 首次在客户端调用时从 localStorage 读取持久化的设置（模块级标记，避免重复读取）
@@ -34,6 +44,10 @@ export function useSettings() {
         // 过滤旧版本存储的无效宽度值（如 '7xl'），回退到默认
         if (!VALID_MODAL_SIZES.includes(parsed.entryModalSize)) {
           delete parsed.entryModalSize
+        }
+        // 视图值只接受枚举内的字符串（老版本 / 手改 localStorage 都可能带来非法值）
+        if (!isListView(parsed.view)) {
+          delete parsed.view
         }
         settings.value = { ...settings.value, ...parsed }
       }

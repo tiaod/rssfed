@@ -6,6 +6,7 @@ import SiteSettingsManager from '~/components/admin/SiteSettingsManager.vue'
 import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimate'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
+import { LIST_VIEW_OPTIONS } from '~/utils/listViews'
 
 definePageMeta({
   layout: 'default'
@@ -267,6 +268,19 @@ const confirmReset = async () => {
                   <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
                     阅读
                   </h3>
+
+                  <UFormField
+                    label="默认列表视图"
+                    description="时间线用这个默认；单个订阅源 / 分组没有单独配置时也用它（列表页上的切换按钮只影响本次会话）"
+                  >
+                    <USelect
+                      v-model="draftSettings.view"
+                      :items="LIST_VIEW_OPTIONS"
+                      value-key="value"
+                      class="w-48"
+                    />
+                  </UFormField>
+
                   <UFormField
                     label="条目详情宽度"
                     description="控制点击条目时弹出的详情窗口宽度"

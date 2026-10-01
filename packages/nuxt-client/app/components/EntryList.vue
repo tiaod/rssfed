@@ -1,6 +1,13 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { RssEntry } from '~/types/rss'
+import { DEFAULT_LIST_VIEW, type ListView } from '~/utils/listViews'
+import { entryCoverAspect, IMAGE_TILE_FALLBACK_ASPECT } from '~/utils/entryDisplay'
+// 显式导入：单测环境没有 Nuxt 组件清单，隐式解析会静默退化成「渲染不出来」
+import EntryCardItem from '~/components/EntryCardItem.vue'
+import EntryBlogItem from '~/components/EntryBlogItem.vue'
+import EntryRowItem from '~/components/EntryRowItem.vue'
+import EntryImageItem from '~/components/EntryImageItem.vue'
 
 const props = defineProps<{
   entries: RssEntry[]
@@ -26,6 +33,12 @@ const props = defineProps<{
    * 掉帧基本都是「视口外多渲染出来的卡片」的布局成本，所以默认值往小里取。
    */
   overscan?: number
+  /**
+   * 列表版式。四种视图共用这一套虚拟化外壳（ScrollArea + 泳道虚拟化 + 页头 + 页尾骨架），
+   * 只有 item 渲染与布局参数（列数 / 间距 / 高度估算）按视图切换。
+   * 为什么不用 UBlogPosts / UPageList 当容器：见下面 VIEW_LAYOUT 的说明。
+   */
+  view?: ListView
 }>()
 
 /**
@@ -80,24 +93,107 @@ const showSkeleton = computed(() =>
   typeof props.loadMore === 'function' && (props.hasMore?.() ?? true)
 )
 
+const view = computed<ListView>(() => props.view ?? DEFAULT_LIST_VIEW)
+
 /**
- * 列数断点表，与 app/assets/css/main.css 的 --breakpoint-3xl/4xl 及 Tailwind 默认断点一致。
- * 虚拟化必须由 JS 知道列数（lane 决定条目落哪一列），没法交给 CSS。
+ * 各视图的列数断点表，与 app/assets/css/main.css 的 --breakpoint-3xl/4xl 及 Tailwind 默认断点一致。
+ * 虚拟化必须由 JS 知道列数（lane 决定条目落哪一列），没法交给 CSS。按 minWidth 降序，首个命中生效。
+ *
+ * 列数刻意按视图分开：瀑布流在手机上也铺两列（卡片墙的密度感）；
+ * 博客卡片要留大留白，手机单列、多列才在平板以上成立；
+ * 紧凑列表永远单列；图片图块窄，手机上也放得下两列。
  */
-const BREAKPOINTS: ReadonlyArray<readonly [number, number]> = [
-  [2560, 8], // 4xl
-  [1792, 6], // 3xl
-  [1536, 5], // 2xl
-  [1280, 4], // xl
-  [1024, 3], // lg
-  [768, 2], // md
-  [0, 1]
-]
+const VIEW_BREAKPOINTS: Record<ListView, ReadonlyArray<readonly [number, number]>> = {
+  // 瀑布流（图片/卡片墙）：手机上就给两列，卡片窄但信息密度高，和博客视图一眼能区分
+  masonry: [
+    [2560, 8], // 4xl
+    [1792, 6], // 3xl
+    [1536, 5], // 2xl
+    [1280, 4], // xl
+    [768, 3], // md（平板）
+    [0, 2] // 手机
+  ],
+  // 博客视图：手机保持单列（卡片大、适合读），到平板/桌面才铺多列
+  blog: [
+    [1280, 3], // xl
+    [768, 2], // md
+    [0, 1]
+  ],
+  list: [[0, 1]],
+  // 图片瀑布流：图块窄，手机上也能放两列
+  image: [
+    [1536, 5], // 2xl
+    [1280, 4], // xl
+    [1024, 3], // lg
+    [0, 2]
+  ]
+}
+
+/**
+ * 各视图的条目间距（px）。
+ *
+ * 它同时是页头跨列宽度的换算依据（见 headerSpanStyle），所以不能写死在模板 class 里。
+ * 列表视图间距为 0：行与行靠 border 分隔，留缝反而不像列表。
+ */
+const VIEW_GAP: Record<ListView, number> = {
+  masonry: 16,
+  blog: 24,
+  list: 0,
+  image: 8
+}
 
 const laneCount = ref(1)
 
-/** 虚拟化条目间距，同时也是页头跨列宽度的换算依据（见 headerSpanStyle） */
-const LIST_GAP = 16
+function resolveLanes(width: number, target: ListView): number {
+  for (const [minWidth, lanes] of VIEW_BREAKPOINTS[target]) {
+    if (width >= minWidth) return lanes
+  }
+  return 1
+}
+
+const gap = computed(() => VIEW_GAP[view.value])
+
+/**
+ * 图片视图的单条泳道宽度（= 图块宽度）。
+ *
+ * estimateSize 只能拿到 index、拿不到容器宽度，所以自己量：ScrollArea 根节点宽度减去
+ * 左右内边距，再按列数与间距均分。量不到（测试环境 / 还没挂载）时用兜底值，
+ * 真实高度由虚拟化的逐项测量纠正。
+ */
+const IMAGE_LANE_WIDTH_FALLBACK = 160
+const contentWidth = ref(0)
+
+/** ScrollArea 根节点：既用来量内容宽度，也挂 ResizeObserver 跟随容器变化 */
+const scrollAreaRef = ref<{ $el?: unknown } | null>(null)
+let resizeObserver: ResizeObserver | null = null
+
+function measureContentWidth() {
+  const el = scrollAreaRef.value?.$el
+  if (!(el instanceof HTMLElement)) return
+  const style = window.getComputedStyle(el)
+  const padding
+    = (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0)
+  const width = el.clientWidth - padding
+  if (width > 0 && width !== contentWidth.value) contentWidth.value = width
+}
+
+const imageLaneWidth = computed(() => {
+  const width = contentWidth.value
+  if (width <= 0) return IMAGE_LANE_WIDTH_FALLBACK
+  const lanes = Math.max(1, laneCount.value)
+  return Math.max(96, Math.floor((width - (lanes - 1) * gap.value) / lanes))
+})
+
+/**
+ * 图片视图的图块高度：按封面真实宽高比换算（与 EntryImageItem 的 aspect-ratio 同一口径）。
+ *
+ * 有封面但缺尺寸元信息、以及没有封面的条目，都按 4:3 兜底 —— 和组件渲染出来的高度一致，
+ * 泳道分配才不会因为估算离谱而参差。
+ */
+function imageTileHeight(entry: RssEntry | undefined): number {
+  const aspect = entry ? entryCoverAspect(entry) : null
+  return Math.round(imageLaneWidth.value / (aspect ?? IMAGE_TILE_FALLBACK_ASPECT))
+}
 
 /**
  * 页尾加载骨架：**每列一个**。
@@ -114,13 +210,6 @@ const skeletonItems = computed<SkeletonItem[]>(() =>
   }))
 )
 
-function resolveLanes(width: number): number {
-  for (const [minWidth, lanes] of BREAKPOINTS) {
-    if (width >= minWidth) return lanes
-  }
-  return 1
-}
-
 /** 页头项：每列一份，id 稳定，虚拟化测量不会因为重渲染而丢 */
 const headerItems = computed<HeaderItem[]>(() =>
   props.header
@@ -133,7 +222,7 @@ const headerItems = computed<HeaderItem[]>(() =>
 
 /** 页头跨列宽度：item 的宽度是「一列」，这里按列数与间隙换算回整行宽度 */
 const headerSpanStyle = computed(() => ({
-  inlineSize: `calc(${laneCount.value} * 100% + ${(laneCount.value - 1) * LIST_GAP}px)`
+  inlineSize: `calc(${laneCount.value} * 100% + ${(laneCount.value - 1) * gap.value}px)`
 }))
 
 /** 交给虚拟化的是「页头 + 真实条目 + 每列一个页尾骨架」（或收尾提示） */
@@ -144,25 +233,68 @@ const listItems = computed<ListItem[]>(() => {
 })
 
 function handleResize() {
-  const next = resolveLanes(window.innerWidth)
+  const next = resolveLanes(window.innerWidth, view.value)
   if (next !== laneCount.value) laneCount.value = next
 }
 
+/**
+ * 量一次容器宽度并（重新）挂上 ResizeObserver。
+ *
+ * 必须可重入：切视图会 `:key="view"` 重建 ScrollArea，旧元素已从文档里摘掉，
+ * 继续观察它等于永远不再收到回调 —— 图片瀑布流的泳道宽度会停在切换前那一版。
+ */
+async function syncViewportMeasurement() {
+  await nextTick()
+  const el = scrollAreaRef.value?.$el
+  resizeObserver?.disconnect()
+  resizeObserver = null
+  measureContentWidth()
+  if (el instanceof HTMLElement && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => measureContentWidth())
+    resizeObserver.observe(el)
+  }
+}
+
 onMounted(() => {
-  laneCount.value = resolveLanes(window.innerWidth)
+  laneCount.value = resolveLanes(window.innerWidth, view.value)
   window.addEventListener('resize', handleResize)
+
+  // 图片瀑布流的泳道宽度依赖容器宽度：先量一次，再用 ResizeObserver 跟随侧边栏 / 窗口变化
+  void syncViewportMeasurement()
 })
-onBeforeUnmount(() => window.removeEventListener('resize', handleResize))
+
+onBeforeUnmount(() => {
+  window.removeEventListener('resize', handleResize)
+  resizeObserver?.disconnect()
+  resizeObserver = null
+})
 
 /**
  * 单条高度估算（px），只用于还没被测量过的条目；渲染过一次后 ScrollArea 内部会记住真实高度。
- * 有封面的卡片按 min-h-40 起算，明显更高。
+ *
+ * 每个视图的估算口径都和它实际渲染出来的高度对齐（瀑布流：有封面的按 min-h-40 起算；
+ * 博客：写死卡片高；列表：写死 h-24；图片：按封面宽高比换算），
+ * 这样总高度和滚动条不会因为估算离谱而抖动。
  */
 function estimateHeight(item: ListItem | undefined): number {
   if (!item || isEnd(item)) return 72
   if (isHeader(item)) return 96
-  if (isSkeleton(item)) return 280
-  return item.coverUrl ? 320 : 180
+  if (isSkeleton(item)) {
+    switch (view.value) {
+      case 'blog': return 352
+      case 'list': return 96
+      case 'image': return imageTileHeight(undefined)
+      default: return 280
+    }
+  }
+  switch (view.value) {
+    // 博客卡片刻意写死高度（见 EntryBlogItem）：估算值就是真实高度，泳道分配才排得整齐
+    case 'blog': return 352
+    case 'list': return 96
+    // 图片视图是瀑布流：每条按自己封面的宽高比算高度（见 EntryImageItem）
+    case 'image': return imageTileHeight(isEntry(item) ? item : undefined)
+    default: return item.coverUrl ? 320 : 180
+  }
 }
 
 /**
@@ -175,10 +307,11 @@ function estimateHeight(item: ListItem | undefined): number {
  *
  * 好在窄屏（手机，本项目的主场景）瀑布流只有 1 列，本来就不存在列尾参差；多列只出现在
  * 平板/桌面，那里设备性能充裕，参差约一张卡片高，不影响阅读。
+ * 博客视图的卡片高度本就接近一致，同样按泳道摆放出来就是规整的网格。
  */
 const virtualize = computed(() => ({
   lanes: laneCount.value,
-  gap: LIST_GAP,
+  gap: gap.value,
   overscan: props.overscan ?? Math.max(3, laneCount.value * 2),
   /**
    * 滚动区铺满整个面板（页面的 body 已经 p-0），内边距改由这里承担，滚动条才会像以前那样
@@ -203,6 +336,14 @@ function registerSkeleton(el: Element | ComponentPublicInstance | null) {
   skeletonEls.value = [...skeletonEls.value, el]
 }
 
+// 各视图的断点表不同，切视图要按新表重算列数；ScrollArea 会重建，测量目标也要重新挂
+watch(view, () => {
+  handleResize()
+  void syncViewportMeasurement()
+  // 旧视图的骨架元素已随 ScrollArea 重建卸载，清掉避免 observer 继续盯着脱离文档的节点
+  skeletonEls.value = []
+})
+
 useIntersectionObserver(
   skeletonEls,
   (intersections) => {
@@ -222,39 +363,6 @@ function handleOpen(entry: RssEntry) {
     props.loadMore ? { loadMore: props.loadMore, hasMore: props.hasMore ?? (() => true) } : undefined
   )
 }
-
-function formatDate(dateStr: string): Date {
-  return new Date(dateStr)
-}
-
-function getExcerpt(entry: RssEntry): string {
-  // 列表查询裁剪了 content（全文）字段，摘要优先用 description（列表查询仍包含）
-  const text = (entry.description || entry.content || '')
-    .replace(/<[^>]*>/g, '')
-    .replace(/\s+/g, ' ')
-    .trim()
-  return text.length > 150
-    ? text.slice(0, 150) + '…'
-    : text
-}
-
-/**
- * 卡片封面图配置。
- *
- * 封面是本地缓存的 AVIF blob，`loading` / `decoding` 会透传到 `<img>`（UBlogPost 对 image
- * 对象是整份 v-bind 展开）：`decoding="async"` 让解码不占主线程——滚动时封面进视口那一下
- * 最容易掉帧；`loading="lazy"` 让视口外的封面延后加载。
- */
-function coverImage(entry: RssEntry) {
-  return entry.coverUrl
-    ? { src: entry.coverUrl, alt: entry.title, loading: 'lazy' as const, decoding: 'async' as const }
-    : undefined
-}
-
-/** 卡片署名用的订阅源名 */
-function feedNameOf(entry: RssEntry): string {
-  return entry.feed?.title || '未知来源'
-}
 </script>
 
 <template>
@@ -263,8 +371,15 @@ function feedNameOf(entry: RssEntry): string {
     只渲染视口附近的条目。手机上条目一多，每追加一批都要重新布局整棵已有 DOM
     （实测 1200 条时一次长任务 133ms），虚拟化后 DOM 数量与总条数无关。
     它自带滚动容器，所以外层容器要给它确定高度（页面里是 flex-1 + min-h-0）。
+
+    四种视图都走这一套外壳，只是 row 渲染与布局参数不同：UBlogPosts / UPageList 都是
+    「数组 -> 一整块 DOM」的容器，套不进「index -> 一个块」的虚拟化 slot（见 view prop 说明）。
+    切视图会重建 ScrollArea（:key）：布局算法换了，重建比让旧虚拟化缓存里残留上一版
+    的测量值更干净；代价是滚动位置回到顶部，而这正是切换视图时用户预期的位置。
   -->
   <UScrollArea
+    ref="scrollAreaRef"
+    :key="view"
     :items="listItems"
     :virtualize="virtualize"
     class="h-full"
@@ -304,52 +419,36 @@ function feedNameOf(entry: RssEntry): string {
         已加载全部条目
       </p>
 
-      <UBlogPost
+      <EntryBlogItem
+        v-else-if="isEntry(item) && view === 'blog'"
+        :key="item.id"
+        :entry="item"
+        :show-feed="showFeed"
+        @open="handleOpen"
+      />
+
+      <EntryRowItem
+        v-else-if="isEntry(item) && view === 'list'"
+        :key="item.id"
+        :entry="item"
+        :show-feed="showFeed"
+        @open="handleOpen"
+      />
+
+      <EntryImageItem
+        v-else-if="isEntry(item) && view === 'image'"
+        :key="item.id"
+        :entry="item"
+        @open="handleOpen"
+      />
+
+      <EntryCardItem
         v-else-if="isEntry(item)"
         :key="item.id"
-        :title="item.title"
-        :description="getExcerpt(item)"
-        :date="formatDate(item.publishedAt)"
-        :image="coverImage(item)"
-        :ui="{
-          // 封面不统一裁剪比例：按原比例显示，仅限制高度区间——超长的长图裁底部，超宽的横幅裁两侧，避免过长刷屏或过短成一条线
-          header: 'aspect-auto',
-          image: 'h-auto min-h-40 max-h-80 object-cover object-top'
-        }"
-        class="cursor-pointer"
-        @click="handleOpen(item)"
-      >
-        <!--
-          署名不用 authors 数组：那条路径渲染 UUser，默认头像 32px（比正文还大），
-          且 to 存在时主题带 group-hover/user:scale-115 的放大动画。
-          这里用插槽自己渲染，图标尺寸和动效都可控。
-        -->
-        <template #authors>
-          <ULink
-            v-if="showFeed"
-            :to="item.feed?.siteUrl"
-            class="group/feed flex min-w-0 items-center gap-1.5"
-          >
-            <!-- 源图标由 enrichEntries 解析（本地缓存的 AVIF blob URL 优先，离线可用）；
-                 没有图标时 UAvatar 用 text 显示名字首字母，不占额外空间 -->
-            <UAvatar
-              :src="item.feed?.image"
-              :alt="feedNameOf(item)"
-              :text="feedNameOf(item).trim()[0] ?? 'R'"
-              size="3xs"
-              class="shrink-0"
-            />
-            <span class="truncate text-sm text-muted transition-colors group-hover/feed:text-highlighted">
-              {{ feedNameOf(item) }}
-            </span>
-          </ULink>
-          <UUser
-            v-else
-            :name="item.author || feedNameOf(item)"
-            :to="item.feed?.siteUrl"
-          />
-        </template>
-      </UBlogPost>
+        :entry="item"
+        :show-feed="showFeed"
+        @open="handleOpen"
+      />
     </template>
   </UScrollArea>
 </template>

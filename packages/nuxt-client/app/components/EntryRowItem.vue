@@ -1,0 +1,73 @@
+<script setup lang="ts">
+/**
+ * 列表视图条目：紧凑单行，一屏尽可能多的条目。
+ *
+ * 高度写死（h-24）：列表视图的看点就是密度与整齐，高度浮动会让虚拟化的 item 高度估算
+ * 失去意义；摘要固定两行，超出截断。缩略图缺失时不占位——文字块自然铺满整行。
+ */
+import { computed } from 'vue'
+import type { RssEntry } from '~/types/rss'
+import { entryExcerpt, entryFeedName } from '~/utils/entryDisplay'
+
+const props = defineProps<{
+  entry: RssEntry
+  showFeed?: boolean
+}>()
+
+const emit = defineEmits<{ open: [entry: RssEntry] }>()
+
+const excerpt = computed(() => entryExcerpt(props.entry, 120))
+// 聚合视图署源名、单源页署名作者：与卡片视图同规则，只是这里用纯文本（UUser 头像 32px 太占地方）
+const byline = computed(() =>
+  props.showFeed ? entryFeedName(props.entry) : (props.entry.author || entryFeedName(props.entry))
+)
+const date = computed(() => {
+  const time = new Date(props.entry.publishedAt)
+  return Number.isNaN(time.getTime())
+    ? ''
+    : time.toLocaleDateString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric' })
+})
+</script>
+
+<template>
+  <!-- 固定高度放在 article 上（行高一致是列表视图的前提）；点击区用真正的 button，键盘也能打开 -->
+  <article class="h-24 min-w-0 border-b border-default/60">
+    <button
+      type="button"
+      class="flex size-full min-w-0 cursor-pointer items-center gap-3 text-left transition-colors hover:bg-elevated/40 focus-visible:bg-elevated/40 focus-visible:outline-none"
+      @click="emit('open', entry)"
+    >
+      <div
+        v-if="entry.coverUrl"
+        class="size-16 shrink-0 overflow-hidden rounded-md bg-elevated"
+      >
+        <img
+          :src="entry.coverUrl"
+          :alt="entry.title"
+          loading="lazy"
+          decoding="async"
+          class="size-full object-cover"
+        >
+      </div>
+
+      <div class="min-w-0 flex-1">
+        <h3 class="line-clamp-1 text-sm font-medium text-highlighted">
+          {{ entry.title }}
+        </h3>
+        <p
+          v-if="excerpt"
+          class="mt-0.5 line-clamp-2 text-xs text-muted"
+        >
+          {{ excerpt }}
+        </p>
+        <p class="mt-1 flex items-center gap-1.5 text-[11px] text-dimmed">
+          <span class="truncate">{{ byline }}</span>
+          <template v-if="date">
+            <span aria-hidden="true">·</span>
+            <time :datetime="entry.publishedAt">{{ date }}</time>
+          </template>
+        </p>
+      </div>
+    </button>
+  </article>
+</template>

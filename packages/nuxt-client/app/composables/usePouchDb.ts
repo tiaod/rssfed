@@ -10,6 +10,7 @@ import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
 import { localDbName, syncedFeedsKey, syncRetryKey, LEGACY_LOCAL_DB_NAMES } from '~/utils/localDbName'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
+import { isListView, type ListView } from '~/utils/listViews'
 
 // 注册 Mango 查询插件（db.find / createIndex）。
 // pouchdb-find 是 CJS 模块，兼容 Vite 的 default interop 嵌套
@@ -144,6 +145,15 @@ interface StateDoc {
   createdAt?: string
   /** subscription 文档：订阅类型（默认 feed） */
   kind?: 'feed' | 'bot'
+  /**
+   * subscription / group-pref 文档：该订阅源 / 该分组配置的默认列表视图。
+   *
+   * 存字符串（不是 ListView 联合类型）：文档来自远端，可能被老版本或手改写脏，
+   * 读取时统一用 listViews 的 isListView 校验后再回退。
+   */
+  view?: string
+  /** group-pref 文档：分组名（等于订阅文档上的 category） */
+  name?: string
 }
 
 /** nuxtApp 上挂载的 PouchDB 共享状态（用 $ 前缀避免与 Nuxt 内部字段冲突） */
@@ -1532,7 +1542,8 @@ export function usePouchDb() {
         image: doc.image,
         category: doc.category,
         createdAt: doc.createdAt ?? new Date().toISOString(),
-        kind: doc.kind === 'bot' ? 'bot' as const : 'feed' as const
+        kind: doc.kind === 'bot' ? 'bot' as const : 'feed' as const,
+        view: isListView(doc.view) ? doc.view : undefined
       }))
   }
 
@@ -1594,17 +1605,115 @@ export function usePouchDb() {
   }
 
   /**
-   * 更新订阅元信息（显示名/分类）
+   * 更新订阅元信息（显示名 / 分类 / 默认视图）。
+   *
+   * view 传 null 表示「清除该订阅源的默认视图」（页面回退到分组 / 全局默认），
+   * 与 undefined（不动这个字段）是两种语义，所以不能用可选字段省略表达。
    */
-  async function updateSubscription(feedId: string, patch: { title?: string, category?: string }) {
+  async function updateSubscription(
+    feedId: string,
+    patch: { title?: string, category?: string, view?: ListView | null }
+  ) {
     const stateDb = getUserStateDb()
     const docId = `subscription:${feedId}`
-    const doc = await stateDb.get(docId)
-    await stateDb.put({
+    const doc = await stateDb.get(docId) as unknown as StateDoc
+    const next: StateDoc = {
       ...doc,
       ...(patch.title !== undefined ? { title: patch.title } : {}),
       ...(patch.category !== undefined ? { category: patch.category } : {})
-    })
+    }
+    if (patch.view !== undefined) {
+      if (patch.view === null) Reflect.deleteProperty(next, 'view')
+      else next.view = patch.view
+    }
+    await stateDb.put(next)
+  }
+
+  // ── 分组（文件夹）默认视图 ──
+  //
+  // 分组不是独立实体：它就是订阅文档上的自由文本 category（见 useFeedNavigation 的分组规则），
+  // 所以分组偏好单独存一条用户状态库文档，与订阅一起双向同步、跟着账号走。
+
+  const GROUP_PREF_PREFIX = 'pref:group:'
+
+  /** 分组偏好文档的 _id */
+  function groupPrefId(name: string): string {
+    return `${GROUP_PREF_PREFIX}${name}`
+  }
+
+  /**
+   * 读取某个订阅源自身的默认视图与所属分组。
+   *
+   * 单源页用它解析默认视图（订阅源 -> 分组 -> 全局，见 composables/useListView）。
+   * 文档缺失（离线、别的设备删了订阅）时返回全空，调用方按「未配置」处理。
+   */
+  async function getSubscriptionViewPrefs(
+    feedId: string
+  ): Promise<{ view: ListView | null, category: string | null }> {
+    try {
+      const doc = await getUserStateDb().get(`subscription:${feedId}`) as unknown as StateDoc
+      return {
+        view: isListView(doc.view) ? doc.view : null,
+        category: doc.category?.trim() || null
+      }
+    } catch {
+      return { view: null, category: null }
+    }
+  }
+
+  /** 读取某个分组的默认视图（未配置返回 null） */
+  async function getGroupView(name: string): Promise<ListView | null> {
+    if (!name) return null
+    try {
+      const doc = await getUserStateDb().get(groupPrefId(name)) as unknown as StateDoc
+      return isListView(doc.view) ? doc.view : null
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * 批量读取全部分组默认视图（订阅管理页一次拿全，避免每个分组行各查一次）。
+   *
+   * 已知取舍：分组改名后偏好会留在旧名字下成为孤儿，不做自动跟随——category 是自由文本，
+   * 无法判断一次修改是「分组改名」还是「这条订阅换了个组」。
+   */
+  async function listGroupViews(): Promise<Record<string, ListView>> {
+    const out: Record<string, ListView> = {}
+    try {
+      const res = await getUserStateDb().allDocs({
+        include_docs: true,
+        startkey: GROUP_PREF_PREFIX,
+        endkey: `${GROUP_PREF_PREFIX}\uffff`
+      })
+      for (const row of res.rows as Array<{ doc?: StateDoc }>) {
+        const doc = row.doc
+        if (doc?.type === 'group-pref' && doc.name && isListView(doc.view)) {
+          out[doc.name] = doc.view
+        }
+      }
+    } catch {
+      // 读取失败按「未配置」处理
+    }
+    return out
+  }
+
+  /** 写入 / 清除某个分组的默认视图（null = 清除，回退到全局默认） */
+  async function setGroupView(name: string, view: ListView | null) {
+    if (!name) return
+    const db = getUserStateDb()
+    const docId = groupPrefId(name)
+    let existing: (StateDoc & { _rev: string }) | null = null
+    try {
+      existing = await db.get(docId) as unknown as StateDoc & { _rev: string }
+    } catch {
+      // 还没有偏好文档，下面新建
+    }
+    if (view === null) {
+      if (existing) await db.remove(existing)
+      return
+    }
+    await db.put(existing ? { ...existing, view } : { _id: docId, type: 'group-pref', name, view })
   }
 
   return {
@@ -1643,6 +1752,10 @@ export function usePouchDb() {
     addSubscription,
     addBotSubscription,
     removeSubscription,
-    updateSubscription
+    updateSubscription,
+    getSubscriptionViewPrefs,
+    getGroupView,
+    listGroupViews,
+    setGroupView
   }
 }
