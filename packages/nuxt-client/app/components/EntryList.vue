@@ -230,6 +230,19 @@ function getExcerpt(entry: RssEntry): string {
     : text
 }
 
+/**
+ * 卡片封面图配置。
+ *
+ * 封面是本地缓存的 AVIF blob，`loading` / `decoding` 会透传到 `<img>`（UBlogPost 对 image
+ * 对象是整份 v-bind 展开）：`decoding="async"` 让解码不占主线程——滚动时封面进视口那一下
+ * 最容易掉帧；`loading="lazy"` 让视口外的封面延后加载。
+ */
+function coverImage(entry: RssEntry) {
+  return entry.coverUrl
+    ? { src: entry.coverUrl, alt: entry.title, loading: 'lazy' as const, decoding: 'async' as const }
+    : undefined
+}
+
 /** 卡片署名用的订阅源名 */
 function feedNameOf(entry: RssEntry): string {
   return entry.feed?.title || '未知来源'
@@ -289,9 +302,7 @@ function feedNameOf(entry: RssEntry): string {
         :title="item.title"
         :description="getExcerpt(item)"
         :date="formatDate(item.publishedAt)"
-        :image="item.coverUrl
-          ? { src: item.coverUrl, alt: item.title }
-          : undefined"
+        :image="coverImage(item)"
         :ui="{
           // 封面不统一裁剪比例：按原比例显示，仅限制高度区间——超长的长图裁底部，超宽的横幅裁两侧，避免过长刷屏或过短成一条线
           header: 'aspect-auto',
