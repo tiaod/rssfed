@@ -273,9 +273,8 @@ onBeforeUnmount(() => {
  * 博客卡片的估算高度。
  *
  * 多列时卡片写死等高（`sm:h-[22rem]`，见 EntryBlogItem），估算值就是真实高度，泳道分配才排得整齐；
- * 手机单列没有行要对齐，卡片不再强制等高、没有封面的条目也不再有那条 144px 占位带，
- * 于是估算按「有封面 / 无封面」分开给，总高度和滚动条才不会虚高。
- * （单列正是 `laneCount === 1`，与 blog 的断点表同源，不用再判断一次屏宽。）
+ * 单列（`laneCount === 1`，与 blog 断点表同源）没有行要对齐，卡片不强制等高、没有封面的条目
+ * 也不再有那条 144px 占位带，于是估算按「有封面 / 无封面」分开给，总高度和滚动条才不会虚高。
  */
 function blogEstimateHeight(entry: RssEntry | undefined): number {
   if (laneCount.value > 1) return 352
@@ -436,6 +435,7 @@ function handleOpen(entry: RssEntry) {
         :key="item.id"
         :entry="item"
         :show-feed="showFeed"
+        :lanes="laneCount"
         @open="handleOpen"
       />
 

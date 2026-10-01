@@ -198,17 +198,20 @@ describe('EntryList 视图切换', () => {
     expect(await lanesAt(800, 'blog')).toBe(2)
   })
 
-  it('博客视图：卡片等高（固定封面高 + 固定卡片高 + 行数截断），间距比瀑布流大', () => {
+  it('博客视图：多列时卡片等高（封面带 + 固定卡片高 + 行数截断），间距比瀑布流大', async () => {
+    // 列数在 onMounted 里解析，等高样式与估算都依赖它
     const wrapper = mountList([makeEntry({ coverUrl: 'blob:cover' })], undefined, 'blog')
+    await nextTick()
 
     const post = wrapper.findComponent(STUBS.UBlogPost)
     const ui = post.props('ui') as { title: string, description: string, header: string }
     expect(ui.title).toContain('line-clamp-2')
     expect(ui.description).toContain('line-clamp-2')
     // 高度写在插槽子元素上（封面条 / 占位带），header 自己不写死高度：
-    // 手机单列时占位带一 hidden，header 就自然塌成 0 高
+    // 单列时占位带一 hidden，header 就自然塌成 0 高
     expect(ui.header).not.toContain('h-36')
-    expect(post.classes()).toContain('sm:h-[22rem]')
+    // happy-dom 默认 1024px → 博客两列 → 强制等高
+    expect(post.classes()).toContain('h-[22rem]')
 
     const virtualize = virtualizeOf(wrapper)
     expect(virtualize.gap).toBe(24)
@@ -216,21 +219,31 @@ describe('EntryList 视图切换', () => {
     expect(virtualize.estimateSize(0)).toBe(352)
   })
 
-  it('博客视图：手机单列不强制等高，没有封面的条目不再留占位带', async () => {
-    const original = window.innerWidth
-    try {
-      window.innerWidth = 390
-      const withCover = mountList([makeEntry({ coverUrl: 'blob:cover' })], undefined, 'blog')
-      const withoutCover = mountList([makeEntry()], undefined, 'blog')
-      await nextTick()
+  it('博客视图：单列（含 640~767 这段）不强制等高，没有封面的条目不留占位带', async () => {
+    // 单列只由「列数」决定：博客断点表 <768px 就是单列，而 640~767 也 ≥sm，
+    // 之前用 sm: 控制占位带，这段就会「已是单列却还留着 144px 占位带」。
+    for (const width of [390, 700]) {
+      const original = window.innerWidth
+      window.innerWidth = width
+      try {
+        const withoutCover = mountList([makeEntry()], undefined, 'blog')
+        const withCover = mountList([makeEntry({ coverUrl: 'blob:cover' })], undefined, 'blog')
+        await nextTick()
 
-      // 占位带 hidden（sm:flex）：单列没有行要对齐，不该白占 144px
-      expect(withoutCover.get('.blog-post [class*="sm:flex"]').classes()).toContain('hidden')
-      // 估算按有无封面分档，滚动总高度不虚高
-      expect(virtualizeOf(withCover).estimateSize(0)).toBe(336)
-      expect(virtualizeOf(withoutCover).estimateSize(0)).toBe(192)
-    } finally {
-      window.innerWidth = original
+        const post = withoutCover.findComponent(STUBS.UBlogPost)
+        // 单列：不强制等高（卡片高度交回内容）
+        expect(post.classes(), `宽度 ${width}`).not.toContain('h-[22rem]')
+        expect(
+          withoutCover.get('.blog-post [class*="bg-elevated/60"]').classes(),
+          `宽度 ${width}`
+        ).toContain('hidden')
+
+        // 估算按有无封面分档，单列滚动总高度不虚高
+        expect(virtualizeOf(withCover).estimateSize(0)).toBe(336)
+        expect(virtualizeOf(withoutCover).estimateSize(0)).toBe(192)
+      } finally {
+        window.innerWidth = original
+      }
     }
   })
 
@@ -240,7 +253,7 @@ describe('EntryList 视图切换', () => {
 
     const withoutCover = mountList([makeEntry()], undefined, 'blog')
     expect(withoutCover.find('.blog-post img').exists()).toBe(false)
-    // 占位条与封面同高
+    // 占位带与封面同高，且多列时是显示的（happy-dom 默认 1024px → 两列）
     expect(withoutCover.find('.blog-post [class*="bg-elevated/60"]').exists()).toBe(true)
   })
 
