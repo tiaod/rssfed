@@ -35,6 +35,7 @@
  * 保留占位只把文字淡掉的话，空间一寸没让出来，等于没隐藏，还多一层残影。
  * 浮层形态没有这个问题（高度为零、不参与布局），方向隐藏由使用方通过 `visible` 控制。
  *
+ * 浮层底色用半透明的 `--ui-bg`（/90）：盖在滚动内容上的纯实底像贴了块板子，透一点更贴内容；
  * 底部再压一条 12px 的渐隐带（细节见模板里的注释），滚过的内容在提示条下缘淡出；
  * 浮层形态下这条带子正好抹掉「内容从提示条下面钻过去」的硬边。
  */
@@ -91,7 +92,10 @@ function handleApply(event?: MouseEvent) {
       // 定位由形态决定：两个类同时出现时谁生效取决于 CSS 里的先后顺序，不能都写上
       props.floating
         ? [
-          'absolute inset-x-0 top-0 z-20 bg-[var(--ui-bg)] px-4 sm:px-6',
+          // 底色带一点透明度（/90）：浮层压在滚动内容上，纯实底会像贴了一块板子。
+          // 透明度只加在这里和下面的渐隐带，两个值必须一致（见那边的注释），
+          // 不做 backdrop-blur：滚动每一帧都要重算背后像素，列表滚动的开销受不了。
+          'absolute inset-x-0 top-0 z-20 bg-[var(--ui-bg)]/90 px-4 sm:px-6',
           // 收起时高度必须真正归零，并且不能拦住下面对列表的点击：
           // 浮层盖在内容上，残留的 pt 会一直占着顶部一条、吃掉那一带的点击
           expanded ? 'pt-2 sm:pt-3' : 'pointer-events-none pt-0'
@@ -128,12 +132,14 @@ function handleApply(event?: MouseEvent) {
     <!--
       底部渐隐：从面板底色到「同色的全透明」的一条窄带，压在下面列表的顶上。滚动经过的
       内容在提示条下缘淡出，提示条就不再是「贴在内容上的一块硬边」。
+      起点必须和提示条底色一样带 /90：提示条半透明后，不透明的起点会在下缘露出一条
+      比提示条更实的横带，等于把「半透明」这件事画了个边。
       透明端写 /0 而不是 to-transparent：Tailwind v4 在 oklab 空间插值，白 → 透明黑会在
       中段泛灰，落成一层灰雾；同色透明才是干净的淡出。只盖内容不盖文字——它在提示条之外
       （top-full），且 pointer-events-none 不会挡住列表的点击。
     -->
     <div
-      class="pointer-events-none absolute inset-x-0 top-full z-10 h-3 bg-linear-to-b from-[var(--ui-bg)] to-[var(--ui-bg)]/0"
+      class="pointer-events-none absolute inset-x-0 top-full z-10 h-3 bg-linear-to-b from-[var(--ui-bg)]/90 to-[var(--ui-bg)]/0"
       aria-hidden="true"
     />
   </div>

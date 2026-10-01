@@ -108,7 +108,8 @@ describe('NewEntriesBanner', () => {
     expect(fade).not.toBeNull()
     expect(fade!.className).toContain('top-full') // 在提示条之外，压的是下面列表的顶边
     expect(fade!.className).toContain('bg-linear-to-b')
-    expect(fade!.className).toContain('from-[var(--ui-bg)]')
+    // 起点必须和提示条底色同色同透明度（/90）：不透明的起点会在下缘露出一条实边
+    expect(fade!.className).toContain('from-[var(--ui-bg)]/90')
     // 透明端必须是与起点同色（带 /0）而不是 to-transparent：后者在 oklab 插值下中段泛灰
     expect(fade!.className).toContain('to-[var(--ui-bg)]/0')
     expect(fade!.className).not.toContain('to-transparent')
@@ -170,8 +171,8 @@ describe('NewEntriesBanner', () => {
     expect(classes).toContain('top-0')
     // 互斥：relative 与 absolute 同时出现时谁生效取决于 CSS 顺序，浮层就白写了
     expect(classes).not.toContain('relative')
-    // 盖在内容上必须有底色，否则文字会和下面的卡片叠在一起
-    expect(bannerEl().className).toContain('bg-[var(--ui-bg)]')
+    // 盖在内容上必须有底色，否则文字会和下面的卡片叠在一起；带一点透明度（/90）不糊成一块板
+    expect(bannerEl().className).toContain('bg-[var(--ui-bg)]/90')
     expect(classes).not.toContain('mt-2')
   })
 
