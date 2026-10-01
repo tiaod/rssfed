@@ -18,6 +18,14 @@ const props = defineProps<{
    * 就会和条目一起滚动，而不是固定占住视图顶部。见下方 HeaderItem 的说明。
    */
   header?: boolean
+  /**
+   * 视口外上下各预渲染几个条目（不传时按列数算：至少 3，多列时约两行）。
+   *
+   * 注意它是「条目数」而不是「行数」——多列时同样的值只覆盖不到一行，所以默认值随列数放大。
+   * 实测（390×900、连续滚动 85 帧）单列下 6 → 18 帧超过 20ms、3 → 4~5 帧、1 → 0~1 帧：
+   * 掉帧基本都是「视口外多渲染出来的卡片」的布局成本，所以默认值往小里取。
+   */
+  overscan?: number
 }>()
 
 /**
@@ -171,7 +179,7 @@ function estimateHeight(item: ListItem | undefined): number {
 const virtualize = computed(() => ({
   lanes: laneCount.value,
   gap: LIST_GAP,
-  overscan: 6,
+  overscan: props.overscan ?? Math.max(3, laneCount.value * 2),
   /**
    * 滚动区铺满整个面板（页面的 body 已经 p-0），内边距改由这里承担，滚动条才会像以前那样
    * 贴面板右边缘，而不是缩在中间一块。垂直方向用 virtualize 的 paddingStart/End，
