@@ -104,6 +104,19 @@ watch(
   <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
       <UDashboardNavbar title="时间线">
+        <!-- 列表状态跟标题放一起，右侧只留动作 -->
+        <template #trailing>
+          <UButton
+            v-if="loading"
+            loading
+            variant="ghost"
+            color="neutral"
+            size="sm"
+          >
+            加载中…
+          </UButton>
+        </template>
+
         <template #right>
           <ListViewSwitcher
             :view="view"
@@ -116,15 +129,6 @@ watch(
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
           />
-          <UButton
-            v-if="loading"
-            loading
-            variant="ghost"
-            color="neutral"
-            size="sm"
-          >
-            加载中…
-          </UButton>
         </template>
       </UDashboardNavbar>
     </template>

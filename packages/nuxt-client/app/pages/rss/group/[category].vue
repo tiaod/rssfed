@@ -81,6 +81,25 @@ watch(
   <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
       <UDashboardNavbar :title="category">
+        <!-- 分组规模是「这个页面是什么」的一部分，跟标题放一起；右侧只留动作 -->
+        <template #trailing>
+          <UButton
+            v-if="loading"
+            loading
+            variant="ghost"
+            color="neutral"
+            size="sm"
+          >
+            加载中…
+          </UButton>
+          <span
+            v-else
+            class="shrink-0 text-sm text-muted"
+          >
+            {{ groupFeeds.length }} 个订阅源
+          </span>
+        </template>
+
         <template #right>
           <ListViewSwitcher
             :view="view"
@@ -94,21 +113,6 @@ watch(
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
           />
-          <UButton
-            v-if="loading"
-            loading
-            variant="ghost"
-            color="neutral"
-            size="sm"
-          >
-            加载中…
-          </UButton>
-          <span
-            v-else
-            class="text-sm text-muted"
-          >
-            {{ groupFeeds.length }} 个订阅源
-          </span>
         </template>
       </UDashboardNavbar>
     </template>

@@ -129,6 +129,19 @@ async function unsubscribe() {
   <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
       <UDashboardNavbar :title="feedDisplayName || '订阅源'">
+        <!-- 列表状态跟标题放一起，右侧只留动作 -->
+        <template #trailing>
+          <UButton
+            v-if="loading"
+            loading
+            variant="ghost"
+            color="neutral"
+            size="sm"
+          >
+            加载中…
+          </UButton>
+        </template>
+
         <template #right>
           <ListViewSwitcher
             :view="view"
@@ -146,15 +159,6 @@ async function unsubscribe() {
             @edit="openEdit"
             @unsubscribe="openUnsubscribe"
           />
-          <UButton
-            v-if="loading"
-            loading
-            variant="ghost"
-            color="neutral"
-            size="sm"
-          >
-            加载中…
-          </UButton>
         </template>
       </UDashboardNavbar>
     </template>
