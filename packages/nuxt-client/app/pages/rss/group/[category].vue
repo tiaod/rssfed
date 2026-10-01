@@ -81,8 +81,8 @@ watch(
   <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
       <UDashboardNavbar :title="category">
-        <!-- 分组规模是「这个页面是什么」的一部分，跟标题放一起；右侧只留动作 -->
-        <template #trailing>
+        <template #right>
+          <!-- 页面状态排在动作之前（切换视图按钮的左边），先看到「这是什么页面」再看到动作 -->
           <UButton
             v-if="loading"
             loading
@@ -98,9 +98,7 @@ watch(
           >
             {{ groupFeeds.length }} 个订阅源
           </span>
-        </template>
 
-        <template #right>
           <ListViewSwitcher
             :view="view"
             :overridden="overridden"

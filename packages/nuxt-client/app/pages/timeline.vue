@@ -104,8 +104,8 @@ watch(
   <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
       <UDashboardNavbar title="时间线">
-        <!-- 列表状态跟标题放一起，右侧只留动作 -->
-        <template #trailing>
+        <template #right>
+          <!-- 页面状态排在动作之前（切换视图按钮的左边） -->
           <UButton
             v-if="loading"
             loading
@@ -115,9 +115,7 @@ watch(
           >
             加载中…
           </UButton>
-        </template>
 
-        <template #right>
           <ListViewSwitcher
             :view="view"
             :overridden="overridden"
