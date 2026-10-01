@@ -216,18 +216,19 @@ worker 侧则在有失败时打一行 `[EntryImages] feed=… 候选=… 失败=
 
    > **为什么 Bot 产出库里不放压缩图片？** 两个场景的消费者不同：PouchDB 同步 feed 库中的条目供离线阅读，需要下载并压缩图片嵌入文档；ActivityPub outbox 返回的是轻量分发元数据，远程实例会自行拉取原始图片 URL，不需要也不应该处理压缩版本。Bot 产出库只存标题、摘要、原文链接即可。
 
-## 前端列表渲染（虚拟化瀑布流 + 无限滚动）
+## 前端列表渲染（四种视图 + 虚拟化 + 无限滚动）
 
 时间线、分类页、单源页、Bot 产出页共用 `packages/nuxt-client/app/components/EntryList.vue`：
-虚拟化瀑布流 + 页尾骨架触底加载。数据侧由 `useSyncedEntryList`（列表只在 `load()` 里整体替换，
-`grow()` 只往末尾接更旧的条目）与 `useInfiniteList`（单飞防重入）提供。
+**四种视图（瀑布流 / 博客文章 / 列表 / 图片）共用同一套虚拟化外壳** + 页尾骨架触底加载。
+数据侧由 `useSyncedEntryList`（列表只在 `load()` 里整体替换，`grow()` 只往末尾接更旧的条目）
+与 `useInfiniteList`（单飞防重入）提供。
 
 ### 虚拟化（为什么必须做）
 
 列表用 **Nuxt UI 的 `ScrollArea`**（`items` + `virtualize`，内部就是 `@tanstack/vue-virtual` 的
 官方封装，见 `packages/nuxt-client/app/components/EntryList.vue`），只渲染视口附近的条目：
-`lanes` 按断点给列数（窄屏 1 列就是普通线性虚拟列表），`estimateSize` 估算未测量过的条目，
-真实高度由 ScrollArea 内部 `measureElement` 在渲染后记住。
+`lanes` 按断点给列数，`estimateSize` 估算未测量过的条目，真实高度由 ScrollArea 内部
+`measureElement` 在渲染后记住。
 
 选它而不是自己接 virtualizer：虚拟化这层逻辑（测量、overscan、scrollMargin、lanes 分配）
 交给官方组件维护，升级 Nuxt UI 自动跟进。**没有用 `ScrollArea` 的地方只剩一点**：它自带滚动
@@ -245,6 +246,55 @@ worker 侧则在有失败时打一行 `[EntryImages] feed=… 候选=… 失败=
 
 > `content-visibility: auto` 那类"跳过视口外元素"的取巧方案试过，不够用：600 条有效，1200 条
 > 仍有 111ms，而且滚动 P95 从 18ms 涨到 25ms（视口外元素滚进来要即时布局）。已放弃。
+
+### 四种视图共用一套虚拟化外壳
+
+`EntryList` 接一个 `view` prop（`masonry` / `blog` / `list` / `image`，见 `app/utils/listViews.ts`），
+只切换 **item 渲染组件** 与 **布局参数**（`lanes` / `gap` / `estimateSize`），虚拟化、页头跨列、
+页尾骨架触底、浮层锚点这些逻辑一份不动。切换按钮（`ListViewSwitcher`）放在各页导航栏的同步按钮旁。
+
+**没有直接用 `UBlogPosts` / `UPageList` 当容器**，因为颗粒度对不上：虚拟化要的是「index → 一个 DOM
+块」的映射（ScrollArea 决定渲染哪些 index，再对每个 index 调一次 slot），而这两个组件是
+「数组 → 一整块 DOM」（`v-for` 全量渲染）。把全量条目交给它们就等于放弃虚拟化；自己算窗口再喂
+给它们，则要面对它们写死的 grid 列数（`sm:grid-cols-2 lg:grid-cols-3`）和自己按视口算的 lanes 对不上。
+`UBlogPosts` 的可视规格本身 ≈ `UBlogPost × N` + 一个 grid class，所以**复刻版式即可，容器不要**。
+
+各视图的估算口径必须和实际渲染高度一致（`estimateSize` 参与泳道分配，估不准列尾就参差）：
+
+| 视图 | 版式 | 手机列数 | 高度来源 |
+| --- | --- | --- | --- |
+| 瀑布流 | 封面按原比例，卡片高矮不一 | 2 | 有封面 320 / 无封面 180 |
+| 博客文章 | 等高卡片：封面压成 `h-36` 横条 + 标题摘要各截断 2 行 + 卡片固定 `h-[22rem]` | 1 | 写死 352 |
+| 列表 | 紧凑单行：小缩略图 + 标题 + 两行摘要 | 1 | 写死 96（行高固定） |
+| 图片 | 按封面真实比例的瀑布流（不裁切） | 2 | 泳道宽度 ÷ 该条封面宽高比 |
+
+图片视图的比例取自列表查询 `images` 投影里**压缩后的 width/height**，所以图片还没加载时首帧布局
+和总高度就是对的（Nuxt UI 官方的 masonry 例子给的是常数估算，靠渲染后测量纠正）。没有封面或
+缺尺寸元信息的条目按 4:3 占位、**不过滤掉**——每页条数稳定，触底加载的节奏才不会被打乱。
+
+窄屏单独收档：手机上瀑布流两列（`masonry` 断点表 `0 → 2`），卡片只有 ~170px 宽，所以
+封面高度区间、内边距、标题/摘要字号都按窄屏降一档（都用 `sm:` 还原，桌面不受影响），摘要限 4 行，
+否则一行标题要折四五层。博客视图手机保持单列，两档版式一眼可分。
+
+切视图会 `:key="view"` 重建 ScrollArea（布局算法换了，重建比留着上一版的测量值干净），代价是
+回到顶部——正是切换视图时预期的位置。重建会让之前那个 ResizeObserver 盯上已卸载的节点，所以
+量容器宽度、挂 observer 的那段逻辑做成可重入的（`syncViewportMeasurement`），切视图后重新挂。
+
+### 视图默认值：三层 + 会话内覆盖
+
+生效优先级（越具体越优先）：
+
+    单源页 / Bot 产出页：订阅源 -> 所属分组 -> 全局
+    分组页：            分组 -> 全局
+    时间线：            全局（默认瀑布流）
+
+存储位置分别是：全局在 `useSettings` 的 localStorage（`AppSettings.view`，通用设置页可改）；
+订阅源在订阅文档上（编辑订阅弹窗里的「默认视图」，跟着用户状态库双向同步，不用改服务端 schema）；
+分组新开一种用户状态库文档 `pref:group:<name>`（订阅管理页分组行的菜单）。分组是订阅文档上的
+自由文本 `category`，所以分组改名后偏好会留在旧名字下成为孤儿，不做自动跟随。
+
+**页面上的切换按钮只写会话内的 `useState` 覆盖**（`composables/useListView.ts`），刷新即回到配置值；
+菜单里给「恢复默认视图」做会话内撤销。这样顺手点一下不会把配置改掉——默认值只能由三个显式入口修改。
 
 ### 页头随列表一起滚
 
