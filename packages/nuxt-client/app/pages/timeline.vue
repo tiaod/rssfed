@@ -30,6 +30,9 @@ const { loadMore } = useInfiniteList(() => grow())
 // EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
 const hasMoreGetter = () => hasMore.value
 
+// 提示条是浮层（盖在列表顶部、不占布局），按滚动方向让位——下滑收起、上滑或回顶部露出
+const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
+
 onMounted(async () => {
   try {
     // 获取订阅列表：优先远端（含 lastNewEntryAt，用于增量同步判断），失败回退本地
@@ -118,57 +121,58 @@ watch(
       />
 
       <div
-        v-if="loading"
-        class="flex justify-center py-12"
+        ref="listAnchorRef"
+        class="relative flex h-full min-h-0 flex-col"
       >
-        <UIcon
-          name="i-lucide-loader-circle"
-          class="size-8 animate-spin text-muted"
+        <!-- 浮层提示条：盖在滚动区顶部，不占布局，按滚动方向让位 -->
+        <NewEntriesBanner
+          floating
+          :count="newCount"
+          :visible="bannerVisible"
+          @apply="applyNew"
         />
-      </div>
 
-      <div
-        v-else-if="!entries.length"
-        class="flex flex-col items-center py-12 gap-4"
-      >
-        <UIcon
-          name="i-lucide-inbox"
-          class="size-12 text-muted"
-        />
-        <p class="text-muted">
-          暂无条目，先订阅一些 RSS 源吧
-        </p>
-        <UButton
-          to="/"
-          variant="outline"
-          color="neutral"
-        >
-          去发现订阅源
-        </UButton>
-      </div>
-
-      <template v-else>
-        <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
-        <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
         <div
-          ref="listAnchorRef"
-          class="flex h-full min-h-0 flex-col"
+          v-if="loading"
+          class="flex justify-center py-12"
         >
-          <!-- 常驻挂载：展开 / 收起由组件内部过渡，列表跟着平滑平移 -->
-          <NewEntriesBanner
-            class="mx-4 sm:mx-6"
-            :count="newCount"
-            @apply="applyNew"
-          />
-          <EntryList
-            class="min-h-0 flex-1"
-            :entries="entries"
-            :load-more="loadMore"
-            :has-more="hasMoreGetter"
-            show-feed
+          <UIcon
+            name="i-lucide-loader-circle"
+            class="size-8 animate-spin text-muted"
           />
         </div>
-      </template>
+
+        <div
+          v-else-if="!entries.length"
+          class="flex flex-col items-center py-12 gap-4"
+        >
+          <UIcon
+            name="i-lucide-inbox"
+            class="size-12 text-muted"
+          />
+          <p class="text-muted">
+            暂无条目，先订阅一些 RSS 源吧
+          </p>
+          <UButton
+            to="/"
+            variant="outline"
+            color="neutral"
+          >
+            去发现订阅源
+          </UButton>
+        </div>
+
+        <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
+        <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
+        <EntryList
+          v-else
+          class="min-h-0 flex-1"
+          :entries="entries"
+          :load-more="loadMore"
+          :has-more="hasMoreGetter"
+          show-feed
+        />
+      </div>
     </template>
   </UDashboardPanel>
 </template>

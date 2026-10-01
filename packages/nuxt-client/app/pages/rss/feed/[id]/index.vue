@@ -35,15 +35,9 @@ const {
 
 /**
  * 「已同步 N 条」提示条是浮层：盖在列表顶部、不占布局高度，展开不会推动正在读的内容。
- * 代价是它会挡住最上面一条内容，所以按滚动方向让位——往下读（内容往上走）时收起，
- * 往上滚或回到顶部时露出（逻辑见 useScrollHideOnDown）。
+ * 代价是它会挡住最上面一条内容，所以按滚动方向让位（见 useEntriesBannerVisibility）。
  */
-const { visible: bannerVisible, reveal: revealBanner } = useScrollHideOnDown(listAnchorRef)
-
-// 新提示出现时先露一次：否则用户正在往下读的话，这次通知会被"下滑隐藏"直接吃掉
-watch(newCount, (n, prev) => {
-  if (n > 0 && n !== prev) revealBanner()
-})
+const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
 const { loadMore } = useInfiniteList(() => grow())
