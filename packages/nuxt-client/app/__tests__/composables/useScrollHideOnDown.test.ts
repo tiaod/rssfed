@@ -18,9 +18,10 @@ nuxtGlobals.useEventListener = useEventListener
  * 事件也从内部元素发出（scroll 不冒泡，只有捕获阶段会经过外层）。
  */
 const Host = defineComponent({
-  setup() {
+  props: { guardMs: { type: Number, default: undefined } },
+  setup(props) {
     const outer = ref<HTMLElement | null>(null)
-    const { visible, reveal } = useScrollHideOnDown(outer)
+    const { visible, reveal } = useScrollHideOnDown(outer, { revealGuardMs: props.guardMs })
     return { outer, visible, reveal }
   },
   template: `
@@ -39,8 +40,8 @@ afterEach(() => {
   wrapper = undefined
 })
 
-async function setup() {
-  wrapper = mount(Host, { attachTo: document.body })
+async function setup(guardMs?: number) {
+  wrapper = mount(Host, { attachTo: document.body, props: { guardMs } })
   // useEventListener 要等挂载后的下一个 tick 才绑到元素上
   await nextTick()
   const scroller = wrapper.find('.scroller').element as HTMLElement
@@ -52,8 +53,14 @@ async function setup() {
     await nextTick()
   }
 
+  async function reveal() {
+    await wrapper!.find('.reveal').trigger('click')
+    await nextTick()
+  }
+
   return {
     scrollTo,
+    reveal,
     state: () => wrapper!.find('.state').text()
   }
 }
@@ -95,12 +102,45 @@ describe('useScrollHideOnDown', () => {
   })
 
   it('reveal() 立刻显示：新提示不该被「正在下滑」吃掉', async () => {
-    const { scrollTo, state } = await setup()
+    const { scrollTo, reveal, state } = await setup()
 
     await scrollTo(800)
     expect(state()).toBe('false')
 
-    await wrapper!.find('.reveal').trigger('click')
+    await reveal()
     expect(state()).toBe('true')
+  })
+
+  it('reveal 后的保护窗口内，同一段惯性下滑不会把新提示立刻收走', async () => {
+    const { scrollTo, reveal, state } = await setup(200)
+
+    await scrollTo(800)
+    expect(state()).toBe('false')
+
+    await reveal()
+    expect(state()).toBe('true')
+
+    // 手指还在往下滑：这里正是「提示条闪一下就没」的现场
+    await scrollTo(880)
+    await scrollTo(960)
+    expect(state()).toBe('true')
+  })
+
+  it('保护窗口内上滑照常显示，窗口过后下滑照常让位', async () => {
+    const { scrollTo, reveal, state } = await setup(60)
+
+    await scrollTo(800)
+    await reveal()
+    await scrollTo(900)
+    expect(state()).toBe('true')
+
+    // 上滑永远有效
+    await scrollTo(850)
+    expect(state()).toBe('true')
+
+    // 等过保护窗口，继续下滑就该让位了
+    await new Promise(resolve => setTimeout(resolve, 100))
+    await scrollTo(1200)
+    expect(state()).toBe('false')
   })
 })
