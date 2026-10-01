@@ -129,42 +129,46 @@ async function unsubscribe() {
     </template>
 
     <template #body>
-      <template v-if="!entries.length && !loading">
-        <!-- 空列表：没有可滚动的内容，页头固定在空态上方 -->
-        <FeedHeader
-          v-if="feed"
-          :feed="feed"
-          class="mb-2 px-4 sm:px-6"
+      <!--
+        定位/滚动锚点容器始终渲染，提示条挂在它下面而不是列表分支里：
+        列表为空时同步带来第一批条目，用户必须能看到「已同步 N 条」并点「查看」，
+        否则页面会一直停在「暂无条目」（entries 只在 load() 里更新）。
+      -->
+      <div
+        ref="listAnchorRef"
+        class="relative flex h-full min-h-0 flex-col"
+      >
+        <!--
+          提示条盖在滚动区顶部（浮层，不占布局），滚动方向由页面控制显隐；
+          水平内边距在组件里自带，与滚动区的 px-4 sm:px-6 对齐。
+        -->
+        <NewEntriesBanner
+          floating
+          :count="newCount"
+          :visible="bannerVisible"
+          @apply="applyNew"
         />
 
-        <div class="flex flex-col items-center py-12 gap-4">
-          <UIcon
-            name="i-lucide-file-text"
-            class="size-12 text-muted"
+        <template v-if="!entries.length && !loading">
+          <!-- 空列表：没有可滚动的内容，页头固定在空态上方 -->
+          <FeedHeader
+            v-if="feed"
+            :feed="feed"
+            class="mb-2 px-4 sm:px-6"
           />
-          <p class="text-muted">
-            暂无条目
-          </p>
-        </div>
-      </template>
 
-      <template v-else>
-        <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
-        <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
-        <div
-          ref="listAnchorRef"
-          class="relative flex h-full min-h-0 flex-col"
-        >
-          <!--
-            提示条盖在滚动区顶部（浮层，不占布局），滚动方向由页面控制显隐；
-            水平内边距在组件里自带，与滚动区的 px-4 sm:px-6 对齐。
-          -->
-          <NewEntriesBanner
-            floating
-            :count="newCount"
-            :visible="bannerVisible"
-            @apply="applyNew"
-          />
+          <div class="flex flex-col items-center py-12 gap-4">
+            <UIcon
+              name="i-lucide-file-text"
+              class="size-12 text-muted"
+            />
+            <p class="text-muted">
+              暂无条目
+            </p>
+          </div>
+        </template>
+
+        <template v-else>
           <EntryList
             class="min-h-0 flex-1"
             :entries="entries || []"
@@ -183,8 +187,8 @@ async function unsubscribe() {
               />
             </template>
           </EntryList>
-        </div>
-      </template>
+        </template>
+      </div>
 
       <!-- 取消订阅确认弹窗 -->
       <UModal
