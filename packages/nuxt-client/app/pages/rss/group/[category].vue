@@ -90,7 +90,7 @@ watch(
           />
           <ListActionsBar
             :feed-ids="groupFeeds.map(f => f.id)"
-            :has-entries="entries.length > 0"
+            :entry-count="entries.length"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
           />

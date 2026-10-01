@@ -112,7 +112,7 @@ watch(
             @reset="resetView"
           />
           <ListActionsBar
-            :has-entries="entries.length > 0"
+            :entry-count="entries.length"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
           />

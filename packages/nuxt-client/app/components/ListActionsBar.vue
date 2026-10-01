@@ -8,16 +8,17 @@
  *
  * 布局：〔切换视图〕〔✓ 全部标记为已读〕〔⋮ 页面动作〕。视图切换不在这里（见 ListViewSwitcher）。
  *
- * 「标记为已读」按钮兼任同步状态指示：
- *   同步中 → 转圈并禁用（正在写库，这时候也不该去标记）
- *   同步失败 → 变红 + 警告图标，tooltip 显示错误详情
+ * 「标记为已读」按钮：
+ *   点击 → 就地在按钮旁弹出确认浮层（一次批量写、没有「全部撤销」，值得多一步），确认后才抛事件；
+ *   同步中 → 转圈并禁用（正在写库，这时候也不该去标记）；
+ *   同步失败 → 变红 + 警告图标，错误详情同时出现在按钮 title 与确认浮层里。
  *
  * 菜单内容按页面能力拼：
  *   时间线 / 分组页   同步订阅
  *   单源页           刷新订阅 + 编辑订阅 ｜ 取消订阅
  *   bot 产出页       刷新订阅 + 编辑订阅 ｜ 订阅 / 取消订阅
  */
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { useSyncAction } from '~/composables/useSyncAction'
 import type { ManualSyncOutcome } from '~/composables/useManualSync'
@@ -29,15 +30,15 @@ const props = withDefaults(defineProps<{
   syncLabel?: string
   /** 传了才显示订阅类动作（编辑订阅 / 取消订阅 / 订阅） */
   feedId?: string
-  /** 当前列表有没有条目：没有就没什么可标记的 */
-  hasEntries?: boolean
+  /** 当前列表已加载的条目数（= 会被标记的总数）；0 时按钮不可点 */
+  entryCount?: number
   /** 是否已订阅（bot 产出页在「订阅 / 取消订阅」之间切换）；不传按已订阅处理 */
   subscribed?: boolean
 }>(), {
   feedIds: undefined,
   syncLabel: '同步订阅',
   feedId: undefined,
-  hasEntries: undefined,
+  entryCount: 0,
   subscribed: true
 })
 
@@ -57,14 +58,22 @@ async function handleSync() {
   if (outcome) emit('synced', outcome)
 }
 
+/** 确认浮层的开关：确认之后才真正抛事件 */
+const confirmOpen = ref(false)
+
 /** 同步中不能标记：一堆写入还在落盘，标完的状态可能立刻又被同步改动覆盖 */
-const markAllReadDisabled = computed(() => props.hasEntries === false || syncing.value)
+const markAllReadDisabled = computed(() => props.entryCount === 0 || syncing.value)
 
 const markAllReadTooltip = computed(() => {
   if (syncing.value) return '同步中…同步结束后可以标记为已读'
   if (hasError.value) return `同步失败：${errorDetail.value}`
-  return props.hasEntries === false ? '当前列表没有条目' : '全部标记为已读'
+  return props.entryCount === 0 ? '当前列表没有条目' : '全部标记为已读'
 })
+
+function confirmMarkAllRead() {
+  confirmOpen.value = false
+  emit('mark-all-read')
+}
 
 const items = computed<DropdownMenuItem[][]>(() => {
   const actions: DropdownMenuItem[] = [
@@ -111,18 +120,57 @@ const items = computed<DropdownMenuItem[][]>(() => {
 
 <template>
   <div class="flex items-center gap-1.5">
-    <UTooltip :text="markAllReadTooltip">
+    <UPopover
+      v-model:open="confirmOpen"
+      :content="{ align: 'end', sideOffset: 8 }"
+    >
       <UButton
         :icon="hasError ? 'i-lucide-alert-circle' : 'i-lucide-circle-check'"
         :loading="syncing"
         :color="hasError ? 'error' : 'neutral'"
         :disabled="markAllReadDisabled"
+        :title="markAllReadTooltip"
         variant="ghost"
         size="sm"
         aria-label="全部标记为已读"
-        @click="emit('mark-all-read')"
       />
-    </UTooltip>
+
+      <template #content>
+        <div class="w-60 p-3">
+          <p class="text-sm text-highlighted">
+            把当前列表的 {{ entryCount }} 条标记为已读？
+          </p>
+          <p class="mt-1 text-xs text-muted">
+            只处理已经加载出来的条目
+          </p>
+          <p
+            v-if="hasError"
+            class="mt-2 text-xs text-error"
+          >
+            同步失败：{{ errorDetail }}
+          </p>
+
+          <div class="mt-3 flex justify-end gap-2">
+            <UButton
+              variant="outline"
+              color="neutral"
+              size="sm"
+              @click="confirmOpen = false"
+            >
+              取消
+            </UButton>
+            <UButton
+              color="error"
+              size="sm"
+              icon="i-lucide-circle-check"
+              @click="confirmMarkAllRead"
+            >
+              全部标记为已读
+            </UButton>
+          </div>
+        </div>
+      </template>
+    </UPopover>
 
     <UDropdownMenu
       :items="items"

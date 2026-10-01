@@ -7,8 +7,8 @@ import ListActionsBar from '../../components/ListActionsBar.vue'
 /**
  * 列表页右上角的动作区：〔✓ 全部标记为已读〕〔⋮ 页面动作〕。
  *
- * 盯三件事：菜单内容按页面能力拼（订阅类动作只在单源 / bot 页出现）、各动作抛对事件、
- * 以及「标记已读」按钮兼任的同步状态指示（同步中禁用转圈、失败变红）。
+ * 盯四件事：菜单内容按页面能力拼、各动作抛对事件、**标记已读必须先确认**、
+ * 以及按钮兼任的同步状态指示（同步中禁用转圈、失败变红）。
  */
 
 const H = vi.hoisted(() => ({
@@ -32,10 +32,11 @@ vi.mock('~/composables/useSyncAction', async () => {
 })
 
 const STUBS = {
-  UTooltip: {
-    name: 'UTooltip',
-    props: ['text'],
-    template: '<div class="tooltip"><span class="tooltip-text">{{ text }}</span><slot /></div>'
+  UPopover: {
+    name: 'Popover',
+    props: ['open', 'content', 'ui'],
+    emits: ['update:open'],
+    template: '<div class="popover"><div class="popover-trigger"><slot /></div><div class="popover-content"><slot name="content" /></div></div>'
   },
   UDropdownMenu: {
     name: 'DropdownMenu',
@@ -45,21 +46,34 @@ const STUBS = {
   UButton: {
     name: 'Button',
     props: ['icon', 'title', 'ariaLabel', 'variant', 'color', 'size', 'loading', 'disabled'],
-    template: '<button class="trigger" :data-icon="icon" :data-loading="String(loading)" :data-color="color" :disabled="disabled" :aria-label="ariaLabel" />'
+    template: '<button class="trigger" :data-icon="icon" :data-loading="String(loading)" :data-color="color" :disabled="disabled" :title="title" :aria-label="ariaLabel"><slot /></button>'
   }
 }
 
 function mountBar(props: Record<string, unknown> = {}) {
-  return mount(ListActionsBar, { props, global: { stubs: STUBS } })
+  return mount(ListActionsBar, { props: { entryCount: 24, ...props }, global: { stubs: STUBS } })
 }
 
-/** 独立按钮：按 aria-label 找，别和 ⋮ 混了 */
+/** 标记已读的触发按钮（按 aria-label 找，别和 ⋮、确认按钮混了） */
 function markButton(wrapper: ReturnType<typeof mountBar>) {
   return wrapper.get('button[aria-label="全部标记为已读"]')
 }
 
 function moreButton(wrapper: ReturnType<typeof mountBar>) {
   return wrapper.get('button[aria-label="更多操作"]')
+}
+
+function confirmButton(wrapper: ReturnType<typeof mountBar>) {
+  const hit = wrapper.get('.popover-content').findAll('button')
+    .find(b => b.text().includes('全部标记为已读'))
+  if (!hit) throw new Error('确认浮层里没有确认按钮')
+  return hit
+}
+
+function cancelButton(wrapper: ReturnType<typeof mountBar>) {
+  const hit = wrapper.get('.popover-content').findAll('button').find(b => b.text().includes('取消'))
+  if (!hit) throw new Error('确认浮层里没有取消按钮')
+  return hit
 }
 
 function groups(wrapper: ReturnType<typeof mountBar>): DropdownMenuItem[][] {
@@ -90,9 +104,7 @@ describe('ListActionsBar 菜单内容', () => {
   })
 
   it('单源页：刷新订阅 + 编辑订阅 ｜ 取消订阅', () => {
-    const wrapper = mountBar({ feedId: 'feed-1', syncLabel: '刷新订阅' })
-
-    expect(labels(wrapper)).toEqual([
+    expect(labels(mountBar({ feedId: 'feed-1', syncLabel: '刷新订阅' }))).toEqual([
       ['刷新订阅', '编辑订阅'],
       ['取消订阅']
     ])
@@ -108,16 +120,14 @@ describe('ListActionsBar 菜单内容', () => {
 })
 
 describe('ListActionsBar 动作', () => {
-  it('各动作抛对应事件', async () => {
+  it('编辑订阅 / 取消订阅抛对应事件', () => {
     const wrapper = mountBar({ feedId: 'feed-1' })
 
     itemOf(wrapper, '编辑订阅').onSelect?.(new Event('select'))
     itemOf(wrapper, '取消订阅').onSelect?.(new Event('select'))
-    await markButton(wrapper).trigger('click')
 
     expect(wrapper.emitted('edit')).toHaveLength(1)
     expect(wrapper.emitted('unsubscribe')).toHaveLength(1)
-    expect(wrapper.emitted('mark-all-read')).toHaveLength(1)
   })
 
   it('未订阅时「订阅」抛 subscribe', () => {
@@ -144,39 +154,71 @@ describe('ListActionsBar 动作', () => {
   })
 })
 
-describe('ListActionsBar 的「全部标记为已读」按钮', () => {
-  it('默认是圆勾图标，提示就是动作本身', () => {
+describe('ListActionsBar 的「全部标记为已读」确认步骤', () => {
+  it('点按钮只弹确认，不直接标记；确认后才抛事件', async () => {
+    const wrapper = mountBar()
+
+    await markButton(wrapper).trigger('click')
+    expect(wrapper.emitted('mark-all-read')).toBeUndefined()
+
+    await confirmButton(wrapper).trigger('click')
+    expect(wrapper.emitted('mark-all-read')).toHaveLength(1)
+  })
+
+  it('确认浮层说明会标记多少条', () => {
+    expect(mountBar({ entryCount: 37 }).get('.popover-content').text()).toContain('把当前列表的 37 条标记为已读？')
+  })
+
+  it('取消不会标记', async () => {
+    const wrapper = mountBar()
+
+    await cancelButton(wrapper).trigger('click')
+
+    expect(wrapper.emitted('mark-all-read')).toBeUndefined()
+  })
+
+  it('同步失败时确认浮层里带错误详情（按钮 title 也有一份）', async () => {
+    H.hasError = ref(true) as unknown as { value: boolean }
+    const wrapper = mountBar()
+    await nextTick()
+
+    expect(wrapper.get('.popover-content').text()).toContain('同步失败：远端 503')
+    expect(markButton(wrapper).attributes('title')).toContain('同步失败：远端 503')
+  })
+})
+
+describe('ListActionsBar 的同步状态指示', () => {
+  it('默认是圆勾图标，title 就是动作本身', () => {
     const wrapper = mountBar()
 
     expect(markButton(wrapper).attributes('data-icon')).toBe('i-lucide-circle-check')
-    expect(wrapper.get('.tooltip-text').text()).toBe('全部标记为已读')
+    expect(markButton(wrapper).attributes('title')).toBe('全部标记为已读')
   })
 
-  it('列表为空时禁用并说明原因', () => {
-    const wrapper = mountBar({ hasEntries: false })
+  it('列表为空（0 条）时禁用并说明原因', () => {
+    const wrapper = mountBar({ entryCount: 0 })
 
     expect(markButton(wrapper).attributes('disabled')).toBeDefined()
-    expect(wrapper.get('.tooltip-text').text()).toBe('当前列表没有条目')
+    expect(markButton(wrapper).attributes('title')).toBe('当前列表没有条目')
   })
 
-  it('同步中：转圈 + 禁用（正在写库时不该去标记），并说明原因', async () => {
+  it('同步中：转圈 + 禁用（正在写库时不该去标记）', async () => {
     H.syncing = ref(true) as unknown as { value: boolean }
     const wrapper = mountBar()
     await nextTick()
 
     expect(markButton(wrapper).attributes('data-loading')).toBe('true')
     expect(markButton(wrapper).attributes('disabled')).toBeDefined()
-    expect(wrapper.get('.tooltip-text').text()).toContain('同步中')
+    expect(markButton(wrapper).attributes('title')).toContain('同步中')
   })
 
-  it('同步失败：变红 + 警告图标，提示里带错误详情', async () => {
+  it('同步失败：变红 + 警告图标', async () => {
     H.hasError = ref(true) as unknown as { value: boolean }
     const wrapper = mountBar()
     await nextTick()
 
     expect(markButton(wrapper).attributes('data-color')).toBe('error')
     expect(markButton(wrapper).attributes('data-icon')).toBe('i-lucide-alert-circle')
-    expect(wrapper.get('.tooltip-text').text()).toBe('同步失败：远端 503')
   })
 
   it('⋮ 始终是三个点：状态指示由标记按钮承担，不重复显示', async () => {

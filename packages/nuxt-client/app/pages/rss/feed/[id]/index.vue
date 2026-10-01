@@ -140,7 +140,7 @@ async function unsubscribe() {
             :feed-ids="[feedId]"
             sync-label="刷新订阅"
             :feed-id="feedId"
-            :has-entries="entries.length > 0"
+            :entry-count="entries.length"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
             @edit="openEdit"
