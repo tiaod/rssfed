@@ -90,7 +90,12 @@ function handleApply(event?: MouseEvent) {
     :class="[
       // 定位由形态决定：两个类同时出现时谁生效取决于 CSS 里的先后顺序，不能都写上
       props.floating
-        ? 'absolute inset-x-0 top-0 z-20 bg-[var(--ui-bg)] px-4 pt-2 sm:px-6 sm:pt-3'
+        ? [
+          'absolute inset-x-0 top-0 z-20 bg-[var(--ui-bg)] px-4 sm:px-6',
+          // 收起时高度必须真正归零，并且不能拦住下面对列表的点击：
+          // 浮层盖在内容上，残留的 pt 会一直占着顶部一条、吃掉那一带的点击
+          expanded ? 'pt-2 sm:pt-3' : 'pointer-events-none pt-0'
+        ]
         : 'relative',
       expanded ? 'grid-rows-[1fr] opacity-100' : 'grid-rows-[0fr] opacity-0',
       // 常驻形态展开时才留上边距；浮层形态贴住滚动区顶部，外边距由自己的 pt 承担

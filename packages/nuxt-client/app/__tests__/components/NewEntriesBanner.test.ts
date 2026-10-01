@@ -175,6 +175,16 @@ describe('NewEntriesBanner', () => {
     expect(classes).not.toContain('mt-2')
   })
 
+  it('浮层收起时高度真正归零且不拦点击（残留的 pt 会一直盖住顶部一条并吃掉点击）', () => {
+    mountBanner(0, { floating: true })
+    const classes = bannerEl().className.split(' ')
+
+    expect(classes).toContain('absolute')
+    expect(classes).not.toContain('pt-2')
+    expect(classes).toContain('pt-0')
+    expect(classes).toContain('pointer-events-none')
+  })
+
   it('常驻形态保持参与布局的 relative 定位', () => {
     mountBanner(3)
 
