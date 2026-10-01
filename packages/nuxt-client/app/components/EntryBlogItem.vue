@@ -32,29 +32,31 @@ const date = computed(() => new Date(props.entry.publishedAt))
     :description="excerpt"
     :date="date"
     :ui="{
-      // 封面压成等高横条 + 标题摘要固定行数 + 卡片固定总高（见下方 class）：
-      // 三者一起让每张卡片高度完全一致，多列时才会排成整齐的行
-      // （虚拟化按「最矮泳道」放条目，高度不一致就会像瀑布流那样错位）
-      header: 'aspect-auto h-36 shrink-0',
+      // 高度不写在 header 上，交给插槽里的子元素决定（见下）：
+      // 多列时封面是等高横条、没有封面的条目补一条同高占位带，卡片总高再固定（sm:h-[22rem]），
+      // 三者一起让卡片完全等高 —— 虚拟化按「最矮泳道」放条目，高度不一致就会像瀑布流那样错位。
+      // 手机单列没有行要对齐，于是不再强制等高：占位带直接折叠，卡片高度随内容。
+      header: 'aspect-auto shrink-0',
       title: 'line-clamp-2',
       description: 'line-clamp-2'
     }"
-    class="h-[22rem] cursor-pointer"
+    class="cursor-pointer sm:h-[22rem]"
     @click="emit('open', entry)"
   >
     <!--
       UBlogPost 的 #header 是「覆盖」而不是「追加」：给了插槽就不再渲染内置图片，
-      所以这里自己渲染封面图，并给没有封面的条目补一条同高的占位条 —— 卡片必须等高。
+      所以这里自己渲染封面图。没有封面时：sm 以上补一条同高占位带（为了行对齐），
+      手机上它 hidden，header 因此自然塌成 0 高，条目只剩文字。
     -->
     <template #header>
       <img
         v-if="image"
         v-bind="image"
-        class="size-full object-cover object-top"
+        class="h-36 w-full object-cover object-top"
       >
       <div
         v-else
-        class="flex size-full items-center justify-center bg-elevated/60"
+        class="hidden h-36 w-full items-center justify-center bg-elevated/60 sm:flex"
       >
         <UIcon
           name="i-lucide-newspaper"

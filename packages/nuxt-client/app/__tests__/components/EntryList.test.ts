@@ -205,17 +205,36 @@ describe('EntryList 视图切换', () => {
     const ui = post.props('ui') as { title: string, description: string, header: string }
     expect(ui.title).toContain('line-clamp-2')
     expect(ui.description).toContain('line-clamp-2')
-    // 封面压成等高横条、卡片固定总高：高度一致，多列才会排成整齐的行
-    expect(ui.header).toContain('h-36')
-    expect(post.classes()).toContain('h-[22rem]')
+    // 高度写在插槽子元素上（封面条 / 占位带），header 自己不写死高度：
+    // 手机单列时占位带一 hidden，header 就自然塌成 0 高
+    expect(ui.header).not.toContain('h-36')
+    expect(post.classes()).toContain('sm:h-[22rem]')
 
     const virtualize = virtualizeOf(wrapper)
     expect(virtualize.gap).toBe(24)
-    // 估算值 = 写死的真实高度（泳道按估算分配，估不准就会参差）
+    // 多列：估算值 = 写死的真实高度（泳道按估算分配，估不准就会参差）
     expect(virtualize.estimateSize(0)).toBe(352)
   })
 
-  it('博客视图：有封面渲染封面图，没封面补同高占位条（否则卡片高矮不一）', () => {
+  it('博客视图：手机单列不强制等高，没有封面的条目不再留占位带', async () => {
+    const original = window.innerWidth
+    try {
+      window.innerWidth = 390
+      const withCover = mountList([makeEntry({ coverUrl: 'blob:cover' })], undefined, 'blog')
+      const withoutCover = mountList([makeEntry()], undefined, 'blog')
+      await nextTick()
+
+      // 占位带 hidden（sm:flex）：单列没有行要对齐，不该白占 144px
+      expect(withoutCover.get('.blog-post [class*="sm:flex"]').classes()).toContain('hidden')
+      // 估算按有无封面分档，滚动总高度不虚高
+      expect(virtualizeOf(withCover).estimateSize(0)).toBe(336)
+      expect(virtualizeOf(withoutCover).estimateSize(0)).toBe(192)
+    } finally {
+      window.innerWidth = original
+    }
+  })
+
+  it('博客视图：有封面渲染封面图，多列时没封面补同高占位条（否则行不齐）', () => {
     const withCover = mountList([makeEntry({ coverUrl: 'blob:cover' })], undefined, 'blog')
     expect(withCover.find('.blog-post img').attributes('src')).toBe('blob:cover')
 

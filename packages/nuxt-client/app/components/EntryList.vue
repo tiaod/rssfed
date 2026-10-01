@@ -270,10 +270,23 @@ onBeforeUnmount(() => {
 })
 
 /**
+ * 博客卡片的估算高度。
+ *
+ * 多列时卡片写死等高（`sm:h-[22rem]`，见 EntryBlogItem），估算值就是真实高度，泳道分配才排得整齐；
+ * 手机单列没有行要对齐，卡片不再强制等高、没有封面的条目也不再有那条 144px 占位带，
+ * 于是估算按「有封面 / 无封面」分开给，总高度和滚动条才不会虚高。
+ * （单列正是 `laneCount === 1`，与 blog 的断点表同源，不用再判断一次屏宽。）
+ */
+function blogEstimateHeight(entry: RssEntry | undefined): number {
+  if (laneCount.value > 1) return 352
+  return entry?.coverUrl ? 336 : 192
+}
+
+/**
  * 单条高度估算（px），只用于还没被测量过的条目；渲染过一次后 ScrollArea 内部会记住真实高度。
  *
  * 每个视图的估算口径都和它实际渲染出来的高度对齐（瀑布流：有封面的按 min-h-40 起算；
- * 博客：写死卡片高；列表：写死 h-24；图片：按封面宽高比换算），
+ * 博客：多列写死卡片高、单列按有无封面分档；列表：写死 h-24；图片：按封面宽高比换算），
  * 这样总高度和滚动条不会因为估算离谱而抖动。
  */
 function estimateHeight(item: ListItem | undefined): number {
@@ -281,15 +294,14 @@ function estimateHeight(item: ListItem | undefined): number {
   if (isHeader(item)) return 96
   if (isSkeleton(item)) {
     switch (view.value) {
-      case 'blog': return 352
+      case 'blog': return blogEstimateHeight(undefined)
       case 'list': return 96
       case 'image': return imageTileHeight(undefined)
       default: return 280
     }
   }
   switch (view.value) {
-    // 博客卡片刻意写死高度（见 EntryBlogItem）：估算值就是真实高度，泳道分配才排得整齐
-    case 'blog': return 352
+    case 'blog': return blogEstimateHeight(isEntry(item) ? item : undefined)
     case 'list': return 96
     // 图片视图是瀑布流：每条按自己封面的宽高比算高度（见 EntryImageItem）
     case 'image': return imageTileHeight(isEntry(item) ? item : undefined)
