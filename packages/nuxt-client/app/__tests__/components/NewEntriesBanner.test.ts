@@ -148,6 +148,19 @@ describe('NewEntriesBanner', () => {
     expect(bannerEl().className).toContain('grid-rows-[1fr]')
   })
 
+  it('不传 visible 时默认可见（时间线 / 分类页 / Bot 产出页只传 count）', () => {
+    // Vue 会把未传的 Boolean prop 填成 false，这里锁死默认值必须是 true——
+    // 否则这些页面会把「已同步 N 条」整体折叠掉，用户以为提示没了
+    wrapper = mount(NewEntriesBanner, { props: { count: 3 }, global: { stubs: STUBS } })
+    const el = wrapper.element as HTMLElement
+
+    expect(wrapper.text()).toContain('已同步 3 条')
+    expect(el.className).toContain('grid-rows-[1fr]')
+    expect(el.className).toContain('opacity-100')
+    expect(el.getAttribute('aria-hidden')).toBeNull()
+    expect(el.hasAttribute('inert')).toBe(false)
+  })
+
   it('浮层形态：绝对定位盖在滚动区顶部、自带底色，且不带外边距（不参与布局才不会推动内容）', () => {
     mountBanner(3, { floating: true })
 

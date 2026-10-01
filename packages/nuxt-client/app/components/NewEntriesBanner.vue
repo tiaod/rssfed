@@ -40,26 +40,33 @@
  */
 import { computed } from 'vue'
 
-const props = defineProps<{
-  /** 待查看的新条目数（0 表示收起） */
-  count: number
-  /**
-   * 浮层形态：绝对定位盖在滚动区顶部（使用方容器需 `relative`），不占布局高度。
-   * 展开 / 收起不会推动下面的内容，虚拟化也不必重测。
-   */
-  floating?: boolean
-  /**
-   * 因外部原因（如滚动方向）临时隐藏：为 false 时按「无新条目」折叠，过渡与焦点处理完全一致。
-   * 不传视为一直可见。
-   */
-  visible?: boolean
-}>()
+const props = withDefaults(
+  defineProps<{
+    /** 待查看的新条目数（0 表示收起） */
+    count: number
+    /**
+     * 浮层形态：绝对定位盖在滚动区顶部（使用方容器需 `relative`），不占布局高度。
+     * 展开 / 收起不会推动下面的内容，虚拟化也不必重测。
+     */
+    floating?: boolean
+    /**
+     * 因外部原因（如滚动方向）临时隐藏：为 false 时按「无新条目」折叠，过渡与焦点处理完全一致。
+     */
+    visible?: boolean
+  }>(),
+  {
+    // 必须显式声明默认值：Vue 会把**未传的 Boolean prop 填成 false**，靠 `visible !== false`
+    // 兜底是错的——时间线 / 分类页 / Bot 产出页只传 count，会被整体折叠掉。
+    floating: false,
+    visible: true
+  }
+)
 
 const emit = defineEmits<{
   apply: []
 }>()
 
-const expanded = computed(() => props.count > 0 && props.visible !== false)
+const expanded = computed(() => props.count > 0 && props.visible)
 
 /**
  * 点「查看」：先把焦点还给页面，再交给列表去刷新。
