@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
-import ListActionsMenu from '~/components/ListActionsMenu.vue'
+import ListActionsBar from '~/components/ListActionsBar.vue'
 import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.vue'
 import type { EditableSubscription } from '~/components/settings/EditSubscriptionModal.vue'
 
@@ -125,7 +125,7 @@ async function toggleSubscribe() {
             @update:view="setView"
             @reset="resetView"
           />
-          <ListActionsMenu
+          <ListActionsBar
             :feed-ids="[virtualFeedId]"
             sync-label="刷新订阅"
             :feed-id="virtualFeedId"

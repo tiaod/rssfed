@@ -1,14 +1,21 @@
 <script setup lang="ts">
 /**
- * 列表页右上角的「三个点」菜单：把页面级动作收拢成一个入口。
+ * 列表页右上角的动作区：**全部标记为已读按钮 + 「三个点」菜单**。
  *
- * 四个列表页都用它，但菜单内容按页面能力拼：
- *   时间线 / 分组页   同步订阅 + 全部标记为已读
- *   单源页           刷新订阅 + 编辑订阅 + 全部标记为已读 ｜ 取消订阅
- *   bot 产出页       刷新订阅 + 编辑订阅 + 全部标记为已读 ｜ 订阅 / 取消订阅
+ * 两者放同一个组件是有意的：同步状态（转圈 / 失败）要同时体现在「标记已读」按钮上，
+ * 而状态来自 `useManualSync`，每个实例各持一份 —— 分成两个组件就会出现「菜单里点了同步、
+ * 外面的指示按钮不动」。
  *
- * 视图切换按钮**不在**菜单里（见 ListViewSwitcher）：它是高频的版式切换，留在外面一眼可见。
- * 同步状态（转圈 / 失败）体现在触发按钮与第一项上，所以收进菜单不会丢掉「一眼看到同步在跑」。
+ * 布局：〔切换视图〕〔✓ 全部标记为已读〕〔⋮ 页面动作〕。视图切换不在这里（见 ListViewSwitcher）。
+ *
+ * 「标记为已读」按钮兼任同步状态指示：
+ *   同步中 → 转圈并禁用（正在写库，这时候也不该去标记）
+ *   同步失败 → 变红 + 警告图标，tooltip 显示错误详情
+ *
+ * 菜单内容按页面能力拼：
+ *   时间线 / 分组页   同步订阅
+ *   单源页           刷新订阅 + 编辑订阅 ｜ 取消订阅
+ *   bot 产出页       刷新订阅 + 编辑订阅 ｜ 订阅 / 取消订阅
  */
 import { computed } from 'vue'
 import type { DropdownMenuItem } from '@nuxt/ui'
@@ -42,13 +49,22 @@ const emit = defineEmits<{
   'unsubscribe': []
 }>()
 
-const { syncing, hasError, statusText, tooltipText, sync } = useSyncAction(() => props.feedIds)
+const { syncing, hasError, errorDetail, statusText, sync } = useSyncAction(() => props.feedIds)
 
 async function handleSync() {
   const outcome = await sync()
   // 空转（上一轮还在跑）不发事件，与 SyncButton 一致
   if (outcome) emit('synced', outcome)
 }
+
+/** 同步中不能标记：一堆写入还在落盘，标完的状态可能立刻又被同步改动覆盖 */
+const markAllReadDisabled = computed(() => props.hasEntries === false || syncing.value)
+
+const markAllReadTooltip = computed(() => {
+  if (syncing.value) return '同步中…同步结束后可以标记为已读'
+  if (hasError.value) return `同步失败：${errorDetail.value}`
+  return props.hasEntries === false ? '当前列表没有条目' : '全部标记为已读'
+})
 
 const items = computed<DropdownMenuItem[][]>(() => {
   const actions: DropdownMenuItem[] = [
@@ -68,15 +84,6 @@ const items = computed<DropdownMenuItem[][]>(() => {
       onSelect: () => emit('edit')
     })
   }
-
-  actions.push({
-    label: '全部标记为已读',
-    icon: 'i-lucide-check-check',
-    // 与「取消订阅」同色：都是不可撤销的批量动作（列表里只有已加载的那批会被标，见页面实现）
-    color: 'error',
-    disabled: props.hasEntries === false,
-    onSelect: () => emit('mark-all-read')
-  })
 
   const groups: DropdownMenuItem[][] = [actions]
 
@@ -103,18 +110,32 @@ const items = computed<DropdownMenuItem[][]>(() => {
 </script>
 
 <template>
-  <UDropdownMenu
-    :items="items"
-    :content="{ align: 'end' }"
-  >
-    <UButton
-      :icon="hasError ? 'i-lucide-alert-circle' : 'i-lucide-ellipsis-vertical'"
-      :loading="syncing"
-      :color="hasError ? 'error' : 'neutral'"
-      :title="tooltipText"
-      aria-label="更多操作"
-      variant="ghost"
-      size="sm"
-    />
-  </UDropdownMenu>
+  <div class="flex items-center gap-1.5">
+    <UTooltip :text="markAllReadTooltip">
+      <UButton
+        :icon="hasError ? 'i-lucide-alert-circle' : 'i-lucide-circle-check'"
+        :loading="syncing"
+        :color="hasError ? 'error' : 'neutral'"
+        :disabled="markAllReadDisabled"
+        variant="ghost"
+        size="sm"
+        aria-label="全部标记为已读"
+        @click="emit('mark-all-read')"
+      />
+    </UTooltip>
+
+    <UDropdownMenu
+      :items="items"
+      :content="{ align: 'end' }"
+    >
+      <UButton
+        icon="i-lucide-ellipsis-vertical"
+        title="更多操作"
+        aria-label="更多操作"
+        variant="ghost"
+        color="neutral"
+        size="sm"
+      />
+    </UDropdownMenu>
+  </div>
 </template>

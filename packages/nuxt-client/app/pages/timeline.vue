@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { SubscriptionItem, FeedSubscriptionItem } from '~/types/rss'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
-import ListActionsMenu from '~/components/ListActionsMenu.vue'
+import ListActionsBar from '~/components/ListActionsBar.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 
@@ -111,7 +111,7 @@ watch(
             @update:view="setView"
             @reset="resetView"
           />
-          <ListActionsMenu
+          <ListActionsBar
             :has-entries="entries.length > 0"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"

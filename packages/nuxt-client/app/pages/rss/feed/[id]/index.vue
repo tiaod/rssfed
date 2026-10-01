@@ -3,7 +3,7 @@ import type { RssFeed } from '~/types/rss'
 import type { EditableSubscription } from '~/components/settings/EditSubscriptionModal.vue'
 import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
-import ListActionsMenu from '~/components/ListActionsMenu.vue'
+import ListActionsBar from '~/components/ListActionsBar.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 
@@ -136,7 +136,7 @@ async function unsubscribe() {
             @update:view="setView"
             @reset="resetView"
           />
-          <ListActionsMenu
+          <ListActionsBar
             :feed-ids="[feedId]"
             sync-label="刷新订阅"
             :feed-id="feedId"

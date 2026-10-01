@@ -1,7 +1,7 @@
 <script setup lang="ts">
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
-import ListActionsMenu from '~/components/ListActionsMenu.vue'
+import ListActionsBar from '~/components/ListActionsBar.vue'
 import type { SubscriptionItem } from '~/types/rss'
 
 definePageMeta({
@@ -88,7 +88,7 @@ watch(
             @update:view="setView"
             @reset="resetView"
           />
-          <ListActionsMenu
+          <ListActionsBar
             :feed-ids="groupFeeds.map(f => f.id)"
             :has-entries="entries.length > 0"
             @synced="applyNewIfSyncAddedNothing"
