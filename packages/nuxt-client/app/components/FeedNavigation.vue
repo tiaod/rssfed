@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import type { SubscriptionItem } from '~/types/rss'
 import type { FeedNavigationMenuItem } from '~/composables/useFeedNavigation'
 import { subscriptionsEqual } from '~/utils/subscriptionsEqual'
@@ -7,7 +7,7 @@ import { subscriptionsEqual } from '~/utils/subscriptionsEqual'
 // 组件清单扫描不到时不会静默退化成「Failed to resolve component」
 import FeedIcon from '~/components/FeedIcon.vue'
 
-defineProps<{
+const props = defineProps<{
   collapsed?: boolean
   /**
    * 只滚动订阅源列表（侧边栏固定头部时用）。
@@ -112,6 +112,49 @@ watch(activeCategoryGroupValue, (value) => {
   }
 }, { immediate: true })
 
+// ── 底部渐隐（代替列表与用户区之间的分割线，参考 DeepSeek 侧边栏）──
+//
+// 列表还有内容被挡住时，底部盖一层「侧边栏背景色 → 透明」的渐变把内容淡出；
+// 滚到底就撤掉，免得最后一项永远看不清。只在「列表自己滚」（scrollable）时生效：
+// 紧凑模式下整块内容跟着侧边栏一起滚，固定位置的渐变会盖住滚动中的内容。
+const listEl = ref<HTMLElement | null>(null)
+const listContentEl = ref<HTMLElement | null>(null)
+const showFade = ref(false)
+let listObserver: ResizeObserver | null = null
+
+function updateFade() {
+  const el = listEl.value
+  showFade.value = !!(
+    props.scrollable
+    && el
+    && el.scrollHeight - el.clientHeight - el.scrollTop > 1
+  )
+}
+
+/**
+ * 容器尺寸（窗口缩放、侧边栏拖宽）和内容高度（订阅源增减、分组展开）都会改变
+ * 「是否还有内容被挡住」，两个盒子都观察，避免只在滚动时才更新。
+ */
+function observeList() {
+  if (typeof ResizeObserver === 'undefined') {
+    updateFade()
+    return
+  }
+  if (!listObserver) listObserver = new ResizeObserver(() => updateFade())
+  listObserver.disconnect()
+  if (listEl.value) listObserver.observe(listEl.value)
+  if (listContentEl.value) listObserver.observe(listContentEl.value)
+  updateFade()
+}
+
+// flush: 'post'：ClientOnly 的插槽要到客户端挂载后才有真实 DOM，等 DOM 更新完再观察
+watch([listEl, listContentEl, () => props.scrollable], observeList, { flush: 'post' })
+
+onBeforeUnmount(() => {
+  listObserver?.disconnect()
+  listObserver = null
+})
+
 async function addFeed() {
   const url = feedUrl.value.trim()
   if (!url || submitting.value) return
@@ -176,41 +219,73 @@ async function addFeed() {
           </UTooltip>
         </div>
 
-        <!-- 滚动区：订阅源列表 -->
-        <div
-          class="min-w-0"
-          :class="scrollable ? 'min-h-0 flex-1 overflow-y-auto' : ''"
-        >
-          <UNavigationMenu
-            v-model="openGroups"
-            :collapsed="collapsed"
-            :items="menuItems"
-            orientation="vertical"
-            tooltip
-            popover
-          >
-            <!--
-              feed 项（useFeedNavigation 里标了 slot: 'feed'）的图标：
-              由 FeedIcon 在进入视口时才请求，未就位时显示首字母占位。
-              旧实现会对每个订阅源同步调 getFeedImageUrl，订阅多时一次性占满主线程。
-            -->
-            <template #feed-leading="{ item }">
-              <FeedIcon
-                :feed-id="feedIdOf(item)"
-                :fallback-text="feedTextOf(item)"
-                :load-icon="pouch.getFeedImageUrl"
-              />
-            </template>
-          </UNavigationMenu>
+        <!--
+          滚动区：订阅源列表（relative 供底部渐隐定位）。
 
+          负边距抵消侧边栏 body 的 px-4 py-2，让滚动区直接铺满侧边栏，四周的空白
+          改成列表内容自己的内边距（见下面的 px-4 pb-2）—— 于是滚动条、底部渐隐、
+          以及滚出视野的条目都贴在侧边栏边缘，而不是被 body 的内边距框成一个方框。
+
+          这里按 body 的默认 px-4 / py-2 成对写：负边距退多少，内容内边距就补回多少。
+          不再镜像抽屉模式 body 的 sm:px-6 —— 抽屉在本项目没有入口，侧边栏只在 lg 起
+          出现（那时 body 就是 px-4），多一套断点只会让两边一旦不同步就错位。
+        -->
+        <div
+          class="relative flex min-w-0 flex-col"
+          :class="scrollable ? 'min-h-0 flex-1 -mx-4 -mb-2' : ''"
+        >
           <div
-            v-if="!hasFeeds"
-            class="px-2"
+            ref="listEl"
+            class="min-h-0"
+            :class="scrollable ? 'flex-1 overflow-y-auto' : ''"
+            @scroll.passive="updateFade"
           >
-            <p class="text-xs text-muted">
-              暂无订阅
-            </p>
+            <div
+              ref="listContentEl"
+              :class="scrollable ? 'px-4 pb-2' : ''"
+            >
+              <UNavigationMenu
+                v-model="openGroups"
+                :collapsed="collapsed"
+                :items="menuItems"
+                orientation="vertical"
+                tooltip
+                popover
+              >
+                <!--
+                  feed 项（useFeedNavigation 里标了 slot: 'feed'）的图标：
+                  由 FeedIcon 在进入视口时才请求，未就位时显示首字母占位。
+                  旧实现会对每个订阅源同步调 getFeedImageUrl，订阅多时一次性占满主线程。
+                -->
+                <template #feed-leading="{ item }">
+                  <FeedIcon
+                    :feed-id="feedIdOf(item)"
+                    :fallback-text="feedTextOf(item)"
+                    :load-icon="pouch.getFeedImageUrl"
+                  />
+                </template>
+              </UNavigationMenu>
+
+              <div
+                v-if="!hasFeeds"
+                class="px-2"
+              >
+                <p class="text-xs text-muted">
+                  暂无订阅
+                </p>
+              </div>
+            </div>
           </div>
+
+          <!--
+            底部渐隐：用侧边栏自身的背景色（--ui-bg）渐变到透明，替代与用户区之间的分割线。
+            高度按 DeepSeek 侧边栏的观感取 3rem（约一到两行列表项）。
+          -->
+          <div
+            v-if="showFade"
+            aria-hidden="true"
+            class="pointer-events-none absolute inset-x-0 bottom-0 h-12 bg-linear-to-t from-[var(--ui-bg)] to-transparent"
+          />
         </div>
       </template>
     </ClientOnly>

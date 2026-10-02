@@ -23,9 +23,11 @@ function syncCompactSidebar() {
 
 // 正常：body 不滚动，只让订阅源列表内部滚动；紧凑：用主题默认的 overflow-y-auto 整块滚动。
 // 间距一律用主题默认值（gap-4），不再自定义收紧
+//
+// footer 不再画 border-t（主题默认没有，这里也不再额外加）：用户区与订阅源列表之间
+// 改用列表底部的渐隐过渡（见 FeedNavigation 的 showFade），参考 DeepSeek 侧边栏。
 const sidebarUi = computed(() => ({
-  body: compactSidebar.value ? undefined : 'flex-1 min-h-0 overflow-hidden',
-  footer: 'lg:border-t lg:border-default'
+  body: compactSidebar.value ? undefined : 'flex-1 min-h-0 overflow-hidden'
 }))
 
 // 初始化用户 session — 在客户端挂载后刷新，确保登录/登出后状态正确
