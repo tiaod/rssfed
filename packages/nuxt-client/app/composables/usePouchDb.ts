@@ -1205,7 +1205,66 @@ export function usePouchDb() {
     if (writes.length === 0) return 0
     const results = await stateDb.bulkDocs(writes)
     // 个别冲突（同一条在别处刚被改过）不算整体失败，只记未写入
-    return results.filter(r => !('error' in r && r.error)).length
+    const written = results.filter(r => !('error' in r && r.error)).length
+    return written
+  }
+
+  /**
+   * 收藏列表：状态在用户状态库、条目本体在集中库，map view 没法 join，只能分两步查。
+   *
+   * 窗口按**收藏时间**切（savedAt 倒序），分块回查窗口内的条目。窗口只在「本地真的存在」
+   * 的条目上计数：状态文档可能指向本机还没有的条目（别的设备刚收藏、条目还没同步过来），
+   * 那种 id 直接跳过，否则一页可能全是查不到的 id、收藏夹看起来是空的。
+   */
+  async function querySavedEntries(limit = 50): Promise<RssEntry[]> {
+    let states: StateDoc[] = []
+    try {
+      const res = await getUserStateDb().allDocs({
+        include_docs: true,
+        startkey: 'entry-state:',
+        endkey: 'entry-state:\uffff'
+      })
+      states = (res.rows as Array<{ doc?: StateDoc }>)
+        .map(row => row.doc)
+        .filter((doc): doc is StateDoc =>
+          doc?.type === 'entry-state' && doc.saved === true && Boolean(doc.entryId))
+    } catch {
+      // 状态库不可用：当空列表，页面给空态
+      return []
+    }
+    if (states.length === 0) return []
+
+    // 收藏时间倒序；老文档可能没写 savedAt，用空串参与字典序比较，自然排在最后
+    states.sort((a, b) => (b.savedAt ?? '').localeCompare(a.savedAt ?? ''))
+    const stateIds = states.map(state => state.entryId).filter((id): id is string => Boolean(id))
+
+    // 分块回查：一次 allDocs 带全部 keys 会让请求体随收藏数线性增长
+    const CHUNK_SIZE = 200
+    const entries: RssEntry[] = []
+    for (let i = 0; i < stateIds.length && entries.length < limit; i += CHUNK_SIZE) {
+      const chunk = stateIds.slice(i, i + CHUNK_SIZE)
+      let docs: EntryDoc[] = []
+      try {
+        const res = await getEntriesDb().allDocs({ include_docs: true, keys: chunk })
+        docs = (res.rows as Array<{ doc?: EntryDoc }>)
+          .map(row => row.doc)
+          .filter((doc): doc is EntryDoc => Boolean(doc))
+      } catch {
+        // 条目库不可用：返回已经拿到的部分，页面照常展示
+        break
+      }
+      const byId = new Map(docs.map(doc => [doc._id, doc]))
+      // 按 chunk（= 收藏时间顺序）逐个收，不能按 allDocs 的返回顺序重排
+      for (const id of chunk) {
+        const doc = byId.get(id)
+        if (!doc) continue
+        entries.push(docToEntry(doc))
+        if (entries.length >= limit) break
+      }
+    }
+
+    // 已读/收藏状态与源元信息由 enrichEntries 统一补全（attachReadState 会再合一次 read/starred）
+    return enrichEntries(entries)
   }
 
   /**
@@ -1543,57 +1602,83 @@ export function usePouchDb() {
   }
 
   /**
-   * 标记条目为已读
+   * 读改写一条 entry-state（已读与收藏共用同一个文档，只能整文档回写）。
+   *
+   * `mutate` 收到**最新一版**文档（不存在时为 null），返回要合并进去的字段；写冲突
+   * （409：同一账号的另一台设备 / 另一个标签页刚改过）时重读再重算，最多 3 轮。
+   *
+   * 不用「get 失败就当文档不存在、直接 put 新建」的旧写法：get 也可能因为冲突以外的
+   * 原因（网络、库还没就绪）失败，那种情况下新建会把对端刚写入的收藏位冲掉。
    */
-  async function markRead(entryId: string, feedId: string, read: boolean) {
+  async function mutateEntryState(
+    entryId: string,
+    feedId: string,
+    mutate: (prev: StateDoc | null) => Partial<StateDoc>
+  ): Promise<StateDoc> {
     const stateDb = getUserStateDb()
     const docId = `entry-state:${entryId}`
+    const maxAttempts = 3
 
-    try {
-      const existing = await stateDb.get(docId) as unknown as StateDoc
-      await stateDb.put({
-        ...existing,
-        read,
-        readAt: read ? new Date().toISOString() : undefined
-      })
-    } catch {
-      await stateDb.put({
-        _id: docId,
-        type: 'entry-state',
-        entryId,
-        feedId,
-        read,
-        readAt: read ? new Date().toISOString() : undefined,
-        saved: false
-      })
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      let prev: StateDoc | null = null
+      try {
+        prev = await stateDb.get(docId) as unknown as StateDoc
+      } catch (e: unknown) {
+        // 404 = 还没有这条状态文档，下面按新建处理；其它错误照抛给调用方
+        if ((e as { status?: number }).status !== 404) throw e
+      }
+
+      const patch = mutate(prev)
+      const next: StateDoc = prev
+        ? { ...prev, ...patch }
+        : {
+            _id: docId,
+            type: 'entry-state',
+            entryId,
+            feedId,
+            // 新建时两个开关都给默认值，避免出现「只有 read 没有 saved」的半条状态
+            read: false,
+            saved: false,
+            ...patch
+          }
+
+      try {
+        const res = await stateDb.put(next)
+        return { ...next, _rev: res.rev }
+      } catch (e: unknown) {
+        // 冲突时本轮的 prev 已过期，重读一版重算；最后一轮仍冲突就抛给调用方
+        if ((e as { status?: number }).status !== 409 || attempt === maxAttempts - 1) throw e
+      }
     }
+    // 循环只可能以 return / throw 结束，这行只为类型收窄
+    throw new Error(`写入条目状态失败：${entryId}`)
   }
 
   /**
-   * 收藏/取消收藏条目
+   * 标记单条条目为已读 / 未读。
+   * 只碰 read / readAt，收藏位原样保留（两者同文档）。
    */
-  async function toggleSaved(entryId: string, feedId: string) {
-    const stateDb = getUserStateDb()
-    const docId = `entry-state:${entryId}`
+  async function markRead(entryId: string, feedId: string, read: boolean): Promise<void> {
+    await mutateEntryState(entryId, feedId, () => (
+      read
+        ? { read: true, readAt: new Date().toISOString() }
+        // undefined 在序列化时会被丢掉，等于把 readAt 一并清掉
+        : { read: false, readAt: undefined }
+    ))
+  }
 
-    try {
-      const existing = await stateDb.get(docId) as unknown as StateDoc
-      await stateDb.put({
-        ...existing,
-        saved: !existing.saved,
-        savedAt: !existing.saved ? new Date().toISOString() : undefined
-      })
-    } catch {
-      await stateDb.put({
-        _id: docId,
-        type: 'entry-state',
-        entryId,
-        feedId,
-        read: false,
-        saved: true,
-        savedAt: new Date().toISOString()
-      })
-    }
+  /**
+   * 收藏 / 取消收藏条目，返回切换后的状态（调用方据此就地更新界面）。
+   */
+  async function toggleSaved(entryId: string, feedId: string): Promise<boolean> {
+    let saved = false
+    await mutateEntryState(entryId, feedId, (prev) => {
+      saved = !(prev?.saved === true)
+      return saved
+        ? { saved: true, savedAt: new Date().toISOString() }
+        : { saved: false, savedAt: undefined }
+    })
+    return saved
   }
 
   // ── 订阅管理（离线优先，读写本地 PouchDB，自动同步远端） ──
@@ -1818,6 +1903,7 @@ export function usePouchDb() {
     queryTimeline,
     queryFeedEntries,
     queryGroupEntries,
+    querySavedEntries,
     getEntry,
     getEntryAttachment,
     getFeedImageUrl,

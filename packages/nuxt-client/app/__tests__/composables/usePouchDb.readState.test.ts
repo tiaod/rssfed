@@ -145,3 +145,93 @@ describe('markManyRead 批量标记', () => {
     expect(await pouch.markManyRead([])).toBe(0)
   })
 })
+
+/** 直接读一条状态文档（断言字段级行为用） */
+async function stateDoc(entryId: string) {
+  return await pouch.getUserStateDb().get(`entry-state:${entryId}`) as unknown as {
+    read?: boolean
+    readAt?: string
+    saved?: boolean
+    savedAt?: string
+    feedId?: string
+  }
+}
+
+/** 把某条状态文档标成「已收藏 + 指定收藏时间」，用于给收藏列表造序 */
+async function setSavedAt(entryId: string, savedAt: string) {
+  const db = pouch.getUserStateDb()
+  const existing = await db.get(`entry-state:${entryId}`) as unknown as Record<string, unknown>
+  await db.put({ ...existing, saved: true, savedAt })
+}
+
+describe('单条标记：markRead / toggleSaved', () => {
+  it('markRead 新建状态文档：只碰 read，收藏位给默认 false', async () => {
+    await pouch.markRead('entry-c', 'feed-a', true)
+
+    const doc = await stateDoc('entry-c')
+    expect(doc.read).toBe(true)
+    expect(doc.feedId).toBe('feed-a')
+    expect(doc.saved).toBe(false)
+    expect(doc.readAt).toBeTruthy()
+  })
+
+  it('markRead 改回未读时清掉 readAt，且不动收藏位', async () => {
+    // entry-c 已是已读，先收藏它，再标回未读
+    expect(await pouch.toggleSaved('entry-c', 'feed-a')).toBe(true)
+    await pouch.markRead('entry-c', 'feed-a', false)
+
+    const doc = await stateDoc('entry-c')
+    expect(doc.read).toBe(false)
+    expect(doc.readAt).toBeUndefined()
+    expect(doc.saved).toBe(true)
+  })
+
+  it('toggleSaved 往返切换并返回切换后的值，未读位保持不变', async () => {
+    expect(await pouch.toggleSaved('entry-d', 'feed-a')).toBe(true)
+    let doc = await stateDoc('entry-d')
+    expect(doc.saved).toBe(true)
+    expect(doc.savedAt).toBeTruthy()
+    expect(doc.read).toBe(false) // 新建时 read 默认 false，不被收藏动作带成已读
+
+    expect(await pouch.toggleSaved('entry-d', 'feed-a')).toBe(false)
+    doc = await stateDoc('entry-d')
+    expect(doc.saved).toBe(false)
+    expect(doc.savedAt).toBeUndefined()
+  })
+})
+
+describe('querySavedEntries 收藏列表', () => {
+  it('按收藏时间倒序只返回本地已有的条目', async () => {
+    await setSavedAt('entry-a', '2026-07-01T00:00:00.000Z')
+    await setSavedAt('entry-b', '2026-07-03T00:00:00.000Z')
+    // 收藏了一条本地根本没有的条目（别的设备收藏、条目还没同步过来）
+    await pouch.getUserStateDb().put({
+      _id: 'entry-state:entry-missing',
+      type: 'entry-state',
+      entryId: 'entry-missing',
+      feedId: 'feed-a',
+      read: false,
+      saved: true,
+      savedAt: '2026-07-04T00:00:00.000Z'
+    })
+
+    const list = await pouch.querySavedEntries()
+    expect(list.map(e => e.id)).toEqual(['entry-b', 'entry-a'])
+    expect(list.every(e => e.starred)).toBe(true)
+  })
+
+  it('窗口按「本地存在的条目」计数：查不到的 id 不占名额', async () => {
+    // entry-missing 最新，但它不在本地；limit=1 仍应给出下一条真实存在的收藏
+    const list = await pouch.querySavedEntries(1)
+    expect(list.map(e => e.id)).toEqual(['entry-b'])
+  })
+
+  it('没有收藏时返回空数组', async () => {
+    const db = pouch.getUserStateDb()
+    for (const id of ['entry-a', 'entry-b']) {
+      const doc = await db.get(`entry-state:${id}`) as unknown as Record<string, unknown>
+      await db.put({ ...doc, saved: false })
+    }
+    expect(await pouch.querySavedEntries()).toEqual([])
+  })
+})
