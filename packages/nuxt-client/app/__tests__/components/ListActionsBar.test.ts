@@ -194,21 +194,28 @@ describe('ListActionsBar 的「全部标记为已读」确认步骤', () => {
 })
 
 describe('ListActionsBar 的「只看未读」开关', () => {
-  it('默认关闭：aria-pressed=false，点击抛 toggle-unread-only', async () => {
+  it('默认关闭：空心圈图标（不排文字），点击抛 toggle-unread-only', async () => {
     const wrapper = mountBar()
+    const button = unreadButton(wrapper)
 
-    expect(unreadButton(wrapper).attributes('aria-pressed')).toBe('false')
+    expect(button.attributes('aria-pressed')).toBe('false')
+    expect(button.attributes('data-icon')).toBe('i-lucide-circle')
+    // 按钮上不排文字：导航栏右侧空间留给页面状态，含义交给图标 + tooltip
+    expect(button.text()).toBe('')
+    expect(button.attributes('title')).toBe('只看未读：点击后只显示未读条目')
 
-    await unreadButton(wrapper).trigger('click')
+    await button.trigger('click')
     expect(wrapper.emitted('toggle-unread-only')).toHaveLength(1)
   })
 
-  it('开启时高亮，title 说明怎么退出', () => {
+  it('开启时高亮，图标变实心点，title 说明怎么退出', () => {
     const wrapper = mountBar({ unreadOnly: true })
+    const button = unreadButton(wrapper)
 
-    expect(unreadButton(wrapper).attributes('aria-pressed')).toBe('true')
-    expect(unreadButton(wrapper).attributes('data-color')).toBe('primary')
-    expect(unreadButton(wrapper).attributes('title')).toBe('只看未读：已开启，点击显示全部')
+    expect(button.attributes('aria-pressed')).toBe('true')
+    expect(button.attributes('data-color')).toBe('primary')
+    expect(button.attributes('data-icon')).toBe('i-lucide-circle-dot')
+    expect(button.attributes('title')).toBe('只看未读：已开启，点击显示全部')
   })
 
   it('开着筛选但没有未读时，标记按钮禁用并说明原因（区别于「列表空」）', () => {

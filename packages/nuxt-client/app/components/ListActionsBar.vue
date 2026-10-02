@@ -8,7 +8,8 @@
  *
  * 布局：〔切换视图〕〔只看未读〕〔✓ 全部标记为已读〕〔⋮ 页面动作〕。
  * 视图切换不在这里（见 ListViewSwitcher），「只看未读」的开关状态由页面持有（见 useUnreadFilter），
- * 这里只负责把它渲染成一个可点的开关：开着时高亮 + aria-pressed，页面据此过滤列表。
+ * 这里只负责把它渲染成一个可点的开关：开着时图标变实心点 + 主色软底 + aria-pressed，
+ * 页面据此过滤列表。按钮上不排文字，状态全靠图标与配色表达。
  *
  * 「标记为已读」按钮：
  *   点击 → 就地在按钮旁弹出确认浮层（一次批量写、没有「全部撤销」，值得多一步），确认后才抛事件；
@@ -129,13 +130,18 @@ const items = computed<DropdownMenuItem[][]>(() => {
 
 <template>
   <div class="flex items-center gap-1.5">
-    <!-- 「只看未读」开关：纯客户端过滤已加载的条目（见 useUnreadFilter），与同步状态无关 -->
+    <!--
+      「只看未读」开关：纯客户端过滤已加载的条目（见 useUnreadFilter），与同步状态无关。
+      按钮上不排文字（导航栏右侧留给页面自己的状态），靠图标自己表态：
+      关闭 = 空心圈 + ghost，开启 = 实心点 + 主色软底 —— 一眼能认出「已选中」，
+      配上 aria-pressed 与 tooltip（「只看未读」「点击显示全部」）说明这是什么、点一下会怎样。
+    -->
     <UButton
-      icon="i-lucide-circle-dot"
+      :icon="unreadOnly ? 'i-lucide-circle-dot' : 'i-lucide-circle'"
       :color="unreadOnly ? 'primary' : 'neutral'"
       :variant="unreadOnly ? 'soft' : 'ghost'"
       :aria-pressed="unreadOnly"
-      :title="unreadOnly ? '只看未读：已开启，点击显示全部' : '只看未读'"
+      :title="unreadOnly ? '只看未读：已开启，点击显示全部' : '只看未读：点击后只显示未读条目'"
       aria-label="只看未读"
       size="sm"
       @click="emit('toggle-unread-only')"

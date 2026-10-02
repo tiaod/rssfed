@@ -15,7 +15,7 @@ const STUBS = {
   UButton: {
     name: 'Button',
     props: ['icon', 'title', 'ariaLabel', 'variant', 'color', 'size'],
-    template: '<button class="trigger" :data-icon="icon" :aria-label="ariaLabel" :title="title" />'
+    template: '<button class="trigger" :data-icon="icon" :aria-label="ariaLabel" :title="title"><slot /></button>'
   }
 }
 
@@ -59,6 +59,17 @@ describe('ListViewSwitcher', () => {
     const trigger = wrapper.get('.trigger')
 
     expect(trigger.attributes('data-icon')).toBe(LIST_VIEW_META.blog.icon)
+    expect(trigger.attributes('aria-label')).toContain(LIST_VIEW_META.blog.label)
+  })
+
+  it('触发按钮是纯图标：不排文字，靠 tooltip 说明「点击能切换」', async () => {
+    const wrapper = mountSwitcher('blog')
+    await nextTick()
+    const trigger = wrapper.get('.trigger')
+
+    // 导航栏右侧不排字：可点性靠 tooltip / aria-label（都带当前视图名）说明，视觉上与 ⋮ 等一致
+    expect(trigger.text()).toBe('')
+    expect(trigger.attributes('title')).toBe(`视图：${LIST_VIEW_META.blog.label}（点击切换）`)
     expect(trigger.attributes('aria-label')).toContain(LIST_VIEW_META.blog.label)
   })
 
