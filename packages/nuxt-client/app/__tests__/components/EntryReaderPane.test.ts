@@ -38,6 +38,13 @@ const H = vi.hoisted(() => ({
 }))
 
 const toastAdd = vi.fn()
+
+/** 通用设置里的「条目详情宽度」：正文列的宽度上限（超出的部分两边留白） */
+let modalSize = 'sm:max-w-6xl'
+testGlobals.useSettings = () => ({
+  settings: ref({ entryModalSize: modalSize, fixedBars: true, view: 'masonry' }),
+  updateSettings: vi.fn()
+})
 const goPrev = vi.fn()
 const goNext = vi.fn()
 const closeEntry = vi.fn()
@@ -74,13 +81,20 @@ testGlobals.usePouchDb = () => ({
 testGlobals.useToast = () => ({ add: toastAdd })
 
 const STUBS = {
+  // 阅读栏本体是 UDashboardSidebar（side="right" + resizable）：拖动 / 持久化由它负责，
+  // 这里只关心两个插槽的内容渲染，桩掉即可
+  UDashboardSidebar: {
+    name: 'UDashboardSidebar',
+    props: ['id', 'side', 'resizable', 'toggle', 'autoClose', 'minSize', 'maxSize', 'defaultSize', 'ui'],
+    template: '<div class="reader-sidebar"><slot name="header" /><slot /></div>'
+  },
   UButton: {
     name: 'UButton',
     props: [
       'icon', 'title', 'ariaLabel', 'ariaPressed', 'variant', 'color', 'size',
       'loading', 'disabled', 'label', 'to', 'target'
     ],
-    template: '<button class="ubtn" :data-icon="icon" :title="title" :aria-label="ariaLabel" :disabled="disabled"><slot>{{ label }}</slot></button>'
+    template: '<button class="ubtn" :data-icon="icon" :data-color="color" :data-variant="variant" :title="title" :aria-label="ariaLabel" :disabled="disabled"><slot>{{ label }}</slot></button>'
   },
   UIcon: true,
   EntryDetailSkeleton: {
@@ -112,6 +126,7 @@ beforeEach(() => {
   H.markRead.mockResolvedValue(undefined)
   H.toggleSaved.mockClear()
   toastAdd.mockClear()
+  modalSize = 'sm:max-w-6xl'
   goPrev.mockReset()
   goNext.mockReset()
   closeEntry.mockClear()
@@ -138,6 +153,30 @@ describe('EntryReaderPane 版式', () => {
     // 顶栏显示订阅源名与当前位置
     expect(wrapper.text()).toContain('源')
     expect(wrapper.text()).toContain('1 / 1')
+  })
+
+  it('正文列按通用设置的「条目详情宽度」限宽（mx-auto：多出来的宽度两边留白）', async () => {
+    modalSize = 'sm:max-w-2xl'
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(2)
+
+    const wrapper = mountPane()
+    await flushPromises()
+
+    const column = wrapper.get('.mx-auto')
+    expect(column.classes()).toContain('sm:max-w-2xl')
+    expect(column.classes()).toContain('relative')
+  })
+
+  it('设置选「全屏」时正文列不限宽（与弹窗选全屏同义：铺满）', async () => {
+    modalSize = 'fullscreen'
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(2)
+
+    const wrapper = mountPane()
+    await flushPromises()
+
+    expect(wrapper.get('.mx-auto').classes().some(c => c.includes('max-w'))).toBe(false)
   })
 
   it('全文未到位时正文区是骨架屏', async () => {
@@ -181,6 +220,30 @@ describe('EntryReaderPane 交互', () => {
 
     expect(entry.read).toBe(true)
     expect(H.markRead).toHaveBeenCalledWith('entry-3', 'feed-1', true)
+  })
+
+  it('已读 / 未读按钮沿用列表页「只看未读」开关那套图标与配色', async () => {
+    g.isOpen.value = true
+    const entry = makeEntry(2)
+    g.currentEntry.value = entry
+
+    const wrapper = mountPane()
+    await flushPromises()
+
+    // 打开即标已读 → 空心圈 + 中性 ghost（与列表开关的「关闭」态一致）
+    const readBtn = wrapper.get('[aria-label="标为未读"]')
+    expect(readBtn.attributes('data-icon')).toBe('i-lucide-circle')
+    expect(readBtn.attributes('data-color')).toBe('neutral')
+    expect(readBtn.attributes('data-variant')).toBe('ghost')
+
+    // 点「标为未读」→ 圈内实心点 + 主色软底（与列表开关的「开启」态一致）
+    await readBtn.trigger('click')
+    await flushPromises()
+
+    const unreadBtn = wrapper.get('[aria-label="标为已读"]')
+    expect(unreadBtn.attributes('data-icon')).toBe('i-lucide-circle-dot')
+    expect(unreadBtn.attributes('data-color')).toBe('primary')
+    expect(unreadBtn.attributes('data-variant')).toBe('soft')
   })
 
   it('Esc 退出阅读（清掉选中，回到占位态）', async () => {

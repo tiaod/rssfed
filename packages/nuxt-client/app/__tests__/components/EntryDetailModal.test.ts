@@ -135,7 +135,7 @@ const STUBS = {
       'icon', 'title', 'ariaLabel', 'ariaPressed', 'variant', 'color', 'size',
       'loading', 'disabled', 'label', 'to', 'target'
     ],
-    template: '<button class="ubtn" :data-icon="icon" :title="title" :aria-label="ariaLabel" :aria-pressed="ariaPressed"><slot>{{ label }}</slot></button>'
+    template: '<button class="ubtn" :data-icon="icon" :data-color="color" :data-variant="variant" :title="title" :aria-label="ariaLabel" :aria-pressed="ariaPressed"><slot>{{ label }}</slot></button>'
   },
   UIcon: true,
   USkeleton: true,
@@ -389,6 +389,27 @@ describe('EntryDetailModal 的已读 / 收藏', () => {
 
     expect(H.markRead).toHaveBeenCalledWith('entry-1', 'feed-1', false)
     expect(entry.read).toBe(false)
+  })
+
+  it('工具栏的已读 / 未读按钮用列表页那套圆圈图标（circle / circle-dot）', async () => {
+    g.isOpen.value = true
+    const entry = makeEntry(1)
+    g.currentEntry.value = entry
+
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+    // 打开即标已读 → 空心圈 + 中性 ghost
+    const readBtn = wrapper.get('[aria-label="标为未读"]')
+    expect(readBtn.attributes('data-icon')).toBe('i-lucide-circle')
+
+    await readBtn.trigger('click')
+    await flushPromises()
+
+    // 未读 → 圈内实心点 + 主色软底
+    const unreadBtn = wrapper.get('[aria-label="标为已读"]')
+    expect(unreadBtn.attributes('data-icon')).toBe('i-lucide-circle-dot')
+    expect(unreadBtn.attributes('data-color')).toBe('primary')
+    expect(unreadBtn.attributes('data-variant')).toBe('soft')
   })
 
   it('工具栏星标：收藏与取消收藏都按本地库返回的状态就地更新', async () => {

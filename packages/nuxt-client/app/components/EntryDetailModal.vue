@@ -681,14 +681,15 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
             已读 / 未读与收藏都只作用于当前这篇：打开任意一篇时已由 watch 自动标为已读，
             这里给的是「标回未读」与「收藏」这两个手动动作；按钮状态直接读当前条目的字段。
           -->
+          <!-- 同一套记号：图标与配色沿用列表页「只看未读」开关（见 EntryReaderPane 里的注释） -->
           <UButton
             v-if="currentEntry"
-            :icon="currentEntry.read ? 'i-lucide-mail-open' : 'i-lucide-mail'"
+            :icon="currentEntry.read ? 'i-lucide-circle' : 'i-lucide-circle-dot'"
+            :color="currentEntry.read ? 'neutral' : 'primary'"
+            :variant="currentEntry.read ? 'ghost' : 'soft'"
             :aria-label="currentEntry.read ? '标为未读' : '标为已读'"
             :title="currentEntry.read ? '标为未读' : '标为已读'"
             :loading="readBusy"
-            variant="ghost"
-            color="neutral"
             size="sm"
             @click="toggleRead"
           />

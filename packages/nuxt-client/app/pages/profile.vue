@@ -283,7 +283,7 @@ const confirmReset = async () => {
 
                   <UFormField
                     label="条目详情宽度"
-                    description="控制点击条目时弹出的详情窗口宽度"
+                    description="详情弹窗的窗口宽度；宽屏的右侧阅读栏还用它限制正文宽度，阅读栏拖得再宽，多出来的也是两边留白"
                   >
                     <USelect
                       v-model="draftSettings.entryModalSize"

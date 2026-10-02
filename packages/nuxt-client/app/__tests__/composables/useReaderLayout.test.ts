@@ -1,5 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { isReaderRoute, READER_PANE_MIN_WIDTH } from '../../composables/useReaderLayout'
+import {
+  isReaderRoute,
+  readerPaneMaxSizeRem,
+  READER_PANE_MIN_REM,
+  READER_PANE_MIN_WIDTH
+} from '../../composables/useReaderLayout'
 
 /**
  * 三栏（列表 + 常驻阅读栏）只在列表页成立。
@@ -38,5 +43,26 @@ describe('isReaderRoute', () => {
 
   it('断点就是侧边栏出现的 lg（1024）', () => {
     expect(READER_PANE_MIN_WIDTH).toBe(1024)
+  })
+})
+
+/**
+ * 阅读栏能拖多宽。固定上限在两种窗口上都不合适（小窗口挤没中间栏、大窗口拖不动），
+ * 所以是「视口 - 侧边栏 - 中间栏下限」，再夹在 20~80rem 之间。
+ */
+describe('readerPaneMaxSizeRem', () => {
+  it('大屏放开到绝对上限 80rem', () => {
+    expect(readerPaneMaxSizeRem(2560)).toBe(80)
+    expect(readerPaneMaxSizeRem(1920)).toBe(80) // 120-33=87 → 夹到 80
+  })
+
+  it('中等窗口按「视口 - 侧边栏 15rem - 中间栏下限 18rem」算', () => {
+    expect(readerPaneMaxSizeRem(1440)).toBe(57) // 90-33
+    expect(readerPaneMaxSizeRem(1280)).toBe(47) // 80-33
+  })
+
+  it('小窗口给中间那栏留下限，且不低于阅读栏自己的 min', () => {
+    expect(readerPaneMaxSizeRem(1024)).toBe(31) // 64-33
+    expect(readerPaneMaxSizeRem(800)).toBe(READER_PANE_MIN_REM) // 50-33=17 → 夹到 20
   })
 })

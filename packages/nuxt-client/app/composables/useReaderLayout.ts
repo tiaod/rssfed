@@ -25,6 +25,29 @@ const READER_ROUTE_PATTERNS: readonly RegExp[] = [
   /^\/bots\/[^/]+\/posts$/
 ]
 
+/** 阅读栏宽度的下限（rem）：再窄正文就成一条了 */
+export const READER_PANE_MIN_REM = 20
+
+/** 阅读栏宽度的绝对上限（rem）：一行上百字并不好读，给到 80rem(1280px) 已经远超正常阅读宽度 */
+export const READER_PANE_MAX_REM = 80
+
+/** 中间那栏要保住的最小宽度、左侧边栏的默认宽度（rem，它自身可拖可折叠，这里按主题默认值算） */
+const LIST_FLOOR_REM = 18
+const SIDEBAR_DEFAULT_REM = 15
+
+/**
+ * 阅读栏的拖动上限（rem），跟着视口走。
+ *
+ * 固定上限在两种窗口上都不合适：窗口小而之前拖得很宽 → 中间那栏被挤没；窗口很大 → 想拖宽却拖不动。
+ * 所以上限 = min(绝对上限, 视口宽 - 侧边栏 - 中间那栏的下限)。
+ * EntryReaderPane 用它当 `max-size`，同一表达式也作为 root 的 max-width（见那里的注释）：
+ * 两处必须一致，否则会出现「拖了却不变宽」。
+ */
+export function readerPaneMaxSizeRem(viewportWidth: number): number {
+  const allowed = viewportWidth / 16 - SIDEBAR_DEFAULT_REM - LIST_FLOOR_REM
+  return Math.max(READER_PANE_MIN_REM, Math.min(READER_PANE_MAX_REM, allowed))
+}
+
 /** 当前路由是不是会用到阅读栏的列表页 */
 export function isReaderRoute(path: string): boolean {
   return READER_ROUTE_PATTERNS.some(pattern => pattern.test(path))
