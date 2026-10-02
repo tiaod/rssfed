@@ -1530,16 +1530,14 @@ export function usePouchDb() {
    * 是上屏才该付的成本 —— 扫到的行绝大多数会被丢掉，给它们取封面纯属浪费。
    * 已读态必须合（否则挑不出未读），但那只是一次批量 allDocs，没有附件与 DOM。
    *
-   * `notAfter` 是扫描上界（通常传当前列表最新一条）：列表是快照，同步进来的新条目要等用户
-   * 点「查看」才该出现，扫描不能把它提前放出来。
+   * 扫描**不受列表快照约束**：从游标（首轮为 null = 本地库最新一条）沿时间序往下走，
+   * 同步刚写进来的条目也在范围内 —— 「只看未读」进来的那一下就是要一次完整刷新。
    */
   async function scanTimelinePage(
     after: ScanCursor | null,
-    limit = SCAN_PAGE_SIZE,
-    notAfter: ScanCursor | null = null
+    limit = SCAN_PAGE_SIZE
   ): Promise<ScanPage> {
-    const start = after ?? notAfter
-    const rows = await scanPageRows(TIMELINE_VIEW, undefined, start, limit, after !== null)
+    const rows = await scanPageRows(TIMELINE_VIEW, undefined, after, limit, after !== null)
     await attachReadState(rows)
     return { rows, ...cursorOfPage(rows, limit) }
   }
@@ -1548,11 +1546,9 @@ export function usePouchDb() {
   async function scanFeedPage(
     feedId: string,
     after: ScanCursor | null,
-    limit = SCAN_PAGE_SIZE,
-    notAfter: ScanCursor | null = null
+    limit = SCAN_PAGE_SIZE
   ): Promise<ScanPage> {
-    const start = after ?? notAfter
-    const rows = await scanPageRows(BY_FEED_VIEW, feedId, start, limit, after !== null)
+    const rows = await scanPageRows(BY_FEED_VIEW, feedId, after, limit, after !== null)
     await attachReadState(rows)
     return { rows, ...cursorOfPage(rows, limit) }
   }
@@ -1566,15 +1562,14 @@ export function usePouchDb() {
   async function scanGroupPage(
     feedIds: string[],
     after: GroupScanCursor | null,
-    limit = SCAN_PAGE_SIZE,
-    notAfter: ScanCursor | null = null
+    limit = SCAN_PAGE_SIZE
   ): Promise<ScanPage<GroupScanCursor>> {
     if (feedIds.length === 0) return { rows: [], cursor: { byFeed: {} }, exhausted: true }
     const cursors = after?.byFeed ?? {}
 
     const perFeed = await Promise.all(feedIds.map((id) => {
       const cursor = cursors[id]
-      return scanPageRows(BY_FEED_VIEW, id, cursor ?? notAfter, limit, cursor !== undefined)
+      return scanPageRows(BY_FEED_VIEW, id, cursor ?? null, limit, cursor !== undefined)
     }))
 
     const ptr = perFeed.map(() => 0)

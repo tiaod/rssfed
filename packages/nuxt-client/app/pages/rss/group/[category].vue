@@ -51,7 +51,7 @@ const {
   entries,
   hasMore: () => hasMore.value,
   grow: () => grow(),
-  scan: (cursor, limit, notAfter) => pouch.scanGroupPage(groupFeeds.value.map(feed => feed.id), cursor, limit, notAfter),
+  scan: (cursor, limit) => pouch.scanGroupPage(groupFeeds.value.map(feed => feed.id), cursor, limit),
   enrich: async (list) => {
     // 与列表查询同口径：分组页的源名以订阅列表里的自定义名为准
     const enriched = await pouch.enrichEntries(list)
@@ -67,7 +67,9 @@ const markAllRead = useMarkAllRead(visibleEntries)
 const { loadMore } = useInfiniteList(loadMoreVisible)
 
 // 提示条是浮层（盖在列表顶部、不占布局），按滚动方向让位——下滑收起、上滑或回顶部露出
-const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
+// 「只看未读」下整条收起：切进未读就是一次完整刷新（不受列表快照约束），待查看的条目此刻
+// 已经上屏，再顶一条「已同步 N 条」纯属重复；计数不清零，切回全部时照旧出现
+const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef, { suppressed: unreadOnly })
 
 // 列表视图：分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
 const { view, overridden, setView, resetView } = useGroupView(category)

@@ -1,4 +1,4 @@
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import type { ComputedRef, Ref } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import type { ScanCursor, ScanPage } from '~/composables/usePouchDb'
@@ -7,14 +7,14 @@ import type { ScanCursor, ScanPage } from '~/composables/usePouchDb'
 export type UnreadScanPage<C> = ScanPage<C>
 
 export interface UnreadFilterOptions<C> {
-  /** 原始列表快照：筛选关掉时直接用它，同时它的最新一条就是扫描上界 */
+  /** 原始列表快照：筛选关掉时直接用它 */
   entries: Ref<RssEntry[]> | ComputedRef<RssEntry[]>
   /** 原始列表还有没有更多（筛选关掉时用） */
   hasMore: () => boolean
   /** 原始列表加载下一页（筛选关掉时用） */
   grow: () => boolean | Promise<boolean>
   /** 按游标往下扫一页（usePouchDb 的 scanTimelinePage / scanFeedPage / scanGroupPage） */
-  scan: (cursor: C | null, limit: number, notAfter: ScanCursor | null) => Promise<UnreadScanPage<C>>
+  scan: (cursor: C | null, limit: number) => Promise<UnreadScanPage<C>>
   /** 只对要上屏的那批做 enrich（usePouchDb.enrichEntries） */
   enrich: (entries: RssEntry[]) => Promise<RssEntry[]>
   /** 每页扫多少行（默认 300） */
@@ -37,9 +37,12 @@ export interface UnreadFilterOptions<C> {
  * 而不是几千次附件读取。用 `scanBatch`（默认 300）控制每批行数，`maxScan`（默认 10000）
  * 限制单轮总扫描量，避免一次点击卡住界面：扫满就停，列表给「继续扫描」。
  *
- * 扫描上界固定为**当前列表快照的最新一条**：列表是快照，同步进来的新条目要等用户点「查看」
- * 才该出现（见 useSyncedEntryList），扫描不能把它提前放出来。快照换了（点「查看」/首屏加载完）
- * 就重扫。
+ * **切进「只看未读」= 一次完整刷新**：扫描不受列表快照约束（从本地库最新一条往下走），
+ * 同步刚写进来、还没点「查看」的条目同样在范围内。列表那边仍是快照语义（见
+ * useSyncedEntryList）—— 两套语义各自成立：快照保证「同步不推走正在读的内容」，
+ * 而用户主动切模式本来就要换一批数据看，此时给他最新的才符合直觉。
+ * 也正因如此，「已同步 N 条」提示条在未读模式下整条收起（见 useEntriesBannerVisibility
+ * 的 `suppressed`），计数不清零，切回全部时照旧出现。
  *
  * 会话级状态（useState）：页面之间来回跳不丢，刷新即回到「显示全部」。切到别的模式会重置扫描
  * （读状态可能在别处变过），再打开时重新扫一遍。
@@ -68,16 +71,8 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
   /** 扫到但还没上屏的未读：一页可能扫出远超一屏，不能丢 */
   let pending: RssEntry[] = []
   let exhausted = false
-  /** 代次：重置 / 换扫描上界时作废在途结果 */
+  /** 代次：重置时作废在途结果 */
   let generation = 0
-
-  /** 扫描上界 = 原始快照的最新一条；快照为空时不设上界（从库头开始） */
-  const notAfter = computed<ScanCursor | null>(() => {
-    const head = options.entries.value[0]
-    if (!head) return null
-    const ms = Date.parse(head.publishedAt)
-    return Number.isNaN(ms) ? null : { ms, id: head.id }
-  })
 
   const visibleEntries = computed<RssEntry[]>(() => {
     if (!unreadOnly.value) return options.entries.value
@@ -118,7 +113,7 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
       // ② 沿游标往下扫
       let scannedThisRound = 0
       while (collected.length < target && !exhausted && scannedThisRound < maxScan) {
-        const page = await options.scan(cursor, scanBatch, notAfter.value)
+        const page = await options.scan(cursor, scanBatch)
         if (gen !== generation) return false // 期间被重置：结果作废
         if (page.rows.length === 0) {
           exhausted = true
@@ -163,17 +158,11 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
 
   function toggleUnreadOnly() {
     unreadOnly.value = !unreadOnly.value
-    // 两种模式的数据不是同一批对象：切走时留下的未读列表可能已被别处标读，直接丢掉重扫
+    // 两种模式的数据不是同一批对象：切走时留下的未读列表可能已被别处标读，直接丢掉重扫。
+    // 打开的这一下就是一次完整刷新（不受列表快照约束），用户看到的一定是当下最新的未读。
     reset()
     if (unreadOnly.value) void probeRound()
   }
-
-  // 快照换了（用户点「查看」/首屏加载完成）→ 扫描上界变了，重扫一遍
-  watch(() => options.entries.value[0]?.id ?? '', () => {
-    if (!unreadOnly.value) return
-    reset()
-    void probeRound()
-  })
 
   return {
     unreadOnly,

@@ -42,13 +42,15 @@ const {
   entries,
   hasMore: () => hasMore.value,
   grow: () => grow(),
-  scan: (cursor, limit, notAfter) => pouch.scanFeedPage(virtualFeedId, cursor, limit, notAfter),
+  scan: (cursor, limit) => pouch.scanFeedPage(virtualFeedId, cursor, limit),
   enrich: list => pouch.enrichEntries(list)
 })
 const markAllRead = useMarkAllRead(visibleEntries)
 
 // 提示条是浮层（盖在列表顶部、不占布局），按滚动方向让位——下滑收起、上滑或回顶部露出
-const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
+// 「只看未读」下整条收起：切进未读就是一次完整刷新（不受列表快照约束），待查看的条目此刻
+// 已经上屏，再顶一条「已同步 N 条」纯属重复；计数不清零，切回全部时照旧出现
+const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef, { suppressed: unreadOnly })
 
 // 分页加载：查询窗口逐步增大；页尾骨架进入视口就加载下一批（与其它列表页一致）
 const { loadMore } = useInfiniteList(loadMoreVisible)

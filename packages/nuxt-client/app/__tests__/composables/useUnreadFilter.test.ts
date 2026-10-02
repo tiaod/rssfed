@@ -70,19 +70,18 @@ async function settle() {
 
 /**
  * 假世界：按时间倒序的条目 + 已读集合。scan 的分页语义与 usePouchDb 的 scan*Page 一致：
- * `cursor` 是「上一页最后一行（已消费）」，`notAfter` 是首轮上界（含端点）。
+ * `cursor` 是「上一页最后一行（已消费）」；首轮 cursor 为 null，从世界（本地库）最新一条开始，
+ * 不受列表快照约束。
  */
 function makeWorld(world: RssEntry[], readIds: Set<string>) {
   return async (
     cursor: ScanCursor | null,
-    limit: number,
-    notAfter: ScanCursor | null
+    limit: number
   ): Promise<ScanPage<ScanCursor>> => {
-    const startKey = cursor ?? notAfter
     let startIdx = 0
-    if (startKey) {
-      const idx = world.findIndex(e => e.id === startKey.id)
-      startIdx = idx === -1 ? 0 : idx + (cursor ? 1 : 0)
+    if (cursor) {
+      const idx = world.findIndex(e => e.id === cursor.id)
+      startIdx = idx === -1 ? 0 : idx + 1
     }
     const rows = world.slice(startIdx, startIdx + limit)
       .map(entry => ({ ...entry, read: readIds.has(entry.id) }))
@@ -173,7 +172,7 @@ describe('useUnreadFilter：扫描未读', () => {
     expect(scan).toHaveBeenCalledTimes(1)
   })
 
-  it('扫描上界是快照最新一条：同步进来但还没点「查看」的新条目不提前露面', async () => {
+  it('不受列表快照约束：同步刚到、还没点「查看」的新条目，切进来就在（完整刷新）', async () => {
     const world = [makeEntry(0), makeEntry(1), makeEntry(2)]
     // 快照里只有 e1、e2（e0 是同步刚到、用户还没点「查看」的）；e0、e2 都未读
     const { filter, scan } = setup({ entries: world.slice(1), world, readIds: new Set(['e1']) })
@@ -181,9 +180,10 @@ describe('useUnreadFilter：扫描未读', () => {
     filter.toggleUnreadOnly()
     await settle()
 
-    // e2 在界内照常出现；e0 虽然未读，但比上界更新，不该被提前放出来
-    expect(idsOf(filter.visibleEntries.value)).toEqual(['e2'])
-    expect(scan.mock.calls[0]![2]).toEqual({ ms: Date.parse(world[1]!.publishedAt), id: 'e1' })
+    // e0 虽不在快照里，但「切进未读 = 完整刷新」，最新的未读一样要上屏
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e2'])
+    // 首轮不带游标：交给 scan 层从本地库最新一条开始
+    expect(scan.mock.calls[0]![0]).toBeNull()
   })
 
   it('一页扫出的未读多于一屏：剩下的留在缓冲区，下一轮接着上屏且不重复', async () => {
@@ -263,7 +263,7 @@ describe('useUnreadFilter：扫描未读', () => {
     expect(scan).toHaveBeenCalledTimes(2)
   })
 
-  it('快照换了（点了「查看」）→ 按新上界重扫', async () => {
+  it('列表快照换了（点了「查看」）不需要重扫：未读扫描本来就不看快照', async () => {
     const world = [makeEntry(0), makeEntry(1)]
     const entries = ref<RssEntry[]>([world[1]!])
     const scan = vi.fn(makeWorld(world, new Set()))
@@ -277,15 +277,15 @@ describe('useUnreadFilter：扫描未读', () => {
 
     filter.toggleUnreadOnly()
     await settle()
-    // 上界 e1：只剩 e1 可扫，e0 在界外
-    expect(idsOf(filter.visibleEntries.value)).toEqual(['e1'])
+    // 首轮就扫到世界里的全部未读（含不在快照里的 e0）
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e1'])
 
-    // 用户点了「查看」：新条目 e0 上屏，扫描上界随之前移
+    // 用户点了「查看」：列表快照前移。未读列表已经是完整的一批，不必再扫一遍
     entries.value = [world[0]!, world[1]!]
     await settle()
 
     expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e1'])
-    expect(scan).toHaveBeenCalledTimes(2)
+    expect(scan).toHaveBeenCalledTimes(1)
   })
 
   it('读取中弹窗里的那条即使已读也留在列表里，关闭后消失', async () => {

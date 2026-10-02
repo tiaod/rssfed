@@ -12,7 +12,7 @@ import type { ScanCursor } from '~/composables/usePouchDb'
  *   2. 扫到的行**没有**源元信息与封面 blob（证明没走 enrich —— 深扫几千条也不会去读附件）；
  *   3. 已读态合进来了（否则挑不出未读）；
  *   4. 单源桶不外溢、分组按时间归并且游标按源分别记；
- *   5. `notAfter` 上界生效（同步刚到、还没点「查看」的新条目不提前露面）。
+ *   5. 扫描不受列表快照约束：从最新一条往下扫，同步刚写进来的条目也在范围内。
  */
 
 const H = vi.hoisted(() => ({
@@ -119,7 +119,7 @@ describe('scanTimelinePage：时间线游标分页', () => {
     let cursor: ScanCursor | null = null
     let rounds = 0
     for (;;) {
-      const page = await pouch.scanTimelinePage(cursor, 3, null)
+      const page = await pouch.scanTimelinePage(cursor, 3)
       ids.push(...page.rows.map(row => row.id))
       cursor = page.cursor
       rounds++
@@ -131,7 +131,7 @@ describe('scanTimelinePage：时间线游标分页', () => {
   })
 
   it('合上已读态（否则挑不出未读）', async () => {
-    const page = await pouch.scanTimelinePage(null, 8, null)
+    const page = await pouch.scanTimelinePage(null, 8)
 
     expect(page.rows.find(row => row.id === 'e1')?.read).toBe(true)
     expect(page.rows.find(row => row.id === 'b1')?.read).toBe(true)
@@ -141,7 +141,7 @@ describe('scanTimelinePage：时间线游标分页', () => {
 
 describe('扫描不做 enrich', () => {
   it('扫到的行没有源名、没有封面 blob；对照的列表查询两者都有', async () => {
-    const page = await pouch.scanFeedPage('feed-a', null, 5, null)
+    const page = await pouch.scanFeedPage('feed-a', null, 5)
     const scanned = page.rows[0]!
 
     expect(scanned.id).toBe('e0')
@@ -157,41 +157,41 @@ describe('扫描不做 enrich', () => {
   })
 })
 
-describe('scanFeedPage：单源桶隔离与上界', () => {
+describe('scanFeedPage：单源桶隔离', () => {
   it('只在桶内翻页，游标续扫接得上', async () => {
-    const first = await pouch.scanFeedPage('feed-b', null, 2, null)
+    const first = await pouch.scanFeedPage('feed-b', null, 2)
     expect(first.rows.map(row => row.id)).toEqual(['b0', 'b1'])
     expect(first.exhausted).toBe(false)
 
-    const second = await pouch.scanFeedPage('feed-b', first.cursor, 2, null)
+    const second = await pouch.scanFeedPage('feed-b', first.cursor, 2)
     expect(second.rows.map(row => row.id)).toEqual(['b2'])
     expect(second.exhausted).toBe(true)
   })
 
-  it('notAfter 生效：比上界更新的条目不会被扫出来', async () => {
-    const page = await pouch.scanFeedPage('feed-a', null, 10, { ms: Date.parse(at(4)), id: 'e2' })
+  it('首轮从最新一条开始扫（不受列表快照约束）：桶内最新的 e0 也在结果里', async () => {
+    const page = await pouch.scanFeedPage('feed-a', null, 10)
 
-    expect(page.rows.map(row => row.id)).toEqual(['e2', 'e3', 'e4'])
+    expect(page.rows.map(row => row.id)).toEqual(['e0', 'e1', 'e2', 'e3', 'e4'])
   })
 })
 
 describe('scanGroupPage：多源归并', () => {
   it('按时间归并、游标按源分别记，分页不重不漏', async () => {
-    const first = await pouch.scanGroupPage(['feed-a', 'feed-b'], null, 3, null)
+    const first = await pouch.scanGroupPage(['feed-a', 'feed-b'], null, 3)
     expect(first.rows.map(row => row.id)).toEqual(['e0', 'b0', 'e1'])
     expect(first.exhausted).toBe(false)
 
-    const second = await pouch.scanGroupPage(['feed-a', 'feed-b'], first.cursor, 3, null)
+    const second = await pouch.scanGroupPage(['feed-a', 'feed-b'], first.cursor, 3)
     expect(second.rows.map(row => row.id)).toEqual(['b1', 'e2', 'b2'])
     expect(second.rows.find(row => row.id === 'b1')?.read).toBe(true)
 
-    const third = await pouch.scanGroupPage(['feed-a', 'feed-b'], second.cursor, 3, null)
+    const third = await pouch.scanGroupPage(['feed-a', 'feed-b'], second.cursor, 3)
     expect(third.rows.map(row => row.id)).toEqual(['e3', 'e4'])
     expect(third.exhausted).toBe(true)
   })
 
   it('空分组直接算扫到底', async () => {
-    const page = await pouch.scanGroupPage([], null, 5, null)
+    const page = await pouch.scanGroupPage([], null, 5)
 
     expect(page.rows).toEqual([])
     expect(page.exhausted).toBe(true)

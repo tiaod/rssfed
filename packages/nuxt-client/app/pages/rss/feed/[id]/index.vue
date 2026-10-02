@@ -39,12 +39,6 @@ const {
   syncedDocs: () => pouch.syncedDocsByFeed[feedId] ?? 0
 })
 
-/**
- * 「已同步 N 条」提示条是浮层：盖在列表顶部、不占布局高度，展开不会推动正在读的内容。
- * 代价是它会挡住最上面一条内容，所以按滚动方向让位（见 useEntriesBannerVisibility）。
- */
-const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
-
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
 const { view, overridden, setView, resetView, refreshPrefs } = useFeedView(feedId)
 
@@ -56,10 +50,18 @@ const {
   entries,
   hasMore: () => hasMore.value,
   grow: () => grow(),
-  scan: (cursor, limit, notAfter) => pouch.scanFeedPage(feedId, cursor, limit, notAfter),
+  scan: (cursor, limit) => pouch.scanFeedPage(feedId, cursor, limit),
   enrich: list => pouch.enrichEntries(list)
 })
 const markAllRead = useMarkAllRead(visibleEntries)
+
+/**
+ * 「已同步 N 条」提示条是浮层：盖在列表顶部、不占布局高度，展开不会推动正在读的内容。
+ * 代价是它会挡住最上面一条内容，所以按滚动方向让位（见 useEntriesBannerVisibility）。
+ * 「只看未读」下整条收起：切进未读就是一次完整刷新（不受列表快照约束），待查看的条目此刻已经
+ * 上屏，再顶一条提示就是重复；计数不清零，切回全部时照旧出现。
+ */
+const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef, { suppressed: unreadOnly })
 
 // 滚动到底部附近时加载下一批；loadMore 同时供文章弹窗尾部的自动预加载复用（单飞防重入）
 const { loadMore } = useInfiniteList(loadMoreVisible)
