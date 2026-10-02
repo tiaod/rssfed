@@ -90,9 +90,20 @@ testGlobals.useSettings = () => ({
   updateSettings: vi.fn()
 })
 
-testGlobals.useToast = () => ({ add: vi.fn() })
+const toastAdd = vi.fn()
+testGlobals.useToast = () => ({ add: toastAdd })
+
+/** 用户状态库的写入桩：自动标已读与工具栏的两个切换都走这里 */
+const H = vi.hoisted(() => ({
+  getEntry: vi.fn(async () => null as unknown),
+  markRead: vi.fn(async () => {}),
+  toggleSaved: vi.fn(async () => true)
+}))
+
 testGlobals.usePouchDb = () => ({
-  getEntry: vi.fn(async () => null)
+  getEntry: H.getEntry,
+  markRead: H.markRead,
+  toggleSaved: H.toggleSaved
 })
 
 beforeEach(() => {
@@ -103,6 +114,13 @@ beforeEach(() => {
   }
   modalSize = 'sm:max-w-6xl'
   fixedBars = true
+  H.getEntry.mockReset()
+  H.getEntry.mockResolvedValue(null)
+  H.markRead.mockReset()
+  H.markRead.mockResolvedValue(undefined)
+  H.toggleSaved.mockReset()
+  H.toggleSaved.mockResolvedValue(true)
+  toastAdd.mockReset()
 })
 
 const STUBS = {
@@ -111,7 +129,14 @@ const STUBS = {
     template: '<div class="umodal"><slot name="body" /><slot name="footer" /></div>',
     props: ['open', 'fullscreen', 'scrollable', 'ui', 'title']
   },
-  UButton: true,
+  UButton: {
+    name: 'UButton',
+    props: [
+      'icon', 'title', 'ariaLabel', 'ariaPressed', 'variant', 'color', 'size',
+      'loading', 'disabled', 'label', 'to', 'target'
+    ],
+    template: '<button class="ubtn" :data-icon="icon" :title="title" :aria-label="ariaLabel" :aria-pressed="ariaPressed"><slot>{{ label }}</slot></button>'
+  },
   UIcon: true,
   USkeleton: true,
   EntryDetailSkeleton: {
@@ -189,7 +214,11 @@ describe('EntryDetailModal', () => {
     g.entries.value = [makeEntry(1), makeEntry(2), makeEntry(3)]
     // 模拟「投影已到、全文还在路上」：读取一直不落地
     const realPouch = testGlobals.usePouchDb
-    testGlobals.usePouchDb = () => ({ getEntry: vi.fn(() => new Promise(() => {})) })
+    testGlobals.usePouchDb = () => ({
+      getEntry: vi.fn(() => new Promise(() => {})),
+      markRead: H.markRead,
+      toggleSaved: H.toggleSaved
+    })
 
     try {
       const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
@@ -307,5 +336,95 @@ describe('EntryDetailModal', () => {
     } finally {
       testGlobals.requestAnimationFrame = realRaf
     }
+  })
+})
+
+describe('EntryDetailModal 的已读 / 收藏', () => {
+  it('打开即标已读：就地更新列表里的那条并写库', async () => {
+    g.isOpen.value = true
+    const entry = makeEntry(1)
+    g.currentEntry.value = entry
+
+    mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    expect(entry.read).toBe(true)
+    expect(H.markRead).toHaveBeenCalledWith('entry-1', 'feed-1', true)
+  })
+
+  it('已经读过的条目不再写一次', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = { ...makeEntry(1), read: true }
+
+    mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    expect(H.markRead).not.toHaveBeenCalled()
+  })
+
+  it('自动标记写库失败 → 界面状态退回未读（不显示没落盘的状态）', async () => {
+    H.markRead.mockRejectedValueOnce(new Error('磁盘满了'))
+    g.isOpen.value = true
+    const entry = makeEntry(1)
+    g.currentEntry.value = entry
+
+    mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    expect(entry.read).toBe(false)
+  })
+
+  it('工具栏「标为未读」：写库成功后当前条目置回未读', async () => {
+    g.isOpen.value = true
+    const entry = makeEntry(1)
+    g.currentEntry.value = entry
+
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+    // 挂载时已自动标为已读，按钮此刻的语义就是「标为未读」
+    H.markRead.mockClear()
+
+    await wrapper.get('[aria-label="标为未读"]').trigger('click')
+    await flushPromises()
+
+    expect(H.markRead).toHaveBeenCalledWith('entry-1', 'feed-1', false)
+    expect(entry.read).toBe(false)
+  })
+
+  it('工具栏星标：收藏与取消收藏都按本地库返回的状态就地更新', async () => {
+    g.isOpen.value = true
+    const entry = makeEntry(1)
+    g.currentEntry.value = entry
+
+    H.toggleSaved.mockResolvedValueOnce(true)
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    await wrapper.get('[aria-label="收藏"]').trigger('click')
+    await flushPromises()
+
+    expect(H.toggleSaved).toHaveBeenCalledWith('entry-1', 'feed-1')
+    expect(entry.starred).toBe(true)
+
+    H.toggleSaved.mockResolvedValueOnce(false)
+    await wrapper.get('[aria-label="取消收藏"]').trigger('click')
+    await flushPromises()
+
+    expect(entry.starred).toBe(false)
+  })
+
+  it('写库失败时收藏状态不翻转，并弹出错误提示', async () => {
+    g.isOpen.value = true
+    const entry = makeEntry(1)
+    g.currentEntry.value = entry
+    H.toggleSaved.mockRejectedValueOnce(new Error('磁盘满了'))
+
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+    await wrapper.get('[aria-label="收藏"]').trigger('click')
+    await flushPromises()
+
+    expect(entry.starred).toBe(false)
+    expect(toastAdd).toHaveBeenCalledWith(expect.objectContaining({ color: 'error' }))
   })
 })

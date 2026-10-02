@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref, computed, watch, reactive, onBeforeUnmount, defineAsyncComponent } from 'vue'
 import type { RssEntry } from '~/types/rss'
+import { errorMessage } from '~/utils/errorMessage'
 import 'swiper/css'
 
 // Swiper 仅在前端按需加载（ClientOnly 包裹 + 异步组件），避免拖慢首屏与 SSR 水合差异
@@ -51,6 +52,64 @@ function onScreenChange(event: MediaQueryListEvent) {
 const bodyRef = ref<HTMLElement | null>(null)
 
 const pouch = usePouchDb()
+
+// ── 已读 / 收藏（都写用户状态库的 entry-state 文档） ──
+
+/**
+ * 打开弹窗、以及「上一篇 / 下一篇」翻到某篇时，就地标为已读。
+ *
+ * 打开即已读是本项目的既定口径：点进来就是要读它。就地改列表里那个对象
+ * （openEntry 传进来的就是列表元素本身，共用引用），列表立刻淡显，不必重查；
+ * 写库失败则回退，避免界面显示一个并没落盘的状态。已经是已读的直接跳过。
+ */
+watch(
+  [isOpen, () => currentEntry.value?.id],
+  ([open]) => {
+    if (!open) return
+    const entry = currentEntry.value
+    if (!entry || entry.read) return
+    entry.read = true
+    void pouch.markRead(entry.id, entry.feedId, true).catch(() => {
+      entry.read = false
+    })
+  },
+  // 组件可能是在弹窗已打开的状态下挂载的（如切页后重新渲染），首帧同样要标记
+  { immediate: true }
+)
+
+/** 手动切换已读 / 未读（弹窗工具栏）。与自动标记共用同一个开关，冲突由 markRead 内部重试消化 */
+const readBusy = ref(false)
+
+async function toggleRead() {
+  const entry = currentEntry.value
+  if (!entry || readBusy.value) return
+  const next = !entry.read
+  readBusy.value = true
+  try {
+    await pouch.markRead(entry.id, entry.feedId, next)
+    entry.read = next
+  } catch (e: unknown) {
+    toast.add({ title: '操作失败', description: errorMessage(e, '标记已读失败'), color: 'error' })
+  } finally {
+    readBusy.value = false
+  }
+}
+
+/** 收藏 / 取消收藏（弹窗工具栏）。切换结果由本地库返回，避免两端状态不一致 */
+const savedBusy = ref(false)
+
+async function toggleStar() {
+  const entry = currentEntry.value
+  if (!entry || savedBusy.value) return
+  savedBusy.value = true
+  try {
+    entry.starred = await pouch.toggleSaved(entry.id, entry.feedId)
+  } catch (e: unknown) {
+    toast.add({ title: '操作失败', description: errorMessage(e, '收藏失败'), color: 'error' })
+  } finally {
+    savedBusy.value = false
+  }
+}
 
 // 条目全文也是懒取的：按 id 缓存，命中的直接复用（见 hydrateSlots）
 const details = reactive(new Map<string, RssEntry | null>())
@@ -707,16 +766,45 @@ function isLoading(raw: RssEntry | null): boolean {
     </template>
 
     <template #footer>
-      <div class="flex items-center justify-between gap-2">
-        <UButton
-          v-if="currentEntry"
-          :to="currentEntry.url"
-          target="_blank"
-          label="阅读原文"
-          icon="i-lucide-external-link"
-          variant="outline"
-          size="sm"
-        />
+      <div class="flex w-full items-center justify-between gap-2">
+        <div class="flex items-center gap-1">
+          <!--
+            已读 / 未读与收藏都只作用于当前这篇：打开任意一篇时已由 watch 自动标为已读，
+            这里给的是「标回未读」与「收藏」这两个手动动作；按钮状态直接读当前条目的字段。
+          -->
+          <UButton
+            v-if="currentEntry"
+            :icon="currentEntry.read ? 'i-lucide-mail-open' : 'i-lucide-mail'"
+            :aria-label="currentEntry.read ? '标为未读' : '标为已读'"
+            :title="currentEntry.read ? '标为未读' : '标为已读'"
+            :loading="readBusy"
+            variant="ghost"
+            color="neutral"
+            size="sm"
+            @click="toggleRead"
+          />
+          <UButton
+            v-if="currentEntry"
+            icon="i-lucide-star"
+            :color="currentEntry.starred ? 'warning' : 'neutral'"
+            :variant="currentEntry.starred ? 'soft' : 'ghost'"
+            :aria-label="currentEntry.starred ? '取消收藏' : '收藏'"
+            :aria-pressed="currentEntry.starred === true"
+            :title="currentEntry.starred ? '取消收藏' : '收藏'"
+            :loading="savedBusy"
+            size="sm"
+            @click="toggleStar"
+          />
+          <UButton
+            v-if="currentEntry"
+            :to="currentEntry.url"
+            target="_blank"
+            label="阅读原文"
+            icon="i-lucide-external-link"
+            variant="outline"
+            size="sm"
+          />
+        </div>
         <UButton
           color="neutral"
           variant="outline"
