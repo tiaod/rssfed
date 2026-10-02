@@ -1,5 +1,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { DEFAULT_LIST_VIEW, type ListView } from '~/utils/listViews'
+// 显式导入：单测环境没有 Nuxt 自动导入，裸调 useReaderPaneView 会直接 ReferenceError
+import { useReaderPaneView } from '~/composables/useReaderLayout'
 
 /**
  * 列表视图的解析与切换。
@@ -29,6 +31,9 @@ export function useListViewState(contextKey: string, resolveDefault: () => ListV
   const defaultView = computed<ListView>(() => resolveDefault())
   const view = computed<ListView>(() => overrides.value[contextKey] ?? defaultView.value)
   const overridden = computed(() => overrides.value[contextKey] !== undefined)
+
+  // 把生效视图发布给布局：宽屏 + 列表视图时详情走右侧常驻阅读栏，其余视图仍走弹窗（见 useReaderLayout）
+  useReaderPaneView(view)
 
   function setView(next: ListView) {
     overrides.value = { ...overrides.value, [contextKey]: next }

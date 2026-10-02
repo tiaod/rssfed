@@ -14,7 +14,11 @@ import { computed } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import { entryCoverAspect, entryCoverImage, IMAGE_TILE_FALLBACK_ASPECT } from '~/utils/entryDisplay'
 
-const props = defineProps<{ entry: RssEntry }>()
+const props = defineProps<{
+  entry: RssEntry
+  /** 详情正在展示这条（宽屏阅读栏）：图块描一圈主题色边框 */
+  selected?: boolean
+}>()
 
 const emit = defineEmits<{ open: [entry: RssEntry] }>()
 
@@ -29,8 +33,11 @@ const aspect = computed(() => entryCoverAspect(props.entry) ?? IMAGE_TILE_FALLBA
     type="button"
     :data-entry-id="entry.id"
     :style="{ aspectRatio: String(aspect) }"
-    class="group relative block w-full cursor-pointer overflow-hidden rounded-lg bg-elevated ring-1 ring-default transition-shadow hover:ring-accented focus-visible:ring-2 focus-visible:ring-primary"
-    :class="{ 'opacity-60': entry.read }"
+    class="group relative block w-full cursor-pointer overflow-hidden rounded-lg bg-elevated transition-shadow hover:ring-accented focus-visible:ring-2 focus-visible:ring-primary"
+    :class="[
+      selected ? 'ring-2 ring-primary' : 'ring-1 ring-default',
+      { 'opacity-60': entry.read }
+    ]"
     @click="emit('open', entry)"
   >
     <!-- 未读圆点：压在图片左上角，加一圈 ring 保证浅色图上也看得见 -->

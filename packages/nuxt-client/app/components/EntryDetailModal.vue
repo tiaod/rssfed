@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { nextTick, ref, computed, watch, reactive, onBeforeUnmount, defineAsyncComponent } from 'vue'
 import type { RssEntry } from '~/types/rss'
-import { errorMessage } from '~/utils/errorMessage'
+// 打开即已读、全文懒取、上一篇/下一篇、工具栏的已读与收藏：与宽屏阅读栏共用同一份口径
+import { useEntryDetail } from '~/composables/useEntryDetail'
 import 'swiper/css'
 
 // Swiper 仅在前端按需加载（ClientOnly 包裹 + 异步组件），避免拖慢首屏与 SSR 水合差异
@@ -22,16 +23,26 @@ const {
 const { settings } = useSettings()
 const toast = useToast()
 
-// 到了尽头还要继续翻时不再无声失败：无更多数据（hasMore 为假）提示结尾，开头则提示已到首篇
+// 详情相关的状态与动作（含「到尽头时的提示」）都在共享 composable 里，见 useEntryDetail
+const {
+  readBusy,
+  savedBusy,
+  toggleRead,
+  toggleStar,
+  details,
+  loadingIds,
+  detailEntry,
+  detailLoading,
+  detailViewKey,
+  loadDetail,
+  displayOf,
+  isLoading,
+  navWithHint: navEntryWithHint
+} = useEntryDetail()
+
+/** 翻页：尽头提示由共享 composable 发，弹窗这边额外把页码亮回来（正文滚动时它会被隐去） */
 function navWithHint(dir: -1 | 1) {
-  const moved = dir === 1 ? goNext() : goPrev()
-  if (moved) revealCounter()
-  if (moved || !isOpen.value) return
-  if (dir === 1) {
-    if (isLastWithNoMore()) toast.add({ title: '没有下一篇了', color: 'neutral' })
-  } else if (!canGoPrev.value) {
-    toast.add({ title: '已经是第一篇了', color: 'neutral' })
-  }
+  if (navEntryWithHint(dir)) revealCounter()
 }
 
 // 小屏设备（手机）始终全屏；大屏按设置：选「全屏」档时也全屏
@@ -51,81 +62,6 @@ function onScreenChange(event: MediaQueryListEvent) {
 // 切换条目时把 window 与正文所在的所有可滚动祖先统一归零，避免停留在上一篇的阅读位置
 const bodyRef = ref<HTMLElement | null>(null)
 
-const pouch = usePouchDb()
-
-// ── 已读 / 收藏（都写用户状态库的 entry-state 文档） ──
-
-/**
- * 打开弹窗、以及「上一篇 / 下一篇」翻到某篇时，就地标为已读。
- *
- * 打开即已读是本项目的既定口径：点进来就是要读它。就地改列表里那个对象
- * （openEntry 传进来的就是列表元素本身，共用引用），列表立刻淡显，不必重查；
- * 写库失败则回退，避免界面显示一个并没落盘的状态。已经是已读的直接跳过。
- */
-watch(
-  [isOpen, () => currentEntry.value?.id],
-  ([open]) => {
-    if (!open) return
-    const entry = currentEntry.value
-    if (!entry || entry.read) return
-    entry.read = true
-    void pouch.markRead(entry.id, entry.feedId, true).catch(() => {
-      entry.read = false
-    })
-  },
-  // 组件可能是在弹窗已打开的状态下挂载的（如切页后重新渲染），首帧同样要标记
-  { immediate: true }
-)
-
-/** 手动切换已读 / 未读（弹窗工具栏）。与自动标记共用同一个开关，冲突由 markRead 内部重试消化 */
-const readBusy = ref(false)
-
-async function toggleRead() {
-  const entry = currentEntry.value
-  if (!entry || readBusy.value) return
-  const next = !entry.read
-  readBusy.value = true
-  try {
-    await pouch.markRead(entry.id, entry.feedId, next)
-    entry.read = next
-  } catch (e: unknown) {
-    toast.add({ title: '操作失败', description: errorMessage(e, '标记已读失败'), color: 'error' })
-  } finally {
-    readBusy.value = false
-  }
-}
-
-/** 收藏 / 取消收藏（弹窗工具栏）。切换结果由本地库返回，避免两端状态不一致 */
-const savedBusy = ref(false)
-
-async function toggleStar() {
-  const entry = currentEntry.value
-  if (!entry || savedBusy.value) return
-  savedBusy.value = true
-  try {
-    entry.starred = await pouch.toggleSaved(entry.id, entry.feedId)
-  } catch (e: unknown) {
-    toast.add({ title: '操作失败', description: errorMessage(e, '收藏失败'), color: 'error' })
-  } finally {
-    savedBusy.value = false
-  }
-}
-
-// 条目全文也是懒取的：按 id 缓存，命中的直接复用（见 hydrateSlots）
-const details = reactive(new Map<string, RssEntry | null>())
-const loadingIds = reactive(new Set<string>())
-
-/**
- * 非全屏正文区当前渲染的条目。
- *
- * 列表行来自 map view 投影（为省内存刻意不携带正文全文 content），只有标题与元信息：
- * 直接把它当正文上屏的话，切篇瞬间框体会先塌成一小条、等全文到位再弹回原高度——就是那一下闪烁。
- * 因此全文没到位前 detailEntry 保持 null（正文区显示骨架屏），只认真正取到的全文；
- * 邻篇全文已由 hydrateSlots 预取，命中缓存时整篇直接换掉，连骨架屏都不会闪。
- */
-const detailEntry = ref<RssEntry | null>(null)
-/** 全文是否还在取：true 时正文区渲染骨架屏 */
-const detailLoading = ref(false)
 /**
  * 当前正显示的正文高度（px）。
  *
@@ -153,32 +89,12 @@ watch(
   { immediate: true }
 )
 
-async function loadDetail(id: string | undefined) {
-  const cached = id ? details.get(id) : null
-  if (cached) {
-    // 预取命中：整篇直接切换，不经过「只有标题的投影」那一帧
-    detailEntry.value = cached
-    detailLoading.value = false
-    return
-  }
-  detailEntry.value = null
-  detailLoading.value = !!id
-  if (!id) return
-  const full = await pouch.getEntry(id)
-  if (currentEntry.value?.id !== id) return // 竞态：已切到别的条目，旧结果作废
-  // 取不到全文时退回投影（至少能看标题），其余情况用全文
-  detailEntry.value = full ?? currentEntry.value
-  detailLoading.value = false
-}
-
 // ── 正文切换的淡入淡出 ──
 //
 // 弹窗高度由正文长度决定，切篇时框体尺寸必然要变。给高度本身做过渡观感并不好
 // （长文收短像被「抽走」），所以尺寸就让它一步到位，只让内容交叉淡入淡出：
 // 新内容（或骨架屏）立刻占据正常流、框体高度随之确定，旧内容退场时改为绝对定位并裁切，
 // 两层叠着淡入淡出，既不会出现空窗，也不会先塌再弹。
-/** 正文区的渲染态：加载中是骨架屏，否则是条目 id；变化即触发淡入淡出 */
-const detailViewKey = computed(() => (detailLoading.value ? 'loading' : detailEntry.value?.id ?? 'empty'))
 
 function resetScroll() {
   if (!import.meta.client || typeof window === 'undefined') return
@@ -379,7 +295,10 @@ const slots = computed<Slot[]>(() => {
   return arr
 })
 
-// 槽内全文懒取：给三槽的每个条目补齐全文（命中缓存的跳过），未命中先展示投影 + 骨架
+// 槽内全文懒取：给三槽的每个条目补齐全文（命中缓存的跳过），未命中先展示投影 + 骨架。
+// 三槽预取是划卡全屏档特有的（阅读栏一次只显示一篇），所以这里自己读本地库
+const pouch = usePouchDb()
+
 function hydrateSlots() {
   if (!isOpen.value) return
   for (const s of slots.value) {
@@ -614,16 +533,6 @@ if (import.meta.client) {
  * 仅当该源在本地完全没有数据时 title 为空，此时回退到文章标题，避免顶栏空白。
  */
 const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntry.value?.title)
-
-/** 槽内展示用条目：全文取到后换全文，否则先用列表投影的标题/元信息顶着 */
-function displayOf(raw: RssEntry | null): RssEntry | null {
-  if (!raw) return null
-  return details.get(raw.id) ?? raw
-}
-
-function isLoading(raw: RssEntry | null): boolean {
-  return !!raw && !details.has(raw.id) && loadingIds.has(raw.id)
-}
 </script>
 
 <template>
@@ -844,7 +753,8 @@ function isLoading(raw: RssEntry | null): boolean {
 }
 
 /* 正文切换的交叉淡入淡出：新内容正常占位（框体高度即时到位），
-   退场层改为绝对定位铺满正文区并裁切，不参与撑高，因此不会出现空窗或高度反复 */
+   退场层改为绝对定位铺满正文区并裁切，不参与撑高，因此不会出现空窗或高度反复。
+   宽屏的常驻阅读栏用的是同一套类名，样式在这里（非 scoped，全局生效） */
 .entry-fade-enter-active,
 .entry-fade-leave-active {
   transition: opacity 0.18s ease;

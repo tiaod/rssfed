@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import type { NavigationMenuItem } from '@nuxt/ui'
 import { useUserStore } from '~/stores/user'
+// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
+import EntryReaderPane from '~/components/EntryReaderPane.vue'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -44,6 +46,17 @@ onBeforeUnmount(() => {
 const open = ref(false)
 // 通知入口暂时下线，恢复底部通知按钮时一并取消注释
 // const notificationsOpen = ref(false)
+
+/**
+ * 宽屏 + 「列表」视图：详情改由右侧的常驻阅读栏承载，弹窗整块不挂载。
+ *
+ * 阅读栏放在这里（面板的同级一栏）而不是页面的面板里面：它是一整栏，自己的顶栏要和页面导航栏
+ * 并排、各自占满自己的列；塞进面板 body 的话页面导航栏会横跨整行盖在它上面。
+ *
+ * 两个展示面互斥而不是「弹窗留在 DOM 里但隐藏」：打开即已读、全文懒取、浏览器返回键都挂在
+ * 展示面上，同时挂载会让同一篇被处理两次（尤其是历史栈会多压一条）。
+ */
+const readerPane = useReaderPaneMode()
 
 const navItems = computed<NavigationMenuItem[]>(() => {
   const items: NavigationMenuItem[] = [
@@ -164,6 +177,9 @@ const isBottomNavActive = (to: string) => {
 
     <slot />
 
+    <!-- 第三栏：与 <slot />（页面面板）同级，构成「侧边栏 | 列表 | 正文」三栏 -->
+    <EntryReaderPane v-if="readerPane" />
+
     <nav class="fixed bottom-0 left-0 right-0 z-50 border-t border-default bg-background/95 backdrop-blur sm:hidden">
       <div class="flex items-center justify-around py-1.5">
         <NuxtLink
@@ -185,6 +201,6 @@ const isBottomNavActive = (to: string) => {
     <!-- 通知面板暂时下线，与底部通知按钮一起恢复
     <NotificationsSlideover v-model:open="notificationsOpen" />
     -->
-    <EntryDetailModal />
+    <EntryDetailModal v-if="!readerPane" />
   </UDashboardGroup>
 </template>

@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { nextTick } from 'vue'
+import { nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import EntryList from '../../components/EntryList.vue'
 import type { RssEntry } from '../../types/rss'
@@ -14,8 +14,15 @@ import type { ListView } from '../../utils/listViews'
  * 「单源分支仍渲染 UUser 的作者名」。
  */
 
+/** 详情状态（宽屏阅读栏 / 窄屏弹窗共用）：列表据此给当前那篇高亮 */
+const modalState = { isOpen: ref(false), currentEntry: ref<RssEntry | null>(null) }
+
 const testGlobals = globalThis as unknown as Record<string, unknown>
-testGlobals.useEntryModal = () => ({ openEntry: vi.fn() })
+testGlobals.useEntryModal = () => ({
+  openEntry: vi.fn(),
+  isOpen: modalState.isOpen,
+  currentEntry: modalState.currentEntry
+})
 // EntryList 用 IntersectionObserver 观察页尾骨架（骨架可见即触底加载）
 testGlobals.useIntersectionObserver = vi.fn(() => ({ pause: vi.fn(), resume: vi.fn(), stop: vi.fn() }))
 
@@ -79,6 +86,11 @@ function mountList(entries: RssEntry[], showFeed?: boolean, view?: ListView) {
     global: { stubs: STUBS }
   })
 }
+
+beforeEach(() => {
+  modalState.isOpen.value = false
+  modalState.currentEntry.value = null
+})
 
 /** 单测里 ScrollArea 退化成把 items 全渲染，虚拟化参数仍从 props 里读得到 */
 function virtualizeOf(wrapper: ReturnType<typeof mountList>) {
@@ -350,5 +362,42 @@ describe('EntryList 已读态', () => {
     const read = mountList([makeEntry({ read: true, coverUrl: 'blob:cover' })], undefined, 'image')
     expect(read.find('button[style] [data-unread]').exists()).toBe(false)
     expect(read.get('button[style]').classes()).toContain('opacity-60')
+  })
+})
+
+describe('EntryList 选中态高亮', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('详情打开时，列表里对应的那条高亮（宽屏阅读栏正在读的那篇）', () => {
+    const entry = makeEntry({ id: 'entry-1' })
+    const other = makeEntry({ id: 'entry-2' })
+    modalState.isOpen.value = true
+    modalState.currentEntry.value = entry
+
+    const wrapper = mountList([entry, other], undefined, 'list')
+    expect(wrapper.get('[data-entry-id="entry-1"]').classes()).toContain('bg-primary/10')
+    expect(wrapper.get('[data-entry-id="entry-2"]').classes()).not.toContain('bg-primary/10')
+  })
+
+  it('详情关闭（窄屏弹窗关掉 / 宽屏点关闭）后没有高亮', () => {
+    const entry = makeEntry({ id: 'entry-1' })
+    modalState.isOpen.value = false
+    modalState.currentEntry.value = entry
+
+    const wrapper = mountList([entry], undefined, 'list')
+    expect(wrapper.get('[data-entry-id="entry-1"]').classes()).not.toContain('bg-primary/10')
+  })
+
+  it('卡片视图同样按当前条目描边', () => {
+    const entry = makeEntry({ id: 'entry-1', coverUrl: 'blob:cover' })
+    const other = makeEntry({ id: 'entry-2' })
+    modalState.isOpen.value = true
+    modalState.currentEntry.value = entry
+
+    const wrapper = mountList([entry, other])
+    expect(wrapper.get('[data-entry-id="entry-1"]').classes()).toContain('ring-primary')
+    expect(wrapper.get('[data-entry-id="entry-2"]').classes()).not.toContain('ring-primary')
   })
 })

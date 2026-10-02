@@ -363,7 +363,15 @@ useIntersectionObserver(
   { rootMargin: '0px 0px 200px 0px' }
 )
 
-const { openEntry } = useEntryModal()
+const { openEntry, isOpen, currentEntry } = useEntryModal()
+
+/**
+ * 详情正在展示的那条，列表里给它一圈高亮。
+ *
+ * 宽屏三栏下正文在右侧、列表在中间，没有这个标记就不知道右边这篇对应左边哪一行；
+ * 详情没打开时（窄屏关掉弹窗、宽屏点关闭）没有选中项。
+ */
+const selectedId = computed(() => (isOpen.value ? currentEntry.value?.id ?? null : null))
 
 // 打开详情时传入当前可见列表（取值函数而非快照），modal 内的上一篇/下一篇沿此定位
 function handleOpen(entry: RssEntry) {
@@ -434,6 +442,7 @@ function handleOpen(entry: RssEntry) {
         v-else-if="isEntry(item) && view === 'blog'"
         :key="item.id"
         :entry="item"
+        :selected="item.id === selectedId"
         :show-feed="showFeed"
         :lanes="laneCount"
         @open="handleOpen"
@@ -443,6 +452,7 @@ function handleOpen(entry: RssEntry) {
         v-else-if="isEntry(item) && view === 'list'"
         :key="item.id"
         :entry="item"
+        :selected="item.id === selectedId"
         :show-feed="showFeed"
         @open="handleOpen"
       />
@@ -451,6 +461,7 @@ function handleOpen(entry: RssEntry) {
         v-else-if="isEntry(item) && view === 'image'"
         :key="item.id"
         :entry="item"
+        :selected="item.id === selectedId"
         @open="handleOpen"
       />
 
@@ -458,6 +469,7 @@ function handleOpen(entry: RssEntry) {
         v-else-if="isEntry(item)"
         :key="item.id"
         :entry="item"
+        :selected="item.id === selectedId"
         :show-feed="showFeed"
         @open="handleOpen"
       />

@@ -12,6 +12,8 @@ import { entryExcerpt, entryFeedName } from '~/utils/entryDisplay'
 const props = defineProps<{
   entry: RssEntry
   showFeed?: boolean
+  /** 详情正在展示这条（宽屏阅读栏）：整行加底色，读了右边那篇也知道它对应左边哪行 */
+  selected?: boolean
 }>()
 
 const emit = defineEmits<{ open: [entry: RssEntry] }>()
@@ -33,8 +35,8 @@ const date = computed(() => {
   <!-- 固定高度放在 article 上（行高一致是列表视图的前提）；点击区用真正的 button，键盘也能打开 -->
   <article
     :data-entry-id="entry.id"
-    class="h-24 min-w-0 border-b border-default/60"
-    :class="{ 'opacity-60': entry.read }"
+    class="h-24 min-w-0 border-b border-default/60 transition-colors"
+    :class="{ 'opacity-60': entry.read, 'bg-primary/10': selected }"
   >
     <button
       type="button"

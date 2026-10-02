@@ -17,6 +17,8 @@ const props = defineProps<{
   entry: RssEntry
   /** 聚合视图（时间线 / 分类页）：卡片上显示所属订阅源 */
   showFeed?: boolean
+  /** 详情正在展示这条（宽屏阅读栏）：卡片描一圈主题色边框 */
+  selected?: boolean
 }>()
 
 const emit = defineEmits<{ open: [entry: RssEntry] }>()
@@ -33,7 +35,8 @@ const date = computed(() => new Date(props.entry.publishedAt))
   -->
   <div
     :data-entry-id="entry.id"
-    :class="{ 'opacity-60': entry.read }"
+    class="rounded-lg"
+    :class="{ 'opacity-60': entry.read, 'ring-2 ring-primary': selected }"
   >
     <UBlogPost
       :title="entry.title"
