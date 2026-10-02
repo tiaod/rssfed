@@ -63,11 +63,13 @@ pnpm dev:all
 
 | 文档 | 内容 |
 | --- | --- |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | 架构设计、模块划分、存储职责、数据流 |
+| [ARCHITECTURE.md](ARCHITECTURE.md) | 架构不变量与取舍：模块划分、库职责、部署拓扑、数据流 |
+| [docs/frontend-list-rendering.md](docs/frontend-list-rendering.md) | 前端四种列表视图、虚拟化、已读/收藏交互 |
+| [docs/offline-and-pwa.md](docs/offline-and-pwa.md) | Service Worker 离线策略、PWA manifest 与图标 |
 | [docs/docker-deployment.md](docs/docker-deployment.md) | 生产部署：镜像、编排、反代、存储、CI |
 | [docs/troubleshooting.md](docs/troubleshooting.md) | 踩坑记录：现象 → 原因 → 解法 |
-| [docs/ai-mcp-assistant.md](docs/ai-mcp-assistant.md) | MCP 助手集成方案 |
-| [docs/cloud-deployment-todo.md](docs/cloud-deployment-todo.md) | 上线检查清单与部署笔记 |
+| [docs/cloud-deployment-todo.md](docs/cloud-deployment-todo.md) | 尚未落地的事项与部署运维知识 |
+| [docs/archive/](docs/archive/) | 已归档方案稿（MCP 助手、dsh 桥接） |
 
 ## 许可证
 

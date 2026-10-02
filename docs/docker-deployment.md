@@ -103,7 +103,7 @@ docker build --target web    -t rssfed-web:latest    .
 
 **只转 `/api/*` 是最常见的踩坑**：ActivityPub 端点挂在 Hono 的 `app.all("*")` 兜底上，漏了 `/mcp`、`/.well-known/*`、`/ap/*` 会让联邦与 MCP 整体 404。
 
-其中 **`/ap/*` 最阴**：webfinger 走 `/.well-known/*`，能正常返回 200；外部实例据此拿到 `/ap/actor/{username}` 再回来取时才发现 404，外部表现为「能搜到账号、但无法关注 / 账号加载不出来」，而站点首页完全正常。2026-09-21 上线验收实测踩过这个坑，详见 [cloud-deployment-todo.md](cloud-deployment-todo.md) 的「本地端到端验收」一节。
+其中 **`/ap/*` 最阴**：webfinger 走 `/.well-known/*`，能正常返回 200；外部实例据此拿到 `/ap/actor/{username}` 再回来取时才发现 404，外部表现为「能搜到账号、但无法关注 / 账号加载不出来」，而站点首页完全正常。排障口径见 [troubleshooting.md](troubleshooting.md)。
 
 用自建 Nginx / 云负载均衡代替 Caddy 时，对照上表配置，并把上游指向宿主的 `127.0.0.1:3000`（web）与 `127.0.0.1:3001`（server）——compose 默认只把这两个端口绑到回环，公网直连不到。此时不要加 `--profile tls`，避免 80/443 冲突。
 
@@ -134,7 +134,7 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'Accept: application/activity+json' 
 curl -s -o /dev/null -w '%{http_code}\n' $BASE/mcp/                   # 不能是 3xx
 ```
 
-> `/ap/actor/{username}` 是 BotKit actor 的真实路径，**不是 `/users/*`**。2026-09-21 上线验收正是漏了这一条：webfinger 返回 200、首页正常，但 actor 一律 404，联邦功能整体不可用。详见 [cloud-deployment-todo.md](cloud-deployment-todo.md) 的「本地端到端验收」。
+> `/ap/actor/{username}` 是 BotKit actor 的真实路径，**不是 `/users/*`**。2026-09-21 上线验收正是漏了这一条：webfinger 返回 200、首页正常，但 actor 一律 404，联邦功能整体不可用。排障口径见 [troubleshooting.md](troubleshooting.md)。
 
 ## 4. 环境变量
 
@@ -185,7 +185,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 
 ## 7. 代码层生产开关（已完成）
 
-以下三项属于代码层，已在 [cloud-deployment-todo.md](cloud-deployment-todo.md) 的 P0-5/P0-6 修复并实测（恶意 Origin 403、看板未登录 401）：
+以下三项属于代码层，已修复并实测（恶意 Origin 403、看板未登录 401）：
 
 - [auth.ts](../packages/hono-server/src/auth.ts) 的 `trustedOrigins` 生产环境只认 `CORS_ORIGINS` 白名单，开发环境才放开通配。
 - [config.ts](../packages/hono-server/src/config.ts) 的 `isOriginAllowed` 仅在非生产放行 localhost 与私有网段。
