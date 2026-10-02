@@ -3,6 +3,7 @@
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 import ListActionsBar from '~/components/ListActionsBar.vue'
 import type { SubscriptionItem } from '~/types/rss'
+import type { GroupScanCursor } from '~/composables/usePouchDb'
 
 definePageMeta({
   layout: 'default'
@@ -42,19 +43,34 @@ const {
   syncedDocs: () => groupFeeds.value.reduce((n, feed) => n + (pouch.syncedDocsByFeed[feed.id] ?? 0), 0)
 })
 
-// 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
-const { loadMore } = useInfiniteList(() => grow())
-// EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
-const hasMoreGetter = () => hasMore.value
+// 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
+// 凑够一屏才 enrich 上屏（见 useUnreadFilter）。「全部标记为已读」作用在可见的那批上。
+const {
+  unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, toggleUnreadOnly, probing, scannedCount
+} = useUnreadFilter<GroupScanCursor>({
+  entries,
+  hasMore: () => hasMore.value,
+  grow: () => grow(),
+  scan: (cursor, limit, notAfter) => pouch.scanGroupPage(groupFeeds.value.map(feed => feed.id), cursor, limit, notAfter),
+  enrich: async (list) => {
+    // 与列表查询同口径：分组页的源名以订阅列表里的自定义名为准
+    const enriched = await pouch.enrichEntries(list)
+    return enriched.map(entry => ({
+      ...entry,
+      feed: { ...entry.feed, title: feedTitleMap.value[entry.feedId] ?? entry.feed.title }
+    }))
+  }
+})
+const markAllRead = useMarkAllRead(visibleEntries)
+
+// 滚动到底部附近时加载下一批；loadMore 同时供文章弹窗尾部的自动预加载复用（单飞防重入）
+const { loadMore } = useInfiniteList(loadMoreVisible)
 
 // 提示条是浮层（盖在列表顶部、不占布局），按滚动方向让位——下滑收起、上滑或回顶部露出
 const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
 
 // 列表视图：分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
 const { view, overridden, setView, resetView } = useGroupView(category)
-
-// 「全部标记为已读」：只标当前已加载的这批（见 useMarkAllRead）
-const markAllRead = useMarkAllRead(entries)
 
 onMounted(async () => {
   try {
@@ -107,7 +123,9 @@ watch(
           />
           <ListActionsBar
             :feed-ids="groupFeeds.map(f => f.id)"
-            :entry-count="entries.length"
+            :entry-count="visibleEntries.length"
+            :unread-only="unreadOnly"
+            @toggle-unread-only="toggleUnreadOnly"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
           />
@@ -162,8 +180,18 @@ watch(
           </UButton>
         </div>
 
+        <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
+        <NoUnreadState
+          v-else-if="unreadOnly && !visibleEntries.length && !loading"
+          :probing="probing"
+          :scanned="scannedCount"
+          :has-more="visibleHasMore()"
+          @scan-more="loadMoreVisible"
+          @show-all="toggleUnreadOnly"
+        />
+
         <div
-          v-else-if="!entries.length && !loading"
+          v-else-if="!visibleEntries.length && !loading"
           class="flex flex-col items-center py-12 gap-4"
         >
           <UIcon
@@ -181,9 +209,9 @@ watch(
           v-else
           class="min-h-0 flex-1"
           :view="view"
-          :entries="entries"
+          :entries="visibleEntries"
           :load-more="loadMore"
-          :has-more="hasMoreGetter"
+          :has-more="visibleHasMore"
           show-feed
         />
       </div>

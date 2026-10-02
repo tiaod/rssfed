@@ -30,20 +30,28 @@ const {
   syncedDocs: () => pouch.syncedDocsByFeed[virtualFeedId] ?? 0
 })
 
-// 分页加载：查询窗口逐步增大；页尾骨架进入视口就加载下一批（与其它列表页一致）
-const { loadMore } = useInfiniteList(() => grow())
-// EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
-const hasMoreGetter = () => hasMore.value
-
-// 提示条是浮层（盖在列表顶部、不占布局），按滚动方向让位——下滑收起、上滑或回顶部露出
-const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
-
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
 // （bot 产出用虚拟 feedId 入库，订阅文档同样是 subscription:bot:<id>，规则完全一致）
 const { view, overridden, setView, resetView, refreshPrefs } = useFeedView(virtualFeedId)
 
-// 「全部标记为已读」：只标当前已加载的这批（见 useMarkAllRead）
-const markAllRead = useMarkAllRead(entries)
+// 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
+// 凑够一屏才 enrich 上屏（见 useUnreadFilter）。「全部标记为已读」作用在可见的那批上。
+const {
+  unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, toggleUnreadOnly, probing, scannedCount
+} = useUnreadFilter({
+  entries,
+  hasMore: () => hasMore.value,
+  grow: () => grow(),
+  scan: (cursor, limit, notAfter) => pouch.scanFeedPage(virtualFeedId, cursor, limit, notAfter),
+  enrich: list => pouch.enrichEntries(list)
+})
+const markAllRead = useMarkAllRead(visibleEntries)
+
+// 提示条是浮层（盖在列表顶部、不占布局），按滚动方向让位——下滑收起、上滑或回顶部露出
+const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
+
+// 分页加载：查询窗口逐步增大；页尾骨架进入视口就加载下一批（与其它列表页一致）
+const { loadMore } = useInfiniteList(loadMoreVisible)
 
 /** bot 订阅文档与普通订阅同形，编辑弹窗直接复用（名字 / 分类 / 默认视图） */
 const editingItem = ref<EditableSubscription | null>(null)
@@ -130,7 +138,9 @@ async function toggleSubscribe() {
             sync-label="刷新订阅"
             :feed-id="virtualFeedId"
             :subscribed="subscribed"
-            :entry-count="entries.length"
+            :entry-count="visibleEntries.length"
+            :unread-only="unreadOnly"
+            @toggle-unread-only="toggleUnreadOnly"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
             @edit="openEdit"
@@ -177,8 +187,18 @@ async function toggleSubscribe() {
           @apply="applyNew"
         />
 
+        <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
+        <NoUnreadState
+          v-if="unreadOnly && !visibleEntries.length && !loading"
+          :probing="probing"
+          :scanned="scannedCount"
+          :has-more="visibleHasMore()"
+          @scan-more="loadMoreVisible"
+          @show-all="toggleUnreadOnly"
+        />
+
         <div
-          v-if="!entries.length && !loading"
+          v-else-if="!visibleEntries.length && !loading"
           class="flex flex-col items-center py-12 gap-4"
         >
           <UIcon
@@ -196,9 +216,9 @@ async function toggleSubscribe() {
           v-else
           class="min-h-0 flex-1"
           :view="view"
-          :entries="entries || []"
+          :entries="visibleEntries"
           :load-more="loadMore"
-          :has-more="hasMoreGetter"
+          :has-more="visibleHasMore"
         />
       </div>
 

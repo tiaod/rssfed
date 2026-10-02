@@ -1,4 +1,4 @@
-import type { Ref } from 'vue'
+import type { ComputedRef, Ref } from 'vue'
 import { usePouchDb } from '~/composables/usePouchDb'
 import { errorMessage } from '~/utils/errorMessage'
 import type { RssEntry } from '~/types/rss'
@@ -12,8 +12,11 @@ import type { RssEntry } from '~/types/rss'
  *
  * 写完直接把本地条目的 read 置真，**不重查列表**：重查会把滚动位置带回顶部，
  * 而用户刚点的只是「标已读」，没有理由动他的位置。
+ *
+ * 传进来的通常不是原始列表而是「只看未读」过滤后的可见列表（见 useUnreadFilter）：
+ * 确认浮层里的条数、实际写入的范围都跟用户此刻看到的一致。
  */
-export function useMarkAllRead(entries: Ref<RssEntry[]>) {
+export function useMarkAllRead(entries: Ref<RssEntry[]> | ComputedRef<RssEntry[]>) {
   const pouch = usePouchDb()
   const toast = useToast()
 

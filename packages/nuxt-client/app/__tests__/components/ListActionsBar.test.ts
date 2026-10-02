@@ -5,10 +5,11 @@ import type { DropdownMenuItem } from '@nuxt/ui'
 import ListActionsBar from '../../components/ListActionsBar.vue'
 
 /**
- * 列表页右上角的动作区：〔✓ 全部标记为已读〕〔⋮ 页面动作〕。
+ * 列表页右上角的动作区：〔只看未读〕〔✓ 全部标记为已读〕〔⋮ 页面动作〕。
  *
  * 盯四件事：菜单内容按页面能力拼、各动作抛对事件、**标记已读必须先确认**、
  * 以及按钮兼任的同步状态指示（同步中禁用转圈、失败变红）。
+ * 「只看未读」只负责渲染开关并抛事件，筛选本身由页面用 useUnreadFilter 做。
  */
 
 const H = vi.hoisted(() => ({
@@ -61,6 +62,11 @@ function markButton(wrapper: ReturnType<typeof mountBar>) {
 
 function moreButton(wrapper: ReturnType<typeof mountBar>) {
   return wrapper.get('button[aria-label="更多操作"]')
+}
+
+/** 「只看未读」开关（按 aria-label 找，别和标记已读混了） */
+function unreadButton(wrapper: ReturnType<typeof mountBar>) {
+  return wrapper.get('button[aria-label="只看未读"]')
 }
 
 function confirmButton(wrapper: ReturnType<typeof mountBar>) {
@@ -184,6 +190,38 @@ describe('ListActionsBar 的「全部标记为已读」确认步骤', () => {
 
     expect(wrapper.get('.popover-content').text()).toContain('同步失败：远端 503')
     expect(markButton(wrapper).attributes('title')).toContain('同步失败：远端 503')
+  })
+})
+
+describe('ListActionsBar 的「只看未读」开关', () => {
+  it('默认关闭：aria-pressed=false，点击抛 toggle-unread-only', async () => {
+    const wrapper = mountBar()
+
+    expect(unreadButton(wrapper).attributes('aria-pressed')).toBe('false')
+
+    await unreadButton(wrapper).trigger('click')
+    expect(wrapper.emitted('toggle-unread-only')).toHaveLength(1)
+  })
+
+  it('开启时高亮，title 说明怎么退出', () => {
+    const wrapper = mountBar({ unreadOnly: true })
+
+    expect(unreadButton(wrapper).attributes('aria-pressed')).toBe('true')
+    expect(unreadButton(wrapper).attributes('data-color')).toBe('primary')
+    expect(unreadButton(wrapper).attributes('title')).toBe('只看未读：已开启，点击显示全部')
+  })
+
+  it('开着筛选但没有未读时，标记按钮禁用并说明原因（区别于「列表空」）', () => {
+    const wrapper = mountBar({ unreadOnly: true, entryCount: 0 })
+
+    expect(markButton(wrapper).attributes('disabled')).toBeDefined()
+    expect(markButton(wrapper).attributes('title')).toBe('当前没有未读条目')
+  })
+
+  it('开着筛选时确认浮层按可见条数报数', () => {
+    const wrapper = mountBar({ unreadOnly: true, entryCount: 5 })
+
+    expect(wrapper.get('.popover-content').text()).toContain('把当前列表的 5 条标记为已读？')
   })
 })
 

@@ -29,19 +29,27 @@ const {
 // 首屏要等本地库重查一次
 const loading = ref(true)
 
-// 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
-const { loadMore } = useInfiniteList(() => grow())
-// EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
-const hasMoreGetter = () => hasMore.value
+// 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
+// 凑够一屏才 enrich 上屏（见 useUnreadFilter）。「全部标记为已读」作用在可见的那批上。
+const {
+  unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, toggleUnreadOnly, probing, scannedCount
+} = useUnreadFilter({
+  entries,
+  hasMore: () => hasMore.value,
+  grow: () => grow(),
+  scan: (cursor, limit, notAfter) => pouch.scanTimelinePage(cursor, limit, notAfter),
+  enrich: list => pouch.enrichEntries(list)
+})
+const markAllRead = useMarkAllRead(visibleEntries)
+
+// 滚动到底部附近时加载下一批；loadMore 同时供文章弹窗尾部的自动预加载复用（单飞防重入）
+const { loadMore } = useInfiniteList(loadMoreVisible)
 
 // 提示条是浮层（盖在列表顶部、不占布局），按滚动方向让位——下滑收起、上滑或回顶部露出
 const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnchorRef)
 
 // 列表视图：默认取全局设置（默认瀑布流）；切换按钮只改本次会话，不落盘
 const { view, overridden, setView, resetView } = useTimelineView()
-
-// 「全部标记为已读」：只标当前已加载的这批（见 useMarkAllRead）
-const markAllRead = useMarkAllRead(entries)
 
 onMounted(async () => {
   try {
@@ -123,7 +131,9 @@ watch(
             @reset="resetView"
           />
           <ListActionsBar
-            :entry-count="entries.length"
+            :entry-count="visibleEntries.length"
+            :unread-only="unreadOnly"
+            @toggle-unread-only="toggleUnreadOnly"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
           />
@@ -164,8 +174,18 @@ watch(
           />
         </div>
 
+        <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
+        <NoUnreadState
+          v-else-if="unreadOnly && !visibleEntries.length"
+          :probing="probing"
+          :scanned="scannedCount"
+          :has-more="visibleHasMore()"
+          @scan-more="loadMoreVisible"
+          @show-all="toggleUnreadOnly"
+        />
+
         <div
-          v-else-if="!entries.length"
+          v-else-if="!visibleEntries.length"
           class="flex flex-col items-center py-12 gap-4"
         >
           <UIcon
@@ -190,9 +210,9 @@ watch(
           v-else
           class="min-h-0 flex-1"
           :view="view"
-          :entries="entries"
+          :entries="visibleEntries"
           :load-more="loadMore"
-          :has-more="hasMoreGetter"
+          :has-more="visibleHasMore"
           show-feed
         />
       </div>

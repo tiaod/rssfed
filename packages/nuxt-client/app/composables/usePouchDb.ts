@@ -156,6 +156,29 @@ interface StateDoc {
   name?: string
 }
 
+/**
+ * 视图扫描游标：下一批从哪一行往下读（对应视图 key 的尾部 `[发布时间(ms), _id]`）。
+ *
+ * 游标是**排他上界**的替代：给定 [ms, id] 时查询用 `startkey=[ms, id]`（含）往下走，
+ * 因此调用方拿到 cursor 后直接传回来就能续扫，不会重复也不会漏。
+ */
+export interface ScanCursor {
+  ms: number
+  id: string
+}
+
+/** 分组扫描游标：分组视图是多个 per-feed 桶的归并，每个源各记一个位置 */
+export interface GroupScanCursor {
+  byFeed: Record<string, ScanCursor>
+}
+
+/** 一页扫描结果：投影行（已合已读态，未 enrich）+ 续扫游标 + 是否已扫到底 */
+export interface ScanPage<C = ScanCursor> {
+  rows: RssEntry[]
+  cursor: C
+  exhausted: boolean
+}
+
 /** nuxtApp 上挂载的 PouchDB 共享状态（用 $ 前缀避免与 Nuxt 内部字段冲突） */
 type NuxtAppWithPouchState = ReturnType<typeof useNuxtApp> & { $pouchDbState?: PouchDbState }
 
@@ -1430,16 +1453,34 @@ export function usePouchDb() {
 
   /** 视图翻页：翻转窗口大小下取分桶最新条目（不补全 feed 元信息，由调用方统一 enrich） */
   async function queryByView(view: string, feedId: string | undefined, limit: number): Promise<RssEntry[]> {
+    return queryViewFrom(view, feedId, null, limit)
+  }
+
+  /**
+   * 视图范围查询（desc）：从 `after`（**含**该行）往下取 limit 行。
+   *
+   * after 为 null 表示从最新一行开始（等价于原来的「只给 limit」翻页）。
+   * 端点用 startkey 而不是 skip：skip 在 CouchDB/PouchDB 里要先走完被跳过的行，
+   * 深翻时会退化成 O(偏移量)。含端点带来的重复行由 scanPageRows 负责丢掉。
+   */
+  async function queryViewFrom(
+    view: string,
+    feedId: string | undefined,
+    after: ScanCursor | null,
+    limit: number
+  ): Promise<RssEntry[]> {
     const db = getEntriesDb()
     await ensureLocalViews()
     const opts: Record<string, unknown> = { descending: true, include_docs: false, reduce: false, limit }
-    // 限定到 feed 桶内：desc 起点取该 feed 最新的一条（startkey=[feedId, MAX, '']）。
+    // 限定到 feed 桶内：desc 起点取该 feed 最新的一条（未传游标时是 [feedId, MAX, '']）。
     // 关键：desc 只给 startkey 会沿索引一路扫到开头，越过桶底串进其它 feed；
     // 必须再用 endkey=[feedId] 兜住桶底。数组键里 [feedId] 排在全部 [feedId,*] 之前，
     // 且不会有行恰等于该键，因此正好在不漏本桶的同时把扫描截断在桶边界。
     if (feedId !== undefined) {
-      opts.startkey = [feedId, VIEW_MAX_TS, '']
+      opts.startkey = after ? [feedId, after.ms, after.id] : [feedId, VIEW_MAX_TS, '']
       opts.endkey = [feedId]
+    } else if (after) {
+      opts.startkey = [after.ms, after.id]
     }
     try {
       const res = await db.query(view, opts)
@@ -1447,6 +1488,131 @@ export function usePouchDb() {
     } catch {
       return []
     }
+  }
+
+  /** 扫描一页的默认批量：投影行很小（不带正文与附件），比列表的 50 大得多才划算 */
+  const SCAN_PAGE_SIZE = 300
+
+  /**
+   * 取一页投影行（不给已读态、不 enrich）。
+   *
+   * `start` 是查询起点且含端点。`dropStart` 表示这个起点是「上一页的末尾」——
+   * 多要一行用来抵消端点重复（游标行若已被删就自然少一行），保证页与页不重不漏。
+   * 返回 <= limit 行，`rows.length < limit` 即已读到底。
+   */
+  async function scanPageRows(
+    view: string,
+    feedId: string | undefined,
+    start: ScanCursor | null,
+    limit: number,
+    dropStart: boolean
+  ): Promise<RssEntry[]> {
+    const rows = await queryViewFrom(view, feedId, start, dropStart ? limit + 1 : limit)
+    if (dropStart && start && rows[0]?.id === start.id) rows.shift()
+    return rows.slice(0, limit)
+  }
+
+  /** 由一页投影行推出续扫游标（页尾那行的 key）与是否已扫到底 */
+  function cursorOfPage(rows: RssEntry[], limit: number): { cursor: ScanCursor, exhausted: boolean } {
+    const last = rows[rows.length - 1]
+    return {
+      cursor: last
+        ? { ms: Date.parse(last.publishedAt), id: last.id }
+        : { ms: VIEW_MAX_TS, id: '' },
+      exhausted: rows.length < limit
+    }
+  }
+
+  /**
+   * 时间线扫描一页：**只合已读态，不做 enrich**。
+   *
+   * 「只看未读」要沿时间序深挖才能凑够一屏未读，而 enrich（源元信息 + 封面附件 + blob URL）
+   * 是上屏才该付的成本 —— 扫到的行绝大多数会被丢掉，给它们取封面纯属浪费。
+   * 已读态必须合（否则挑不出未读），但那只是一次批量 allDocs，没有附件与 DOM。
+   *
+   * `notAfter` 是扫描上界（通常传当前列表最新一条）：列表是快照，同步进来的新条目要等用户
+   * 点「查看」才该出现，扫描不能把它提前放出来。
+   */
+  async function scanTimelinePage(
+    after: ScanCursor | null,
+    limit = SCAN_PAGE_SIZE,
+    notAfter: ScanCursor | null = null
+  ): Promise<ScanPage> {
+    const start = after ?? notAfter
+    const rows = await scanPageRows(TIMELINE_VIEW, undefined, start, limit, after !== null)
+    await attachReadState(rows)
+    return { rows, ...cursorOfPage(rows, limit) }
+  }
+
+  /** 单个订阅源的扫描一页：语义同 scanTimelinePage，只是限定在该源的桶内 */
+  async function scanFeedPage(
+    feedId: string,
+    after: ScanCursor | null,
+    limit = SCAN_PAGE_SIZE,
+    notAfter: ScanCursor | null = null
+  ): Promise<ScanPage> {
+    const start = after ?? notAfter
+    const rows = await scanPageRows(BY_FEED_VIEW, feedId, start, limit, after !== null)
+    await attachReadState(rows)
+    return { rows, ...cursorOfPage(rows, limit) }
+  }
+
+  /**
+   * 分组扫描一页：每源各取一页再按时间归并，游标按源分别记。
+   *
+   * 归并可能在某源的页中间停下（已经凑够 limit 行），该源的续扫游标就停在**已消费的最后一行**；
+   * 该源这一页没被消费的行下一轮会重新读一遍 —— 多花一点读，但不漏行。
+   */
+  async function scanGroupPage(
+    feedIds: string[],
+    after: GroupScanCursor | null,
+    limit = SCAN_PAGE_SIZE,
+    notAfter: ScanCursor | null = null
+  ): Promise<ScanPage<GroupScanCursor>> {
+    if (feedIds.length === 0) return { rows: [], cursor: { byFeed: {} }, exhausted: true }
+    const cursors = after?.byFeed ?? {}
+
+    const perFeed = await Promise.all(feedIds.map((id) => {
+      const cursor = cursors[id]
+      return scanPageRows(BY_FEED_VIEW, id, cursor ?? notAfter, limit, cursor !== undefined)
+    }))
+
+    const ptr = perFeed.map(() => 0)
+    const rows: RssEntry[] = []
+    while (rows.length < limit) {
+      let bestIdx = -1
+      let bestTs = -Infinity
+      for (let i = 0; i < perFeed.length; i++) {
+        const row = perFeed[i]![ptr[i]!]
+        if (!row) continue
+        const ts = Date.parse(row.publishedAt)
+        if (ts > bestTs) {
+          bestTs = ts
+          bestIdx = i
+        }
+      }
+      if (bestIdx === -1) break
+      rows.push(perFeed[bestIdx]![ptr[bestIdx]!]!)
+      ptr[bestIdx]!++
+    }
+
+    // 只保留当前订阅源集合的游标：退订的源不该在游标里留残留
+    const nextByFeed: Record<string, ScanCursor> = {}
+    for (const id of feedIds) {
+      const cursor = cursors[id]
+      if (cursor) nextByFeed[id] = cursor
+    }
+    for (let i = 0; i < perFeed.length; i++) {
+      const consumed = ptr[i]!
+      if (consumed === 0) continue
+      const last = perFeed[i]![consumed - 1]!
+      nextByFeed[feedIds[i]!] = { ms: Date.parse(last.publishedAt), id: last.id }
+    }
+
+    // 每个源都「取不满一页且已全部消费」才算扫到底
+    const exhausted = perFeed.every((feedRows, i) => feedRows.length < limit && ptr[i] === feedRows.length)
+    await attachReadState(rows)
+    return { rows, cursor: { byFeed: nextByFeed }, exhausted }
   }
 
   /** 时间线：一次性查询所有订阅源的最新条目（走全局视图，最新在前） */
@@ -1904,6 +2070,15 @@ export function usePouchDb() {
     queryFeedEntries,
     queryGroupEntries,
     querySavedEntries,
+    /**
+     * 把「投影行」补成可上屏的条目（源名 / 站点 / 图标 / 封面 blob URL）。
+     * 只有真要上屏的条目才该走它 —— 扫描阶段一律不调用（见 scanTimelinePage 的说明）。
+     */
+    enrichEntries,
+    /** 「只看未读」的深扫：按游标分批走视图，只合已读态、不 enrich */
+    scanTimelinePage,
+    scanFeedPage,
+    scanGroupPage,
     getEntry,
     getEntryAttachment,
     getFeedImageUrl,

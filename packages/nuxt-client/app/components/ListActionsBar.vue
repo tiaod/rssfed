@@ -6,7 +6,9 @@
  * 而状态来自 `useManualSync`，每个实例各持一份 —— 分成两个组件就会出现「菜单里点了同步、
  * 外面的指示按钮不动」。
  *
- * 布局：〔切换视图〕〔✓ 全部标记为已读〕〔⋮ 页面动作〕。视图切换不在这里（见 ListViewSwitcher）。
+ * 布局：〔切换视图〕〔只看未读〕〔✓ 全部标记为已读〕〔⋮ 页面动作〕。
+ * 视图切换不在这里（见 ListViewSwitcher），「只看未读」的开关状态由页面持有（见 useUnreadFilter），
+ * 这里只负责把它渲染成一个可点的开关：开着时高亮 + aria-pressed，页面据此过滤列表。
  *
  * 「标记为已读」按钮：
  *   点击 → 就地在按钮旁弹出确认浮层（一次批量写、没有「全部撤销」，值得多一步），确认后才抛事件；
@@ -30,21 +32,25 @@ const props = withDefaults(defineProps<{
   syncLabel?: string
   /** 传了才显示订阅类动作（编辑订阅 / 取消订阅 / 订阅） */
   feedId?: string
-  /** 当前列表已加载的条目数（= 会被标记的总数）；0 时按钮不可点 */
+  /** 当前列表已加载的条目数（= 会被标记的总数）；0 时按钮不可点。开着「只看未读」时传的是可见条数 */
   entryCount?: number
   /** 是否已订阅（bot 产出页在「订阅 / 取消订阅」之间切换）；不传按已订阅处理 */
   subscribed?: boolean
+  /** 「只看未读」是否开启（状态由页面持有，这里只渲染开关） */
+  unreadOnly?: boolean
 }>(), {
   feedIds: undefined,
   syncLabel: '同步订阅',
   feedId: undefined,
   entryCount: 0,
-  subscribed: true
+  subscribed: true,
+  unreadOnly: false
 })
 
 const emit = defineEmits<{
   'synced': [outcome: ManualSyncOutcome]
   'mark-all-read': []
+  'toggle-unread-only': []
   'edit': []
   'subscribe': []
   'unsubscribe': []
@@ -67,7 +73,10 @@ const markAllReadDisabled = computed(() => props.entryCount === 0 || syncing.val
 const markAllReadTooltip = computed(() => {
   if (syncing.value) return '同步中…同步结束后可以标记为已读'
   if (hasError.value) return `同步失败：${errorDetail.value}`
-  return props.entryCount === 0 ? '当前列表没有条目' : '全部标记为已读'
+  if (props.entryCount === 0) {
+    return props.unreadOnly ? '当前没有未读条目' : '当前列表没有条目'
+  }
+  return props.unreadOnly ? '把未读条目全部标记为已读' : '全部标记为已读'
 })
 
 function confirmMarkAllRead() {
@@ -120,6 +129,18 @@ const items = computed<DropdownMenuItem[][]>(() => {
 
 <template>
   <div class="flex items-center gap-1.5">
+    <!-- 「只看未读」开关：纯客户端过滤已加载的条目（见 useUnreadFilter），与同步状态无关 -->
+    <UButton
+      icon="i-lucide-circle-dot"
+      :color="unreadOnly ? 'primary' : 'neutral'"
+      :variant="unreadOnly ? 'soft' : 'ghost'"
+      :aria-pressed="unreadOnly"
+      :title="unreadOnly ? '只看未读：已开启，点击显示全部' : '只看未读'"
+      aria-label="只看未读"
+      size="sm"
+      @click="emit('toggle-unread-only')"
+    />
+
     <UPopover
       v-model:open="confirmOpen"
       :content="{ align: 'end', sideOffset: 8 }"

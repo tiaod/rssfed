@@ -48,13 +48,21 @@ const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnch
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
 const { view, overridden, setView, resetView, refreshPrefs } = useFeedView(feedId)
 
-// 「全部标记为已读」：只标当前已加载的这批（见 useMarkAllRead）
-const markAllRead = useMarkAllRead(entries)
+// 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
+// 凑够一屏才 enrich 上屏（见 useUnreadFilter）。「全部标记为已读」作用在可见的那批上。
+const {
+  unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, toggleUnreadOnly, probing, scannedCount
+} = useUnreadFilter({
+  entries,
+  hasMore: () => hasMore.value,
+  grow: () => grow(),
+  scan: (cursor, limit, notAfter) => pouch.scanFeedPage(feedId, cursor, limit, notAfter),
+  enrich: list => pouch.enrichEntries(list)
+})
+const markAllRead = useMarkAllRead(visibleEntries)
 
-// 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
-const { loadMore } = useInfiniteList(() => grow())
-// EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
-const hasMoreGetter = () => hasMore.value
+// 滚动到底部附近时加载下一批；loadMore 同时供文章弹窗尾部的自动预加载复用（单飞防重入）
+const { loadMore } = useInfiniteList(loadMoreVisible)
 
 onMounted(async () => {
   // 订阅名先从本地订阅文档取（离线可用，也是侧边栏显示的名字），取不到再回退接口标题
@@ -151,7 +159,9 @@ async function unsubscribe() {
             :feed-ids="[feedId]"
             sync-label="刷新订阅"
             :feed-id="feedId"
-            :entry-count="entries.length"
+            :entry-count="visibleEntries.length"
+            :unread-only="unreadOnly"
+            @toggle-unread-only="toggleUnreadOnly"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
             @edit="openEdit"
@@ -182,7 +192,7 @@ async function unsubscribe() {
           @apply="applyNew"
         />
 
-        <template v-if="!entries.length && !loading">
+        <template v-if="!visibleEntries.length && !loading">
           <!-- 空列表：没有可滚动的内容，页头固定在空态上方 -->
           <FeedHeader
             v-if="feed"
@@ -190,7 +200,20 @@ async function unsubscribe() {
             class="mb-2 px-4 sm:px-6"
           />
 
-          <div class="flex flex-col items-center py-12 gap-4">
+          <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
+          <NoUnreadState
+            v-if="unreadOnly"
+            :probing="probing"
+            :scanned="scannedCount"
+            :has-more="visibleHasMore()"
+            @scan-more="loadMoreVisible"
+            @show-all="toggleUnreadOnly"
+          />
+
+          <div
+            v-else
+            class="flex flex-col items-center py-12 gap-4"
+          >
             <UIcon
               name="i-lucide-file-text"
               class="size-12 text-muted"
@@ -205,9 +228,9 @@ async function unsubscribe() {
           <EntryList
             class="min-h-0 flex-1"
             :view="view"
-            :entries="entries || []"
+            :entries="visibleEntries"
             :load-more="loadMore"
-            :has-more="hasMoreGetter"
+            :has-more="visibleHasMore"
             :header="hasFeedHeader"
           >
             <!-- 页头作为列表首项：跟条目一起滚走，读长列表时不再固定占住视图 -->
