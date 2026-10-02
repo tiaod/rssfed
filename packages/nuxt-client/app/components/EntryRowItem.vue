@@ -7,7 +7,7 @@
  */
 import { computed } from 'vue'
 import type { RssEntry } from '~/types/rss'
-import { entryExcerpt, entryFeedName } from '~/utils/entryDisplay'
+import { entryDate, entryExcerpt, entryFeedName } from '~/utils/entryDisplay'
 
 const props = defineProps<{
   entry: RssEntry
@@ -23,12 +23,7 @@ const excerpt = computed(() => entryExcerpt(props.entry, 120))
 const byline = computed(() =>
   props.showFeed ? entryFeedName(props.entry) : (props.entry.author || entryFeedName(props.entry))
 )
-const date = computed(() => {
-  const time = new Date(props.entry.publishedAt)
-  return Number.isNaN(time.getTime())
-    ? ''
-    : time.toLocaleDateString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric' })
-})
+const date = computed(() => entryDate(props.entry))
 </script>
 
 <template>

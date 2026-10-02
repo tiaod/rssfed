@@ -30,7 +30,7 @@ const collapsedGroups = ref<Set<string>>(new Set())
  */
 const groupViews = ref<Record<string, ListView>>({})
 
-/** 分组行右侧菜单：四种视图 + （已配置时）跟随全局默认 */
+/** 分组行右侧菜单：全部视图 + （已配置时）跟随全局默认 */
 function groupViewItems(name: string): DropdownMenuItem[][] {
   const current = groupViews.value[name]
   const groups: DropdownMenuItem[][] = [

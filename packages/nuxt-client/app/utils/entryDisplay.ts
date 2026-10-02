@@ -1,5 +1,5 @@
 /**
- * 列表条目的展示派生值：四种视图（瀑布流 / 博客 / 列表 / 图片）共用同一套口径。
+ * 列表条目的展示派生值：各视图（瀑布流 / 博客 / 列表 / 表格 / 图片）共用同一套口径。
  *
  * 纯函数、无 Nuxt / 浏览器依赖，方便单测；组件只负责把它们摆进各自的版式。
  */
@@ -44,6 +44,20 @@ export function entryCoverImage(entry: Pick<RssEntry, 'coverUrl' | 'title'>) {
 /** 署名用的订阅源名（feed 元信息由 enrichEntries 补全，缺失时兜底） */
 export function entryFeedName(entry: Pick<RssEntry, 'feed'>): string {
   return entry.feed?.title || '未知来源'
+}
+
+/**
+ * 条目日期文本（zh-CN 数字格式），省略年份以外的精度。
+ *
+ * 列表视图与表格视图都要在行里显示日期，口径抽在这里 —— 同一个 publishedAt 在两处
+ * 显示成两种样子会让人以为数据不同。解析失败（字段缺失 / 非法时间）返回空串，
+ * 由调用方决定是省略这一段还是留空。
+ */
+export function entryDate(entry: Pick<RssEntry, 'publishedAt'>): string {
+  const time = new Date(entry.publishedAt)
+  return Number.isNaN(time.getTime())
+    ? ''
+    : time.toLocaleDateString('zh-CN', { year: 'numeric', month: 'numeric', day: 'numeric' })
 }
 
 /** 没有封面、或封面元信息缺失时的兜底宽高比（4:3 横图，见 entryCoverAspect） */

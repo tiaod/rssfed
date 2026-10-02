@@ -3,6 +3,7 @@ import type { RssEntry } from '../../types/rss'
 import {
   entryCoverAspect,
   entryCoverImage,
+  entryDate,
   entryExcerpt,
   entryFeedName,
   IMAGE_TILE_FALLBACK_ASPECT
@@ -55,6 +56,17 @@ describe('entryFeedName', () => {
   it('源名缺失时兜底', () => {
     expect(entryFeedName({ feed: { title: '' } } as FeedPick)).toBe('未知来源')
     expect(entryFeedName({} as FeedPick)).toBe('未知来源')
+  })
+})
+
+describe('entryDate（列表行与表格行共用的日期口径）', () => {
+  it('按 zh-CN 数字格式输出年月日', () => {
+    expect(entryDate({ publishedAt: '2026-07-01T12:00:00.000Z' })).toMatch(/^2026\/7\/1$/)
+  })
+
+  it('时间缺失 / 非法时返回空串，由调用方决定省略这一段', () => {
+    expect(entryDate({ publishedAt: '' })).toBe('')
+    expect(entryDate({ publishedAt: 'not-a-date' })).toBe('')
   })
 })
 

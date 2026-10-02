@@ -5,7 +5,7 @@
  * 设置页（默认值选择）、订阅文档读取校验都从这里取同一份枚举，避免各处写字符串。
  */
 
-export const LIST_VIEWS = ['masonry', 'blog', 'list', 'image'] as const
+export const LIST_VIEWS = ['masonry', 'blog', 'list', 'table', 'image'] as const
 
 export type ListView = (typeof LIST_VIEWS)[number]
 
@@ -36,6 +36,13 @@ export const LIST_VIEW_META: Record<ListView, ListViewMeta> = {
     label: '列表',
     icon: 'i-lucide-rows-3',
     description: '紧凑单行：小缩略图 + 标题 + 两行摘要'
+  },
+  table: {
+    label: '表格',
+    icon: 'i-lucide-table',
+    // 说明里刻意不出现其它视图的标签：切换菜单的可访问名是「标签 + 说明」，而验证脚本按名字
+    // 包含匹配菜单项（见 report/list-views/verify.mjs），撞词会让「列表」这类名字匹配到两项。
+    description: '一行一条：来源 + 标题（后接浅灰摘要）+ 日期，像邮件客户端那样扫读'
   },
   image: {
     label: '图片',

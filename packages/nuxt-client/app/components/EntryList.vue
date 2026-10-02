@@ -1,13 +1,26 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import type { TableColumn } from '@nuxt/ui'
 import type { RssEntry } from '~/types/rss'
 import { DEFAULT_LIST_VIEW, type ListView } from '~/utils/listViews'
-import { entryCoverAspect, IMAGE_TILE_FALLBACK_ASPECT } from '~/utils/entryDisplay'
+import {
+  entryCoverAspect,
+  entryDate,
+  entryExcerpt,
+  entryFeedName,
+  IMAGE_TILE_FALLBACK_ASPECT
+} from '~/utils/entryDisplay'
 // 显式导入：单测环境没有 Nuxt 组件清单，隐式解析会静默退化成「渲染不出来」
 import EntryCardItem from '~/components/EntryCardItem.vue'
 import EntryBlogItem from '~/components/EntryBlogItem.vue'
 import EntryRowItem from '~/components/EntryRowItem.vue'
 import EntryImageItem from '~/components/EntryImageItem.vue'
+
+/**
+ * 自己转发 $attrs：模板是 ScrollArea / Table 两个分支，Vue 对「多根节点」不再自动继承
+ * 属性，页面给的 `flex-1 min-h-0` 会当场丢掉（两种分支机构都靠它拿到确定高度）。
+ */
+defineOptions({ inheritAttrs: false })
 
 const props = defineProps<{
   entries: RssEntry[]
@@ -26,7 +39,7 @@ const props = defineProps<{
    */
   header?: boolean
   /**
-   * 视口外上下各预渲染几个条目（不传时按列数算：至少 3，多列时约两行）。
+   * 视口外上下各预渲染几个条目（不传时按列数算：至少 3，多列时约两行；表格视图按 8 行）。
    *
    * 注意它是「条目数」而不是「行数」——多列时同样的值只覆盖不到一行，所以默认值随列数放大。
    * 实测（390×900、连续滚动 85 帧）单列下 6 → 18 帧超过 20ms、3 → 4~5 帧、1 → 0~1 帧：
@@ -34,9 +47,10 @@ const props = defineProps<{
    */
   overscan?: number
   /**
-   * 列表版式。四种视图共用这一套虚拟化外壳（ScrollArea + 泳道虚拟化 + 页头 + 页尾骨架），
-   * 只有 item 渲染与布局参数（列数 / 间距 / 高度估算）按视图切换。
-   * 为什么不用 UBlogPosts / UPageList 当容器：见下面 VIEW_LAYOUT 的说明。
+   * 列表版式。除「表格」外的四种视图共用这一套虚拟化外壳（ScrollArea + 泳道虚拟化 +
+   * 页头 + 页尾骨架），只有 item 渲染与布局参数（列数 / 间距 / 高度估算）按视图切换；
+   * 表格走 Nuxt UI 的 Table（自带 virtualize），见 TABLE_ROW_HEIGHT 那段说明。
+   * 为什么不用 UBlogPosts / UPageList 当容器：见下面 VIEW_BREAKPOINTS 的说明。
    */
   view?: ListView
 }>()
@@ -120,6 +134,8 @@ const VIEW_BREAKPOINTS: Record<ListView, ReadonlyArray<readonly [number, number]
     [0, 1]
   ],
   list: [[0, 1]],
+  // 表格恒为单列，且走的是 Table 分支（不用泳道虚拟化）：这里只为枚举完整、不参与布局
+  table: [[0, 1]],
   // 图片瀑布流：图块窄，手机上也能放两列
   image: [
     [1536, 5], // 2xl
@@ -139,6 +155,7 @@ const VIEW_GAP: Record<ListView, number> = {
   masonry: 16,
   blog: 24,
   list: 0,
+  table: 0, // 同上：表格分支不吃这个值
   image: 8
 }
 
@@ -382,9 +399,191 @@ function handleOpen(entry: RssEntry) {
     props.loadMore ? { loadMore: props.loadMore, hasMore: props.hasMore ?? (() => true) } : undefined
   )
 }
+
+// ── 表格视图 ──────────────────────────────────────────────────────────────
+
+/**
+ * 表格视图（一行一条）直接用 Nuxt UI 的 Table，而不是复用上面那套 ScrollArea 泳道虚拟化。
+ *
+ * 泳道虚拟化的抽象是「index -> 一个格子」，条目要自己按列摆放、跨列的东西还得复制占位（见
+ * HeaderItem）；表格的抽象是「行 -> table」，列宽由 table 布局算、列头能 sticky。硬塞进泳道
+ * 等于自己把 table 布局复刻一遍，而 UTable 自带 virtualize（同样是 @tanstack/vue-virtual），
+ * 「只渲染视口附近的行」这条性能口径不变 —— 它的根节点就是滚动容器，页面给的
+ * `flex-1 min-h-0` 落在根上（见模板）。一行一条、行高固定，也就不需要逐条测量。
+ */
+const TABLE_ROW_HEIGHT = 53
+
+/**
+ * 表格列：来源 / 标题（标题后紧跟浅灰摘要，同一行）/ 日期。
+ *
+ * 列宽只写在 th 上：表格是 table-fixed（见模板的 ui 覆盖），首行即列宽；标题列不写宽度，
+ * 于是吃掉剩余空间、由 truncate 收尾 —— 一行一条的前提。
+ * 两侧列在窄屏收窄（`sm:` 还原）：固定布局下它们把宽度吃光，手机上的标题就只剩几十像素。
+ */
+const tableColumns = computed<TableColumn<RssEntry>[]>(() => [
+  {
+    id: 'source',
+    header: props.showFeed ? '来源' : '作者',
+    meta: { class: { th: 'w-20 sm:w-48' } }
+  },
+  { id: 'title', header: '标题' },
+  {
+    id: 'date',
+    header: '日期',
+    // 主题的 th / td 都是左对齐，日期列单独靠右（两处都要写，th 与 td 是两套类）
+    meta: { class: { th: 'w-24 sm:w-28 text-right', td: 'text-right' } }
+  }
+])
+
+/**
+ * 行级样式：已读整行淡显，与其它视图同一口径。
+ *
+ * 表格的行由 UTable 生成，挂不上 `data-entry-id` 这类属性，所以只能走它的 meta（class 允许
+ * 是以行为参数的函数）。选中高亮不做：表格视图不参与宽屏阅读栏（见 useReaderPaneMode），
+ * 打开的是弹窗，没有「左边哪一行对应右边正文」要指。
+ */
+const tableMeta = {
+  class: {
+    tr: (row: { original: RssEntry }) => (row.original.read ? 'opacity-60' : '')
+  }
+}
+
+/** 表格里的署名：聚合视图署源名、单源页署名作者（与其它视图同规则） */
+function tableByline(entry: RssEntry): string {
+  return props.showFeed ? entryFeedName(entry) : (entry.author || entryFeedName(entry))
+}
+
+/** 表格行里的摘要：只取一段，超长交给 CSS 截断（与列表视图同一份投影） */
+function tableExcerpt(entry: RssEntry): string {
+  return entryExcerpt(entry, 160)
+}
+
+/** 行点击：整行都是打开详情的热区（UTable 会挡掉行内 button / a 上的点击，避免双开） */
+function handleTableSelect(_event: Event, row: { original: RssEntry }) {
+  handleOpen(row.original)
+}
+
+/**
+ * 键盘打开：UTable 只把行标成 `role="button"` + `tabindex`，不给 keydown，Enter 由这里代理。
+ * 监听挂在根上（透传到 UTable 根节点），所以靠 DOM 找回这一行 —— 行上挂不了自定义属性，
+ * 标记落在来源/标题格里（两格都在同一个 tr 下）。
+ */
+function handleTableKeydown(event: KeyboardEvent) {
+  if (!(event.target instanceof HTMLElement)) return
+  const id = event.target.closest('tr')?.querySelector('[data-entry-id]')?.getAttribute('data-entry-id')
+  const entry = id ? props.entries.find(item => item.id === id) : undefined
+  if (!entry) return
+  event.preventDefault()
+  handleOpen(entry)
+}
 </script>
 
 <template>
+  <!--
+    表格视图：Nuxt UI 的 Table（自带 virtualize）。一行一条，标题后面紧跟浅灰摘要 —— 版式参考
+    邮件列表那种「一行扫完」的排布（来源 / 标题+摘要 / 日期）。
+
+    它和下面 ScrollArea 分支共用同一套「只渲染视口附近 + 页尾骨架触底加载」的口径，但容器
+    不同：UTable 的根节点就是滚动容器，所以页面给的 `flex-1 min-h-0` 必须落在它的根上
+    （$attrs 透传，见 defineOptions 的说明），而不能像 ScrollArea 那样套一层 h-full。
+    `table-fixed` + `w-full` 是为了让标题列的 truncate 真正生效：固定布局下首行列宽即列宽，
+    而**宽度必须是确定值** —— 只给 `min-w-full` 时表格自己算出来的宽度是「内容最小宽度」，
+    表头那几个 `whitespace-nowrap` 的单元格会把它撑到几千像素，日期列当场被挤出可视区。
+  -->
+  <UTable
+    v-if="view === 'table'"
+    v-bind="$attrs"
+    :data="entries"
+    :columns="tableColumns"
+    :meta="tableMeta"
+    :virtualize="{ estimateSize: TABLE_ROW_HEIGHT, overscan: overscan ?? 8 }"
+    :ui="{ base: 'table-fixed w-full' }"
+    sticky="header"
+    :on-select="handleTableSelect"
+    empty="暂无条目"
+    @keydown.enter="handleTableKeydown"
+  >
+    <!-- 页头（单源页的订阅源描述）当作表体的第一行：和条目一起滚走，与其它视图同一口径 -->
+    <template
+      v-if="header"
+      #body-top
+    >
+      <tr>
+        <td :colspan="tableColumns.length">
+          <div class="px-4">
+            <slot name="header" />
+          </div>
+        </td>
+      </tr>
+    </template>
+
+    <template #source-cell="{ row }">
+      <div
+        :data-entry-id="row.original.id"
+        class="flex min-w-0 items-center gap-1.5"
+      >
+        <UAvatar
+          v-if="showFeed"
+          :src="row.original.feed?.image"
+          :alt="entryFeedName(row.original)"
+          :text="entryFeedName(row.original).trim()[0] ?? 'R'"
+          size="3xs"
+          class="shrink-0"
+        />
+        <span class="truncate">{{ tableByline(row.original) }}</span>
+      </div>
+    </template>
+
+    <!-- 标题加粗、摘要浅灰紧跟其后（同一行流式截断）：标题长了先挤掉摘要，与邮件列表一致 -->
+    <template #title-cell="{ row }">
+      <div class="truncate">
+        <span
+          v-if="!row.original.read"
+          class="mr-1.5 inline-block size-1.5 rounded-full bg-primary align-middle"
+          data-unread="true"
+        >
+          <span class="sr-only">未读</span>
+        </span>
+        <span class="font-medium text-highlighted">{{ row.original.title }}</span>
+        <span
+          v-if="tableExcerpt(row.original)"
+          class="text-muted"
+        > {{ tableExcerpt(row.original) }}</span>
+      </div>
+    </template>
+
+    <template #date-cell="{ row }">
+      <time
+        :datetime="row.original.publishedAt"
+        class="text-dimmed"
+      >{{ entryDate(row.original) }}</time>
+    </template>
+
+    <!-- 页尾加载骨架 = 触底信号：骨架进视口就加载下一批（与其它视图同一套 observer） -->
+    <template #body-bottom>
+      <tr
+        v-if="showSkeleton"
+        :ref="registerSkeleton"
+        aria-hidden="true"
+      >
+        <td
+          :colspan="tableColumns.length"
+          class="p-4"
+        >
+          <USkeleton class="h-4 w-full" />
+        </td>
+      </tr>
+      <tr v-else>
+        <td
+          :colspan="tableColumns.length"
+          class="py-6 text-center text-xs text-muted"
+        >
+          已加载全部条目
+        </td>
+      </tr>
+    </template>
+  </UTable>
+
   <!--
     列表虚拟化交给 Nuxt UI 的 ScrollArea（内部就是 @tanstack/vue-virtual 的官方封装）：
     只渲染视口附近的条目。手机上条目一多，每追加一批都要重新布局整棵已有 DOM
@@ -397,7 +596,9 @@ function handleOpen(entry: RssEntry) {
     的测量值更干净；代价是滚动位置回到顶部，而这正是切换视图时用户预期的位置。
   -->
   <UScrollArea
+    v-else
     ref="scrollAreaRef"
+    v-bind="$attrs"
     :key="view"
     :items="listItems"
     :virtualize="virtualize"

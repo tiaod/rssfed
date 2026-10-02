@@ -16,15 +16,49 @@ import type { ListView } from '../../utils/listViews'
 
 /** 详情状态（宽屏阅读栏 / 窄屏弹窗共用）：列表据此给当前那篇高亮 */
 const modalState = { isOpen: ref(false), currentEntry: ref<RssEntry | null>(null) }
+/** 打开详情：表格视图的行点击 / Enter 也要走到这里 */
+const openEntryMock = vi.fn()
 
 const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useEntryModal = () => ({
-  openEntry: vi.fn(),
+  openEntry: openEntryMock,
   isOpen: modalState.isOpen,
   currentEntry: modalState.currentEntry
 })
 // EntryList 用 IntersectionObserver 观察页尾骨架（骨架可见即触底加载）
 testGlobals.useIntersectionObserver = vi.fn(() => ({ pause: vi.fn(), resume: vi.fn(), stop: vi.fn() }))
+
+/**
+ * 表格视图的 UTable 退化成「按 columns 渲染列头 + 按 data 渲染行」：
+ * slot context 只造出组件真实给的 `row`（EntryList 的单元格只用得到 `row.original`），
+ * 行级 class 仍走 UTable 自己的 meta 口径（已读淡显挂在那里），点击也照它转发 onSelect。
+ */
+const UTableStub = {
+  name: 'Table',
+  props: ['data', 'columns', 'meta', 'virtualize', 'sticky', 'ui', 'onSelect', 'empty'],
+  template: `
+    <table class="table">
+      <thead>
+        <tr><th v-for="col in columns" :key="col.id">{{ col.header }}</th></tr>
+      </thead>
+      <tbody>
+        <slot name="body-top" />
+        <tr
+          v-for="item in data"
+          :key="item.id"
+          class="table-row"
+          :class="meta?.class?.tr?.({ original: item }) ?? ''"
+          @click="onSelect?.($event, { original: item })"
+        >
+          <td v-for="col in columns" :key="col.id" :class="'col-' + col.id">
+            <slot :name="col.id + '-cell'" :row="{ original: item }" />
+          </td>
+        </tr>
+        <slot name="body-bottom" />
+      </tbody>
+    </table>
+  `
+}
 
 const STUBS = {
   // ScrollArea（虚拟化）在单测里退化成「把 items 全渲染出来」
@@ -53,7 +87,8 @@ const STUBS = {
     name: 'UUser',
     props: ['name', 'to'],
     template: '<span class="user">{{ name }}</span>'
-  }
+  },
+  UTable: UTableStub
 }
 
 function makeEntry(over: Partial<RssEntry> = {}): RssEntry {
@@ -399,5 +434,112 @@ describe('EntryList 选中态高亮', () => {
     const wrapper = mountList([entry, other])
     expect(wrapper.get('[data-entry-id="entry-1"]').classes()).toContain('ring-primary')
     expect(wrapper.get('[data-entry-id="entry-2"]').classes()).not.toContain('ring-primary')
+  })
+})
+
+describe('EntryList 表格视图', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function tableOf(wrapper: ReturnType<typeof mountList>) {
+    return wrapper.getComponent({ name: 'Table' })
+  }
+
+  it('一行一条：来源 / 标题 / 日期三列，摘要浅灰跟在标题后面，且不再走 ScrollArea', () => {
+    const wrapper = mountList([makeEntry({ description: '这是摘要' })], true, 'table')
+
+    expect(wrapper.find('.scroll-area').exists()).toBe(false)
+    expect(wrapper.findAll('th').map(th => th.text())).toEqual(['来源', '标题', '日期'])
+
+    const row = wrapper.get('.table-row')
+    expect(row.get('.col-source').text()).toContain('某科技周刊')
+
+    // 标题加粗在前、浅灰摘要在后（同一行流式截断，长了先挤掉摘要）
+    const titleCell = row.get('.col-title')
+    expect(titleCell.get('.font-medium').text()).toBe('文章标题')
+    expect(titleCell.get('.text-muted').text()).toContain('这是摘要')
+    expect(titleCell.html().indexOf('文章标题')).toBeLessThan(titleCell.html().indexOf('这是摘要'))
+
+    expect(row.get('.col-date').text()).toMatch(/^\d{4}\/\d{1,2}\/\d{1,2}$/)
+  })
+
+  it('署名列：聚合视图显示源名，单源页显示条目作者', () => {
+    const entries = [makeEntry({ author: '张三' })]
+
+    const aggregate = mountList(entries, true, 'table')
+    expect(aggregate.findAll('th')[0]!.text()).toBe('来源')
+    expect(aggregate.get('.col-source').text()).toContain('某科技周刊')
+
+    const single = mountList(entries, undefined, 'table')
+    expect(single.findAll('th')[0]!.text()).toBe('作者')
+    expect(single.get('.col-source').text()).toContain('张三')
+  })
+
+  it('虚拟化按固定行高估高、表头 sticky、table-fixed + w-full 让标题列的 truncate 生效', () => {
+    const table = tableOf(mountList([makeEntry()], undefined, 'table'))
+
+    expect(table.props('sticky')).toBe('header')
+    // w-full 是硬要求：只给 min-w-full 时表格按内容最小宽度撑开，日期列会被挤出可视区
+    const base = (table.props('ui') as { base: string }).base
+    expect(base).toContain('table-fixed')
+    expect(base).toContain('w-full')
+
+    const virtualize = table.props('virtualize') as { estimateSize: number, overscan: number }
+    // 行高必须和 td 主题默认的 p-4 + 一行 text-sm + 1px 分隔线对齐，否则滚动总高对不上
+    expect(virtualize.estimateSize).toBe(53)
+    expect(virtualize.overscan).toBe(8)
+  })
+
+  it('已读态：未读行带圆点，已读整行淡显（走 UTable 的行级 meta）', () => {
+    const unread = mountList([makeEntry({ read: false })], undefined, 'table')
+    expect(unread.find('.col-title [data-unread]').exists()).toBe(true)
+    expect(unread.get('.table-row').classes()).not.toContain('opacity-60')
+
+    const read = mountList([makeEntry({ read: true })], undefined, 'table')
+    expect(read.find('.col-title [data-unread]').exists()).toBe(false)
+    expect(read.get('.table-row').classes()).toContain('opacity-60')
+  })
+
+  it('页尾骨架仍是触底信号；没有更多时换成收尾提示', () => {
+    const withMore = mount(EntryList, {
+      props: { entries: [makeEntry()], view: 'table', loadMore: vi.fn(), hasMore: () => true },
+      global: { stubs: STUBS }
+    })
+    expect(withMore.find('tbody .skeleton').exists()).toBe(true)
+
+    const noMore = mount(EntryList, {
+      props: { entries: [makeEntry()], view: 'table', loadMore: vi.fn(), hasMore: () => false },
+      global: { stubs: STUBS }
+    })
+    expect(noMore.find('.skeleton').exists()).toBe(false)
+    expect(noMore.text()).toContain('已加载全部条目')
+  })
+
+  it('点击整行或按 Enter（行聚焦）打开详情', async () => {
+    const entry = makeEntry()
+    const wrapper = mountList([entry], undefined, 'table')
+
+    await wrapper.get('.table-row').trigger('click')
+    expect(openEntryMock).toHaveBeenCalledTimes(1)
+    expect(openEntryMock.mock.calls[0]![0].id).toBe(entry.id)
+
+    // UTable 只给行 role="button" + tabindex，Enter 由 EntryList 在根上代理
+    await wrapper.get('.table-row').trigger('keydown', { key: 'Enter' })
+    expect(openEntryMock).toHaveBeenCalledTimes(2)
+    expect(openEntryMock.mock.calls[1]![0].id).toBe(entry.id)
+  })
+
+  it('单源页的页头当作表体第一行，跟条目一起滚（列头仍在它上面）', () => {
+    const wrapper = mount(EntryList, {
+      props: { entries: [makeEntry()], view: 'table', header: true },
+      slots: { header: '<p class="feed-header">订阅源描述</p>' },
+      global: { stubs: STUBS }
+    })
+
+    const rows = wrapper.findAll('tbody tr')
+    expect(rows[0]!.find('.feed-header').exists()).toBe(true)
+    expect(rows[0]!.find('th').exists()).toBe(false)
+    expect(wrapper.findAll('thead th')).toHaveLength(3)
   })
 })
