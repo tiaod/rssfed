@@ -6,6 +6,7 @@ import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.v
 import ListActionsBar from '~/components/ListActionsBar.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
+import { toEntryDocId, toEntryUrlId } from '~/utils/entryUrlId'
 
 definePageMeta({
   layout: 'default'
@@ -66,6 +67,33 @@ const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnch
 // 滚动到底部附近时加载下一批；loadMore 同时供文章弹窗尾部的自动预加载复用（单飞防重入）
 const { loadMore } = useInfiniteList(loadMoreVisible)
 
+/**
+ * 地址 ↔ 详情：条目详情的地址是 `/rss/feed/:id/entry/:entryId`（见 useEntryRoute）。
+ *
+ * 打开详情仍旧不切页面 —— 详情由布局里的弹窗 / 常驻阅读栏承载，列表原地不动；这里只把
+ * 「在读哪一篇」写进地址，于是刷新、分享、浏览器返回键都能落到同一篇上。
+ *
+ * 地址段里的 id 是文档 id 去掉源前缀后的那截 hash（`entry:<feedId>:<hash12>` → `<hash12>`）：
+ * 源已经写在地址里，再重复一遍只是噪音；取文档时按同一规则拼回去（见 utils/entryUrlId）。
+ */
+const { entryLink, attachListContext } = useEntryRoute({
+  listPath: () => `/rss/feed/${feedId}`,
+  entryPath: urlId => `/rss/feed/${feedId}/entry/${encodeURIComponent(urlId)}`,
+  urlIdOf: entry => toEntryUrlId(entry.id, feedId),
+  entries: () => visibleEntries.value,
+  loadMore,
+  hasMore: visibleHasMore,
+  getEntry: urlId => pouch.getEntry(toEntryDocId(urlId, feedId)),
+  // 地址里的源与条目要对得上：/rss/feed/1/entry/9（9 属于别的源）按「找不到」处理
+  belongs: entry => entry.feedId === feedId
+})
+
+/** 用户点「查看」把攒下的新条目上屏后，当前在读的那篇可能才第一次进列表 —— 顺手把翻篇上下文补上 */
+async function applyNewEntries() {
+  await applyNew()
+  attachListContext()
+}
+
 onMounted(async () => {
   // 订阅名先从本地订阅文档取（离线可用，也是侧边栏显示的名字），取不到再回退接口标题
   subscriptionTitle.value = await pouch.getSubscriptionTitle(feedId).catch(() => null) ?? ''
@@ -81,6 +109,8 @@ onMounted(async () => {
 
   // 不自动同步：数据来自集中库（时间线页已增量同步），需要最新时点导航栏同步按钮
   await load()
+  // 深链进来时详情先按 id 取了全文（列表还没加载完，没有上/下篇可翻）：列表就绪后补挂上下文
+  attachListContext()
   loading.value = false
 })
 
@@ -191,7 +221,7 @@ async function unsubscribe() {
           floating
           :count="newCount"
           :visible="bannerVisible"
-          @apply="applyNew"
+          @apply="applyNewEntries"
         />
 
         <template v-if="!visibleEntries.length && !loading">
@@ -233,6 +263,7 @@ async function unsubscribe() {
             :entries="visibleEntries"
             :load-more="loadMore"
             :has-more="visibleHasMore"
+            :entry-link="entryLink"
             :header="hasFeedHeader"
           >
             <!-- 页头作为列表首项：跟条目一起滚走，读长列表时不再固定占住视图 -->
@@ -287,6 +318,17 @@ async function unsubscribe() {
           </UButton>
         </template>
       </UModal>
+
+      <!--
+        `/rss/feed/:id/entry/:entryId` 的落地组件（entry/[entryId].vue，只占位不渲染 DOM）。
+        列表页因此是这条地址的父级路由：地址加上那一截时本页不重建，滚动位置与列表快照原地保留。
+        详情仍在布局里的弹窗 / 阅读栏，由 useEntryRoute 按这里的路由参数开关。
+
+        父子关系由**文件布局**决定：本页是 `[id].vue`（同名文件 + 同名目录），Nuxt 只认这种写法 ——
+        写成 `[id]/index.vue` 时 `[id]/entry/[entryId].vue` 会变成平级路由，一进详情地址
+        整个列表页就从 RouterView 里消失，只剩一个空面板。
+      -->
+      <NuxtPage />
     </template>
   </UDashboardPanel>
 </template>

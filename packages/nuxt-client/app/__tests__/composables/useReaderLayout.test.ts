@@ -25,6 +25,15 @@ describe('isReaderRoute', () => {
     }
   })
 
+  it('单源页读某一篇时的详情地址仍算列表页（阅读栏不该在点开的瞬间消失）', () => {
+    for (const path of [
+      '/rss/feed/-EGH98Uu-bNGGYJj/entry/entry%3A-EGH98Uu-bNGGYJj%3Aab12cd34ef56',
+      '/rss/feed/-EGH98Uu-bNGGYJj/entry/entry-1'
+    ]) {
+      expect(isReaderRoute(path), path).toBe(true)
+    }
+  })
+
   it('非列表页不命中（详情仍走弹窗）', () => {
     for (const path of [
       '/',
@@ -35,6 +44,9 @@ describe('isReaderRoute', () => {
       '/bots/6qtpuepzbtc4m8xdv3wpkntj',
       '/rss/feed',
       '/rss/feed/-EGH98Uu-bNGGYJj/extra',
+      // 只有 /entry 这一层、没带条目 id：不是详情地址
+      '/rss/feed/-EGH98Uu-bNGGYJj/entry',
+      '/rss/feed/-EGH98Uu-bNGGYJj/entry/a/b',
       '/bots/6qtpuepzbtc4m8xdv3wpkntj/posts/extra'
     ]) {
       expect(isReaderRoute(path), path).toBe(false)

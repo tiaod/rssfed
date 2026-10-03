@@ -351,6 +351,19 @@ watch(slots, hydrateSlots, { immediate: true })
 // 程序化关闭（关闭按钮/Esc/遮罩）时若该记录仍在栈顶则退掉，避免历史堆积
 const HISTORY_KEY = '__entryModal'
 
+const route = useRoute()
+
+/**
+ * 打开这一篇时地址里是否已经带着它（单源页的 `/rss/feed/:id/entry/:entryId`）。
+ *
+ * 带着就说明「在读哪一篇」由路由承载：返回键与关闭都交给路由（见 useEntryRoute），
+ * 这里再压一条自己的历史记录会和路由的历史打架 —— 关闭时的 go(-1) 会退到同一个地址上，
+ * 弹窗看起来没关掉，而路由那边又把它重新打开。
+ *
+ * 必须在**打开那一刻**定死：关闭时地址可能已经被页面改回列表页，那时再读就晚了。
+ */
+let openedWithUrl = false
+
 function onPopState() {
   if (isOpen.value) {
     isOpen.value = false
@@ -358,10 +371,15 @@ function onPopState() {
 }
 
 watch(isOpen, (open, wasOpen) => {
-  if (!import.meta.client) return
+  // 服务端没有 window / 历史栈（用 typeof window 而不是 import.meta.client：这段历史交互要能在
+  // 单测里跑，import.meta.client 在 vitest 里恒为 undefined，会把整段逻辑一起跳过）
+  if (typeof window === 'undefined') return
   if (open) {
-    window.history.pushState({ ...window.history.state, [HISTORY_KEY]: true }, '', window.location.href)
-  } else if (wasOpen && window.history.state?.[HISTORY_KEY]) {
+    openedWithUrl = Boolean(route.params.entryId)
+    if (!openedWithUrl) {
+      window.history.pushState({ ...window.history.state, [HISTORY_KEY]: true }, '', window.location.href)
+    }
+  } else if (wasOpen && !openedWithUrl && window.history.state?.[HISTORY_KEY]) {
     window.history.go(-1)
   }
 })

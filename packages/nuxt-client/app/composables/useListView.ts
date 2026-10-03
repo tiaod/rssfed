@@ -25,7 +25,17 @@ function useViewOverrides() {
 }
 
 /** 视图状态：生效值、配置默认值、是否被会话内切换覆盖，以及切换 / 撤销 */
-export function useListViewState(contextKey: string, resolveDefault: () => ListView) {
+export function useListViewState(
+  contextKey: string,
+  resolveDefault: () => ListView,
+  options: {
+    /**
+     * 默认值是否已经解析完（订阅源 / 分组的偏好要读本地库）。
+     * 未就绪时不把视图发布给布局，避免三栏在切页瞬间塌成弹窗，见 useReaderPaneView。
+     */
+    ready?: () => boolean
+  } = {}
+) {
   const overrides = useViewOverrides()
 
   const defaultView = computed<ListView>(() => resolveDefault())
@@ -33,7 +43,7 @@ export function useListViewState(contextKey: string, resolveDefault: () => ListV
   const overridden = computed(() => overrides.value[contextKey] !== undefined)
 
   // 把生效视图发布给布局：宽屏 + 列表视图时详情走右侧常驻阅读栏，其余视图仍走弹窗（见 useReaderLayout）
-  useReaderPaneView(view)
+  useReaderPaneView(view, options.ready)
 
   function setView(next: ListView) {
     overrides.value = { ...overrides.value, [contextKey]: next }
@@ -59,14 +69,17 @@ export function useTimelineView() {
 /**
  * 单源页 / bot 产出页：订阅源自身 -> 所属分组 -> 全局。
  *
- * 两个偏好都来自用户状态库，客户端挂载后才拿得到；在此之前先按全局默认渲染，
- * 拿到值再切换（列表本身也要等本地查询，所以不会多一次可见的跳动）。
+ * 两个偏好都来自用户状态库，客户端挂载后才拿得到；在此之前先按全局默认渲染列表，
+ * 拿到值再切换（列表本身也要等本地查询，所以不会多一次可见的跳动）。但这个暂定值
+ * **不发布给布局**（见下面的 `ready`）：发布它会让三栏在切页时塌成弹窗再弹回来。
  */
 export function useFeedView(feedId: string) {
   const pouch = usePouchDb()
   const { settings } = useSettings()
   const feedDefault = ref<ListView | null>(null)
   const groupDefault = ref<ListView | null>(null)
+  /** 两个偏好都读过了（成功或失败）：在此之前 view 只是暂定值，不该发布给布局 */
+  const prefsLoaded = ref(false)
 
   /** 读一次订阅源 / 分组的默认值；编辑订阅之后重读一次，改动不用刷新页面就能生效 */
   async function refreshPrefs() {
@@ -76,6 +89,8 @@ export function useFeedView(feedId: string) {
       groupDefault.value = prefs.category ? await pouch.getGroupView(prefs.category) : null
     } catch {
       // 读取失败按「未配置」处理，回退全局默认
+    } finally {
+      prefsLoaded.value = true
     }
   }
 
@@ -84,7 +99,8 @@ export function useFeedView(feedId: string) {
   return {
     ...useListViewState(
       `feed:${feedId}`,
-      () => feedDefault.value ?? groupDefault.value ?? settings.value.view ?? DEFAULT_LIST_VIEW
+      () => feedDefault.value ?? groupDefault.value ?? settings.value.view ?? DEFAULT_LIST_VIEW,
+      { ready: () => prefsLoaded.value }
     ),
     feedDefault,
     groupDefault,
@@ -97,19 +113,24 @@ export function useGroupView(category: string) {
   const pouch = usePouchDb()
   const { settings } = useSettings()
   const groupDefault = ref<ListView | null>(null)
+  /** 同 useFeedView：偏好读完之前 view 只是暂定值 */
+  const prefsLoaded = ref(false)
 
   onMounted(async () => {
     try {
       groupDefault.value = await pouch.getGroupView(category)
     } catch {
       // 读取失败按「未配置」处理，回退全局默认
+    } finally {
+      prefsLoaded.value = true
     }
   })
 
   return {
     ...useListViewState(
       `group:${category}`,
-      () => groupDefault.value ?? settings.value.view ?? DEFAULT_LIST_VIEW
+      () => groupDefault.value ?? settings.value.view ?? DEFAULT_LIST_VIEW,
+      { ready: () => prefsLoaded.value }
     ),
     groupDefault
   }

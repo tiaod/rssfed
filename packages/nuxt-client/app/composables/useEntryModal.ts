@@ -17,6 +17,8 @@ export interface EntryListLoader {
  * 用模态替代独立路由页面，避免页面切换导致列表滚动状态丢失。
  * 状态通过 useState 在组件间共享，EntryList 触发 openEntry，
  * 在 layout 中全局渲染的 EntryDetailModal 监听 isOpen。
+ * 列表页要的是「地址也跟着变」（/rss/feed/:id/entry/:entryId）：那是列表页与路由之间的
+ * 一层接线，不在这里 —— 见 useEntryRoute。
  *
  * 上一篇/下一篇：openEntry 时由列表组件注入「当前可见列表」的取值函数（而非快照）。
  * 这样无限滚动加载出新一批条目后，翻页范围会随列表自动扩大；
@@ -51,6 +53,18 @@ export function useEntryModal() {
     loader.value = null
     firedAtLength.value = -1
     isOpen.value = false
+  }
+
+  /**
+   * 只替换「所属列表」的上下文，不动当前条目、也不重开详情。
+   *
+   * 深链（地址里直接带着某一篇）进来时列表还没加载完，只能先按 id 取全文，此时没有上/下篇
+   * 可翻；列表就绪后由页面补挂一次上下文（见 useEntryRoute）。重开详情会把正文重新加载、
+   * 阅读位置也丢，所以这里只换上下文。
+   */
+  function setListContext(getList?: () => RssEntry[], listLoader?: EntryListLoader) {
+    listGetter.value = getList ?? null
+    loader.value = listLoader ?? null
   }
 
   /** 当前条目在列表中的下标；不在列表中（或尚无列表上下文）时返回 -1 */
@@ -110,6 +124,7 @@ export function useEntryModal() {
     entries,
     openEntry,
     closeEntry,
+    setListContext,
     goPrev: () => navEntry(-1),
     goNext: () => navEntry(1),
     canGoPrev,

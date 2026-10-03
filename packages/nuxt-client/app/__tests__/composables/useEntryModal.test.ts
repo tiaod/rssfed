@@ -181,4 +181,23 @@ describe('useEntryModal', () => {
     list.value.push(makeEntry(2), makeEntry(3))
     expect(entries.value.map(e => e.id)).toEqual(['entry-1', 'entry-2', 'entry-3'])
   })
+
+  it('setListContext 只换列表上下文：深链先取全文、列表就绪后补上，不重开详情', () => {
+    const list = [makeEntry(1), makeEntry(2), makeEntry(3)]
+    const loadMore = vi.fn()
+    // 深链：地址里直接带着这一篇，此时列表还没加载完，只能先按 id 取全文（没有上下文）
+    const full = makeEntry(2)
+    const { currentEntry, openEntry, setListContext, canGoNext, entries } = useEntryModal()
+
+    openEntry(full)
+    const opened = currentEntry.value
+    expect(opened?.id).toBe('entry-2')
+    expect(canGoNext.value).toBe(false)
+
+    // 列表加载完成：补挂上下文，当前条目与列表视图都应就位
+    setListContext(() => list, { loadMore, hasMore: () => true })
+    expect(currentEntry.value).toBe(opened) // 同一个对象，详情没有被重开
+    expect(entries.value.map(e => e.id)).toEqual(['entry-1', 'entry-2', 'entry-3'])
+    expect(canGoNext.value).toBe(true)
+  })
 })

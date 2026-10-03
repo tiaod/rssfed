@@ -151,3 +151,57 @@ describe('分组页视图：分组 -> 全局', () => {
     expect((await mountWith(() => useGroupView('摄影'))).view.value).toBe('blog')
   })
 })
+
+/**
+ * 发布给布局的「生效视图」决定详情走阅读栏还是弹窗（见 useReaderLayout 的 useReaderPaneMode）。
+ *
+ * 订阅源 / 分组的默认视图是异步读出来的：解析完成前 `view` 只是个暂定值（全局默认）。
+ * 把它发布出去，三栏就会在切页的瞬间塌成弹窗、等偏好读完再弹回来 —— 用户看到的是
+ * 「在读的文章突然变成一个弹窗」。
+ */
+describe('阅读栏视图的发布（切页时三栏不塌）', () => {
+  const publishedView = () =>
+    (stateStore.get('reader-pane-view') as Ref<ListView | null> | undefined)?.value ?? null
+
+  it('偏好没读完时不发布暂定值：保留上一页发布的「列表」', async () => {
+    mockSettings('masonry') // 暂定值 = 全局默认（瀑布流），一旦发布出去就会塌成弹窗
+    let resolvePrefs!: (prefs: { view: ListView | null, category: string | null }) => void
+    mockPouch({
+      getSubscriptionViewPrefs: vi.fn(() => new Promise((resolve) => { resolvePrefs = resolve }))
+    })
+    // 上一个源（列表视图）已经发布过 list
+    stateStore.set('reader-pane-view', ref<ListView | null>('list'))
+
+    const api = await mountWith(() => useFeedView('feed-1'))
+    expect(api.view.value).toBe('masonry') // 页面暂时按全局默认渲染
+    expect(publishedView()).toBe('list') // 但没发布出去：三栏原地不动
+
+    resolvePrefs({ view: 'list', category: null })
+    await flushPromises()
+    expect(api.view.value).toBe('list')
+    expect(publishedView()).toBe('list')
+  })
+
+  it('偏好读完且确实不是「列表」→ 才发布出去（详情交回弹窗）', async () => {
+    mockSettings('masonry')
+    mockPouch({ getSubscriptionViewPrefs: vi.fn(async () => ({ view: null, category: null })) })
+    stateStore.set('reader-pane-view', ref<ListView | null>('list'))
+
+    await mountWith(() => useFeedView('feed-1'))
+
+    expect(publishedView()).toBe('masonry')
+  })
+
+  it('偏好读取失败也要解除「未就绪」：否则这一页永远不发布，三栏会一直停在上一个源的状态', async () => {
+    mockSettings('masonry')
+    mockPouch({
+      getSubscriptionViewPrefs: vi.fn(async () => { throw new Error('离线') })
+    })
+    stateStore.set('reader-pane-view', ref<ListView | null>('list'))
+
+    const api = await mountWith(() => useFeedView('feed-1'))
+
+    expect(api.view.value).toBe('masonry') // 回退全局默认
+    expect(publishedView()).toBe('masonry')
+  })
+})

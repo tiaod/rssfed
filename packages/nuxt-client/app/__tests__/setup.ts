@@ -44,6 +44,8 @@ nuxtGlobals.useFetch = vi.fn()
 // Nuxt 的 useState：测试里退化成普通 ref，只需要支持初始值
 nuxtGlobals.useState = vi.fn(<T>(_key: string, init: () => T) => ref(init()))
 nuxtGlobals.navigateTo = vi.fn()
+// Nuxt 的 useRoute：组件只读 params（如「地址里是否带着条目」），默认给一份空参数表
+nuxtGlobals.useRoute = vi.fn(() => ({ params: {} }))
 // runtimeConfig 供 useCouchTargets 等 composable 读取后端地址
 nuxtGlobals.useRuntimeConfig = () => ({
   public: {

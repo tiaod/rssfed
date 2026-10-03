@@ -53,6 +53,13 @@ const props = defineProps<{
    * 为什么不用 UBlogPosts / UPageList 当容器：见下面 VIEW_BREAKPOINTS 的说明。
    */
   view?: ListView
+  /**
+   * 有它时「打开」只改地址，详情交给页面按路由参数打开（单源页的
+   * `/rss/feed/:id/entry/:entryId`）。不传则维持原行为：直接开全局弹窗。
+   *
+   * 地址与详情是同一件事的两面，谁先谁后不能各写一套：传了它就只走地址这一条路。
+   */
+  entryLink?: (entry: RssEntry) => string
 }>()
 
 /**
@@ -392,6 +399,12 @@ const selectedId = computed(() => (isOpen.value ? currentEntry.value?.id ?? null
 
 // 打开详情时传入当前可见列表（取值函数而非快照），modal 内的上一篇/下一篇沿此定位
 function handleOpen(entry: RssEntry) {
+  // 页面把地址作为详情的唯一真源（单源页）：先导航，详情由页面的路由监听打开 ——
+  // 这里不能再顺手 openEntry，否则地址与详情各走各的，返回键就没人管了
+  if (props.entryLink) {
+    void navigateTo(props.entryLink(entry))
+    return
+  }
   openEntry(
     entry,
     () => props.entries,

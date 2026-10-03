@@ -16,11 +16,15 @@ export const READER_PANE_MIN_WIDTH = 1024
  * 会用到阅读栏的页面（四个列表页 + 收藏页）。路由是布局判断「这一页有没有第三栏」的第二把锁：
  * 页面卸载时不去清共享状态（页面切换在 Suspense 下的挂载 / 卸载顺序不保证，
  * 谁清谁写会互相打架），改成「不在列表页就一律不算」。
+ *
+ * 单源页读某一篇时的地址（`/rss/feed/:id/entry/:entryId`）仍算列表页：那只是同一页上的
+ * 详情地址（见 useEntryRoute），阅读栏不该在点开一篇的瞬间整块消失、换成弹窗。
  */
 const READER_ROUTE_PATTERNS: readonly RegExp[] = [
   /^\/timeline$/,
   /^\/saved$/,
   /^\/rss\/feed\/[^/]+$/,
+  /^\/rss\/feed\/[^/]+\/entry\/[^/]+$/,
   /^\/rss\/group\/[^/]+$/,
   /^\/bots\/[^/]+\/posts$/
 ]
@@ -89,11 +93,18 @@ export function useReaderPaneWide() {
  * （订阅源 / 分组各自的默认值要读本地库）。发布方是 useListViewState()，五个列表页都走它，
  * 页面侧不需要额外接线。卸载时不清理：路由兜底已经能保证非列表页不会渲染阅读栏，
  * 而清理反而会和「新页面已经写好了」的时序打架。
+ *
+ * `ready` 为假时**不发布**（保留上一页发布的值）：订阅源 / 分组的默认视图要读本地库，
+ * 解析完成前 `view` 只是个暂定值。把它发布出去会让三栏在切页的瞬间塌成弹窗、等偏好读完
+ * 再弹回来 —— 切到另一个源时正文会被「交回」弹窗，看起来就是文章突然变成弹窗。
  */
-export function useReaderPaneView(view: Ref<ListView>) {
+export function useReaderPaneView(view: Ref<ListView>, ready?: () => boolean) {
   const published = useState<ListView | null>('reader-pane-view', () => null)
+  const isReady = () => (ready ? ready() : true)
 
-  watch(view, (next) => {
+  // 同时听 view 与 ready：偏好读完时 view 可能没变（暂定值恰好就是最终值），那时也要补一次发布
+  watch([view, isReady], ([next, ok]) => {
+    if (!ok) return
     published.value = next
   }, { immediate: true })
 }

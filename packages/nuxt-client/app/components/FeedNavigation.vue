@@ -81,7 +81,8 @@ const route = useRoute()
 
 /** 当前路由对应的订阅 id / 分类：决定侧边栏默认展开哪个分组 */
 const activeFeedId = computed(() => {
-  const feedMatch = route.path.match(/^\/rss\/feed\/(.+)$/)
+  // 读某一篇时的地址是 /rss/feed/:id/entry/:entryId（见 useEntryRoute）：后面那段不该混进 id
+  const feedMatch = route.path.match(/^\/rss\/feed\/([^/]+)(?:\/entry\/[^/]+)?$/)
   if (feedMatch?.[1]) return decodeURIComponent(feedMatch[1])
   const botMatch = route.path.match(/^\/bots\/([^/]+)\/posts$/)
   if (botMatch?.[1]) return `bot:${botMatch[1]}`
