@@ -113,6 +113,19 @@ function resetScroll() {
   }
 }
 
+/**
+ * 拦下正文区的 pointerdown，不让它冒泡到 reka-ui 的遮罩层。
+ *
+ * `scrollable` 的模态（居中弹窗，以及全屏但不固定顶/底栏）在 DOM 上把内容嵌在遮罩层里面，
+ * 而 reka-ui 给遮罩层挂了 `pointerdown` + `.left.prevent`（原意只是「点遮罩本身别选中东西」）。
+ * 事件从正文冒泡上去同样会被 preventDefault —— 浏览器随后就不再补发 mousedown，
+ * 没有 mousedown，鼠标拖选根本不会开始，正文于是「选不中」。
+ * 在正文这一层就地掐断冒泡即可：遮罩层那个处理器除了 preventDefault 什么都不做。
+ */
+function stopPointerDownPropagation(event: PointerEvent) {
+  event.stopPropagation()
+}
+
 // 非全屏（居中弹窗）在触屏设备上的原生划卡：横向位移足够、接近水平、速度够快才翻页
 const touchStart = { x: 0, y: 0, t: 0 }
 
@@ -599,17 +612,26 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
     @after:enter="revealNav"
   >
     <template #body>
-      <!-- 全屏（手机恒定全屏，桌面选全屏档也是）：Swiper 三槽划卡 -->
+      <!--
+        全屏（手机恒定全屏，桌面选全屏档也是）：Swiper 三槽划卡。
+        两条正文分支都挂 stopPointerDownPropagation，原因见该函数。
+      -->
       <div
         v-if="isFullscreen"
         class="article-swiper relative h-full"
+        @pointerdown="stopPointerDownPropagation"
       >
         <ClientOnly>
+          <!--
+            划卡只认触屏：Swiper 的 simulateTouch 默认把鼠标拖动也当手势，并在 pointerdown 上
+            preventDefault，桌面端鼠标拖选正文因此被吃掉。关掉它，鼠标拖动恢复成正常的文本选中；
+            桌面翻页走浮钮与 ←/→ 键（触屏滑动不受影响），grabCursor 也随之失效，不再设置。
+          -->
           <SwiperView
             :slides-per-view="1"
             :space-between="0"
             :speed="SWIPE_SPEED"
-            :grab-cursor="settings.entryModalSize === 'fullscreen' && !isSmallScreen"
+            :simulate-touch="false"
             :threshold="12"
             class="h-full"
             @swiper="onSwiperReady"
@@ -661,6 +683,7 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
         v-else
         ref="bodyRef"
         class="relative min-h-full"
+        @pointerdown="stopPointerDownPropagation"
         @touchstart.passive="onTouchStart"
         @touchend.passive="onTouchEnd"
       >

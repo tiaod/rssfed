@@ -155,6 +155,17 @@ for(const f of walk('packages/nuxt-client/app'))
 JS
 ```
 
+## 前端交互
+
+### 条目弹窗里的正文无法用鼠标选中
+
+- **现象**：弹窗里用鼠标拖过正文没有任何选区（`document.getSelection()` 一直是空），标题/按钮照常能点。
+- **原因**：**拖选是从 `mousedown` 开始的**，而这条链路上有两处第三方默认行为在 `pointerdown` 上 `preventDefault()` —— 一旦被取消，浏览器就不再补发 `mousedown`：
+  1. `scrollable` 的 `UModal`（居中弹窗，以及全屏但不固定顶/底栏）把内容**嵌在遮罩层里面**，reka-ui 给遮罩层挂了 `pointerdown` + `.left.prevent`，事件从正文冒泡上去照样被取消；
+  2. 全屏档的 Swiper 默认 `simulateTouch`，把鼠标拖动也当划卡手势，同样在 `pointerdown` 上取消默认行为。
+- **排查手法**：弹窗里执行 `document.addEventListener('pointerdown', e => console.log(e.defaultPrevented, e.target))`，打印 `true` 即命中本条。
+- **解法**：见 `EntryDetailModal.vue` 的 `stopPointerDownPropagation`（在正文层掐断冒泡）与 Swiper 的 `:simulate-touch="false"`（桌面翻页走浮钮与 ←/→ 键，触屏滑动不受影响）。
+
 ## 离线与 Service Worker
 
 ### 断网后页面完全打不开（连壳都没有）
