@@ -7,7 +7,7 @@
  */
 import { computed } from 'vue'
 import type { RssEntry } from '~/types/rss'
-import { entryDate, entryExcerpt, entryFeedName } from '~/utils/entryDisplay'
+import { entryByline, entryDate, entryExcerpt } from '~/utils/entryDisplay'
 
 const props = defineProps<{
   entry: RssEntry
@@ -19,10 +19,9 @@ const props = defineProps<{
 const emit = defineEmits<{ open: [entry: RssEntry] }>()
 
 const excerpt = computed(() => entryExcerpt(props.entry, 120))
-// 聚合视图署源名、单源页署名作者：与卡片视图同规则，只是这里用纯文本（UUser 头像 32px 太占地方）
-const byline = computed(() =>
-  props.showFeed ? entryFeedName(props.entry) : (props.entry.author || entryFeedName(props.entry))
-)
+// 聚合视图署源名、单源页署名作者：与卡片视图同规则（口径在 entryByline），
+// 只是这里用纯文本（UUser 头像 32px 太占地方）
+const byline = computed(() => entryByline(props.entry, props.showFeed))
 const date = computed(() => entryDate(props.entry))
 </script>
 

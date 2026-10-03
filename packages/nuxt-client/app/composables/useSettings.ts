@@ -1,4 +1,4 @@
-import { DEFAULT_LIST_VIEW, isListView, type ListView } from '~/utils/listViews'
+import { isListView, type ListView } from '~/utils/listViews'
 import { DEFAULT_SYNC_WINDOW_DAYS, normalizeSyncWindowDays } from '~/utils/syncWindow'
 
 export type EntryModalSize = 'sm:max-w-xl' | 'sm:max-w-2xl' | 'sm:max-w-4xl' | 'sm:max-w-6xl' | 'fullscreen'
@@ -11,12 +11,14 @@ export interface AppSettings {
   /** 全屏时固定顶部栏和底部栏（关闭后随正文一起滚动） */
   fixedBars: boolean
   /**
-   * 列表页默认视图。
+   * 列表页默认视图（全局那一层）。
    *
-   * 时间线页直接用它（默认瀑布流）；单个订阅源 / 分组没有单独配置默认视图时也用它兜底。
-   * 页面上的切换按钮只改本次会话，不会写回这里 —— 默认值只由显式配置入口修改。
+   * **可选**：没配过（undefined）与「显式配成瀑布流」是两件事 —— 时间线的内置默认是社交动态
+   * （见 TIMELINE_DEFAULT_VIEW），只有 undefined 时它才生效；单个订阅源 / 分组 / 收藏页
+   * 没有单独配置时兜底瀑布流。页面上的切换按钮只改本次会话，不会写回这里 ——
+   * 默认值只由显式配置入口修改。
    */
-  view: ListView
+  view?: ListView
   /**
    * 同步窗口：每个源首轮同步只拉取最近多少天的条目（0 = 不限时间）。
    *
@@ -28,7 +30,7 @@ export interface AppSettings {
 const DEFAULT_SETTINGS: AppSettings = {
   entryModalSize: 'sm:max-w-6xl',
   fixedBars: true,
-  view: DEFAULT_LIST_VIEW,
+  // view 刻意不给默认值：undefined = 用户没配过，各页回退到自己的内置默认（时间线是社交动态）
   syncWindowDays: DEFAULT_SYNC_WINDOW_DAYS
 }
 

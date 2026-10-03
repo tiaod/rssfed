@@ -6,7 +6,7 @@ import SiteSettingsManager from '~/components/admin/SiteSettingsManager.vue'
 import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimate'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
-import { LIST_VIEW_OPTIONS } from '~/utils/listViews'
+import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 import { SYNC_WINDOW_CHOICES } from '~/utils/syncWindow'
 
 definePageMeta({
@@ -59,6 +59,31 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
 
 // 同步窗口选项（0 = 不限时间），语义见 utils/syncWindow
 const syncWindowOptions = SYNC_WINDOW_CHOICES
+
+/**
+ * 「默认列表视图」里的「跟随内置默认」项：选中它 = 不写设置（view 为 undefined）。
+ *
+ * 用一个哨兵字符串而不是空值：reka 的 Select 明确禁止选项值为空串（空串被它当作「清空选择」，
+ * 传了整个下拉都打不开，见 EditSubscriptionModal 的同类注释）；undefined 又表示「未选中」，
+ * 没法表达「显式选择：取消配置」这个动作。用户不选它时才落一个具体视图 —— 于是
+ * 「没配过」与「配成瀑布流」区分得开，时间线的内置默认（社交动态）才生效。
+ */
+const INHERIT_VIEW = '__default__'
+
+const viewOptions = [
+  { label: '跟随内置默认', value: INHERIT_VIEW },
+  ...LIST_VIEW_OPTIONS
+]
+
+const draftView = computed({
+  get: () => draftSettings.value.view ?? INHERIT_VIEW,
+  set: (value: string) => {
+    draftSettings.value = {
+      ...draftSettings.value,
+      view: value === INHERIT_VIEW ? undefined : (value as ListView)
+    }
+  }
+})
 
 const isAdmin = computed(() => userStore.isAdmin)
 
@@ -275,11 +300,11 @@ const confirmReset = async () => {
 
                   <UFormField
                     label="默认列表视图"
-                    description="时间线用这个默认；单个订阅源 / 分组没有单独配置时也用它（列表页上的切换按钮只影响本次会话）"
+                    description="各列表页的默认视图；选「跟随内置默认」则不写配置 —— 时间线用「社交动态」，单个订阅源 / 分组 / 收藏页用「瀑布流」（列表页上的切换按钮只影响本次会话）"
                   >
                     <USelect
-                      v-model="draftSettings.view"
-                      :items="LIST_VIEW_OPTIONS"
+                      v-model="draftView"
+                      :items="viewOptions"
                       value-key="value"
                       class="w-48"
                     />

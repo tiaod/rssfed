@@ -4,10 +4,15 @@ import type { TableColumn } from '@nuxt/ui'
 import type { RssEntry } from '~/types/rss'
 import { DEFAULT_LIST_VIEW, type ListView } from '~/utils/listViews'
 import {
+  entryByline,
   entryCoverAspect,
   entryDate,
   entryExcerpt,
+  entryFeedImages,
   entryFeedName,
+  feedImagesHeight,
+  FEED_COLUMN_MAX,
+  FEED_CONTENT_INDENT,
   IMAGE_TILE_FALLBACK_ASPECT
 } from '~/utils/entryDisplay'
 // 显式导入：单测环境没有 Nuxt 组件清单，隐式解析会静默退化成「渲染不出来」
@@ -15,6 +20,7 @@ import EntryCardItem from '~/components/EntryCardItem.vue'
 import EntryBlogItem from '~/components/EntryBlogItem.vue'
 import EntryRowItem from '~/components/EntryRowItem.vue'
 import EntryImageItem from '~/components/EntryImageItem.vue'
+import EntrySocialItem from '~/components/EntrySocialItem.vue'
 
 /**
  * 自己转发 $attrs：模板是 ScrollArea / Table 两个分支，Vue 对「多根节点」不再自动继承
@@ -125,6 +131,8 @@ const view = computed<ListView>(() => props.view ?? DEFAULT_LIST_VIEW)
  * 紧凑列表永远单列；图片图块窄，手机上也放得下两列。
  */
 const VIEW_BREAKPOINTS: Record<ListView, ReadonlyArray<readonly [number, number]>> = {
+  // 社交动态：手机与桌面都是同一条窄列（条目内部再居中限宽），列数恒定不影响断点
+  social: [[0, 1]],
   // 瀑布流（图片/卡片墙）：手机上就给两列，卡片窄但信息密度高，和博客视图一眼能区分
   masonry: [
     [2560, 8], // 4xl
@@ -159,6 +167,7 @@ const VIEW_BREAKPOINTS: Record<ListView, ReadonlyArray<readonly [number, number]
  * 列表视图间距为 0：行与行靠 border 分隔，留缝反而不像列表。
  */
 const VIEW_GAP: Record<ListView, number> = {
+  social: 0, // 条与条靠分隔线划分，留缝就不像信息流了
   masonry: 16,
   blog: 24,
   list: 0,
@@ -306,10 +315,26 @@ function blogEstimateHeight(entry: RssEntry | undefined): number {
 }
 
 /**
+ * 社交动态条目的估算高度。
+ *
+ * 单列，估不准只牵连总高度与滚动条（没有泳道要对齐），所以按「文字档 + 图片区」两段给：
+ * 文字档 170（作者行 + 一行标题 + 两行摘要 + 操作栏，实测），图片区与图片视图同一口径 ——
+ * 单图按夹好的比例与高度上限算，多图按行数 × (列宽 / 3) 算（见 utils/entryDisplay.ts 的
+ * feedImagesHeight）。注意图片区在**正文列**里：列宽要先减掉头像那一栏（FEED_CONTENT_INDENT）。
+ */
+function socialEstimateHeight(entry: RssEntry | undefined): number {
+  const text = 170
+  const outer = contentWidth.value > 0 ? Math.min(contentWidth.value, FEED_COLUMN_MAX) : FEED_COLUMN_MAX
+  const column = Math.max(0, outer - FEED_CONTENT_INDENT)
+  const media = entry ? feedImagesHeight(entryFeedImages(entry), column) : 0
+  return media ? text + 8 + media : text // +8 = 文字与图片之间的 gap-2
+}
+
+/**
  * 单条高度估算（px），只用于还没被测量过的条目；渲染过一次后 ScrollArea 内部会记住真实高度。
  *
  * 每个视图的估算口径都和它实际渲染出来的高度对齐（瀑布流：有封面的按 min-h-40 起算；
- * 博客：多列写死卡片高、单列按有无封面分档；列表：写死 h-24；图片：按封面宽高比换算），
+ * 博客：多列写死卡片高、单列按有无封面分档；列表：写死 h-24；图片与社交动态：按封面宽高比换算），
  * 这样总高度和滚动条不会因为估算离谱而抖动。
  */
 function estimateHeight(item: ListItem | undefined): number {
@@ -320,6 +345,7 @@ function estimateHeight(item: ListItem | undefined): number {
       case 'blog': return blogEstimateHeight(undefined)
       case 'list': return 96
       case 'image': return imageTileHeight(undefined)
+      case 'social': return socialEstimateHeight(undefined)
       default: return 280
     }
   }
@@ -328,6 +354,7 @@ function estimateHeight(item: ListItem | undefined): number {
     case 'list': return 96
     // 图片视图是瀑布流：每条按自己封面的宽高比算高度（见 EntryImageItem）
     case 'image': return imageTileHeight(isEntry(item) ? item : undefined)
+    case 'social': return socialEstimateHeight(isEntry(item) ? item : undefined)
     default: return item.coverUrl ? 320 : 180
   }
 }
@@ -461,9 +488,9 @@ const tableMeta = {
   }
 }
 
-/** 表格里的署名：聚合视图署源名、单源页署名作者（与其它视图同规则） */
+/** 表格里的署名：聚合视图署源名、单源页署名作者（与其它视图同规则，口径在 entryByline） */
 function tableByline(entry: RssEntry): string {
-  return props.showFeed ? entryFeedName(entry) : (entry.author || entryFeedName(entry))
+  return entryByline(entry, props.showFeed)
 }
 
 /** 表格行里的摘要：只取一段，超长交给 CSS 截断（与列表视图同一份投影） */
@@ -651,6 +678,15 @@ function handleTableKeydown(event: KeyboardEvent) {
       >
         已加载全部条目
       </p>
+
+      <EntrySocialItem
+        v-else-if="isEntry(item) && view === 'social'"
+        :key="item.id"
+        :entry="item"
+        :selected="item.id === selectedId"
+        :show-feed="showFeed"
+        @open="handleOpen"
+      />
 
       <EntryBlogItem
         v-else-if="isEntry(item) && view === 'blog'"

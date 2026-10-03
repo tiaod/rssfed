@@ -1,14 +1,16 @@
 import { computed, reactive, ref, watch } from 'vue'
 import type { RssEntry } from '~/types/rss'
-import { errorMessage } from '~/utils/errorMessage'
+// 显式导入：单测环境没有 Nuxt 自动导入，裸调 useEntryActions 会直接 ReferenceError
+import { useEntryActions } from '~/composables/useEntryActions'
 
 /**
  * 条目详情的共享状态与动作。
  *
  * 详情有两个展示面：窄屏的模态弹窗（EntryDetailModal）与宽屏右侧的常驻阅读栏
  * （EntryReaderPane，三栏布局的第三栏）。它们要做的事完全一样 —— 打开即标已读、
- * 按 id 懒取全文、上一篇/下一篇、工具栏的已读与收藏切换 —— 所以口径只在这里写一份，
- * 各展示面只负责版式（弹窗尺寸 / 划卡 / 键盘 / 滚动容器）。
+ * 按 id 懒取全文、上一篇/下一篇、工具栏的已读与收藏切换（单条的写入口径见 useEntryActions，
+ * 信息流条目的操作栏也用那一份）—— 所以口径只在这里写一份，各展示面只负责版式
+ * （弹窗尺寸 / 划卡 / 键盘 / 滚动容器）。
  *
  * 两个展示面由断点互斥，同时只有一个是挂载的（见 useReaderPaneWide）。
  */
@@ -48,39 +50,13 @@ export function useEntryDetail() {
     { immediate: true }
   )
 
-  /** 手动切换已读 / 未读（工具栏）。与自动标记共用同一个开关，冲突由 markRead 内部重试消化 */
-  const readBusy = ref(false)
-
-  async function toggleRead() {
-    const entry = currentEntry.value
-    if (!entry || readBusy.value) return
-    const next = !entry.read
-    readBusy.value = true
-    try {
-      await pouch.markRead(entry.id, entry.feedId, next)
-      entry.read = next
-    } catch (e: unknown) {
-      toast.add({ title: '操作失败', description: errorMessage(e, '标记已读失败'), color: 'error' })
-    } finally {
-      readBusy.value = false
-    }
-  }
-
-  /** 收藏 / 取消收藏（工具栏）。切换结果由本地库返回，避免两端状态不一致 */
-  const savedBusy = ref(false)
-
-  async function toggleStar() {
-    const entry = currentEntry.value
-    if (!entry || savedBusy.value) return
-    savedBusy.value = true
-    try {
-      entry.starred = await pouch.toggleSaved(entry.id, entry.feedId)
-    } catch (e: unknown) {
-      toast.add({ title: '操作失败', description: errorMessage(e, '收藏失败'), color: 'error' })
-    } finally {
-      savedBusy.value = false
-    }
-  }
+  /**
+   * 工具栏的两个手动动作（标为已读 / 未读、收藏）：写库与就地改条目的口径在 useEntryActions，
+   * 信息流条目的操作栏用的是同一份，这里只是把它接到「当前这篇」上。
+   */
+  const { readBusy, savedBusy, toggleRead, toggleStar } = useEntryActions(
+    () => currentEntry.value
+  )
 
   // ── 全文懒取：按 id 缓存，命中的直接复用 ──
 

@@ -5,12 +5,21 @@
  * 设置页（默认值选择）、订阅文档读取校验都从这里取同一份枚举，避免各处写字符串。
  */
 
-export const LIST_VIEWS = ['masonry', 'blog', 'list', 'table', 'image'] as const
+export const LIST_VIEWS = ['social', 'masonry', 'blog', 'list', 'table', 'image'] as const
 
 export type ListView = (typeof LIST_VIEWS)[number]
 
 /** 未配置任何默认值时的兜底视图 */
 export const DEFAULT_LIST_VIEW: ListView = 'masonry'
+
+/**
+ * 时间线的内置默认视图。
+ *
+ * 只作用于时间线：它把「各订阅源混在一起」的信息流按社交动态呈现最合身，其余页面
+ * （单源 / 分组 / 收藏）兜底仍是瀑布流。全局设置（通用设置里的「默认列表视图」）优先，
+ * 见 useTimelineView；用户没配过时全局值为 undefined（不是瀑布流），两者才区分得开。
+ */
+export const TIMELINE_DEFAULT_VIEW: ListView = 'social'
 
 export interface ListViewMeta {
   /** 切换菜单 / 设置页里的显示名 */
@@ -22,6 +31,12 @@ export interface ListViewMeta {
 }
 
 export const LIST_VIEW_META: Record<ListView, ListViewMeta> = {
+  social: {
+    label: '社交动态',
+    icon: 'i-lucide-messages-square',
+    // 与 table 同样的讲究：说明里不出现其它视图的标签，菜单的可访问名才不会有歧义
+    description: '头像居左的信息流：署名与正文对齐其右，配图 1 张按比例、多张铺网格'
+  },
   masonry: {
     label: '瀑布流',
     icon: 'i-lucide-layout-dashboard',

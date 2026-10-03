@@ -1,5 +1,5 @@
 import { computed, onMounted, ref } from 'vue'
-import { DEFAULT_LIST_VIEW, type ListView } from '~/utils/listViews'
+import { DEFAULT_LIST_VIEW, TIMELINE_DEFAULT_VIEW, type ListView } from '~/utils/listViews'
 // 显式导入：单测环境没有 Nuxt 自动导入，裸调 useReaderPaneView 会直接 ReferenceError
 import { useReaderPaneView } from '~/composables/useReaderLayout'
 
@@ -9,7 +9,7 @@ import { useReaderPaneView } from '~/composables/useReaderLayout'
  * 默认值三层，越具体越优先：
  *   单源页（含 bot 产出页）：订阅源自身 -> 所属分组 -> 全局
  *   分组页：该分组 -> 全局
- *   时间线：全局（默认瀑布流）
+ *   时间线：全局（未配置时默认社交动态）
  *
  * 页面上的切换按钮**只写会话内覆盖**（下面的 useState），刷新即回到配置的默认值：
  * 只有显式配置入口（通用设置 / 编辑订阅 / 订阅管理页的分组行）才写默认值，
@@ -60,10 +60,10 @@ export function useListViewState(
   return { view, defaultView, overridden, setView, resetView }
 }
 
-/** 时间线：全局默认（默认瀑布流） */
+/** 时间线：全局默认；用户没配过时用时间线自己的内置默认（社交动态，见 TIMELINE_DEFAULT_VIEW） */
 export function useTimelineView() {
   const { settings } = useSettings()
-  return useListViewState('timeline', () => settings.value.view ?? DEFAULT_LIST_VIEW)
+  return useListViewState('timeline', () => settings.value.view ?? TIMELINE_DEFAULT_VIEW)
 }
 
 /**
