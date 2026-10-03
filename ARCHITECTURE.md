@@ -62,7 +62,10 @@ rssfed/                          # pnpm workspace
 
 - **每个订阅源独立 CouchDB 库** — `feed:{feedId}` 存储该源的 FeedDoc + EntryDoc。浏览器 PouchDB 逐个同步用户订阅的 feed 库，在本地完成跨源合并
 - **用户状态独立库存放** — `user-state:{userId}` 存放用户对条目的操作（已读、收藏），各设备双向同步此库来保持跨设备一致
-- **无需服务端过滤复制** — 浏览器端按需拉取各个 feed 库，避免 CouchDB 过滤复制（`_replicate` + filter）在大数据量下的性能瓶颈
+- **按窗口过滤复制，锚点固定** — 首轮同步只拉最近 N 天（默认 3 天，设置页可改）的条目：服务端 `_selector`
+  过滤（`publishedAt >= 锚点` 或 FeedDoc），窗口外历史不进浏览器。锚点按「源 + 档位」存下后不跟随时钟走：
+  PouchDB 复制 id 由 selector 参与计算，锚点一变就重开 checkpoint，等于所有源的 `_changes` 从头重扫
+  （实测 642 源 ≈ 23MB）。窗口只决定往回补多长历史，之后都是增量；调小窗口不删本地已有条目
 - **Bot 做逻辑分组，feed 独立库做物理存储** — 一个 Bot 跟踪多个 feed，一个 feed 可被多个 Bot 引用，但物理上每个 feed 只存一份数据，无冗余
 
 ### 用户状态库 `user-state:{userId}`
@@ -190,7 +193,7 @@ CouchDB 附件写入时与条目文档天然同源同步，省掉了独立下载
 ## 数据流
 
 1. **RSS 资讯聚合**：用户发现并订阅感兴趣的 feed → feedsmith 解析 → 写入对应 feed:{feedId} 库（去重）→ BullMQ 定时调度周期性拉取更新
-2. **用户同步**：登录后 → 获取用户订阅的 feedId 列表 → 浏览器 PouchDB 逐个 `_replicate` feed 库到本地 → 本地 PouchDB 跨源合并，按时间线展示
+2. **用户同步**：登录后 → 获取用户订阅的 feedId 列表 → 浏览器 PouchDB 逐个 `_replicate` feed 库到本地（只拉同步窗口内的条目）→ 本地 PouchDB 跨源合并，按时间线展示。进入单个列表时该列表的源插到复制队列最前：本地有缓存就先上屏、同步在后台跑（新条目折叠进「已同步 N 条」），本地空的才等它（最多 5s）再上屏
 3. **离线阅读**：浏览器 PouchDB 本地缓存 → 离线浏览、跨源搜索、按时间排序 → 打开条目即标已读/手动切换已读与收藏 → 同步到 user-state 库 → 其他设备接收变更
 4. **ActivityPub 分发**：Worker 抓取到新条目 → 查 PostgreSQL `bot_feeds` 找出引用该 feed 的 Bot → 对每个 Bot 通过 BotKit 构建 Create Activity 推送到 follower inbox → 同时写入该 Bot 的 **CouchDB `bot:{botId}` 产出库**供 outbox 查询（`entries-by-date` 视图按 publishedAt 排序，天然支持倒序分页）
 

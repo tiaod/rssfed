@@ -7,6 +7,7 @@ import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimate'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 import { LIST_VIEW_OPTIONS } from '~/utils/listViews'
+import { SYNC_WINDOW_CHOICES } from '~/utils/syncWindow'
 
 definePageMeta({
   layout: 'default'
@@ -55,6 +56,9 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
   { label: '很宽', value: 'sm:max-w-6xl' },
   { label: '全屏', value: 'fullscreen' }
 ]
+
+// 同步窗口选项（0 = 不限时间），语义见 utils/syncWindow
+const syncWindowOptions = SYNC_WINDOW_CHOICES
 
 const isAdmin = computed(() => userStore.isAdmin)
 
@@ -298,6 +302,31 @@ const confirmReset = async () => {
                     description="全屏时固定顶栏与底栏、仅正文滚动；关闭后随文章一起滚动"
                   >
                     <USwitch v-model="draftSettings.fixedBars" />
+                  </UFormField>
+                </section>
+
+                <USeparator />
+
+                <section class="space-y-4">
+                  <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
+                    同步
+                  </h3>
+
+                  <!--
+                    同步窗口只影响「每个源第一次同步时往回补多长历史」：窗口外的历史条目不下载，
+                    之后的同步都是增量（见 utils/syncWindow）。因此文案要讲清两点：
+                    调大/调小各自会发生什么，以及本地已有的条目不会被删掉。
+                  -->
+                  <UFormField
+                    label="同步最近多久的数据"
+                    description="每个订阅源第一次同步时只拉取这段时间内的条目，之后的同步都是增量、不受影响；调大后会按新窗口把更早的条目补回来，调小不会删除本地已缓存的条目。"
+                  >
+                    <USelect
+                      v-model="draftSettings.syncWindowDays"
+                      :items="syncWindowOptions"
+                      value-key="value"
+                      class="w-48"
+                    />
                   </UFormField>
                 </section>
 

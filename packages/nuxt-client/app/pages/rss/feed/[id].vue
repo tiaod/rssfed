@@ -19,7 +19,6 @@ const api = useApi()
 const pouch = usePouchDb()
 const toast = useToast()
 const feed = ref<RssFeed | null>(null)
-const loading = ref(true)
 const feedLoading = ref(true)
 
 // 顶栏标题优先用用户在订阅列表里设置的名字（本地订阅文档，离线可用）；
@@ -38,6 +37,14 @@ const {
 } = useSyncedEntryList({
   query: limit => pouch.queryFeedEntries(feedId, limit),
   syncedDocs: () => pouch.syncedDocsByFeed[feedId] ?? 0
+})
+
+// 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
+// 没缓存才等优先同步把内容拉回来再上屏 —— 见 useListFirstPaint
+const { loading, renderFirstPaint } = useListFirstPaint({
+  load,
+  hasEntries: () => entries.value.length > 0,
+  sync: () => pouch.syncPriority([feedId])
 })
 
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
@@ -107,11 +114,11 @@ onMounted(async () => {
     feedLoading.value = false
   }
 
-  // 不自动同步：数据来自集中库（时间线页已增量同步），需要最新时点导航栏同步按钮
-  await load()
+  // 先上屏、再优先同步这个源：有缓存时一个请求都不等，新条目折叠进「已同步 N 条」提示条
+  // （见 useListFirstPaint）；没缓存时才等它跑完（最多 5s）再渲染。
+  await renderFirstPaint()
   // 深链进来时详情先按 id 取了全文（列表还没加载完，没有上/下篇可翻）：列表就绪后补挂上下文
   attachListContext()
-  loading.value = false
 })
 
 // 该源同步完成时累计「已同步 N 条」；列表不动，等用户点提示条

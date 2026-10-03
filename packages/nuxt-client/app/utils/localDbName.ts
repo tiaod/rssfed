@@ -36,5 +36,15 @@ export function syncRetryKey(userId: string | null | undefined): string {
   return `rssfed-sync-retry-${dbSuffix(userId)}`
 }
 
+/**
+ * 同步窗口锚点（localStorage）的 key：feedId → 该源首轮复制的 publishedAt 下界。
+ *
+ * 同样按账号隔离：锚点决定复制 id（checkpoint 的一条线），串账号会让新账号接着
+ * 上一个账号的窗口补历史。锚点的语义与取舍见 utils/syncWindow。
+ */
+export function syncWindowKey(userId: string | null | undefined): string {
+  return `rssfed-sync-window-${dbSuffix(userId)}`
+}
+
 /** 账号隔离之前使用的固定库名（升级时清理，见 usePouchDb 的 cleanupLegacyDbs） */
 export const LEGACY_LOCAL_DB_NAMES = ['rssfed-entries', 'rssfed-user-state'] as const

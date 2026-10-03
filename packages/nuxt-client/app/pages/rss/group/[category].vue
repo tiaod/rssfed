@@ -14,7 +14,6 @@ const category = route.params.category as string
 
 const pouch = usePouchDb()
 const feeds = ref<SubscriptionItem[] | null>(null)
-const loading = ref(true)
 const error = ref<string | null>(null)
 
 // 该分组下的订阅源（与导航栏的分类匹配规则一致：trim 后精确匹配）
@@ -41,6 +40,14 @@ const {
     }))
   },
   syncedDocs: () => groupFeeds.value.reduce((n, feed) => n + (pouch.syncedDocsByFeed[feed.id] ?? 0), 0)
+})
+
+// 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
+// 没缓存才等优先同步把内容拉回来再上屏 —— 见 useListFirstPaint
+const { loading, renderFirstPaint } = useListFirstPaint({
+  load,
+  hasEntries: () => entries.value.length > 0,
+  sync: () => pouch.syncPriority(groupFeeds.value.map(feed => feed.id))
 })
 
 // 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
@@ -83,9 +90,9 @@ onMounted(async () => {
     return
   }
 
-  // 不自动同步：数据来自集中库（时间线页已增量同步），需要最新时点导航栏同步按钮
-  await load()
-  loading.value = false
+  // 先上屏、再优先同步组内所有源：有缓存时一个请求都不等，新条目折叠进提示条
+  // （见 useListFirstPaint）；没缓存时才等它们跑完（最多 5s）再渲染。
+  await renderFirstPaint()
 })
 
 // 组内任一源同步完成时累计「已同步 N 条」；列表不动，等用户点提示条

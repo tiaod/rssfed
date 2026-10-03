@@ -81,6 +81,7 @@ vi.mock('~/utils/localDbName', () => ({
   localDbName: (kind: string, uid: string | null) => `fake-${kind}-${uid ?? 'guest'}`,
   syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
   syncRetryKey: (uid: string | null) => `rssfed-test-retry-${uid ?? 'guest'}`,
+  syncWindowKey: (uid: string | null) => `rssfed-test-window-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: []
 }))
 

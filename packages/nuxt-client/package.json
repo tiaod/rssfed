@@ -11,7 +11,8 @@
     "lint": "eslint .",
     "typecheck": "nuxt typecheck",
     "verify:lightbox": "node scripts/verify-lightbox.mjs",
-    "verify:entry-route": "node scripts/verify-entry-route.mjs"
+    "verify:entry-route": "node scripts/verify-entry-route.mjs",
+    "verify:sync-window": "node scripts/verify-sync-window.mjs"
   },
   "dependencies": {
     "@iconify-json/lucide": "^1.2.111",

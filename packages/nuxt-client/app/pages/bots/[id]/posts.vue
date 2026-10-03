@@ -16,7 +16,6 @@ const virtualFeedId = `bot:${botId}`
 const pouch = usePouchDb()
 const toast = useToast()
 const bot = ref<{ id: string, name: string, description?: string, avatarUrl?: string } | null>(null)
-const loading = ref(true)
 const subscribed = ref(false)
 
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
@@ -28,6 +27,14 @@ const {
   // bot 产出以虚拟 feedId `bot:{id}` 入库
   query: limit => pouch.queryFeedEntries(virtualFeedId, limit),
   syncedDocs: () => pouch.syncedDocsByFeed[virtualFeedId] ?? 0
+})
+
+// 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
+// 没缓存才等优先同步把内容拉回来再上屏 —— 见 useListFirstPaint
+const { loading, renderFirstPaint } = useListFirstPaint({
+  load,
+  hasEntries: () => entries.value.length > 0,
+  sync: () => pouch.syncPriority([virtualFeedId])
 })
 
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
@@ -92,8 +99,9 @@ onMounted(async () => {
   } catch {
     // bot 信息不要求强依赖
   }
-  await load()
-  loading.value = false
+  // 先上屏、再优先同步这个产出库：有缓存时一个请求都不等，新条目折叠进提示条
+  // （见 useListFirstPaint）；没缓存时才等它跑完（最多 5s）再渲染。
+  await renderFirstPaint()
 })
 
 // 该虚拟源同步完成时累计「已同步 N 条」；列表不动，等用户点提示条
