@@ -5,14 +5,27 @@ import type { RssEntry } from '~/types/rss'
 import { useEntryContent } from '~/composables/useEntryContent'
 import { useImageLightbox } from '~/composables/useImageLightbox'
 import { useSafeHtml } from '~/composables/useSafeHtml'
+import { useSiteSettings } from '~/composables/useSiteSettings'
 
 const props = defineProps<{
   entry: RssEntry
 }>()
 
+const { settings } = useSiteSettings()
+
 // 订阅源正文是任意 HTML，注入前必须过白名单：剥掉 <script>/on* 事件/javascript: 协议，
-// 并给外链补 target=_blank + rel=noopener（见 useSafeHtml）
-const safeContent = useSafeHtml(() => props.entry.content)
+// 并给外链补 target=_blank + rel=noopener（见 useSafeHtml）。
+// iframe 额外走一条策略：与订阅源同源的嵌入保留，第三方嵌入只放行管理员维护的地址前缀
+// 白名单（见 utils/iframePolicy.ts）。settings 变化会自动重算正文。
+const safeContent = useSafeHtml(
+  () => props.entry.content,
+  () => ({
+    siteUrl: props.entry.feed?.siteUrl,
+    feedUrl: props.entry.feed?.feedUrl,
+    entryUrl: props.entry.url,
+    urlPrefixes: settings.value.iframeWhitelist
+  })
+)
 
 // 图片点击放大：滚轮/双指/双击缩放、拖拽平移、旋转、多图切换（见 useImageLightbox）。
 // 挂在 useEntryContent 管线的最后一步，保证拿到的是已换成本地 blob URL 的最终地址。
@@ -26,11 +39,13 @@ const {
 } = useImageLightbox(contentEl)
 
 // 将已缓存为 AVIF 附件的正文图片替换为本地 blob URL 直接展示（离线可用，失败回退原 URL），
-// 同一管线里还负责代码高亮，见 useEntryContent
+// 同一管线里还负责代码高亮，见 useEntryContent。
+// 把 safeContent 一并作为依赖：站点设置（iframe 白名单）到齐后 v-html 会整块重写，
+// 管线必须跟着重跑，否则换好的 blob URL 与代码高亮会被覆盖掉。
 useEntryContent(() => props.entry, contentEl, {
   onReady: attachLightbox,
   onTeardown: detachLightbox
-})
+}, safeContent)
 
 function formatDate(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString('zh-CN', {

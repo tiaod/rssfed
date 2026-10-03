@@ -20,10 +20,14 @@ const form = ref({
   pwaShortName: '',
   pwaDisplay: '',
   pwaThemeColor: '',
-  pwaBackgroundColor: ''
+  pwaBackgroundColor: '',
+  iframeWhitelist: [] as string[]
 })
 const logoUrl = ref<string | null>(null)
 const iconUrl = ref<string | null>(null)
+
+/** 正文 iframe 白名单的内置默认（后端下发）：用于「恢复默认」与「是否仍是默认」判断 */
+const whitelistDefaults = ref<string[]>([])
 
 const logoInput = ref<HTMLInputElement | null>(null)
 const iconInput = ref<HTMLInputElement | null>(null)
@@ -62,6 +66,16 @@ function toNullable(v: string) {
   return trimmed === '' ? null : trimmed
 }
 
+/** 两个列表逐项相等（含顺序）：用来判断白名单是否还等于内置默认 */
+function listsEqual(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((item, index) => item === b[index])
+}
+
+/** 恢复默认：标签还原成内置列表；保存时会被识别为「仍是默认」，以 null 落库 */
+function resetWhitelist() {
+  form.value.iframeWhitelist = [...whitelistDefaults.value]
+}
+
 async function load() {
   loading.value = true
   error.value = null
@@ -75,8 +89,10 @@ async function load() {
       pwaShortName: s.pwaShortName ?? '',
       pwaDisplay: s.pwaDisplay ?? '',
       pwaThemeColor: s.pwaThemeColor ?? '',
-      pwaBackgroundColor: s.pwaBackgroundColor ?? ''
+      pwaBackgroundColor: s.pwaBackgroundColor ?? '',
+      iframeWhitelist: s.iframeWhitelist ?? []
     }
+    whitelistDefaults.value = s.iframeWhitelistDefaults ?? []
     logoUrl.value = s.logoUrl ?? null
     iconUrl.value = s.pwaIconUrl ?? null
   } catch (e) {
@@ -97,7 +113,11 @@ async function save() {
       pwaShortName: toNullable(form.value.pwaShortName),
       pwaDisplay: toNullable(form.value.pwaDisplay),
       pwaThemeColor: toNullable(form.value.pwaThemeColor)?.toLowerCase() ?? null,
-      pwaBackgroundColor: toNullable(form.value.pwaBackgroundColor)?.toLowerCase() ?? null
+      pwaBackgroundColor: toNullable(form.value.pwaBackgroundColor)?.toLowerCase() ?? null,
+      // 与内置默认完全一致时存 null，保持「跟随默认」：以后默认列表增补条目能自动生效
+      iframeWhitelist: listsEqual(form.value.iframeWhitelist, whitelistDefaults.value)
+        ? null
+        : [...form.value.iframeWhitelist]
     })
     toast.add({ title: '站点设置已保存', color: 'success' })
     void siteSettings.refresh()
@@ -388,6 +408,44 @@ onMounted(load)
         fallback-color="#ffffff"
         placeholder="#ffffff"
       />
+
+      <!-- 正文嵌入：iframe 的放行规则 -->
+      <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
+        正文嵌入（iframe）
+      </h3>
+
+      <UAlert
+        color="neutral"
+        variant="soft"
+        icon="i-lucide-shield-check"
+        title="与订阅源同源的 iframe 自动放行"
+        description="条目正文里的 iframe 默认整块移除（含 srcdoc）。与订阅源同源、或命中下面白名单的嵌入才会保留；其余一律丢弃。"
+      />
+
+      <UFormField
+        label="第三方嵌入白名单"
+        description="每项是一个地址前缀（如 https://www.youtube.com/embed/），只放行以它开头的 iframe 地址；与订阅源同源的嵌入不必登记。留空即不放行任何第三方嵌入。"
+      >
+        <UInputTags
+          v-model="form.iframeWhitelist"
+          class="w-full"
+          :duplicate="false"
+          add-on-paste
+          placeholder="https://www.youtube.com/embed/"
+        />
+      </UFormField>
+
+      <div class="flex justify-start">
+        <UButton
+          variant="outline"
+          size="sm"
+          icon="i-lucide-rotate-ccw"
+          :disabled="whitelistDefaults.length === 0"
+          @click="resetWhitelist"
+        >
+          恢复默认列表
+        </UButton>
+      </div>
 
       <div class="flex justify-start">
         <UButton

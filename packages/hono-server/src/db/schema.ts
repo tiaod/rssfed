@@ -59,6 +59,10 @@ export const siteSettings = pgTable("site_settings", {
   /** PWA 图标附件外键（定位 attachments 行以删除旧 S3 文件） */
   pwaIconAttachmentId: text("pwa_icon_attachment_id").references(() => attachments.id, { onDelete: "set null" }),
 
+  /** 正文 <iframe> 第三方白名单（网址前缀，见 src/iframe-whitelist.ts）。
+   *  与订阅源同源的嵌入无需登记；本列为 null 时回退内置默认，空数组表示不放行任何第三方嵌入。 */
+  iframeWhitelist: jsonb("iframe_whitelist").$type<string[]>(),
+
   /** 预留扩展项（新配置字段暂写此处，避免频繁改表结构） */
   extras: jsonb("extras").$type<Record<string, unknown>>().notNull().default({}),
   createdAt: timestamp("created_at").notNull().defaultNow(),

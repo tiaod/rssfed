@@ -90,6 +90,17 @@ describe('EntryDetail', () => {
     expect(link.attributes('rel')).toBe('noopener noreferrer')
   })
 
+  it('与订阅源同源的 iframe 会渲染出来（相对地址改写为绝对地址）', () => {
+    const wrapper = mountEntry({
+      ...mockEntry,
+      content: '<iframe src="/player.html"></iframe><iframe src="https://evil.example/x"></iframe>'
+    })
+
+    const frames = wrapper.findAll('.entry-content iframe')
+    expect(frames).toHaveLength(1)
+    expect(frames[0]!.attributes('src')).toBe('https://example.com/player.html')
+  })
+
   it('没有附件时不显示附件区', () => {
     const wrapper = mountEntry({ ...mockEntry, enclosures: undefined })
 

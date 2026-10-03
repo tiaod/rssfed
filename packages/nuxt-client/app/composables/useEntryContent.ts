@@ -1,4 +1,4 @@
-import { nextTick, onScopeDispose, ref, watch, type Ref } from 'vue'
+import { nextTick, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter, type Ref, type WatchSource } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import { usePouchDb } from '~/composables/usePouchDb'
 import { highlightCodeBlocks } from '~/composables/useCodeHighlight'
@@ -22,11 +22,16 @@ export interface EntryContentHooks {
  * 三步必须串行：放大要基于第 1 步改写后的最终 src。
  * 内容切换/组件卸载时用递增的 runToken 作废进行中的异步任务，避免给旧 DOM 白做功。
  * blob URL 在切换和卸载时统一回收。
+ *
+ * `htmlRef` 是净化后的正文 HTML：它不只随 entry 变，还会随**运行时拉取的站点设置**
+ * （iframe 白名单）二次变化，届时 v-html 会整块重写 DOM，之前换上的 blob URL 与代码
+ * 高亮都会丢。所以把它也作为依赖，重写之后重跑一遍管线。
  */
 export function useEntryContent(
   entryRef: () => RssEntry | null,
   contentEl: Ref<HTMLElement | null | undefined>,
-  hooks: EntryContentHooks = {}
+  hooks: EntryContentHooks = {},
+  htmlRef?: MaybeRefOrGetter<string>
 ) {
   const resolving = ref(false)
   /** 本次处理创建的 blob URL，切换/卸载时回收 */
@@ -35,7 +40,9 @@ export function useEntryContent(
   /** 每次正文重建自增；异步阶段靠它判断本轮是否已作废 */
   let runToken = 0
 
-  watch([entryRef, contentEl], () => {
+  const sources: WatchSource<unknown>[] = [entryRef, contentEl]
+  if (htmlRef) sources.push(() => toValue(htmlRef))
+  watch(sources, () => {
     void enhance()
   }, { flush: 'post' })
 

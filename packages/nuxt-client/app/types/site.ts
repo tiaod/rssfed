@@ -15,6 +15,11 @@ export interface SiteSettingsUpdate {
   pwaThemeColor?: string | null
   /** manifest 的 background_color 与图标底色（hex）；留空回退 primaryColor */
   pwaBackgroundColor?: string | null
+  /**
+   * 正文 <iframe> 的第三方地址前缀白名单。
+   * null = 恢复内置默认；空数组 = 不放行任何第三方嵌入（与订阅源同源的嵌入不受影响）。
+   */
+  iframeWhitelist?: string[] | null
 }
 
 /** PWA 显示模式的合法取值（与后端 DISPLAY_MODES 一致） */
@@ -38,10 +43,19 @@ export interface SiteSettingsPublic {
   pwaBackgroundColor?: string | null
   /** PWA 方形图标 URL；为空时图标由站点 logo 裁剪或内置默认图形生成 */
   pwaIconUrl?: string | null
+  /**
+   * 生效的正文 iframe 白名单（未配置时为内置默认）。
+   * 渲染层据此过滤第三方嵌入，见 utils/iframePolicy.ts。
+   */
+  iframeWhitelist?: string[]
 }
 
 /** 管理员读取的完整视图（含内部扩展与更新时间） */
 export interface SiteSettingsFull extends SiteSettingsPublic {
+  /** 生效的白名单：管理员界面直接编辑这一份 */
+  iframeWhitelist: string[]
+  /** 内置默认白名单：用于「恢复默认」以及判断当前是否仍是默认 */
+  iframeWhitelistDefaults: string[]
   extras?: Record<string, unknown>
   createdAt: string
   updatedAt: string

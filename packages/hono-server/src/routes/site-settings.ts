@@ -15,6 +15,11 @@ import {
 } from "../pwa/manifest"
 import { getPwaIcon } from "../pwa/icons"
 import { etagMatches } from "../pwa/etag"
+import {
+  DEFAULT_IFRAME_WHITELIST,
+  normalizeIframeWhitelist,
+  resolveIframeWhitelist
+} from "../iframe-whitelist"
 
 type SiteSettingsVariables = { userId: string }
 
@@ -31,8 +36,16 @@ export type SiteSettingsUpdate = Partial<
     SiteSettings,
     "siteTitle" | "description" | "primaryColor" | "skin"
     | "pwaShortName" | "pwaDisplay" | "pwaThemeColor" | "pwaBackgroundColor"
+    | "iframeWhitelist"
   >
 >
+
+/** normalizeUpdate 的结果：列补丁 + 需要单独看的字段（null 有语义，不能和「未出现」合并） */
+interface NormalizedUpdate {
+  patch: SiteSettingsUpdate
+  /** 字段未出现 = 不修改；null = 恢复内置默认 */
+  iframeWhitelist?: string[] | null
+}
 
 const HEX_COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i
 
@@ -40,10 +53,11 @@ const HEX_COLOR_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i
  * 校验并归一化更新负载（仅采纳出现过的字段；null 表示恢复默认）。
  * 非法输入抛 ApiError(422)。
  */
-function normalizeUpdate(body: unknown): SiteSettingsUpdate {
+function normalizeUpdate(body: unknown): NormalizedUpdate {
   if (typeof body !== "object" || body === null) throw new ApiError(422, "请求体格式错误")
   const src = body as Record<string, unknown>
   const patch: SiteSettingsUpdate = {}
+  const result: NormalizedUpdate = { patch }
 
   const { siteTitle, description, primaryColor, skin } = src
   if (siteTitle !== undefined) {
@@ -101,7 +115,12 @@ function normalizeUpdate(body: unknown): SiteSettingsUpdate {
     else patch[key] = value.trim().toLowerCase()
   }
 
-  return patch
+  // ── 正文 iframe 白名单（null = 恢复内置默认；空数组 = 不放行任何第三方嵌入） ──
+  if (src.iframeWhitelist !== undefined) {
+    result.iframeWhitelist = normalizeIframeWhitelist(src.iframeWhitelist)
+  }
+
+  return result
 }
 
 /** 序列化为接口 JSON（时间戳转 ISO 字符串，去掉内部字段） */
@@ -117,6 +136,10 @@ function serialize(row: SiteSettings) {
     pwaThemeColor: row.pwaThemeColor,
     pwaBackgroundColor: row.pwaBackgroundColor,
     pwaIconUrl: row.pwaIconUrl,
+    /** 生效的白名单（未配置时为内置默认）；管理员界面直接编辑这一份 */
+    iframeWhitelist: resolveIframeWhitelist(row.iframeWhitelist),
+    /** 内置默认列表：管理员界面用它做「恢复默认」与「是否仍是默认」的判断 */
+    iframeWhitelistDefaults: DEFAULT_IFRAME_WHITELIST,
     extras: row.extras,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
@@ -145,9 +168,13 @@ siteSettingsPublicRouter.get("/", async (c) => {
       pwaThemeColor: siteSettings.pwaThemeColor,
       pwaBackgroundColor: siteSettings.pwaBackgroundColor,
       pwaIconUrl: siteSettings.pwaIconUrl,
+      iframeWhitelist: siteSettings.iframeWhitelist,
     })
     .from(siteSettings).where(eq(siteSettings.id, SITE_ID)).limit(1)
-  return c.json(row ?? {})
+  // 白名单是渲染层做 iframe 过滤的依据，必须随公开配置一起下发；
+  // 未配置时也返回内置默认，否则管理员保存前视频嵌入全部消失
+  const iframeWhitelist = resolveIframeWhitelist(row?.iframeWhitelist)
+  return c.json(row ? { ...row, iframeWhitelist } : { iframeWhitelist })
 })
 
 /** 配置行尚不存在（管理员从未保存过）时的空值兜底：全部走内置默认 */
@@ -270,7 +297,8 @@ siteSettingsAdminRouter.get("/", requireAdmin, async (c) => {
 siteSettingsAdminRouter.put("/", requireAdmin, async (c) => {
   try {
     const body = await c.req.json()
-    const patch = normalizeUpdate(body)
+    const { patch, iframeWhitelist } = normalizeUpdate(body)
+    if (iframeWhitelist !== undefined) patch.iframeWhitelist = iframeWhitelist
     await ensureSiteSettingsRow()
     const [row] = await db.update(siteSettings).set(patch).where(eq(siteSettings.id, SITE_ID)).returning()
     return c.json(row ? serialize(row) : {})
