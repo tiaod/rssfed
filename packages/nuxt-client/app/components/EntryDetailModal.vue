@@ -459,7 +459,7 @@ const modalUi = computed(() => {
 //
 // 浮钮原先固定贴屏幕两端：桌面窗口越宽、弹窗越窄（如 sm:max-w-6xl），
 // 按钮离弹窗边缘就越远，鼠标要长距离移动才点得到。
-// 这里量一次弹窗内容的布局几何，把浮钮摆到弹窗左右边缘外侧。
+// 这里量弹窗内容的布局几何，把浮钮摆到弹窗左右边缘外侧；正文落地后几何还会变，见 observeContent。
 //
 // 用 offsetLeft/offsetWidth 而不是 getBoundingClientRect：入场动画是 scale(.95→1)，
 // 缩放会污染 rect 的读数，而布局盒尺寸不受 transform 影响，因此不必等动画结束再对齐。
@@ -478,6 +478,8 @@ function syncNavInset(retry = 0) {
   if (!import.meta.client || !isOpen.value) return
   cancelAnimationFrame(navSyncRaf)
   if (isFullscreen.value) {
+    // 全屏铺满视口，浮钮贴屏幕两侧：不再需要量内容几何，也不必继续观察它
+    stopObservingContent()
     navInset.left = NAV_EDGE_MIN
     navInset.right = NAV_EDGE_MIN
     return
@@ -497,11 +499,38 @@ function syncNavInset(retry = 0) {
     NAV_EDGE_MIN,
     Math.round(document.documentElement.clientWidth - right - NAV_BUTTON_SPAN)
   )
+  observeContent(content)
+}
+
+/**
+ * 变化侦测：正文落地/骨架屏换高度都会让遮罩层多出或少掉一条纵向滚动条（居中弹窗由遮罩层滚动）。
+ *
+ * 滚动条一出现就占掉遮罩内容盒的一条宽度，居中在里面的弹窗随之横移半条滚动条（实测 15px 滚动条
+ * 横移 7.5px）。只在打开、切篇那一刻量一次几何是量不到这次横移的 —— 那一刻正文还没上屏、弹窗还是
+ * 短的，量出来的落点等正文撑开后就偏了：左侧浮钮贴住弹窗、右侧离得远，两侧间距差正好一条滚动条。
+ * 所以内容盒尺寸一变就按当前几何重量一次。
+ */
+let navObserver: ResizeObserver | null = null
+let navObservedEl: HTMLElement | null = null
+
+function observeContent(content: HTMLElement) {
+  if (typeof ResizeObserver === 'undefined' || navObservedEl === content) return
+  navObserver?.disconnect()
+  navObservedEl = content
+  navObserver = new ResizeObserver(() => syncNavInset())
+  navObserver.observe(content)
+}
+
+function stopObservingContent() {
+  navObserver?.disconnect()
+  navObserver = null
+  navObservedEl = null
 }
 
 /** 关闭时复位，避免下次打开先用上一次的落点闪一帧 */
 function resetNavInset() {
   cancelAnimationFrame(navSyncRaf)
+  stopObservingContent()
   navInset.left = NAV_EDGE_MIN
   navInset.right = NAV_EDGE_MIN
 }
@@ -548,6 +577,7 @@ if (import.meta.client) {
     window.removeEventListener('resize', onViewportResize)
     clearTimeout(navRevealTimer)
     cancelAnimationFrame(navSyncRaf)
+    stopObservingContent()
   })
 }
 
