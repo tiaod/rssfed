@@ -10,7 +10,8 @@
     "postinstall": "nuxt prepare",
     "lint": "eslint .",
     "typecheck": "nuxt typecheck",
-    "verify:lightbox": "node scripts/verify-lightbox.mjs"
+    "verify:lightbox": "node scripts/verify-lightbox.mjs",
+    "verify:entry-route": "node scripts/verify-entry-route.mjs"
   },
   "dependencies": {
     "@iconify-json/lucide": "^1.2.111",
