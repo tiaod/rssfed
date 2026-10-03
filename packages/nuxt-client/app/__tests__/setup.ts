@@ -44,8 +44,12 @@ nuxtGlobals.useFetch = vi.fn()
 // Nuxt 的 useState：测试里退化成普通 ref，只需要支持初始值
 nuxtGlobals.useState = vi.fn(<T>(_key: string, init: () => T) => ref(init()))
 nuxtGlobals.navigateTo = vi.fn()
-// Nuxt 的 useRoute：组件只读 params（如「地址里是否带着条目」），默认给一份空参数表
-nuxtGlobals.useRoute = vi.fn(() => ({ params: {} }))
+// Nuxt 的 useRoute / useRouter：组件只读 params（如「地址里是否带着条目」），默认给一份空参数表。
+// 注意 EntryDetailModal 读的是 router.currentRoute 而不是 useRoute：Nuxt 的 _route 慢一拍
+// （见组件里的注释），测试桩要跟着给同一份形状
+const emptyRouteParams = () => ({ params: {} as Record<string, string> })
+nuxtGlobals.useRoute = vi.fn(emptyRouteParams)
+nuxtGlobals.useRouter = vi.fn(() => ({ currentRoute: { value: emptyRouteParams() } }))
 // runtimeConfig 供 useCouchTargets 等 composable 读取后端地址
 nuxtGlobals.useRuntimeConfig = () => ({
   public: {

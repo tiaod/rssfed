@@ -351,7 +351,13 @@ watch(slots, hydrateSlots, { immediate: true })
 // 程序化关闭（关闭按钮/Esc/遮罩）时若该记录仍在栈顶则退掉，避免历史堆积
 const HISTORY_KEY = '__entryModal'
 
-const route = useRoute()
+/**
+ * 路由状态一律读 `router.currentRoute`，不用 `useRoute()`：Nuxt 的 `_route` 是浅拷贝，
+ * 在导航收尾之后才同步，而 isOpen 变 true 的这一刻它可能还停在**上一条地址**上（实测如此）。
+ * 这里判错一次的代价是：本该跳过的那条历史被压进去 —— 返回键要按两次才关得掉详情，
+ * 关闭时的 go(-1) 也会退到同一条地址上。
+ */
+const router = useRouter()
 
 /**
  * 打开这一篇时地址里是否已经带着它（单源页的 `/rss/feed/:id/entry/:entryId`）。
@@ -375,7 +381,7 @@ watch(isOpen, (open, wasOpen) => {
   // 单测里跑，import.meta.client 在 vitest 里恒为 undefined，会把整段逻辑一起跳过）
   if (typeof window === 'undefined') return
   if (open) {
-    openedWithUrl = Boolean(route.params.entryId)
+    openedWithUrl = Boolean(router.currentRoute.value.params.entryId)
     if (!openedWithUrl) {
       window.history.pushState({ ...window.history.state, [HISTORY_KEY]: true }, '', window.location.href)
     }

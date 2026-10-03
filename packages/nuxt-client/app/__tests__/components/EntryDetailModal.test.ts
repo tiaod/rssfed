@@ -362,7 +362,10 @@ describe('EntryDetailModal 的历史记录', () => {
   it('地址里已经带着这一篇（单源页详情地址）→ 不再压历史，返回键与关闭都交给路由', async () => {
     const pushSpy = vi.spyOn(window.history, 'pushState')
     const goSpy = vi.spyOn(window.history, 'go').mockImplementation(() => {})
-    testGlobals.useRoute = () => ({ params: { id: 'feed-1', entryId: 'entry-1' } })
+    // 判据读的是 router.currentRoute（Nuxt 的 _route 慢一拍，实测打开那一刻还是旧地址）；
+    // 这里刻意让 useRoute() 停留在**旧地址**上，钉住「不能读它」
+    testGlobals.useRoute = () => ({ params: {} })
+    testGlobals.useRouter = () => ({ currentRoute: { value: { params: { id: 'feed-1', entryId: 'entry-1' } } } })
     try {
       mount(EntryDetailModal, { global: { stubs: STUBS } })
       await flushPromises()
@@ -370,7 +373,7 @@ describe('EntryDetailModal 的历史记录', () => {
       g.isOpen.value = true
       await flushPromises()
 
-      // 打开：不压自己的历史（压了会和路由的历史打架，关闭时 go(-1) 会退到同一个地址上）
+      // 打开：不压自己的历史（压了会和路由的历史打架，返回键要按两次才关得掉详情）
       expect(pushSpy).not.toHaveBeenCalled()
 
       // 关闭：也不替路由退历史（地址由 useEntryRoute 换回列表页）
@@ -380,7 +383,7 @@ describe('EntryDetailModal 的历史记录', () => {
     } finally {
       pushSpy.mockRestore()
       goSpy.mockRestore()
-      testGlobals.useRoute = () => ({ params: {} })
+      testGlobals.useRouter = () => ({ currentRoute: { value: { params: {} } } })
     }
   })
 })
