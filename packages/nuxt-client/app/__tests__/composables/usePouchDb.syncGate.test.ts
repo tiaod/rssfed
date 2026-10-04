@@ -12,7 +12,7 @@ import { usePouchDb } from '~/composables/usePouchDb'
  *   1. 成功 → 写 v2 水位（含服务端 seen 值），同一 lastNewEntryAt 下一轮不再入队；
  *   2. 失败 → 写退避表，退避窗口内不再重试；
  *   3. 存储故障（indexed_db_went_bad / QuotaExceededError）→ 熔断本轮，
- *      未入队的批次直接不再发起。
+ *      队列清空、剩下的源不再发起，且按「没尝试」而不是「失败」上报。
  */
 
 interface PendingTask {
@@ -183,15 +183,15 @@ describe('失败退避：失败后不再每轮全量重试', () => {
 })
 
 describe('存储故障熔断', () => {
-  it('IndexedDB 配额故障：置位 storageBroken，后续批次不再入队', async () => {
-    // 60 个源 = 首批 50 + 次批 10，验证首批故障后第二批直接不发起
+  it('IndexedDB 配额故障：置位 storageBroken，队列清空且不再发起复制', async () => {
+    // 60 个源一次性全入队：验证首批故障后剩下的都不再发起请求
     const feeds = Array.from({ length: 60 }, (_, i) => ({
       feedId: `feed-${i}`,
       lastNewEntryAt: '2026-01-01T00:00:00.000Z'
     }))
 
     expect(await pouch.syncFeedsIfChanged(feeds)).toBe(60)
-    // 并发上限 2：首批只会有两个在途
+    // 并发上限 2：只会先跑两个，其余在队列里排队
     await vi.waitFor(() => expect(H.pending).toHaveLength(2))
 
     H.pending[0]!.fail({ status: 500, name: 'indexed_db_went_bad', reason: 'QuotaExceededError' })
@@ -201,7 +201,7 @@ describe('存储故障熔断', () => {
     const callsAfterBreak = (H.replicateFrom as unknown as { mock: { calls: unknown[] } }).mock.calls.length
     await new Promise(resolve => setTimeout(resolve, 30))
 
-    // 第二批次（剩下 10 个）不会被发起；队列里排队的也在熔断时清空
+    // 队列里排队的 58 个在熔断时被清空（按 cancelled 回执，不是失败）
     expect((H.replicateFrom as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(callsAfterBreak)
     expect(callsAfterBreak).toBeLessThanOrEqual(2)
 
@@ -209,6 +209,11 @@ describe('存储故障熔断', () => {
     await pouch.syncFeedsIfChanged(feeds)
     await new Promise(resolve => setTimeout(resolve, 20))
     expect((H.replicateFrom as unknown as { mock: { calls: unknown[] } }).mock.calls.length).toBe(callsAfterBreak)
+
+    // 熔断整轮按「没尝试」上报：几百条失败项会淹没真正的原因（storageBroken 有自己的提示）
+    const result = await pouch.syncNow(['feed-0'], { full: true })
+    expect(result.cancelled).toBe(1)
+    expect(result.failed).toEqual([])
   })
 
   it('重置本地缓存后解除熔断，并清掉退避与水位记录', async () => {

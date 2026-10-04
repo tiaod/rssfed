@@ -44,8 +44,9 @@ export interface SyncStatus {
 /**
  * 一次复制的结果。
  *
- * cancelled 表示「用户主动暂停同步」而非失败：调用方据此不弹失败提示，
- * 也不写 error 状态（暂停时状态已被统一归位）。
+ * cancelled 表示「本轮没尝试」而非失败：用户暂停、或存储故障熔断掉的那部分都以此上报。
+ * 两种情况各有专门的解释入口（暂停的 toast、storageBroken 提示与指示器），
+ * 逐条刷成 failed 只会淹没真正的原因。
  */
 export interface ReplicateResult {
   ok: boolean
@@ -326,16 +327,6 @@ export function computeReplicateProgress(
  * global failure。降到 20 让写入峰值可控，代价只是每批多几个请求。
  */
 const REPLICATE_BATCH_SIZE = 20
-
-/**
- * 每批入队的订阅源数量。
- *
- * 首轮（或本地缓存重建后）可能有几百个源同时需要同步：一次性全入队意味着
- * 队列里堆着几百个任务、失败时几百条错误一次性涌出，而且 IndexedDB 压力集中在
- * 同一段时间。分批入队让「暂停 / 存储故障熔断」能在批与批之间立刻生效，
- * 剩余批次直接不再发起。
- */
-const SYNC_BATCH_SIZE = 50
 
 /**
  * 「优先同步当前列表」的等待上限（毫秒）。
@@ -632,8 +623,10 @@ export function usePouchDb() {
   function pumpReplicateQueue() {
     // 本地存储已不可用：不再发起任何复制，把排队任务就地结束
     // （否则它们会在 global failure 的库上逐个快速失败，白白刷几百条错误）
+    // 按 cancelled 回执而不是 error：熔断是全局故障，原因由 storageBroken 单独解释，
+    // 把几百条「没尝试过」的源报成失败只会淹没它（见 ReplicateResult.cancelled）
     if (pouchState.storageBroken.value) {
-      drainReplicateQueue(pouchState, { ok: false, error: pouchState.storageBroken.value })
+      drainReplicateQueue(pouchState, { ok: false, cancelled: true })
       return
     }
     while (pouchState.activeReplicates < MAX_CONCURRENT_REPLICATE) {
@@ -695,7 +688,7 @@ export function usePouchDb() {
     }
     // 本地存储已熔断：不再排队（复制注定写不进去，还会刷几百条错误）
     if (pouchState.storageBroken.value) {
-      return Promise.resolve({ ok: false, error: pouchState.storageBroken.value })
+      return Promise.resolve({ ok: false, cancelled: true })
     }
     // 兜底：无效 id 直接拒绝，不发出注定失败的复制请求（上游已过滤，这里防漏网）
     if (!isValidDbId(id)) {
@@ -753,40 +746,6 @@ export function usePouchDb() {
     if (at === -1) return // 已经在优先队列里
     pouchState.replicateWaiting.splice(at, 1)
     pouchState.replicatePriority.unshift(item)
-  }
-
-  /**
-   * 分批入队并等待每批完成。
-   *
-   * 首轮可能有几百个源需要同步：一次性全入队会让队列长期堆着几百个任务，
-   * 且「暂停 / 存储故障」要等所有任务都轮完才生效。分批后每批 50 个，
-   * 批与批之间检查暂停与熔断状态，剩余批次直接不再发起。
-   *
-   * 返回值与 ids 等长：被中断而未执行的批次补 `cancelled`（用户暂停）或
-   * `error`（存储熔断），调用方不必处理下标缺失。
-   */
-  async function enqueueInBatches(
-    ids: string[],
-    full: boolean,
-    seenOf: (id: string) => string | undefined
-  ): Promise<ReplicateResult[]> {
-    const results: ReplicateResult[] = []
-    for (let i = 0; i < ids.length; i += SYNC_BATCH_SIZE) {
-      const broken = pouchState.storageBroken.value
-      if (pouchState.paused.value || broken) {
-        // 未执行的批次统一按「本轮中断」上报（不是失败）：暂停由用户操作解释，
-        // 存储熔断由 storageBroken 状态解释（UI 会给出专门提示），
-        // 这样不会把几百条「未尝试」的源刷成失败项淹没真正的原因。
-        for (let j = i; j < ids.length; j++) {
-          results.push({ ok: false, cancelled: true })
-        }
-        break
-      }
-      const batch = ids.slice(i, i + SYNC_BATCH_SIZE)
-      const settled = await Promise.all(batch.map(id => enqueueReplicate(id, full, seenOf(id))))
-      results.push(...settled)
-    }
-    return results
   }
 
   /**
@@ -1141,9 +1100,10 @@ export function usePouchDb() {
       needSync.push(f.feedId)
     }
 
-    // 分批入队且不等待全量：调用方是页面挂载流程，不能被几百个源的复制堵住首屏
-    // （复制完成后的列表刷新由 syncStatuses 的 version 变化触发）
-    void enqueueInBatches(needSync, false, id => seenById.get(id))
+    // 一次性全入队但不等待：调用方是页面挂载流程，不能被几百个源的复制堵住首屏
+    // （复制完成后的列表刷新由 syncStatuses 的 version 变化触发）。
+    // 并发由队列自己限制（MAX_CONCURRENT_REPLICATE），暂停 / 熔断由队列清空 + 入队短路处理
+    void Promise.all(needSync.map(id => enqueueReplicate(id, false, seenById.get(id))))
     return needSync.length
   }
 
@@ -1164,7 +1124,7 @@ export function usePouchDb() {
    * 复制统一走并发受限队列（见 enqueueReplicate），订阅源很多时不会挤爆连接。
    *
    * 返回值 skipped 是被增量过滤跳过的目标数，供 UI 提示「无更新」，避免点了按钮像没反应；
-   * cancelled 是本轮被用户暂停中断的目标数（不算失败，UI 不弹失败提示）；
+   * cancelled 是本轮没尝试的目标数（用户暂停 / 存储熔断中断，不算失败，UI 不弹失败提示）；
    * added 是本轮真正写入本地的文档数（0 = 这次同步没有带来任何新条目）。
    *
    * 用户主动调用即视为「恢复同步」：暂停状态下点同步会先清掉暂停标记，否则复制会被拦在
@@ -1218,20 +1178,23 @@ export function usePouchDb() {
       syncHandles.delete(USER_STATE_ID)
     }
 
-    // ③ 分批入队执行一次性复制（队列内部限制并发，批间可被暂停/熔断中断）
+    // ③ 入队执行一次性复制（队列内部限制并发；暂停 / 熔断由队列清空 + 入队短路处理）
     // 复制前记下各目标的「已同步文档数」基线，结束后做差得到本轮真正写入的条数（见 ⑤）
     const docsBefore = new Map<string, number>()
     for (const id of targets) {
       docsBefore.set(id, pouchState.syncedDocsByFeed[id] ?? 0)
     }
-    const results = await enqueueInBatches(targets, opts.full === true, id => seenById.get(id))
+    // Promise.all 保序：results[i] 对应 targets[i]（下面按下标取结果）
+    const results = await Promise.all(
+      targets.map(id => enqueueReplicate(id, opts.full === true, seenById.get(id)))
+    )
     const ok: string[] = []
     const failed: { id: string, error: string }[] = []
     const cancelled: string[] = []
     targets.forEach((id, i) => {
       const r = results[i]!
       if (r.cancelled) {
-        // 用户暂停导致的中断：既不算成功也不算失败
+        // 暂停 / 熔断导致的中断：既不算成功也不算失败
         cancelled.push(id)
       } else if (r.ok) {
         ok.push(id)
