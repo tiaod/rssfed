@@ -7,8 +7,13 @@
  * 选中态由当前视图派生（与 UserMenu 的主题选择同一套写法）。
  *
  * 触发按钮保持**纯图标**（和右边的「标记已读」「⋮」一致，导航栏右侧不排字、也不加额外装饰）：
- * 版式图标显示当前视图，「点一下能选」靠 tooltip / aria-label 里的「点击切换（当前：…）」说明，
- * 点开后的菜单每项带勾选态。这里不再单挂一个 ▾ —— 视觉上要简洁统一。
+ * 图标固定用 SWITCHER_ICON（一个「版式」符号），**不随当前视图变** —— 按钮要回答的是
+ * 「我点它会打开什么」，用一个专属图标才认得出来；跟着当前视图换图标，同一个位置的按钮
+ * 每切一次就换个长相，反而认不出是同一个开关。当前视图由 tooltip / aria-label 里的
+ * 「当前：…」和菜单里的勾选态交代。这里不再单挂一个 ▾ —— 视觉上要简洁统一。
+ *
+ * 菜单项也只有图标 + 显示名：六个选项一屏排得下，版式长什么样由切换后的列表本身呈现，
+ * 不靠菜单里的一行说明（那是设置页该干的事）。菜单项各留自己的版式图标（那是「切到哪个」）。
  *
  * 这里只负责「切换本次会话的视图」和「撤销会话内切换」；持久化的默认值在
  * 通用设置 / 编辑订阅 / 订阅管理页的分组行里配置，避免顺手点一下就把配置改掉。
@@ -28,11 +33,18 @@ const emit = defineEmits<{
   'reset': []
 }>()
 
+/**
+ * 触发按钮的专用图标：四个圆角方块 = 「版式」，和菜单项里的具体版式图标
+ * （layout-dashboard / newspaper / rows-3 / table / images / users-round）都不是同一个，
+ * 也避开了同排邻居的 refresh-cw（同步）、circle（只看未读）、circle-check（标记已读）、
+ * ellipsis-vertical（更多）。别改成 grid-2x2：那个和「表格」项的 table 太像。
+ */
+const SWITCHER_ICON = 'i-lucide-layout-grid'
+
 const items = computed<DropdownMenuItem[][]>(() => {
   const groups: DropdownMenuItem[][] = [
     LIST_VIEWS.map(value => ({
       label: LIST_VIEW_META[value].label,
-      description: LIST_VIEW_META[value].description,
       icon: LIST_VIEW_META[value].icon,
       type: 'checkbox' as const,
       checked: props.view === value,
@@ -57,17 +69,19 @@ const items = computed<DropdownMenuItem[][]>(() => {
  * 默认视图可能来自 localStorage（通用设置），服务端渲染时读不到 —— 直接按实际值渲染，
  * 服务端产物与客户端状态就不一致。而 Vue 对 hydration 的属性 / class 不一致只报警不修正
  * （提示原文：this mismatch is check-only. The DOM will not be rectified in prod），
- * 于是按钮图标和 tooltip 会一直停在服务端那一版，直到用户手动切一次视图。
+ * 于是 tooltip / aria-label 里的视图名会一直停在服务端那一版，直到用户手动切一次视图。
  * 挂载闸一下：首帧两边都是默认视图，之后正常跟随。
  *
- * 菜单里的勾选态不受影响 —— 菜单是点击后才挂载的，本来就没有 SSR 产物。
+ * 按钮图标不在此列：它是固定的 SWITCHER_ICON，与服务端渲染无关。
+ * 菜单里的勾选态也不受影响 —— 菜单是点击后才挂载的，本来就没有 SSR 产物。
  */
 const mounted = ref(false)
 onMounted(() => {
   mounted.value = true
 })
 
-const meta = computed(() => LIST_VIEW_META[mounted.value ? props.view : DEFAULT_LIST_VIEW])
+/** tooltip / aria-label 里的当前视图名（带挂载闸，见上） */
+const currentLabel = computed(() => LIST_VIEW_META[mounted.value ? props.view : DEFAULT_LIST_VIEW].label)
 </script>
 
 <template>
@@ -76,9 +90,9 @@ const meta = computed(() => LIST_VIEW_META[mounted.value ? props.view : DEFAULT_
     :content="{ align: 'end' }"
   >
     <UButton
-      :icon="meta.icon"
-      :title="`视图：${meta.label}（点击切换）`"
-      :aria-label="`切换视图（当前：${meta.label}）`"
+      :icon="SWITCHER_ICON"
+      :title="`视图：${currentLabel}（点击切换）`"
+      :aria-label="`切换视图（当前：${currentLabel}）`"
       variant="ghost"
       color="neutral"
       size="sm"

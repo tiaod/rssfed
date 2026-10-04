@@ -53,13 +53,22 @@ describe('ListViewSwitcher', () => {
     expect(wrapper.emitted('update:view')?.[0]).toEqual(['image'])
   })
 
-  it('触发按钮的图标与 tooltip 跟随当前视图', async () => {
-    const wrapper = mountSwitcher('blog')
-    await nextTick()
-    const trigger = wrapper.get('.trigger')
+  it('触发按钮用统一的「切换视图」专用图标，不随当前视图变', async () => {
+    const icons = new Set<string>()
 
-    expect(trigger.attributes('data-icon')).toBe(LIST_VIEW_META.blog.icon)
-    expect(trigger.attributes('aria-label')).toContain(LIST_VIEW_META.blog.label)
+    for (const view of LIST_VIEWS) {
+      const wrapper = mountSwitcher(view)
+      await nextTick()
+      const trigger = wrapper.get('.trigger')
+      icons.add(trigger.attributes('data-icon') ?? '')
+      // 当前视图改由 tooltip / aria-label 交代
+      expect(trigger.attributes('aria-label')).toContain(LIST_VIEW_META[view].label)
+    }
+
+    // 「点它会打开什么」要固定：六个视图共用一个图标，且不与菜单项里的版式图标重合
+    expect(icons.size).toBe(1)
+    expect([...icons][0]).toMatch(/^i-lucide-/)
+    expect(LIST_VIEWS.map(v => LIST_VIEW_META[v].icon)).not.toContain([...icons][0])
   })
 
   it('触发按钮是纯图标：不排文字，靠 tooltip 说明「点击能切换」', async () => {
@@ -73,14 +82,15 @@ describe('ListViewSwitcher', () => {
     expect(trigger.attributes('aria-label')).toContain(LIST_VIEW_META.blog.label)
   })
 
-  it('首帧按默认视图渲染（避免 SSR hydration 属性不一致），挂载后再跟随实际视图', async () => {
+  it('首帧按默认视图渲染 tooltip（避免 SSR hydration 属性不一致），挂载后再跟随实际视图', async () => {
     const wrapper = mountSwitcher('image')
 
-    // 尚未 flush：服务端与客户端首帧必须是同一份 DOM，否则 Vue 只报 mismatch 不修正属性
-    expect(wrapper.get('.trigger').attributes('data-icon')).toBe(LIST_VIEW_META.masonry.icon)
+    // 尚未 flush：服务端与客户端首帧必须是同一份 DOM，否则 Vue 只报 mismatch 不修正属性。
+    // 图标是固定值，不受影响；会随视图变的是 tooltip 里的视图名。
+    expect(wrapper.get('.trigger').attributes('title')).toBe(`视图：${LIST_VIEW_META.masonry.label}（点击切换）`)
 
     await nextTick()
-    expect(wrapper.get('.trigger').attributes('data-icon')).toBe(LIST_VIEW_META.image.icon)
+    expect(wrapper.get('.trigger').attributes('title')).toBe(`视图：${LIST_VIEW_META.image.label}（点击切换）`)
   })
 
   it('没有会话内切换时不提供「恢复默认视图」', () => {

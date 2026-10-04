@@ -659,16 +659,50 @@ function handleTableKeydown(event: KeyboardEvent) {
         <slot name="header" />
       </div>
 
-      <!-- 页尾加载骨架 -->
+      <!--
+        页尾加载骨架。
+
+        社交动态视图照搬条目那四段（头像圈 / 署名行 / 标题 + 摘要 / 操作栏占位），宽度、缩进、
+        分隔线都和真条目同一套尺寸（`max-w-xl` + `gap-2` + `size-8` 头像，见 EntrySocialItem）：
+        骨架就是「下一条正在加载」，形状对上了，加载完替换上去也不会跳版。
+        顶部比真条目多留一档（真条目 py-4，这里 pt-6）：和上一条的正文分开一点，
+        一眼能看出是占位而不是刚发出来的一条。
+
+        其余视图仍用「封面 + 两行文字」的通用骨架（各视图条目形状差别大，不做逐视图还原）。
+      -->
       <div
         v-else-if="isSkeleton(item)"
         :ref="registerSkeleton"
-        class="flex flex-col gap-3"
         aria-hidden="true"
       >
-        <USkeleton class="h-40 w-full rounded-lg" />
-        <USkeleton class="h-4 w-3/4" />
-        <USkeleton class="mt-0 h-4 w-1/2" />
+        <div
+          v-if="view === 'social'"
+          class="mx-auto w-full max-w-xl border-b border-default/60 pt-6 pb-4"
+        >
+          <div class="flex items-start gap-2">
+            <USkeleton class="size-8 shrink-0 rounded-full" />
+            <div class="flex min-w-0 flex-1 flex-col gap-2">
+              <USkeleton class="h-3.5 w-28" />
+              <USkeleton class="h-4 w-3/4" />
+              <USkeleton class="h-3.5 w-full" />
+              <USkeleton class="h-3.5 w-4/5" />
+              <div class="flex items-center gap-1">
+                <USkeleton class="size-7 rounded-md" />
+                <USkeleton class="size-7 rounded-md" />
+                <USkeleton class="size-7 rounded-md" />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div
+          v-else
+          class="flex flex-col gap-3"
+        >
+          <USkeleton class="h-40 w-full rounded-lg" />
+          <USkeleton class="h-4 w-3/4" />
+          <USkeleton class="mt-0 h-4 w-1/2" />
+        </div>
       </div>
 
       <!-- 收尾提示 -->

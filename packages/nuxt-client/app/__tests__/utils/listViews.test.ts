@@ -20,11 +20,10 @@ describe('列表视图枚举', () => {
     expect(TIMELINE_DEFAULT_VIEW).not.toBe(DEFAULT_LIST_VIEW)
   })
 
-  it('每个视图都有显示名、图标与说明', () => {
+  it('每个视图都有显示名与图标', () => {
     for (const view of LIST_VIEWS) {
       expect(LIST_VIEW_META[view].label).toBeTruthy()
       expect(LIST_VIEW_META[view].icon).toMatch(/^i-lucide-/)
-      expect(LIST_VIEW_META[view].description).toBeTruthy()
     }
   })
 

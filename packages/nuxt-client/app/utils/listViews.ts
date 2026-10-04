@@ -22,48 +22,25 @@ export const DEFAULT_LIST_VIEW: ListView = 'masonry'
 export const TIMELINE_DEFAULT_VIEW: ListView = 'social'
 
 export interface ListViewMeta {
-  /** 切换菜单 / 设置页里的显示名 */
+  /** 切换菜单 / 设置页里的显示名，也是切换菜单的可访问名 */
   label: string
   /** 切换按钮与菜单项图标 */
   icon: string
-  /** 设置页里的一句话说明 */
-  description: string
 }
 
+/**
+ * 只留显示名 + 图标：切换菜单是「选版式」的短清单，每种版式的长相由列表本身呈现，
+ * 再挂一行说明只会把菜单撑长、把六个选项压成需要滚动的一列。
+ */
 export const LIST_VIEW_META: Record<ListView, ListViewMeta> = {
-  social: {
-    label: '社交动态',
-    icon: 'i-lucide-messages-square',
-    // 与 table 同样的讲究：说明里不出现其它视图的标签，菜单的可访问名才不会有歧义
-    description: '头像居左的信息流：署名与正文对齐其右，配图 1 张按比例、多张铺网格'
-  },
-  masonry: {
-    label: '瀑布流',
-    icon: 'i-lucide-layout-dashboard',
-    description: '封面按原比例、卡片高度随内容变化'
-  },
-  blog: {
-    label: '博客文章',
-    icon: 'i-lucide-newspaper',
-    description: '统一封面比例与摘要行数，多列杂志式排版'
-  },
-  list: {
-    label: '列表',
-    icon: 'i-lucide-rows-3',
-    description: '紧凑单行：小缩略图 + 标题 + 两行摘要'
-  },
-  table: {
-    label: '表格',
-    icon: 'i-lucide-table',
-    // 说明里刻意不出现其它视图的标签：切换菜单的可访问名是「标签 + 说明」，而验证脚本按名字
-    // 包含匹配菜单项（见 report/list-views/verify.mjs），撞词会让「列表」这类名字匹配到两项。
-    description: '一行一条：来源 + 标题（后接浅灰摘要）+ 日期，像邮件客户端那样扫读'
-  },
-  image: {
-    label: '图片',
-    icon: 'i-lucide-images',
-    description: '方形网格，只突出封面；没有封面的条目显示占位块'
-  }
+  // 社交动态的看点就是「谁发的」：用两个人形而不是对话气泡（气泡读起来像私信/聊天，
+  // 而这版式是把各源的多条动态按发帖人排成信息流）
+  social: { label: '社交动态', icon: 'i-lucide-users-round' },
+  masonry: { label: '瀑布流', icon: 'i-lucide-layout-dashboard' },
+  blog: { label: '博客文章', icon: 'i-lucide-newspaper' },
+  list: { label: '列表', icon: 'i-lucide-rows-3' },
+  table: { label: '表格', icon: 'i-lucide-table' },
+  image: { label: '图片', icon: 'i-lucide-images' }
 }
 
 /** 设置页下拉选项（含「跟随上级」由调用方自行追加） */
