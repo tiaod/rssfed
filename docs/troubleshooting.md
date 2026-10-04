@@ -166,6 +166,12 @@ JS
 - **排查手法**：弹窗里执行 `document.addEventListener('pointerdown', e => console.log(e.defaultPrevented, e.target))`，打印 `true` 即命中本条。
 - **解法**：见 `EntryDetailModal.vue` 的 `stopPointerDownPropagation`（在正文层掐断冒泡）与 Swiper 的 `:simulate-touch="false"`（桌面翻页走浮钮与 ←/→ 键，触屏滑动不受影响）。
 
+### 同步成功后，同步弹层里还挂着几行「已同步 0%」
+
+- **现象**：左下角同步指示器的悬停弹层里，标题已经是「同步成功」，明细里却还留着一串上一轮的「已同步 0%」；长同步里会越攒越多（每撞一次 key 多留一行），刷新页面才干净。
+- **原因**：[SyncStatusIndicator.vue](../packages/nuxt-client/app/components/SyncStatusIndicator.vue) 的明细行 `v-for` 原先拿**行文本**当 `:key`，而文本会重复 —— 并发上限是 2，两个源都还没报进度时两行都是「已同步 0%」。重复 key 会让 Vue 的 keyed diff 把两个旧节点解析到同一个新节点上，先被解析的那个节点从此没人引用，留在 DOM 里再也不会被清理（开发模式只在控制台打一条 `Duplicate keys found during update`）。
+- **解法**：明细行按位置取 key（`v-for="(line, i) in details"` + `:key="i"`）—— 这些行都是纯文本、没有身份。回归用例：`app/__tests__/components/SyncStatusIndicator.test.ts` 的「明细行会重复时：重渲染不留孤儿节点」。
+
 ## 离线与 Service Worker
 
 ### 断网后页面完全打不开（连壳都没有）

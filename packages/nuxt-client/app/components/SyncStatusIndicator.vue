@@ -121,9 +121,12 @@ function handleClick() {
           />
           {{ label }}
         </span>
+        <!-- key 取行号而不是行文本：明细行会重复（并发两个源都还没报进度时都是「已同步 0%」），
+             拿文本当 key 会让 Vue 的 keyed diff 把旧节点解析成再也没人清理的孤儿 ——
+             同步成功后弹层里会一直挂着上一轮的「已同步 0%」 -->
         <span
-          v-for="line in details"
-          :key="line"
+          v-for="(line, i) in details"
+          :key="i"
           class="text-muted"
         >
           {{ line }}
