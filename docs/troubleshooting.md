@@ -232,7 +232,18 @@ JS
 ### 升级到单库方案后，旧的 user-state 库怎么处理
 
 - **背景**：用户状态与聚合条目曾是两个库（`user-state_<随机>` + `user-timeline_<随机>`）。合并成单库后服务端只创建/下发一个库（`user.timeline_db_name`），`user.couch_db_name` 列与 `user-state_*` 库全部废弃。
-- **升级动作**（已在本仓库的 dev 环境执行）：把老库里的 `subscription:` / `entry-state:` 文档按 `new_edits: false` 搬进对应的用户库，然后 `DELETE` 掉 `user-state_*` 库、`ALTER TABLE "user" DROP COLUMN couch_db_name`。**搬运必须带原 `_rev`**：客户端本地那份状态文档的 rev 与远端一致，才不会把整份状态重新推一遍。
+- **升级动作**：先搬状态再切流量，用 [scripts/merge-user-state-into-timeline.ts](../packages/hono-server/scripts/merge-user-state-into-timeline.ts)。**搬运必须带原 `_rev`**（`new_edits: false`）：客户端本地那份状态文档的 rev 与远端一致，才不会把整份状态重新推一遍。脚本默认 dry-run、可反复执行（幂等），`--apply` 真搬、`--delete-source` 顺手删老库：
+  ```bash
+  docker compose --env-file .env.production -f docker-compose.prod.yml pull
+  # 切 server/web 之前先搬（脚本用的是新镜像里的新代码，会把用户库建出来）
+  docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate \
+    pnpm exec tsx scripts/merge-user-state-into-timeline.ts            # 先看要搬什么
+  docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate \
+    pnpm exec tsx scripts/merge-user-state-into-timeline.ts --apply    # 真搬
+  docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build
+  ```
+- **别急着删老库**：回滚镜像时旧代码读的还是 `user-state_*`，删早了就没得回滚。确认新架构稳定后再 `--apply --delete-source`（或手工 `DELETE /user-state_xxx`）。
+- **不搬会怎样**：客户端升级时 v5 清理标记会删掉本地 `rssfed-user-state-<uid>`，服务端又只认用户库 —— 该用户**永久失去订阅关系与已读/收藏**（订阅不在 PostgreSQL 里，重建不出来；条目可以重新聚合）。
 - **注意**：代理的库名前缀白名单里已不含 `user-state_`，历史库名经代理访问会直接 400 `invalid_database`。
 
 ## PWA 与安装到手机

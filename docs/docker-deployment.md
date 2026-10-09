@@ -165,7 +165,9 @@ curl -s -o /dev/null -w '%{http_code}\n' $BASE/mcp/                   # 不能�
 docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate
 ```
 
-`--force` 的语义是**自动批准数据丢失语句**（可能 truncate 表），首次部署无风险，后续涉及删列/改类型时先复核再落地：
+`--force` 的语义是**自动批准数据丢失语句**（可能 truncate 表），首次部署无风险，后续涉及删列/改类型时先复核再落地。
+已知一次破坏性变更：合并用户库那次会 `DROP COLUMN "user".couch_db_name`（该列只存已废弃的 user-state 库名），
+但**删列前要先把老库的状态文档搬进用户库**（见 [troubleshooting](troubleshooting.md#升级到单库方案后旧的-user-state-库怎么处理)）：
 
 ```bash
 # 预览将要执行的语句（不要加 --force）
