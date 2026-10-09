@@ -336,7 +336,7 @@ function imageOptions(settings: TimelineSettings): EntryImageOptions {
  * 「先查存在性再写」这一步不能省：`_bulk_docs` 的 `_attachments` 是 base64 内联的，
  * 对一条库里已有、只是再次被扫到的条目重传附件是纯浪费（回填/游标回退时会大量出现）。
  */
-async function writeEntries(
+export async function writeEntries(
   scope: DocumentScope<unknown>,
   sourceDocs: Array<Record<string, unknown>>,
   settings: TimelineSettings,
@@ -348,20 +348,30 @@ async function writeEntries(
   const fresh = entries.filter(doc => !existing.has(String(doc._id)))
   if (fresh.length === 0) return { written: 0, imageFailures: 0 }
 
-  const docs: TimelineDoc[] = []
+  // 条目之间限并发（每条目**内部**仍是串行，预算判断的顺序因此保持确定）：
+  // 占大头的等待是「坏图床的 10s 超时」，并发只是让这些等待重叠，不改变写入内容。
+  const docs: TimelineDoc[] = new Array<TimelineDoc>(fresh.length)
   let imageFailures = 0
-  for (const sourceDoc of fresh) {
-    // 逐条（而不是并发）处理：图片压缩本身在 images/cache.ts 里合并并发，
-    // 这里串行能让单条目的预算判断保持确定顺序，也不会同时压几百张图把 CPU 打满
-    const { images, attachments, stats } = await cacheEntryImages(
-      typeof sourceDoc.content === "string" ? sourceDoc.content : undefined,
-      typeof sourceDoc.url === "string" ? sourceDoc.url : "",
-      sourceCoverUrl(sourceDoc),
-      imageOptions(settings),
-    )
-    imageFailures += stats.failed
-    docs.push(toTimelineEntryDoc(sourceDoc, images, attachments))
+  let next = 0
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const index = next++
+      if (index >= fresh.length) return
+      const sourceDoc = fresh[index]!
+      const { images, attachments, stats } = await cacheEntryImages(
+        typeof sourceDoc.content === "string" ? sourceDoc.content : undefined,
+        typeof sourceDoc.url === "string" ? sourceDoc.url : "",
+        sourceCoverUrl(sourceDoc),
+        imageOptions(settings),
+      )
+      // stats.failed 的累加不需要原子性：JS 单线程，+= 之间没有 await
+      imageFailures += stats.failed
+      docs[index] = toTimelineEntryDoc(sourceDoc, images, attachments)
+    }
   }
+  await Promise.all(
+    Array.from({ length: Math.min(ENTRY_WRITE_CONCURRENCY, fresh.length) }, () => worker()),
+  )
 
   const results = await scope.bulk({ docs })
   // 409（同一轮里重复扫到 / 与别的 worker 撞车）不算失败：库里已经有这条了就达到目的
@@ -483,6 +493,17 @@ const BACKFILL_PAGE = 100
 const BACKFILL_MAX_PAGES = 200
 /** 增量 `_changes` 的分页大小 */
 const CHANGES_PAGE = 200
+
+/**
+ * 一轮写入里**同时处理多少条目**（每条目内部的图片仍是串行的，见 writeEntries）。
+ *
+ * 为什么需要它：图片下载对「连不上的图床」要等满 10s 超时（见 images/fetch.ts），
+ * 而一个源里往往整批图都来自同一个坏站点。逐条串行时，一个 200 条的源 = 200 × N × 10s，
+ * 首次回填会卡成「几十分钟没有进展」的样子（实测 dev 里 627 个源就是这样）。
+ * 并发 4 让超时重叠，同时把同时在飞的图片数限住（每条目自己仍按预算串行），
+ * 避免把 CPU 打满（sharp 编码是 CPU 密集型，压几百张图会拖垮同进程的 API）。
+ */
+const ENTRY_WRITE_CONCURRENCY = 4
 
 /**
  * 把一个用户的时间线派生库对齐到「当前订阅集合 + 当前设置」。
