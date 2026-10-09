@@ -18,7 +18,8 @@
  *      写 `entry-state` / `subscription` 这类状态文档放行；
  *   ⑦ 回写通道只推状态文档：本地写的已读/收藏能自己上去；
  *   ⑧ 未登录访问代理被拒（401）；
- *   ⑨ 同一张图在两个用户下压出的附件**不同**（图片参数是按用户生效的，不是一个全局值）。
+ *   ⑨ **附件只在抓取时产生**：探针源库里的附件被原样搬进各用户库，两个用户的字节与源库
+ *      完全一致（图片策略是 per-feed 的，聚合不再下载/压缩任何图片）。
  *
  * 用法：
  *   node scripts/verify-timeline-sync.mjs
@@ -188,8 +189,13 @@ async function waitFor(label, fn, timeoutMs = 60_000, stepMs = 250) {
 }
 
 /** 探针条目：publishedAt 用当前时间，必然落在窗口内 */
-function probeEntry(id, title, imageUrl) {
+/**
+ * 探针条目：`attachmentBase64` 非空时带上一个附件，模拟**抓取路径已经压好图**的源库文档。
+ * 聚合不该再对它做任何事，只把它原样搬进用户库。
+ */
+function probeEntry(id, title, attachmentBase64) {
   const now = new Date().toISOString()
+  const imageUrl = 'https://example.invalid/probe.avif'
   return {
     _id: id,
     type: 'entry',
@@ -198,7 +204,13 @@ function probeEntry(id, title, imageUrl) {
     url: `https://example.invalid/${id}`,
     publishedAt: now,
     insertedAt: now,
-    content: imageUrl ? `<p>${title}</p><img src="${imageUrl}" alt="">` : `<p>${title}</p>`
+    content: attachmentBase64 ? `<p>${title}</p><img src="${imageUrl}" alt="">` : `<p>${title}</p>`,
+    ...(attachmentBase64
+      ? {
+          images: [{ url: imageUrl, attachment: 'img-0.avif', width: 1, height: 1, cover: true }],
+          _attachments: { 'img-0.avif': { content_type: 'image/avif', data: attachmentBase64 } }
+        }
+      : {})
   }
 }
 
@@ -260,14 +272,19 @@ async function main() {
   resources.feedDbName = feedDbName ?? null
   check('能反查到探针源的 CouchDB 库名', typeof feedDbName === 'string' && feedDbName.length > 0, feedDbName)
 
-  const IMAGE_URL = process.env.PROBE_IMAGE_URL ?? 'https://httpbin.org/image/png'
+  /**
+   * 探针条目**自带附件**：这就是抓取路径的产物形状（正文图在抓取时按 per-feed 策略压成 AVIF
+   * 附件写进源库，见 rss/entry-images.ts）。字节由脚本自己造，不依赖外网图床 ——
+   * 于是「聚合只搬运、两用户字节一致」这条断言是确定的，图片下载链路由单测覆盖。
+   */
+  const PROBE_ATTACHMENT = Buffer.from('rssfed-probe-attachment-bytes-v1').toString('base64')
   const ENTRY_ID = `entry:${subscription.feedId}:verify1`
   await couch(`/${feedDbName}/_bulk_docs`, {
     method: 'POST',
     body: JSON.stringify({
       docs: [
         { _id: subscription.feedId, type: 'feed', title: '探针源', url: PROBE_FEED_URL },
-        probeEntry(ENTRY_ID, '探针条目 1', IMAGE_URL)
+        probeEntry(ENTRY_ID, '探针条目 1', PROBE_ATTACHMENT)
       ]
     })
   })
@@ -331,14 +348,14 @@ async function main() {
   })
   check('live 复制把探针条目 1 拉到本地', !!firstLocal, firstLocal?.title)
 
-  // 派生库里的附件是服务端按用户参数重新压过的（源库没有附件）
+  // 派生库里的附件是从源库搬过来的成品（聚合不碰图片）
   const attachmentNames = Object.keys(firstLocal._attachments ?? {})
   if (attachmentNames.length > 0) {
     const att = firstLocal._attachments[attachmentNames[0]]
-    check('派生条目带服务端重新压好的 AVIF 附件（按用户参数生成）',
+    check('派生条目带源库搬过来的 AVIF 附件',
       att.content_type === 'image/avif', `${attachmentNames[0]} (${att.content_type})`)
   } else {
-    console.log(`  · 跳过附件检查：源图未能下载（${IMAGE_URL}），条目本身已正确同步`)
+    check('派生条目带源库搬过来的 AVIF 附件', false, '派生条目上没有附件')
   }
 
   // ── 6. 复制运行中新增条目：服务端写入 → 客户端自动收到（不重启复制） ──
@@ -439,7 +456,7 @@ async function main() {
   check('回写通道只推状态：本地没有 entry 文档被推上去',
     !(await couch(`/${timelineDb}/${encodeURIComponent(`entry:${subscription.feedId}:forged`)}`).catch(() => null)))
 
-  // ── 9. 同一张图 + 不同用户参数 → 附件必须不同（图片策略是按用户生效的，不是一个全局值） ──
+  // ── 9. 同一张图：两个账号的附件与源库字节一致（图片只在抓取时压一次，聚合只搬运） ──
   const session2 = makeSession()
   const TEMP_EMAIL_2 = `verify-timeline-b-${stamp}@rssfed.local`
   const signUp2 = await session2.request('/api/auth/sign-up/email', {
@@ -450,10 +467,10 @@ async function main() {
   const second = { userId: (await signUp2.json())?.user?.id ?? null, timelineDb: null }
   resources.accounts.push(second)
 
-  // 小图 + 低质量：与第一个账号的默认值（1200px / q45）必然产出不同字节
+  // 第二个账号有自己的设置（窗口），但它改不了附件：图片策略是 per-feed 的
   const patched = await session2.request('/api/timeline/settings', {
     method: 'PATCH',
-    body: JSON.stringify({ maxImageWidth: 64, avifQuality: 30 })
+    body: JSON.stringify({ windowDays: 7 })
   })
   check('第二个账号的时间线设置可改（PATCH 生效）', patched.ok, `HTTP ${patched.status}`)
 
@@ -466,7 +483,7 @@ async function main() {
   check('第二个账号的聚合在请求内跑完', refresh2.status === 200, `HTTP ${refresh2.status} ${JSON.stringify(refresh2Body)}`)
 
   const subs2 = await (await session2.request('/api/feeds/subscriptions')).json()
-  check('第二个账号的订阅落在自己的用户库里（改设置触发重建后也不该丢）',
+  check('第二个账号的订阅落在自己的用户库里（改设置后也不该丢）',
     subs2.some(s => s.feedId === subscription.feedId), `共 ${subs2.length} 条订阅`)
 
   const targets2 = await (await session2.request('/api/couchdb/sync-targets')).json()
@@ -506,11 +523,13 @@ async function main() {
         console.log(`  · 账号 ${label}：${doc ? `条目存在，_attachments=[${atts}]，images=${JSON.stringify(images)}` : '条目不存在'}`)
       }
     }
+    const bytesSource = await attachmentBytes(feedDbName, ENTRY_ID)
     check('两个账号都拿到了同一张图的附件', !!bytesA && !!bytesB, `A=${bytesA}B B=${bytesB}B`)
-    check('附件按各自用户参数压缩（字节数不同，小图/低质量的更小）',
-      !!bytesA && !!bytesB && bytesB < bytesA, `A=${bytesA}B → B=${bytesB}B`)
+    check('用户库的附件与源库字节完全一致（聚合只搬运，不重压、不看用户参数）',
+      !!bytesSource && bytesA === bytesSource && bytesB === bytesSource,
+      `源=${bytesSource}B A=${bytesA}B B=${bytesB}B`)
   } else {
-    console.log('  · 跳过按用户参数的附件对比：源图未能下载')
+    console.log('  · 跳过附件对比：探针条目没带附件')
   }
 
   // ── 清理：本地库 + 各账号的远端库 + 临时账号（探针源库保留，见文件头说明） ──
@@ -518,7 +537,7 @@ async function main() {
   check('临时账号已清理', accountRemoved, `共 ${resources.accounts.length} 个临时账号`)
 
   console.log(failures.length === 0
-    ? '\n全部通过：单库下发 → 聚合入库 → 拉取/回写两条通道 → 删除跟随 → 写方向闸门 → 按用户图片策略，链路行为符合设计。'
+    ? '\n全部通过：单库下发 → 聚合入库（附件原样搬运）→ 拉取/回写两条通道 → 删除跟随 → 写方向闸门，链路行为符合设计。'
     : `\n失败 ${failures.length} 项：${failures.join('；')}`)
   process.exit(failures.length === 0 ? 0 : 1)
 }

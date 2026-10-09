@@ -6,11 +6,10 @@ import { DEFAULT_TIMELINE_SETTINGS, normalizeTimelineSettings } from '~/utils/ti
  * 时间线聚合设置（每用户一份，存在服务端）。
  *
  * 与 useSettings（localStorage 里的浏览器本地偏好）分开：这些设置直接决定**服务端**怎么替
- * 这个用户聚合条目（窗口、图片预算、AI 开关），跟着账号走、在所有设备上一致，
+ * 这个用户聚合条目（窗口、AI 开关），跟着账号走、在所有设备上一致，
  * 因此必须走接口读写，不能落 localStorage。
  *
- * 图片参数变更会触发服务端**重建**派生库（已聚合条目的附件是按旧参数压的），所以 save()
- * 会把 `rebuildQueued` 透出来，让调用方提示「正在后台重算」。
+ * 图片不是用户设置：它按源（per-feed）在抓取时压好，管理员在订阅源管理里调。
  */
 export function useTimelineSettings() {
   const api = useApi()
@@ -35,21 +34,20 @@ export function useTimelineSettings() {
     }
   }
 
-  /** 保存设置；返回服务端是否因此入队了一次重建 */
-  async function save(patch: Partial<TimelineSettings>): Promise<{ rebuildQueued: boolean }> {
+  /** 保存设置（服务端会顺手催一次聚合：窗口调小要剪枝、调大要回填） */
+  async function save(patch: Partial<TimelineSettings>): Promise<void> {
     saving.value = true
     try {
       const res = await api.timeline.updateSettings(patch)
       settings.value = normalizeTimelineSettings(res.settings)
       loaded.value = true
       error.value = null
-      return { rebuildQueued: res.rebuildQueued === true }
     } finally {
       saving.value = false
     }
   }
 
-  /** 手动重建派生库（图片参数或窗口改动后想立刻看到效果时用） */
+  /** 手动重建派生库（服务端写的条目/源元信息整体删掉再全量回填；运维兜底入口） */
   async function rebuild(): Promise<void> {
     rebuilding.value = true
     try {

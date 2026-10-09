@@ -49,7 +49,7 @@ export const LEGACY_LOCAL_DB_NAMES = ['rssfed-entries', 'rssfed-user-state'] as 
  *   状态文档从同一个远端库同步下来，本地那份已无用，留着只是白占空间
  *
  * 这些时代的数据都由服务端的用户库重新拉取，且**结构已变**
- * （条目现在带按用户参数压缩的附件），所以一律丢弃而不是迁移。
+ * （条目现在带 AVIF 附件、字段也变过），所以一律丢弃而不是迁移。
  */
 export const LEGACY_LOCAL_DB_PREFIXES = ['rssfed-feed-', 'rssfed-entries', 'rssfed-user-state'] as const
 

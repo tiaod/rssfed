@@ -84,8 +84,8 @@ export function useApi() {
       settings: () => apiFetch<{ settings: TimelineSettingsPayload, defaults: TimelineSettingsPayload, limits: Record<string, { min: number, max: number }> }>(
         `${base}/api/timeline/settings`
       ),
-      /** 更新设置；改图片参数时服务端会入队一次重建（rebuildQueued=true） */
-      updateSettings: (body: Partial<TimelineSettingsPayload>) => apiFetch<{ settings: TimelineSettingsPayload, rebuildQueued: boolean }>(
+      /** 更新设置（只影响「往用户库里聚合什么」，服务端会顺手催一次聚合） */
+      updateSettings: (body: Partial<TimelineSettingsPayload>) => apiFetch<{ settings: TimelineSettingsPayload }>(
         `${base}/api/timeline/settings`,
         { method: 'PATCH', body }
       ),

@@ -8,11 +8,6 @@ import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimat
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 import {
-  TIMELINE_ENTRY_BYTES_CHOICES,
-  TIMELINE_IMAGE_COUNT_CHOICES,
-  TIMELINE_IMAGE_WIDTH_CHOICES,
-  TIMELINE_QUALITY_CHOICES,
-  TIMELINE_SOURCE_BYTES_CHOICES,
   TIMELINE_WINDOW_CHOICES,
   timelineSettingsEqual,
   withCurrentChoice
@@ -56,7 +51,7 @@ const draftSettings = ref<AppSettings>({ ...settings.value })
  * 时间线聚合设置（服务端，每用户一份）。
  *
  * 与本地偏好一起由「保存设置」提交：两类设置都在同一张页面上，两个保存按钮反而更容易漏点。
- * 图片参数变更会触发服务端重建派生库，提示语必须说清楚（用户在等服务端重算）。
+ * 保存后服务端会催一次聚合（窗口调小剪枝、调大回填），数据随后由 live 复制到端。
  */
 const {
   settings: timelineSettings, loaded: timelineLoaded, saving: timelineSaving,
@@ -81,14 +76,8 @@ const saveSettings = async () => {
   if (timelineLoaded.value && !timelineSettingsEqual(draftTimeline.value, timelineSettings.value)) {
     saving.value = true
     try {
-      const { rebuildQueued } = await saveTimelineSettings({ ...draftTimeline.value })
-      toast.add({
-        title: '设置已保存',
-        description: rebuildQueued
-          ? '图片参数已变，服务端正在后台重建你的时间线（完成后自动同步到本地）'
-          : undefined,
-        color: 'success'
-      })
+      await saveTimelineSettings({ ...draftTimeline.value })
+      toast.add({ title: '设置已保存', color: 'success' })
     } catch (e: unknown) {
       toast.add({ title: '时间线设置保存失败', description: errorMessage(e), color: 'error' })
     } finally {
@@ -109,17 +98,12 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
 ]
 
 /**
- * 时间线聚合设置的下拉档位（值直接就是服务端字段的取值）。
+ * 时间线聚合设置的窗口档位（值直接就是服务端字段的取值）。
  *
- * 一律经过 `withCurrentChoice`：服务端默认值可以用环境变量调，档位表列不全所有可能取值，
+ * 经过 `withCurrentChoice`：服务端默认值可以调，档位表列不全所有可能取值，
  * 而「当前值不在 items 里」会让下拉显示空白（看起来像设置丢了）。
  */
 const timelineWindowOptions = computed(() => withCurrentChoice(TIMELINE_WINDOW_CHOICES, draftTimeline.value.windowDays, '当前'))
-const timelineImageCountOptions = computed(() => withCurrentChoice(TIMELINE_IMAGE_COUNT_CHOICES, draftTimeline.value.maxImageCount, '当前：张'))
-const timelineEntryBytesOptions = computed(() => withCurrentChoice(TIMELINE_ENTRY_BYTES_CHOICES, draftTimeline.value.maxEntryImageBytes, '当前：字节'))
-const timelineImageWidthOptions = computed(() => withCurrentChoice(TIMELINE_IMAGE_WIDTH_CHOICES, draftTimeline.value.maxImageWidth, '当前：px'))
-const timelineQualityOptions = computed(() => withCurrentChoice(TIMELINE_QUALITY_CHOICES, draftTimeline.value.avifQuality, '当前：质量'))
-const timelineSourceBytesOptions = computed(() => withCurrentChoice(TIMELINE_SOURCE_BYTES_CHOICES, draftTimeline.value.maxSourceImageBytes, '当前：字节'))
 
 /**
  * 「默认列表视图」里的「跟随内置默认」项：选中它 = 不写设置（view 为 undefined）。
@@ -399,10 +383,10 @@ const confirmReset = async () => {
                   </h3>
 
                   <!--
-                    这些设置由**服务端**在聚合时执行（每用户一份，见 useTimelineSettings）：
-                    窗口决定「往回补多长历史」，图片参数决定服务端替你缓存多少图。
-                    与旧的同步窗口不同：窗口调小现在真的会删掉窗口外的派生数据
-                    （派生库是冗余副本，随时能从源库重算），所以文案必须写明。
+                    窗口由**服务端**在聚合时执行（每用户一份，见 useTimelineSettings）：
+                    调小真的会删掉窗口外的派生数据（派生库是冗余副本，随时能从源库重算），
+                    所以文案必须写明。图片参数不在这里：它是 per-feed 的，管理员在
+                    「订阅源管理」里按源调，抓取时就压好了（见 AdminFeedManager）。
                   -->
                   <UFormField
                     label="时间线窗口"
@@ -415,66 +399,6 @@ const confirmReset = async () => {
                       :items="timelineWindowOptions"
                       value-key="value"
                       class="w-48"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="每篇缓存图片"
-                    description="服务端按这个上限把正文图压缩成 AVIF 后再同步给你；封面不计入张数。"
-                  >
-                    <USelect
-                      v-model="draftTimeline.maxImageCount"
-                      :items="timelineImageCountOptions"
-                      value-key="value"
-                      class="w-48"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="每篇图片体积上限"
-                    description="单篇条目的图片附件总大小上限，超出的图片不再缓存（第一张始终保留）。"
-                  >
-                    <USelect
-                      v-model="draftTimeline.maxEntryImageBytes"
-                      :items="timelineEntryBytesOptions"
-                      value-key="value"
-                      class="w-48"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="图片最大宽度"
-                    description="压缩后按此宽度等比缩放；越宽越清晰，也越占本地空间。"
-                  >
-                    <USelect
-                      v-model="draftTimeline.maxImageWidth"
-                      :items="timelineImageWidthOptions"
-                      value-key="value"
-                      class="w-48"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="图片质量"
-                    description="AVIF 编码质量。离线阅读为主的场景可以选省流量。"
-                  >
-                    <USelect
-                      v-model="draftTimeline.avifQuality"
-                      :items="timelineQualityOptions"
-                      value-key="value"
-                      class="w-48"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="源图大小上限"
-                    description="原图超过这个体积就放弃缓存（避免为一张巨图拖慢整轮聚合）。"
-                  >
-                    <USelect
-                      v-model="draftTimeline.maxSourceImageBytes"
-                      :items="timelineSourceBytesOptions"
-                      value-key="value"
-                      class="w-64"
                     />
                   </UFormField>
 
