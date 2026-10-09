@@ -14,13 +14,13 @@
 
 | 数据 | 位置 | 丢了能否重建 |
 | --- | --- | --- |
-| `user-state_*` | CouchDB | **完全不可重建**：存用户订阅关系（`subscription` 文档）与已读 / 收藏状态，PostgreSQL 侧没有副本（见 [ARCHITECTURE.md](../ARCHITECTURE.md) 的「为什么订阅关系在 CouchDB 而不在 PostgreSQL」） |
+| `user-timeline_*` | CouchDB | **部分不可重建**：条目是派生数据，但里面还存着用户订阅关系（`subscription` 文档）与已读 / 收藏状态 —— 那部分 PostgreSQL 侧没有副本（见 [ARCHITECTURE.md](../ARCHITECTURE.md) 的「为什么订阅关系在 CouchDB 而不在 PostgreSQL」） |
 | `fedify_kv_v2` | PostgreSQL `fedify` schema | **完全不可重建**：存 Bot 的 ActivityPub 密钥对，被删即永久失去联邦身份 |
 | PostgreSQL（用户 / 认证 / bots / 关联表）、`uploads-data` 卷（附件） | — | 不可重建 |
 | `feed_*`（每个订阅源一个库） | CouchDB | 只能重抓到**源站当前窗口内的条目**（RSS 通常只给最近 10~50 条），滚出窗口的历史条目永久丢失；正文图片需重新下载并重跑 AVIF 压缩 |
 | Redis | — | 队列数据丢了可重建，优先级最低（已带 `--appendonly yes`） |
 
-结论：即使决定不备份 `feed_*`，`user-state_*` 与 `fedify_kv_v2` 也必须带上。
+结论：即使决定不备份 `feed_*`，`user-timeline_*`（用户库）与 `fedify_kv_v2` 也必须带上。
 
 ### 2. 单副本约束 ⚠️
 

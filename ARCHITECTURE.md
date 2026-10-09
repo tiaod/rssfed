@@ -49,38 +49,42 @@ rssfed/                          # pnpm workspace
 ## 同步架构分层
 
 ```
-            服务端（聚合）                                    浏览器
-  feed:{feedId-1}  ┐
-  feed:{feedId-2}  ├─聚合─▶ user-timeline_{userId} ──live 单向复制──▶ PouchDB 本地库
-  feed:{feedId-3}  ┘   （按该用户的窗口 / 图片参数裁剪）        （整条时间线 = 一个库）
-  user-state:{userId} ◀──live 双向同步──▶ PouchDB 本地库（订阅 + 已读/收藏）
+        服务端（聚合）                                浏览器
+  feed:{feedId-N} ─聚合─▶ user:{userId} ─┬─live 拉取（全量）──▶ PouchDB 本地库
+   （按该用户的窗口 / 图片参数裁剪）      └─live 回写（只推状态）◀─ （条目+订阅+已读收藏同库）
 ```
 
 ### 关键设计原则
 
-- **聚合在服务端完成，浏览器只拉一个库** — Worker 把用户订阅的每个 feed 的条目增量搬进用户专属的派生库
+- **一个用户一个库，聚合在服务端完成** — Worker 把用户订阅的每个 feed 的条目增量搬进用户专属库
   （库名随机、存在 `user.timeline_db_name` 列，`_security.members.names = [userId]`；条目是**独立副本**，
-  正文图片按该用户参数重新压缩后作附件）。浏览器只做一条 live 单向复制，订阅 3 个源和 300 个源开销一样
-- **每用户一份冗余是明确取舍** — 用户量小，用磁盘换掉「客户端逐源合并 + 逐源调参」的全部复杂度；派生库随时可删可重建（`rebuildUserTimeline`），`feed:{feedId}` 仍是权威来源
-- **窗口与附件策略按用户生效** — 窗口默认 3 天（可改 1/3/7/30/不限），在服务端生效：**调小会删除派生库里
+  正文图片按该用户参数重新压缩后作附件）。订阅与已读收藏也在这个库里，浏览器对它挂两条 live 通道：
+  拉取全量、回写状态。订阅 3 个源和 300 个源开销一样
+- **写方向由数据库层兜底，不靠客户端自觉** — 服务端独占写聚合产物（`entry:` / `feed:`）。用户库设计文档里的
+  `validate_doc_update` 只放行 `_admin`（代理转发时是 `roles:[user]` 的 CouchDB 用户身份，见 `routes/couchdb.ts`），
+  设计文档本身也只有 admin 能写，所以客户端影子化/删除聚合条目在数据库层就会被拒、且关不掉这条规则
+- **每用户一份冗余是明确取舍** — 用户量小，用磁盘换掉「客户端逐源合并 + 逐源调参」的全部复杂度；聚合产物随时可删可重算（`rebuildUserTimeline` 就地删 `entry:`/`feed:` 后全量回填，**不动用户状态文档**），`feed:{feedId}` 仍是权威来源
+- **窗口与附件策略按用户生效** — 窗口默认 3 天（可改 1/3/7/30/不限），在服务端生效：**调小会删除用户库里
   窗口外的条目**（客户端跟随删除），调大走回填。图片张数/体积预算/宽度/AVIF 质量/源图上限同样 per-user
   （`user_timeline_settings`），改图片参数触发重建
-- **Bot 做逻辑分组，feed 独立库做物理存储** — 一个 Bot 跟踪多个 feed，一个 feed 可被多个 Bot 引用，但物理上每个 feed 只存一份数据，无冗余
+- **Bot 做逻辑分组，feed 独立库做物理存储** — 一个 Bot 跟踪多个 feed、一个 feed 可被多个 Bot 引用，但每个 feed 物理上只存一份
 
-### 用户状态库 `user-state:{userId}`
+### 用户库 `user:{userId}`：两类文档，两个写入口
 
-存储每个用户对条目的操作状态，数据量小且完全按用户隔离：
+服务端写聚合产物、客户端写自己的状态，同居一库（写方向见上）：
 
 ```
-user-state:alice
-  ├── entry-state:{entryId}  →  { read: true, readAt: "...", saved: false }
-  └── ...
+user:alice                                    写入口
+  ├── feed:{feedId} / entry:{feedId}:{...}  →  源元信息与条目副本（含 AVIF 附件）  服务端
+  ├── subscription:{feedId}                 →  { title, category }              客户端（离线也能改）
+  ├── entry-state:{entryId}                 →  { read, readAt, saved }          客户端
+  └── group-pref:{name}                     →  列表分组偏好                     客户端
 ```
 
-**一条不变量：已读与收藏共用同一条文档**（`entry-state:{entryId}`），所以写入一律走 `usePouchDb`
-的读改写：读最新一版 → 只合并要改的字段 → 写回，409 冲突则重读重算（最多 3 轮）。禁止「get 失败
-就当文档不存在、直接新建」：get 也可能因网络等原因失败，那样新建会冲掉对端刚写入的收藏位。
-具体交互见 [frontend-list-rendering.md](docs/frontend-list-rendering.md#已读--收藏)。
+**一条不变量：已读与收藏共用同一条文档**（`entry-state:{entryId}`），写入一律走 `usePouchDb` 的读改写
+（读最新一版 → 只合并要改的字段 → 写回，409 则重读重算，最多 3 轮）；禁止「get 失败就当文档不存在、
+直接新建」—— get 也可能因网络失败，那样新建会冲掉对端刚写入的收藏位。交互见
+[frontend-list-rendering.md](docs/frontend-list-rendering.md#已读--收藏)。
 
 ### Bot 分组的逻辑视图 vs 物理存储
 
@@ -93,27 +97,24 @@ Bot "AI 动态"  → feed:A、D、E   ├──▶  每个 feed 一个独立库
 单独订阅       → feed:F         ┘     （feed:A 只有一份）
 ```
 
-浏览器按 Bot 展开时：拿 feedId 列表 → 直接查本地派生库（Bot 的 feed 属于该用户的订阅，条目已在
-`user-timeline` 里）。零冗余（feed:A 被几个 Bot 引用都只存一份），且浏览器不再需要知道 feed 库的存在。
+浏览器按 Bot 展开时：拿 feedId 列表 → 直接查本地库（Bot 的 feed 属于该用户的订阅，条目已同步下来）。零冗余（feed:A 被几个 Bot 引用都只存一份），且浏览器不再需要知道 feed 库的存在。
 
 ## 数据库职责划分
 
 | 存储                      | 内容                          | 用途                     |
 | ----------------------- | --------------------------- | ---------------------- |
-| PostgreSQL（Drizzle）    | 用户与认证（`user` / `session` / `account` / `api_token`）、`bots`、`bot_*` 关联、`bot_inbox`、`feeds` 注册表、`site_settings`、`user_timeline_settings`、Fedify KV | 核心业务、认证、关系与元数据 |
+| PostgreSQL（Drizzle）    | 用户与认证、`bots`、`bot_*` 关联、`bot_inbox`、`feeds` 注册表、`site_settings`、`user_timeline_settings`、Fedify KV | 核心业务、认证、关系与元数据 |
 | CouchDB feed:{feedId}   | 单个订阅源的 FeedDoc + EntryDoc（正文图片作为附件随文档存放） | RSS 内容权威来源，每源独立库            |
-| CouchDB user-state:{id} | 用户的**订阅关系**（`subscription` 文档）+ read/saved 状态 | 离线优先的订阅管理、多设备阅读状态同步 |
-| CouchDB user-timeline:{id} | 该用户订阅范围的条目**副本**（按窗口/图片参数裁剪）+ FeedDoc 副本 | 服务端聚合结果，客户端只同步这一个库 |
+| CouchDB user:{id}       | 该用户订阅范围的条目**副本**（按窗口/图片参数裁剪）+ FeedDoc 副本 + 订阅关系 + read/saved 状态 | 服务端聚合结果与用户状态同居一库，客户端只同步这一个库 |
 | CouchDB bot:{botId}     | Bot 的产出文档（ActivityPub outbox 的内容源） | Bot 分发与 outbox 查询 |
-| PouchDB（浏览器）           | `user-timeline` 的本地副本 + 用户操作状态              | 离线阅读、跨源聚合查询                 |
+| PouchDB（浏览器）           | 上述用户库的本地副本（条目 + 订阅 + 已读收藏）           | 离线阅读、离线订阅管理、跨源聚合查询        |
 | 存储后端 `image-cache/` 前缀 | 正文图压缩结果（key = URL + 参数的内容寻址） | 同一张图只为不同参数各压一次 |
-
 ### 为什么订阅关系在 CouchDB 而不在 PostgreSQL
 
 最初的设计是把订阅关系放进 PostgreSQL，但它**与离线优先目标冲突**：离线阅读要求用户断网时也能
 订阅/退订，这些改动先落在浏览器 PouchDB，联网后再与服务端合并。关系型表没有对应的客户端副本与
-冲突合并机制，跨端修改无法收敛。因此订阅关系统一改由 CouchDB `user-state:{id}` 库承载
-（`subscription` 文档），与已读/收藏状态复用同一条 PouchDB 双向同步链路。**PostgreSQL 侧没有
+冲突合并机制，跨端修改无法收敛。因此订阅关系统一改由 CouchDB 用户库承载
+（`subscription` 文档，客户端经回写通道推送），与已读/收藏状态复用同一条 PouchDB 双向链路。**PostgreSQL 侧没有
 「某用户订阅了哪些 feed」的表**：`feeds` 只是所有已知订阅源的注册表（供 Worker 定时抓取），
 `bot_feeds` 是 Bot↔feed 的关联，两者都不表示用户订阅。
 
@@ -185,16 +186,15 @@ outbox 路由从该库的 `entries-by-date` 视图读取（见 `routes/bots.ts`�
 后端的 ActivityPub 端点由 Hono 的 `app.all("*")` 兜底提供，**只转发 `/api/*` 会让联邦功能整体 404**，
 而首页看起来完全正常。
 
-前端不经过 Nitro 代理后端：浏览器按 `NUXT_PUBLIC_API_BASE_URL` 直连后端（见 `useApi.ts`），
-同域部署下即反代地址，cookie 同站。部署步骤见 [docs/docker-deployment.md](docs/docker-deployment.md)，
-反代规则见 [deploy/Caddyfile](deploy/Caddyfile)。
+前端不经过 Nitro 代理后端：浏览器按 `NUXT_PUBLIC_API_BASE_URL` 直连后端（见 `useApi.ts`），同域部署下
+即反代地址，cookie 同站。部署见 [docs/docker-deployment.md](docs/docker-deployment.md)、[deploy/Caddyfile](deploy/Caddyfile)。
 
 ## 数据流
 
 1. **RSS 资讯聚合**：用户发现并订阅感兴趣的 feed → feedsmith 解析 → 写入对应 feed:{feedId} 库（去重）→ BullMQ 定时调度周期性拉取更新
-2. **服务端聚合**：抓新条目 → 通知聚合队列（节流 30s，另有定时兜底与客户端催促）；一次聚合 = 退订清理 → 窗口剪枝 → 逐源增量/回填（每源完成即落盘游标）→ 更新状态文档。新写入由客户端那条 live 复制自动推下去
-3. **用户同步**：登录后取 `timeline` / `userState` 两个库名 → 挂 live 复制（一条单向拉条目、一条双向同步状态）→ 首屏查本地库上屏；之后到达的条目折叠进「已同步 N 条」，用户点「查看」才换列表
-4. **离线阅读**：浏览器 PouchDB 本地缓存 → 离线浏览、跨源搜索、按时间排序 → 打开条目即标已读/手动切换已读与收藏 → 同步到 user-state 库 → 其他设备接收变更
+2. **服务端聚合**：抓新条目 → 通知聚合队列（节流 30s，另有定时兜底与客户端催促）；一次聚合 = 退订清理 → 窗口剪枝 → 逐源增量/回填（每源完成即落盘游标）→ 更新状态文档。新写入由拉取通道自动到端
+3. **用户同步**：登录后取一个库名（`GET /api/couchdb/sync-targets`）→ 对同一个远端库挂两条 live 通道（拉全量、只推状态）→ 首屏查本地库上屏；之后到达的条目折叠进「已同步 N 条」，用户点「查看」才换列表
+4. **离线阅读**：浏览器 PouchDB 本地缓存 → 离线浏览、跨源搜索、按时间排序 → 打开条目即标已读/手动切换已读与收藏 → 经回写通道同步到用户库 → 其他设备接收变更
 5. **ActivityPub 分发**：Worker 抓取到新条目 → 查 PostgreSQL `bot_feeds` 找出引用该 feed 的 Bot → 对每个 Bot 通过 BotKit 构建 Create Activity 推送到 follower inbox → 同时写入该 Bot 的 **CouchDB `bot:{botId}` 产出库**供 outbox 查询（`entries-by-date` 视图按 publishedAt 排序，天然支持倒序分页）
 
-   > **为什么 Bot 产出库里不放压缩图片？** 两个场景的消费者不同：派生库同步给浏览器供离线阅读，需要压缩图片作为附件；ActivityPub outbox 返回的是轻量分发元数据，远程实例自行拉取原始图片 URL。Bot 产出库只存标题、摘要、原文链接。
+   > **为什么 Bot 产出库里不放压缩图片？** 两个场景的消费者不同：用户库同步给浏览器供离线阅读，需要压缩图片作附件；ActivityPub outbox 返回的是轻量分发元数据，远程实例自行拉取原始图片 URL。Bot 产出库只存标题、摘要、原文链接。

@@ -58,7 +58,7 @@
 
 - **现象**：每个订阅同步时都出现一条 `GET /api/couchdb/proxy/` 404，功能正常，没有别的报错。
 - **原因**：这是 **PouchDB 建立复制前对远端库的 uuid 探测**，不是脏数据 —— 探测打的是「去掉库名段后的路径」，所以所有订阅都是同一条 404；拿不到 uuid 时 PouchDB 回退用远端库 URL 当复制 id，同步不受影响。
-- **快速验证**（库名从 `GET /api/couchdb/targets` 拿）：
+- **快速验证**（库名从 `GET /api/couchdb/sync-targets` 拿，或按库名规律从 `_all_dbs` 找）：
   ```js
   const PouchDB = require('pouchdb')
   const db = new PouchDB('http://localhost:3001/api/couchdb/proxy/feed_xxxxxxxxxxxxxxxxxxxxxxxx')
@@ -71,7 +71,7 @@
 
 - **现象**：`GET /api/couchdb/proxy/<库名>/_local/xxxx==` 404，响应体 `{"error":"not_found","reason":"missing"}`。
 - **原因**：PouchDB 复制前的 **checkpoint 读取**：checkpoint 尚不存在时 CouchDB 就返回 404，PouchDB 据此从头复制、结束时 PUT 写入。**属于正常链路**，只有首次会 404，之后同一复制 id 会命中并返回 200。
-- **排查**（路径里的库名是随机生成的，不是 `feed_<feedId>`；映射见 `GET /api/couchdb/targets`）：
+- **排查**（路径里的库名是随机生成的，不是 `feed_<feedId>`；feed 库名在 `feeds.couch_db_name` 列，代理只下发用户库名）：
   ```bash
   docker exec hono-server-postgres-1 psql -U rssfed -d rssfed -c \
     "select couch_db_name from feeds where id='<feedId>';"
@@ -109,14 +109,20 @@
 
 ### 同步全报 `Database does not exist`：库名还登记着，库却没了
 
-- **现象**：订阅列表正常、`GET /api/couchdb/targets` 也下发库名，但同步返回 CouchDB 的 `{"error":"not_found","reason":"Database does not exist."}`。
+- **现象**：订阅列表正常、`GET /api/couchdb/sync-targets` 也下发库名，但同步返回 CouchDB 的 `{"error":"not_found","reason":"Database does not exist."}`。
 - **原因**：库名解析走快路径：已登记的库名直接返回、不再校验库是否还在（[client.ts](../packages/hono-server/src/couchdb/client.ts) 的 `resolveDatabase`），手工删库、数据卷丢失**不会自动重建**。
 - **解法**：把对应行的库名置空，下次寻址/抓取会重新建库：
   ```bash
   docker exec hono-server-postgres-1 psql -U rssfed -d rssfed -c \
     "update feeds set couch_db_name = null where id='<feedId>';"
   ```
-  用户状态库/ bot 库同理（`user` / `bots` 表的 `couch_db_name`）；**派生时间线库**置空 `user.timeline_db_name` 后下次聚合会重建（`rebuildUserTimeline` 就是这条路径）。重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次。库级 `_security` 也只在建库时设置一次，改坏了同样用置空库名的方式重建。
+  feed / bot 库同理（`feeds` / `bots` 表的 `couch_db_name`）；**用户库**置空 `user.timeline_db_name` 后下次聚合会重建。重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次（用户状态文档要从客户端再推上来，见下面那条）。库级 `_security` 只在建库时设置一次，改坏了同样用置空库名的方式重建。
+
+### 改图片设置后订阅被清空 / 重建后状态文档消失
+
+- **现象**：改了时间线设置的图片参数（触发重建）之后，订阅列表变空，或已读/收藏全丢。
+- **原因**：`rebuildUserTimeline` 只能重算**服务端独占写**的内容。合并成单库之前用户状态在另一个库里，删掉聚合库不影响它；合并之后两者同库，重建若还用「删库重建」就会把 `subscription:` / `entry-state:` 一起抹掉（客户端那份还会因为远端库名变化变成孤儿）。
+- **现状**：重建已改成**就地删 `entry:` / `feed:` 两个前缀范围**再全量回填，库名不变、状态文档不动（回归用例 `timeline-rebuild.test.ts`）。手工清理时同样别 `DELETE /<用户库>`：用 `_all_docs?startkey="entry:"&endkey="entry:\uffff"` 找出文档再 `_bulk_docs` 标记删除。
 
 ## 反向代理与网络
 
@@ -218,10 +224,16 @@ JS
 
 ### 同一浏览器换账号后，看到（并写进了）上一个账号的数据
 
-- **现象**：A 登出、B 登录后，B 的时间线/订阅里出现 A 的订阅或已读状态；更麻烦的是 **B 的服务端 user-state 库被写入了 A 的文档**。
-- **原因**：旧版本本地 PouchDB 用固定库名（`rssfed-entries` / `rssfed-user-state`），而 user-state 库是**双向** live 同步，装着 A 数据的本地库会把文档推到 B 的远端库；增量同步记录（localStorage 的 `rssfed-synced-feeds`）也是全局 key，会让 B 整段跳过。
+- **现象**：A 登出、B 登录后，B 的时间线/订阅里出现 A 的订阅或已读状态；更麻烦的是 **B 的服务端用户库被写入了 A 的文档**。
+- **原因**：旧版本本地 PouchDB 用固定库名（`rssfed-entries` / `rssfed-user-state`），而用户库是**双向**同步的，装着 A 数据的本地库会把文档推到 B 的远端库；增量同步记录（localStorage 的 `rssfed-synced-feeds`）也是全局 key，会让 B 整段跳过。
 - **解法**：本地库名与同步记录 key 都带上账号 id（[utils/localDbName.ts](../packages/nuxt-client/app/utils/localDbName.ts)），换账号即换一套本地库；会话未就绪或未登录落到 `guest`。启动清理**删除**旧固定库名而非搬进新库 —— 旧库混着多个账号的数据，搬进去会把上个账号的数据固化后再推上远端。
-- **已经被写脏的远端库**：查该账号 user-state 库里的 `subscription:` 文档（`GET /api/couchdb/proxy/<库名>/_all_docs?startkey="subscription:"&endkey="subscription:\uffff"&include_docs=true`，库名从 `GET /api/couchdb/targets` 拿），删掉不属于该账号的文档；本地侧换了库名会重新全量同步一次。
+- **已经被写脏的远端库**：查该账号用户库里的 `subscription:` 文档（`GET /api/couchdb/proxy/<库名>/_all_docs?startkey="subscription:"&endkey="subscription:\uffff"&include_docs=true`，库名从 `GET /api/couchdb/sync-targets` 拿），删掉不属于该账号的文档；本地侧换了库名会重新全量同步一次。
+
+### 升级到单库方案后，旧的 user-state 库怎么处理
+
+- **背景**：用户状态与聚合条目曾是两个库（`user-state_<随机>` + `user-timeline_<随机>`）。合并成单库后服务端只创建/下发一个库（`user.timeline_db_name`），`user.couch_db_name` 列与 `user-state_*` 库全部废弃。
+- **升级动作**（已在本仓库的 dev 环境执行）：把老库里的 `subscription:` / `entry-state:` 文档按 `new_edits: false` 搬进对应的用户库，然后 `DELETE` 掉 `user-state_*` 库、`ALTER TABLE "user" DROP COLUMN couch_db_name`。**搬运必须带原 `_rev`**：客户端本地那份状态文档的 rev 与远端一致，才不会把整份状态重新推一遍。
+- **注意**：代理的库名前缀白名单里已不含 `user-state_`，历史库名经代理访问会直接 400 `invalid_database`。
 
 ## PWA 与安装到手机
 
