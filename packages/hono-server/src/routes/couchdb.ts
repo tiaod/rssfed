@@ -7,6 +7,7 @@ import {
   isProxyableDbName,
   ensureFeedDatabase,
   ensureUserStateDatabase,
+  ensureTimelineDatabase,
   ensureBotDatabase,
 } from "../couchdb/client"
 import { listSubscriptionsForUser } from "../services/feeds"
@@ -51,14 +52,17 @@ couchdbRouter.use("/*", async (c: Context<{ Variables: Variables }>, next: Next)
 })
 
 /**
- * 代理寻址信息：当前用户可同步的库名映射。
+ * 代理寻址信息（**旧版**：每个订阅源一个库）。
  *
  *   { userState: "user-state_xxx", feeds: { <feedId>: "feed_xxx" }, bots: { <botId>: "bot_xxx" } }
  *
- * 前端 PouchDB 拿到库名才能拼出代理地址。顺带 ensure 一次：订阅是刚建立时
- * 库可能还不存在，先把库建好，前端不必关心建库时机。已有库名的都是纯读
- * （见 couchdb/client.ts 的 resolveDatabase），所以这个接口对老订阅几乎零成本。
- * 订阅列表内部会 ensure 用户状态库，并已过滤 feedId 无效的脏文档。
+ * 服务端聚合改造后浏览器不再逐源同步，新版客户端改用 `GET /sync-targets`。
+ * 这个端点**保留**是为了让缓存了旧前端的 PWA（Service Worker 里的旧 shell 会继续跑一段时间）
+ * 不至于整体失效：旧客户端拿不到 feed 库名会把每个源标成同步失败，用户看到的是「一片红」。
+ * 等旧前端淘汰后可以连同 `feeds`/`bots` 一起删掉。
+ *
+ * 顺带 ensure 一次：订阅是刚建立时库可能还不存在，先把库建好，前端不必关心建库时机。
+ * 已有库名的都是纯读（见 couchdb/client.ts 的 resolveDatabase），所以这个接口对老订阅几乎零成本。
  */
 couchdbRouter.get("/targets", async (c) => {
   const userId = c.get("userId")
@@ -79,6 +83,24 @@ couchdbRouter.get("/targets", async (c) => {
   )
 
   return c.json({ userState: await ensureUserStateDatabase(userId), feeds, bots })
+})
+
+/**
+ * 代理寻址信息（**新版**：同步面收敛成两个库）。
+ *
+ *   { userState: "user-state_xxx", timeline: "user-timeline_xxx" }
+ *
+ * 浏览器现在只做两件事：单向 live 复制 timeline 库（服务端聚合好的条目）、
+ * 双向同步 userState 库（订阅关系与已读/收藏）。这里**不再** ensure 每个 feed 库 ——
+ * 那曾是这个接口最重的一部分（订阅源上百个就是上百次库名查询）。
+ */
+couchdbRouter.get("/sync-targets", async (c) => {
+  const userId = c.get("userId")
+  const [userState, timeline] = await Promise.all([
+    ensureUserStateDatabase(userId),
+    ensureTimelineDatabase(userId),
+  ])
+  return c.json({ userState, timeline })
 })
 
 /**

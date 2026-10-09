@@ -1,17 +1,12 @@
 import { Worker, Queue } from "bullmq"
-import IORedis from "ioredis"
 import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
 import { ensureFeedDatabase, ensureBotDatabase, createCouchDb } from "../couchdb/client"
 import { parseFeedUrl, formatFeedError, type ParsedFeed, type ParsedItem } from "../rss/parser"
 import { cacheEntryImages, cacheSingleImage, FEED_ICON_CACHE_VERSION, type EntryImageOptions } from "../rss/entry-images"
 import { db, feeds, botFeeds, bots as botsTable, type EntryDoc } from "../db"
-
-const connection = new IORedis({
-  host: process.env.REDIS_HOST ?? "localhost",
-  port: parseInt(process.env.REDIS_PORT ?? "6379"),
-  maxRetriesPerRequest: null,
-}) as any
+import { connection } from "./connection"
+import { notifyTimelineStale, shutdownTimelineWorkers } from "./timeline"
 
 export const fetchQueue = new Queue("rss-fetch", { connection })
 
@@ -37,6 +32,12 @@ export const worker = new Worker("rss-fetch", async (job) => {
     }
     // 无论有无新条目都同步相关 Bot：FeedDoc 元信息需在无新条目时也能校正
     await notifyRelatedBots(feedId, newEntries)
+
+    // 抓到新条目 → 通知各用户的时间线聚合尽快跑一轮（带节流：一轮抓取里几十个源
+    // 都有新内容时只通知一次）。聚合本身是增量的，安静时每个用户只花一条 SQL。
+    if (newEntries.length > 0) {
+      void notifyTimelineStale().catch(() => {})
+    }
 
     return { feedId, newEntries: newEntries.length, totalItems: parsed.items?.length ?? 0 }
   } catch (err) {
@@ -355,5 +356,7 @@ export async function shutdownWorkers() {
   clearInterval(fetchInterval)
   await worker.close()
   await fetchQueue.close()
+  // 时间线聚合队列与本队列共用同一个 Redis 连接，必须在 quit 之前关掉
+  await shutdownTimelineWorkers()
   await connection.quit()
 }
