@@ -79,7 +79,7 @@ export const timelineWorker = new Worker("rss-timeline", async (job) => {
     console.log(
       `[Timeline] user=${userId} 源=${result.sources} 扫过=${result.scannedSources} ` +
       `新增=${result.addedEntries} 退订删除=${result.removedEntries} 剪枝=${result.prunedEntries} ` +
-      `图片失败=${result.imageFailures} 失败源=${result.failures.length}`,
+      `附件缺失=${result.attachmentFailures} 失败源=${result.failures.length}`,
     )
     for (const failure of result.failures.slice(0, 5)) {
       console.warn(`[Timeline] 源 ${failure.sourceId} 聚合失败：${failure.error}`)

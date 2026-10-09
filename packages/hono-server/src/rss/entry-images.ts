@@ -17,8 +17,9 @@ import {
  */
 
 // ── 条目图片缓存的全局默认（环境变量可覆盖，见 .env.example） ──
-// 每个 feed 可在 PostgreSQL feeds 表上按源覆盖这些默认值（见 cacheEntryImages 的 options 参数）；
-// 每个用户还能在 user_timeline_settings 里覆盖一次（服务端聚合时间线时用，见 services/timeline.ts）。
+// 每个 feed 可在 PostgreSQL feeds 表上按源覆盖这些默认值（管理员维护，见 cacheEntryImages
+// 的 options 参数）。这是**唯一**一处图片策略：抓取时按它把正文图压成附件写进源库，
+// 聚合只把成品搬进各用户库（见 services/timeline.ts），用户没有自己的图片参数。
 
 /**
  * 每篇 entry 最多尝试缓存的图片数。

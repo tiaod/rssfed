@@ -98,14 +98,14 @@
   curl -s -u admin:admin "http://localhost:5984/<user-timeline 库名>" | grep doc_count
   ```
   派生库的 `_local/state` 文档存着每个源的游标：它存在说明至少跑完过一轮，之后就是增量（很快）。
-- **解法**：等它跑完，或 `POST /api/timeline/rebuild` 强制删库重建（图片参数改过之后也必须重建）。**每源完成即落盘游标**，所以中途重启不会让进度归零、下一轮接着做。
+- **解法**：等它跑完，或 `POST /api/timeline/rebuild` 强制重算派生内容（就地删 `entry:`/`feed:` 再全量回填）。**每源完成即落盘游标**，所以中途重启不会让进度归零、下一轮接着做。
 
 ### 图片接口返回 502 `image_unavailable`
 
 - **现象**：`GET /api/images/cached?url=…&w=…&q=…` 返回 502，响应体 `{"error":"image_unavailable","reason":…}`。
-- **原因**：看 `reason`（取值见 `images/fetch.ts` 的 `ImageFailReason`）——`invalid-url`（URL 不合法，或**公网接口**拿到内网/回环地址被 `isPrivateHost` 挡掉，防 SSRF）、`http-status`（403 防盗链 / 404 / 5xx）、`content-type`（返回的不是图片）、`too-large`（源图超过 `maxSourceImageBytes`）、`timeout` / `network`（连不上或读取超时）、`redirect-limit`（跳转超过 3 次）、`decode`（sharp 解不出来）。聚合时这类失败**只记数不阻塞**（`imageFailures`），条目照常入库、只是没有附件。
+- **原因**：看 `reason`（取值见 `images/fetch.ts` 的 `ImageFailReason`）——`invalid-url`（URL 不合法，或**公网接口**拿到内网/回环地址被 `isPrivateHost` 挡掉，防 SSRF）、`http-status`（403 防盗链 / 404 / 5xx）、`content-type`（返回的不是图片）、`too-large`（源图超过 `maxSourceImageBytes`）、`timeout` / `network`（连不上或读取超时）、`redirect-limit`（跳转超过 3 次）、`decode`（sharp 解不出来）。这条链路只在**抓取**时跑：失败只记数不阻塞（worker 打的一行 `[EntryImages] … 原因[…]`），条目照常入库、只是没有附件，聚合不会再重试。
 - **注意**：`invalid-url` 有两种来源（URL 本身非法 vs. 内网地址被拒），响应里不区分；本地 dev 用内网图床调试时要在调用侧显式 `allowPrivateHosts`（见 `images/cache.ts` 的依赖注入），抓取路径与公网接口的默认值不同。
-- **解法**：先直接 `curl -I <源图 URL>` 确认可达；大图调大 `MAX_SOURCE_IMAGE_BYTES` 或该用户的 per-user 上限。同一张图 + 同一组参数只会失败一次（结果也进内存缓存），不会反复重试拖慢聚合。
+- **解法**：先直接 `curl -I <源图 URL>` 确认可达；大图调大 `MAX_SOURCE_IMAGE_BYTES`，或在该 feed 的图片策略里单独调（订阅源管理页 / `feeds` 表的图片列）。同一张图 + 同一组参数只会失败一次，不会反复重试拖慢抓取；已经入库的条目要等下次抓到新条目或按源重抓才会带上图。
 
 ### 同步全报 `Database does not exist`：库名还登记着，库却没了
 
@@ -118,9 +118,9 @@
   ```
   feed / bot 库同理（`feeds` / `bots` 表的 `couch_db_name`）；**用户库**置空 `user.timeline_db_name` 后下次聚合会重建。重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次（用户状态文档要从客户端再推上来，见下面那条）。库级 `_security` 只在建库时设置一次，改坏了同样用置空库名的方式重建。
 
-### 改图片设置后订阅被清空 / 重建后状态文档消失
+### 重建后订阅被清空 / 状态文档消失
 
-- **现象**：改了时间线设置的图片参数（触发重建）之后，订阅列表变空，或已读/收藏全丢。
+- **现象**：`POST /api/timeline/rebuild`（或设置页的「重建时间线」）之后，订阅列表变空，或已读/收藏全丢。
 - **原因**：`rebuildUserTimeline` 只能重算**服务端独占写**的内容。合并成单库之前用户状态在另一个库里，删掉聚合库不影响它；合并之后两者同库，重建若还用「删库重建」就会把 `subscription:` / `entry-state:` 一起抹掉（客户端那份还会因为远端库名变化变成孤儿）。
 - **现状**：重建已改成**就地删 `entry:` / `feed:` 两个前缀范围**再全量回填，库名不变、状态文档不动（回归用例 `timeline-rebuild.test.ts`）。手工清理时同样别 `DELETE /<用户库>`：用 `_all_docs?startkey="entry:"&endkey="entry:\uffff"` 找出文档再 `_bulk_docs` 标记删除。
 

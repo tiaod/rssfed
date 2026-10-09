@@ -33,7 +33,7 @@ export const timelineRouter = new Hono<{ Variables: Variables }>()
  *
  * 客户端的同步模型：对 `user-timeline_*` 库做**单向 live 复制**（服务端一写就自动到端），
  * 所以本路由不返回任何条目数据 —— 它只负责两件事：
- *   1. 读写「服务端该怎么替这个用户聚合」的设置（窗口、图片预算、AI 开关）；
+ *   1. 读写「服务端该怎么替这个用户聚合」的设置（窗口、AI 开关）；
  *   2. 在订阅/退订/打开应用时催一次聚合（`POST /refresh`），让新内容尽快进派生库。
  */
 
@@ -53,9 +53,8 @@ timelineRouter.get("/settings", async (c) => {
 /**
  * 更新设置。
  *
- * 只改窗口不动派生库的内容，只是让下一次聚合按新边界回填/剪枝；
- * 改图片参数则必须重建（已聚合条目的附件是按旧参数压的），所以这里返回
- * `rebuildQueued`，让客户端知道后台正在重算、可以展示对应提示。
+ * 改窗口不需要重建：窗口是「回填/剪枝」的边界，由下一次聚合自己处理（缩小剪枝、放大回填），
+ * 所以入队一次增量聚合即可。条目内容与附件只由源库决定，不随用户设置变化。
  */
 timelineRouter.patch("/settings", async (c) => {
   const userId = c.get("userId")
@@ -70,11 +69,10 @@ timelineRouter.patch("/settings", async (c) => {
   if (errors.length > 0) return c.json({ error: "invalid_settings", details: errors }, 400)
   if (Object.keys(patch).length === 0) return c.json({ error: "empty_patch" }, 400)
 
-  const { settings, needsRebuild } = await updateTimelineSettings(userId, patch)
-  if (needsRebuild) await enqueueTimelineRebuild(userId)
-  else await enqueueTimelineReconcile(userId)
+  const { settings } = await updateTimelineSettings(userId, patch)
+  await enqueueTimelineReconcile(userId)
 
-  return c.json({ settings, rebuildQueued: needsRebuild })
+  return c.json({ settings })
 })
 
 /**
@@ -118,7 +116,7 @@ timelineRouter.post("/refresh", async (c) => {
   })
 })
 
-/** 重建派生库（设置里的「重建时间线」/ 图片参数变更后的兜底入口） */
+/** 重建派生库（服务端写的条目/源元信息整体删掉再全量回填；用户状态文档不动） */
 timelineRouter.post("/rebuild", async (c) => {
   await enqueueTimelineRebuild(c.get("userId"))
   return c.json({ accepted: true }, 202)

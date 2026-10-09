@@ -95,8 +95,10 @@ export const apiToken = pgTable("api_token", {
  *
  * 权威在 PostgreSQL：服务端每次 reconcile 都要读它，而客户端只把它镜到 localStorage
  * 供离线显示（设置页的写入走 PATCH /api/timeline/settings）。**没有行 = 全部走全局默认**
- *（见 services/timeline.ts 的 DEFAULT_TIMELINE_SETTINGS），所以列一律可空：
- * 图片参数从环境变量兜底，与 per-feed 覆盖的既有做法一致（见 rss/entry-images.ts）。
+ *（见 services/timeline.ts 的 DEFAULT_TIMELINE_SETTINGS），所以列一律可空。
+ *
+ * 这里**没有图片参数**：图片策略只有一份 per-feed 的（管理员维护，见 rss/entry-images.ts），
+ * 抓取时就压好了；聚合只搬运成品，用户设置改不了附件。
  */
 export const userTimelineSettings = pgTable("user_timeline_settings", {
   userId: text("user_id").primaryKey().references(() => user.id, { onDelete: "cascade" }),
@@ -105,16 +107,6 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
    * null = 全局默认（3 天）；0 = 不限时间（该用户的库会很大，显式选择才生效）。
    */
   windowDays: integer("window_days"),
-  /** 每篇条目最多缓存几张正文图（null = 全局默认 MAX_IMAGE_COUNT） */
-  maxImageCount: integer("max_image_count"),
-  /** 每篇条目附件总体积上限字节（null = 全局默认 MAX_ENTRY_IMAGE_BYTES） */
-  maxEntryImageBytes: integer("max_entry_image_bytes"),
-  /** 压缩后最大宽度 px（null = 全局默认 MAX_IMAGE_WIDTH） */
-  maxImageWidth: integer("max_image_width"),
-  /** AVIF 编码质量（null = 全局默认 AVIF_QUALITY） */
-  avifQuality: integer("avif_quality"),
-  /** 源图下载大小上限字节（null = 全局默认 MAX_SOURCE_IMAGE_BYTES） */
-  maxSourceImageBytes: integer("max_source_image_bytes"),
   /**
    * 是否为该用户生成 AI 总结（null/false = 不生成）。
    * 本轮只落存储位与 timeline 文档上的 `aiSummary` 字段，生成链路（LLM provider、

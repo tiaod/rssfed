@@ -3,8 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const state = vi.hoisted(() => ({
   session: { user: { id: "u1" } } as { user: { id: string } } | null,
   settings: {
-    settings: { windowDays: 3, maxImageCount: 6, aiSummaryEnabled: false },
-    needsRebuild: false,
+    settings: { windowDays: 3, aiSummaryEnabled: false },
   },
   reconcileQueued: 0,
   rebuildQueued: 0,
@@ -57,8 +56,7 @@ const { app } = await import("../app")
 beforeEach(() => {
   state.session = { user: { id: "u1" } }
   state.settings = {
-    settings: { windowDays: 3, maxImageCount: 6, aiSummaryEnabled: false },
-    needsRebuild: false,
+    settings: { windowDays: 3, aiSummaryEnabled: false },
   }
   state.reconcileQueued = 0
   state.rebuildQueued = 0
@@ -92,7 +90,7 @@ describe("/api/timeline", () => {
   })
 
   it("PATCH 越界值返回 400 并逐项说明", async () => {
-    const res = await patch({ windowDays: 1000, avifQuality: 999 })
+    const res = await patch({ windowDays: 1000, aiSummaryEnabled: "yes" })
     expect(res.status).toBe(400)
     const body = await res.json() as { details: string[] }
     expect(body.details).toHaveLength(2)
@@ -109,22 +107,20 @@ describe("/api/timeline", () => {
     expect(res.status).toBe(400)
   })
 
-  it("只改窗口：入队增量聚合，不重建", async () => {
-    state.settings = { settings: { windowDays: 7, maxImageCount: 6, aiSummaryEnabled: false }, needsRebuild: false }
+  it("改窗口：入队一次增量聚合（窗口边界由 reconcile 自己回填/剪枝，不重建）", async () => {
+    state.settings = { settings: { windowDays: 7, aiSummaryEnabled: false } }
     const res = await patch({ windowDays: 7 })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ rebuildQueued: false })
+    expect(await res.json()).toMatchObject({ settings: { windowDays: 7 } })
     expect(state.reconcileQueued).toBe(1)
     expect(state.rebuildQueued).toBe(0)
   })
 
-  it("改图片参数：入队重建（已聚合条目的附件要按新参数重压）", async () => {
-    state.settings = { settings: { windowDays: 3, maxImageCount: 2, aiSummaryEnabled: false }, needsRebuild: true }
+  it("图片参数不再是用户设置：整包 PATCH 一律 400，不会入任何队", async () => {
     const res = await patch({ maxImageCount: 2 })
-    expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ rebuildQueued: true })
-    expect(state.rebuildQueued).toBe(1)
+    expect(res.status).toBe(400)
     expect(state.reconcileQueued).toBe(0)
+    expect(state.rebuildQueued).toBe(0)
   })
 
   it("POST /refresh 与 /rebuild 返回 202", async () => {

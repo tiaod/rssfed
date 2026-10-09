@@ -272,7 +272,7 @@ async function installFeedDesignDoc(dbName: string) {
  * 确保用户库存在并返回库名（首次调用时生成随机库名并持久化映射）。
  *
  * 一个用户**一个**库，里面两类文档：
- *   - 服务端独占写：`feed:{feedId}` 元数据、`entry:*` 聚合条目（含按用户参数压好的附件）
+ *   - 服务端独占写：`feed:{feedId}` 元数据、`entry:*` 聚合条目（含从源库搬来的附件）
  *   - 客户端也能写：`subscription:*` 订阅、`entry-state:*` 已读/收藏
  * 独占性由设计文档里的 validate_doc_update 在数据库层兜底（见 TIMELINE_DESIGN_DOC）。
  *
