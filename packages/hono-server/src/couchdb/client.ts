@@ -1,7 +1,7 @@
 import nano from "nano"
 import { customAlphabet } from "nanoid"
 import { eq } from "drizzle-orm"
-import { db, feeds, user, bots, COUCHDB_FEED_PREFIX, COUCHDB_USER_STATE_PREFIX, COUCHDB_BOT_PREFIX } from "../db"
+import { db, feeds, user, bots, COUCHDB_FEED_PREFIX, COUCHDB_USER_STATE_PREFIX, COUCHDB_BOT_PREFIX, COUCHDB_USER_TIMELINE_PREFIX } from "../db"
 
 export const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
 export const couchUser = process.env.COUCHDB_USER ?? ""
@@ -43,6 +43,29 @@ const FEED_DESIGN_DOC = {
   },
 }
 
+/**
+ * 每用户时间线库的设计文档：**只给服务端 reconcile 用**（按发布时间剪枝，
+ * 见 services/timeline.ts 的缩窗 / 退订清理）。
+ *
+ * 刻意不复用客户端本地那套 `_design/local_entries_v1`（浏览器的 map view 由客户端自己装）：
+ * 时间线库是**单向**复制到浏览器的，重复装同名设计文档只会在客户端本地造成 rev 冲突。
+ * 这份 `by_published_at` 会随复制进入浏览器本地库，但客户端从不 query 它，
+ * 是一份惰性文档（PouchDB 只在 query 时才构建索引）。
+ */
+const TIMELINE_DESIGN_DOC = {
+  _id: "_design/timeline-maintain",
+  language: "javascript",
+  views: {
+    by_published_at: {
+      map: `function(doc) {
+        if (doc.type === 'entry' && typeof doc.publishedAt === 'string') {
+          emit(doc.publishedAt, null);
+        }
+      }`,
+    },
+  },
+}
+
 // ── 库名解析与创建 ──
 
 // 全小写字母+数字字符集：生成的库名满足 CouchDB 库名规则（小写、以字母开头、无非法字符）
@@ -50,7 +73,7 @@ const DB_NAME_SUFFIX_LENGTH = 24
 const generateDbNameSuffix = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", DB_NAME_SUFFIX_LENGTH)
 
 /** 本服务自己创建的库名前缀白名单 */
-const OWNED_DB_PREFIXES = [COUCHDB_FEED_PREFIX, COUCHDB_BOT_PREFIX, COUCHDB_USER_STATE_PREFIX]
+const OWNED_DB_PREFIXES = [COUCHDB_FEED_PREFIX, COUCHDB_BOT_PREFIX, COUCHDB_USER_STATE_PREFIX, COUCHDB_USER_TIMELINE_PREFIX]
 
 /**
  * 库名规则：`<本服务前缀>` + 固定长度的随机小写字母数字后缀，
@@ -72,12 +95,12 @@ export function isProxyableDbName(name: string): boolean {
 }
 
 /** 库名映射对象类型 */
-type DbKind = "feed" | "user" | "bot"
+type DbKind = "feed" | "user" | "user-timeline" | "bot"
 
 /**
  * 解析（或创建）业务对象对应的 CouchDB 库名。
- * 库名保存在业务表的新增列上（feeds.couch_db_name / user.couch_db_name / bots.couch_db_name），
- * 首次 ensure 时生成随机库名、建库并回写该列；库名不直接由业务 id 派生，
+ * 库名保存在业务表的新增列上（feeds.couch_db_name / user.couch_db_name / user.timeline_db_name /
+ * bots.couch_db_name），首次 ensure 时生成随机库名、建库并回写该列；库名不直接由业务 id 派生，
  * 避免非法字符/撞名问题，且 id 变更不影响已建库。
  *
  * **已有库名时直接返回，一个 CouchDB 请求都不发**：抓取条目、写条目、查条目、
@@ -85,6 +108,7 @@ type DbKind = "feed" | "user" | "bot"
  * 等于每个订阅多打两个请求。代价是不再自动修复「库名已登记但库被删掉」的情况
  * （手工删库、CouchDB 数据卷丢失）；届时把该行的库名置空即可让下次 ensure 重建：
  *   update feeds set couch_db_name = null where id = '<feedId>';
+ *   update "user" set timeline_db_name = null where id = '<userId>';  -- 时间线库同理
  */
 async function resolveDatabase(kind: DbKind, refId: string, prefix: string): Promise<string> {
   const existing = await getCouchDbName(kind, refId)
@@ -112,6 +136,15 @@ async function getCouchDbName(kind: DbKind, refId: string): Promise<string | nul
     })
     return row?.couchDbName ?? null
   }
+  // user 与 user-timeline 是同一个用户对象上的两个库，只是列不同。
+  // 两个分支分开写（而不是三元表达式传 columns）：drizzle 无法从条件列推导出返回类型。
+  if (kind === "user-timeline") {
+    const row = await db.query.user.findFirst({
+      where: eq(user.id, refId),
+      columns: { timelineDbName: true },
+    })
+    return row?.timelineDbName ?? null
+  }
   const row = await db.query.user.findFirst({
     where: eq(user.id, refId),
     columns: { couchDbName: true },
@@ -126,6 +159,8 @@ async function saveCouchDbName(kind: DbKind, refId: string, dbName: string) {
     saved = (await db.update(feeds).set({ couchDbName: dbName }).where(eq(feeds.id, refId)).returning({ id: feeds.id })).length > 0
   } else if (kind === "bot") {
     saved = (await db.update(bots).set({ couchDbName: dbName }).where(eq(bots.id, refId)).returning({ id: bots.id })).length > 0
+  } else if (kind === "user-timeline") {
+    saved = (await db.update(user).set({ timelineDbName: dbName }).where(eq(user.id, refId)).returning({ id: user.id })).length > 0
   } else {
     saved = (await db.update(user).set({ couchDbName: dbName }).where(eq(user.id, refId)).returning({ id: user.id })).length > 0
   }
@@ -150,7 +185,20 @@ async function ensureDbExists(dbName: string, kind: DbKind, refId: string) {
   if (created && kind === "user") {
     await ensureUserStateIndexes(dbName)
   }
-  await setDatabaseSecurity(dbName, kind === "user" ? { names: [refId] } : { roles: ["user"] })
+  if (created && kind === "user-timeline") {
+    await installTimelineDesignDoc(dbName)
+  }
+  await setDatabaseSecurity(dbName, isPerUserKind(kind) ? { names: [refId] } : { roles: ["user"] })
+}
+
+/**
+ * 是否是「一个用户一个库、按用户名授权」的类型。
+ *
+ * user-state 与 user-timeline 都属于此类：库级 _security 的 members.names 限定为本人，
+ * 代理侧授予的只是角色（见 routes/couchdb.ts），最终权限仍由这里兜底。
+ */
+function isPerUserKind(kind: DbKind): boolean {
+  return kind === "user" || kind === "user-timeline"
 }
 
 /** 设置库级 _security：新库默认仅 admin 可读写，需显式授权 */
@@ -191,6 +239,28 @@ async function installFeedDesignDoc(dbName: string) {
 /** 确保用户状态库存在并返回库名（首次调用时生成随机库名并持久化映射） */
 export async function ensureUserStateDatabase(userId: string): Promise<string> {
   return await resolveDatabase("user", userId, COUCHDB_USER_STATE_PREFIX)
+}
+
+// ── User-Timeline 数据库 ──
+
+/**
+ * 确保用户时间线库存在并返回库名（首次调用时生成随机库名并持久化映射）。
+ *
+ * 这是服务端聚合出的**派生**库：内容全部可以从 feed/bot 库重新算出来，
+ * 所以删库即「重建」，不需要任何补偿逻辑（见 services/timeline.ts 的 rebuild）。
+ */
+export async function ensureTimelineDatabase(userId: string): Promise<string> {
+  return await resolveDatabase("user-timeline", userId, COUCHDB_USER_TIMELINE_PREFIX)
+}
+
+/** 安装时间线维护视图（仅在库新建时调用，幂等；并发冲突时忽略） */
+async function installTimelineDesignDoc(dbName: string) {
+  const db = nanoServer.use(dbName)
+  try {
+    await db.insert(TIMELINE_DESIGN_DOC)
+  } catch {
+    // 并发创建时另一个请求可能已安装，忽略冲突
+  }
 }
 
 // ── Bot 产出库 ──

@@ -1,20 +1,29 @@
-import http from "node:http"
-import https from "node:https"
-import sharp from "sharp"
-import { httpAgent, httpsAgent, shouldProxy } from "./parser"
 import type { CachedImage } from "../db/types"
+import { getCompressedImage, type CompressedImageResult } from "../images/cache"
+import {
+  DEFAULT_AVIF_QUALITY,
+  DEFAULT_MAX_IMAGE_WIDTH,
+  DEFAULT_MAX_SOURCE_IMAGE_BYTES,
+  type ImageFailReason,
+} from "../images/fetch"
 
-// ── 图片缓存全局默认配置（环境变量可覆盖，见 .env.example） ──
-// 每个 feed 可在 PostgreSQL feeds 表上按源覆盖这些默认值（见 cacheEntryImages 的 options 参数）。
+/**
+ * 条目图片缓存：**按源（feed）的策略**决定一篇正文里缓存哪些图、缓存成什么参数。
+ *
+ * 下载/压缩的原语与内容寻址缓存在 `images/` 下（见 images/fetch.ts 与 images/cache.ts）：
+ * 这里只管「策略」—— 请求数硬顶、体积预算、封面选择、失败原因聚合。
+ * 同一张图在源库与各用户 timeline 库里用的是**同一份**压缩字节（cache 服务去重），
+ * 所以这里改参数只会产生新的缓存对象，不会让已缓存的其他参数组合失效。
+ */
 
-/** 压缩后最大宽度（保持宽高比，小图不放大） */
-const DEFAULT_MAX_IMAGE_WIDTH = parseInt(process.env.MAX_IMAGE_WIDTH ?? "1200")
-/** AVIF 编码质量：越低体积越小（正文图片 40-50 即可接受） */
-const DEFAULT_AVIF_QUALITY = parseInt(process.env.AVIF_QUALITY ?? "45")
+// ── 条目图片缓存的全局默认（环境变量可覆盖，见 .env.example） ──
+// 每个 feed 可在 PostgreSQL feeds 表上按源覆盖这些默认值（见 cacheEntryImages 的 options 参数）；
+// 每个用户还能在 user_timeline_settings 里覆盖一次（服务端聚合时间线时用，见 services/timeline.ts）。
+
 /**
  * 每篇 entry 最多尝试缓存的图片数。
  *
- * 主约束已改为「每篇附件总体积预算」（见 DEFAULT_MAX_ENTRY_IMAGE_BYTES），
+ * 主约束是「每篇附件总体积预算」（见 DEFAULT_MAX_ENTRY_IMAGE_BYTES），
  * 这个值退化为**请求数硬顶**：预算要压缩完才知道大小，一篇上万张 1KB 小图
  * 在填满预算之前会发出海量请求，必须有个上限兜住。
  */
@@ -27,14 +36,8 @@ const DEFAULT_MAX_IMAGE_COUNT = parseInt(process.env.MAX_IMAGE_COUNT ?? "200")
  * 93.4% 的正文图、被截断 140 条；同等覆盖率下比固定 20 张省约 110MB。
  */
 const DEFAULT_MAX_ENTRY_IMAGE_BYTES = parseInt(process.env.MAX_ENTRY_IMAGE_BYTES ?? String(1024 * 1024))
-/** 源图下载大小上限（字节），超出即放弃缓存 */
-const DEFAULT_MAX_SOURCE_IMAGE_BYTES = parseInt(process.env.MAX_SOURCE_IMAGE_BYTES ?? "8388608")
-/** 单张源图下载超时（毫秒） */
-const IMAGE_DOWNLOAD_TIMEOUT = 10_000
 /** 下载并发上限 */
 const DOWNLOAD_CONCURRENCY = 3
-/** 限制输入像素数，防止超大图耗尽内存 */
-const MAX_INPUT_PIXELS = 40_000_000
 
 /** 全局默认图片缓存参数（环境变量可覆盖），供前端展示 placeholder 默认值 */
 export const DEFAULT_IMAGE_OPTIONS = {
@@ -67,23 +70,6 @@ export interface EntryImageOptions {
 /** 匹配 <img src="...">（含单/双引号，忽略大小写与属性顺序） */
 const IMG_SRC_RE = /<img\b[^>]*\bsrc\s*=\s*["']([^"']+)["']/gi
 
-/** 图片扩展名兜底（见 looksLikeImage） */
-const IMAGE_EXT_RE = /\.(?:avif|webp|png|jpe?g|gif|bmp|tiff?)(?:$|[?#])/i
-
-/**
- * 判断响应是否可能是图片。
- *
- * 只看 `Content-Type: image/*` 会漏掉一批图床：实测 storage.googleapis.com 返回
- * `application/octet-stream`，占失败抽样 URL 的 28%。所以补一层 URL 扩展名兜底，
- * 同时显式拒绝 text/* 与 json/xml/html（避免把防盗链错误页喂给 sharp）。
- * 最终仍由 sharp 解码裁决：解不出来就按 decode 失败跳过，不会写入坏附件。
- */
-function looksLikeImage(url: string, contentType: string): boolean {
-  if (contentType.startsWith("image/")) return true
-  if (/^(?:text\/|application\/(?:json|xml|html))/i.test(contentType)) return false
-  return IMAGE_EXT_RE.test(url)
-}
-
 /**
  * 解码 HTML 文本中的常见实体。
  * 正文里的 URL 常带 &amp;（如 ?k=xxx&amp;u=yyy），不解码会导致下载 404；
@@ -107,27 +93,16 @@ export interface ImageAttachment {
 }
 
 /**
- * 图片下载/压缩失败原因。
+ * 图片下载/压缩失败原因（定义见 images/fetch.ts）。
+ *
  * 这些路径原先全部静默返回 null，导致「为什么没缓存」只能靠反推（见
  * report/image-cache-diagnosis），所以把原因带出来供 worker 聚合成一行日志。
  */
-export type ImageFailReason =
-  /** 非 200：403 防盗链 / 404 下线 / 5xx */
-  | "http-status"
-  /** 响应不是图片（html 错误页、octet-stream 且 URL 无图片扩展名） */
-  | "content-type"
-  /** 源图超过 maxSourceImageBytes，流式读取时被截断放弃 */
-  | "too-large"
-  /** 连接或读取空闲超时 */
-  | "timeout"
-  /** DNS 失败、连接重置等网络错误 */
-  | "network"
-  /** 重定向超过 3 次 */
-  | "redirect-limit"
-  /** sharp 解不出来（损坏数据、或像素数超 MAX_INPUT_PIXELS） */
-  | "decode"
+export type { ImageFailReason }
 
-/** 单条目图片缓存的统计结果，由 worker 汇总后打一行日志 */
+/**
+ * 单条目图片缓存的统计结果，由 worker 汇总后打一行日志
+ */
 export interface EntryImageStats {
   /** 正文图候选数（去重、绝对化、已按请求数硬顶截断） */
   candidates: number
@@ -170,106 +145,26 @@ export function extractImageUrls(content: string | undefined, baseUrl: string, l
   return urls
 }
 
-/** 下载结果：成功带 buffer，失败带原因（供聚合统计） */
-interface DownloadOutcome {
-  buffer: Buffer | null
-  reason?: ImageFailReason
-}
+/** 取图结果（策略层内部用）：成功带压缩字节与尺寸，失败带可聚合的原因 */
+type FetchedImage =
+  | { ok: true, buffer: Buffer, width: number, height: number }
+  | { ok: false, reason: ImageFailReason }
 
-/** 下载一张图片（跟随重定向，校验是否图片，限制大小与超时） */
-async function downloadImage(url: string, maxBytes?: number): Promise<DownloadOutcome> {
-  try {
-    let current = url
-    // 最多跟随 3 次重定向
-    for (let i = 0; i < 4; i++) {
-      const res = await httpGet(current, maxBytes)
-      if (res.status >= 300 && res.status < 400 && res.headers.location) {
-        current = new URL(res.headers.location, current).toString()
-        continue
-      }
-      if (res.status !== 200) return { buffer: null, reason: "http-status" }
-      const contentType = (res.headers["content-type"] ?? "").toLowerCase()
-      // 扩展名兜底：部分图床把图片标成 application/octet-stream（见 looksLikeImage）
-      if (!looksLikeImage(current, contentType)) return { buffer: null, reason: "content-type" }
-      return { buffer: res.buffer }
-    }
-    return { buffer: null, reason: "redirect-limit" }
-  } catch (err) {
-    // 网络失败/超时/超限：跳过该图并带上原因，不阻塞其余图片
-    const msg = (err as Error).message
-    if (msg === "image too large") return { buffer: null, reason: "too-large" }
-    if (msg === "timeout") return { buffer: null, reason: "timeout" }
-    return { buffer: null, reason: "network" }
-  }
-}
-
-/** 发起 HTTP(S) GET 并流式收集响应体（超时、大小超限时抛错终止） */
-function httpGet(url: string, maxBytes?: number): Promise<{ status: number, headers: http.IncomingHttpHeaders, buffer: Buffer }> {
-  // 未显式指定时用全局默认上限
-  const limit = maxBytes ?? DEFAULT_MAX_SOURCE_IMAGE_BYTES
-  return new Promise((resolve, reject) => {
-    const mod = url.startsWith("https:") ? https : http
-    const agent = shouldProxy(url) ? (url.startsWith("https:") ? httpsAgent : httpAgent) : undefined
-    // 只让第一个结果生效：主动断开连接后还会冒出 error/close 事件，不能覆盖已定结论
-    let settled = false
-    const fail = (err: Error): void => {
-      if (settled) return
-      settled = true
-      reject(err)
-    }
-    const req = mod.get(url, {
-      agent,
-      timeout: IMAGE_DOWNLOAD_TIMEOUT,
-      // 部分图床/防盗链站点拒绝无 UA 请求
-      headers: { "User-Agent": "Mozilla/5.0 (compatible; rssfed/1.0)" },
-    }, (res) => {
-      const chunks: Buffer[] = []
-      let total = 0
-      res.on("data", (chunk: Buffer) => {
-        total += chunk.length
-        if (total > limit) {
-          fail(new Error("image too large"))
-          // 关键：destroy **不传 Error**。传了会 emit 出 error 事件，实测在超限路径上
-          // 会产生未接管的 error（vitest 直接报 unhandled）；不传则只安静关闭连接。
-          res.destroy()
-          return
-        }
-        chunks.push(chunk)
-      })
-      res.on("end", () => {
-        if (settled) return
-        settled = true
-        resolve({ status: res.statusCode ?? 0, headers: res.headers, buffer: Buffer.concat(chunks) })
-      })
-      res.on("error", fail)
-    })
-    req.on("timeout", () => {
-      fail(new Error("timeout"))
-      req.destroy()
-    })
-    req.on("error", fail)
+/**
+ * 取一张已压缩图片（命中内容寻址缓存则不发请求）。
+ *
+ * 把 `CompressedImageResult` 收敛成策略层关心的形状：缓存命中与否不影响它在
+ * 预算/封面上的判断，这里只回答「拿到字节没有、没拿到是什么原因」。
+ */
+async function fetchCompressed(url: string, options: EntryImageOptions): Promise<FetchedImage> {
+  const result: CompressedImageResult = await getCompressedImage({
+    url,
+    maxWidth: options.maxImageWidth,
+    quality: options.avifQuality,
+    maxSourceBytes: options.maxSourceImageBytes,
   })
-}
-
-/** 压缩为 AVIF 小图；解码失败返回 null（导出供测试） */
-export async function compressToAvif(
-  buffer: Buffer,
-  opts: { maxWidth?: number, quality?: number } = {},
-): Promise<{ buffer: Buffer, width: number, height: number } | null> {
-  const maxWidth = opts.maxWidth ?? DEFAULT_MAX_IMAGE_WIDTH
-  const quality = opts.quality ?? DEFAULT_AVIF_QUALITY
-  try {
-    const meta = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
-    if (!meta.width || !meta.height) return null
-    const out = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS })
-      .resize({ width: maxWidth, withoutEnlargement: true })
-      .avif({ quality })
-      .toBuffer()
-    const outMeta = await sharp(out).metadata()
-    return { buffer: out, width: outMeta.width ?? meta.width, height: outMeta.height ?? meta.height }
-  } catch {
-    return null // 非图片/损坏数据：跳过
-  }
+  if (!result.ok) return { ok: false, reason: result.reason }
+  return { ok: true, buffer: result.buffer, width: result.width, height: result.height }
 }
 
 /**
@@ -294,38 +189,26 @@ const FEED_ICON_MAX_WIDTH = parseInt(process.env.FEED_ICON_MAX_WIDTH ?? "64")
  */
 export const FEED_ICON_CACHE_VERSION = 2
 
-/** 单张图片 URL 去重缓存（同进程内相同 URL 只下载压缩一次，如 feed 图标/头像） */
-const singleImageCache = new Map<string, Promise<{ image: CachedImage, data: Buffer } | null>>()
-
 /**
- * 下载并压缩单张图片（feed 图标等），返回附件数据与 CachedImage 元数据。
- * 失败返回 null；同 URL + 同参数版本在进程生命周期内只处理一次。
+ * 下载并压缩单张图片（feed 图标 / 头像等），返回附件数据与 CachedImage 元数据。
+ * 失败返回 null（含缓存服务不可用）。
+ *
+ * 去重交给内容寻址缓存（同 URL + 同参数全局只压一次，见 images/cache.ts 的 inflight 表），
+ * 这里不再自己维护进程内 Map —— 那份 Map 只活在一个进程里，多实例部署时并不共享。
  */
-export function cacheSingleImage(url: string): Promise<{ image: CachedImage, data: Buffer } | null> {
-  // 缓存键带上参数版本：同进程内改了压缩参数也要重新压，不能命中旧结果
-  const cacheKey = `${url}|v${FEED_ICON_CACHE_VERSION}`
-  let pending = singleImageCache.get(cacheKey)
-  if (!pending) {
-    pending = (async () => {
-      const outcome = await downloadImage(url)
-      if (!outcome.buffer) return null
-      const result = await compressToAvif(outcome.buffer, { maxWidth: FEED_ICON_MAX_WIDTH })
-      if (!result) return null
-      return {
-        image: {
-          url,
-          attachment: "feed-image.avif",
-          width: result.width,
-          height: result.height,
-          v: FEED_ICON_CACHE_VERSION,
-        },
-        data: result.buffer,
-      }
-    })()
-    singleImageCache.set(cacheKey, pending)
-    pending.finally(() => singleImageCache.delete(cacheKey)).catch(() => {})
+export async function cacheSingleImage(url: string): Promise<{ image: CachedImage, data: Buffer } | null> {
+  const result = await getCompressedImage({ url, maxWidth: FEED_ICON_MAX_WIDTH })
+  if (!result.ok) return null
+  return {
+    image: {
+      url,
+      attachment: "feed-image.avif",
+      width: result.width,
+      height: result.height,
+      v: FEED_ICON_CACHE_VERSION,
+    },
+    data: result.buffer,
   }
-  return pending
 }
 
 /**
@@ -372,23 +255,18 @@ export async function cacheEntryImages(
   // 协议封面优先：下载压缩为第一张图并标记 cover（失败则回退正文选图，并记下原因）。
   // 封面不参与体积判断之外的取舍 —— 即使它单张超过预算也保留，否则整篇会没图。
   if (protocolCoverUrl) {
-    const outcome = await downloadImage(protocolCoverUrl, options.maxSourceImageBytes)
-    if (!outcome.buffer) {
-      bump(outcome.reason ?? "network")
+    const fetched = await fetchCompressed(protocolCoverUrl, options)
+    if (!fetched.ok) {
+      bump(fetched.reason)
     } else {
-      const result = await compressToAvif(outcome.buffer, { maxWidth: options.maxImageWidth, quality: options.avifQuality })
-      if (!result) {
-        bump("decode")
-      } else {
-        const name = `img-${images.length}.avif`
-        attachments.push({ name, data: result.buffer, content_type: "image/avif" })
-        images.push({
-          url: protocolCoverUrl, attachment: name,
-          width: result.width, height: result.height,
-          cover: true,
-        })
-        budgetUsed += result.buffer.length
-      }
+      const name = `img-${images.length}.avif`
+      attachments.push({ name, data: fetched.buffer, content_type: "image/avif" })
+      images.push({
+        url: protocolCoverUrl, attachment: name,
+        width: fetched.width, height: fetched.height,
+        cover: true,
+      })
+      budgetUsed += fetched.buffer.length
     }
   }
 
@@ -397,7 +275,7 @@ export async function cacheEntryImages(
   // 为什么分批而不是继续一把并发：预算只有压缩完才知道大小，必须先算完一批才能决定
   // 下一批还要不要下。批大小取 DOWNLOAD_CONCURRENCY，最坏浪费一批的带宽/CPU。
   // 结果按正文出现顺序收集（并发完成顺序不定，封面选择依赖稳定顺序）。
-  type BatchOutcome = { url: string, result?: { buffer: Buffer, width: number, height: number }, reason?: ImageFailReason }
+  type BatchOutcome = FetchedImage & { url: string }
   const results: Array<{ url: string, result: { buffer: Buffer, width: number, height: number } } | null> =
     new Array(urls.length).fill(null)
   let budgetExhausted = false
@@ -406,20 +284,16 @@ export async function cacheEntryImages(
     const outcomes = await Promise.all(batch.map(async (url): Promise<BatchOutcome | null> => {
       // 协议封面已在上面缓存，正文里重复的 URL 跳过
       if (url === protocolCoverUrl) return null
-      const outcome = await downloadImage(url, options.maxSourceImageBytes)
-      if (!outcome.buffer) return { url, reason: outcome.reason ?? "network" }
-      const result = await compressToAvif(outcome.buffer, { maxWidth: options.maxImageWidth, quality: options.avifQuality })
-      if (!result) return { url, reason: "decode" }
-      return { url, result }
+      return { url, ...await fetchCompressed(url, options) }
     }))
     for (let k = 0; k < outcomes.length; k++) {
       const o = outcomes[k]
       if (!o) continue
-      if (o.reason || !o.result) {
-        bump(o.reason ?? "network")
+      if (!o.ok) {
+        bump(o.reason)
         continue
       }
-      const size = o.result.buffer.length
+      const size = o.buffer.length
       // 首图必留：budgetUsed 为 0 时（无协议封面且这是第一张）即使超预算也存
       if (budgetUsed > 0 && budgetUsed + size > budget) {
         budgetExhausted = true
@@ -427,7 +301,7 @@ export async function cacheEntryImages(
         break
       }
       budgetUsed += size
-      results[start + k] = { url: o.url, result: o.result }
+      results[start + k] = { url: o.url, result: { buffer: o.buffer, width: o.width, height: o.height } }
     }
   }
   for (const r of results) {

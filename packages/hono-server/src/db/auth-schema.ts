@@ -21,6 +21,11 @@ export const user = pgTable("user", {
   banExpires: timestamp("ban_expires"),
   /** 关联的 CouchDB 用户状态库名（首次 ensure 时生成随机库名并回写） */
   couchDbName: text("couch_db_name").unique(),
+  /**
+   * 关联的 CouchDB 用户时间线库名（服务端聚合的派生库，首次 ensure 时生成随机库名并回写）。
+   * 单开一列而不是复用 couchDbName：一个用户同时有两个库，且两个库名都是随机的、互不可推导。
+   */
+  timelineDbName: text("timeline_db_name").unique(),
 });
 
 export const session = pgTable(

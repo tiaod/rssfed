@@ -1,7 +1,39 @@
-import { describe, it, expect } from "vitest"
+import { describe, it, expect, vi } from "vitest"
 import http from "node:http"
 import sharp from "sharp"
-import { extractImageUrls, compressToAvif, cacheSingleImage, cacheEntryImages, FEED_ICON_CACHE_VERSION } from "../rss/entry-images"
+import { extractImageUrls, cacheSingleImage, cacheEntryImages, FEED_ICON_CACHE_VERSION } from "../rss/entry-images"
+import { compressToAvif } from "../images/fetch"
+
+/**
+ * 图片压缩现在经由内容寻址缓存（images/cache.ts）落 Storage 后端。
+ * 单测里换成内存实现：既不需要 S3/磁盘，也顺带把「第二次取同一张图命中缓存」这条路径跑起来。
+ */
+vi.mock("../storage", () => {
+  const files = new Map<string, Buffer>()
+  return {
+    storage: {
+      write: async (content: Buffer, key: string) => {
+        files.set(key, content)
+        return key
+      },
+      read: async (key: string) => {
+        const hit = files.get(key)
+        if (!hit) throw new Error("not_found")
+        return hit
+      },
+      readWithMeta: async (key: string) => {
+        const hit = files.get(key)
+        if (!hit) throw new Error("not_found")
+        return { content: hit, contentType: "image/avif" }
+      },
+      delete: async (key: string) => {
+        files.delete(key)
+      },
+      exists: async (key: string) => files.has(key),
+      getPublicUrl: () => undefined,
+    },
+  }
+})
 
 describe("extractImageUrls", () => {
   const html = [

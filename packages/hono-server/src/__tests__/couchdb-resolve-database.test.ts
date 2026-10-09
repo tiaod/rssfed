@@ -41,13 +41,14 @@ vi.mock("../db", () => ({
   },
   feeds: { id: "feeds.id", couchDbName: "feeds.couch_db_name" },
   bots: { id: "bots.id", couchDbName: "bots.couch_db_name" },
-  user: { id: "user.id", couchDbName: "user.couch_db_name" },
+  user: { id: "user.id", couchDbName: "user.couch_db_name", timelineDbName: "user.timeline_db_name" },
   COUCHDB_FEED_PREFIX: "feed_",
   COUCHDB_USER_STATE_PREFIX: "user-state_",
   COUCHDB_BOT_PREFIX: "bot_",
+  COUCHDB_USER_TIMELINE_PREFIX: "user-timeline_",
 }))
 
-const { ensureFeedDatabase, ensureUserStateDatabase } = await import("../couchdb/client")
+const { ensureFeedDatabase, ensureUserStateDatabase, ensureTimelineDatabase } = await import("../couchdb/client")
 
 /** 已登记的库名（24 位随机后缀） */
 const EXISTING = `feed_${"a".repeat(24)}`
@@ -80,6 +81,16 @@ describe("resolveDatabase：库名已登记", () => {
     expect(await ensureUserStateDatabase("u1")).toBe("user-state_bbbbbbbbbbbbbbbbbbbbbbbb")
 
     expect(mocks.createIndex).not.toHaveBeenCalled()
+    expect(mocks.securityPut).not.toHaveBeenCalled()
+  })
+
+  it("时间线库读的是 user.timeline_db_name 这一列，走同一条快路径", async () => {
+    mocks.findFirst.mockResolvedValue({ timelineDbName: "user-timeline_cccccccccccccccccccccccc" })
+
+    expect(await ensureTimelineDatabase("u1")).toBe("user-timeline_cccccccccccccccccccccccc")
+
+    expect(mocks.dbGet).not.toHaveBeenCalled()
+    expect(mocks.insert).not.toHaveBeenCalled()
     expect(mocks.securityPut).not.toHaveBeenCalled()
   })
 })
@@ -129,5 +140,22 @@ describe("resolveDatabase：库名缺失（首次）", () => {
 
     expect(mocks.dbCreate).not.toHaveBeenCalled()
     expect(mocks.insert).not.toHaveBeenCalled()
+  })
+
+  it("时间线库建库时装维护视图，_security 只授权本人", async () => {
+    mocks.findFirst.mockResolvedValue(null)
+    mocks.dbGet.mockRejectedValue(new Error("not_found"))
+
+    const dbName = await ensureTimelineDatabase("u1")
+
+    expect(dbName).toMatch(/^user-timeline_[a-z0-9]{24}$/)
+    expect(mocks.dbCreate).toHaveBeenCalledWith(dbName)
+    // 只装维护视图（by_published_at），不装 user-state 的 Mango 索引
+    expect(mocks.insert).toHaveBeenCalledTimes(1)
+    expect(mocks.createIndex).not.toHaveBeenCalled()
+    expect(mocks.securityPut.mock.calls[0]![0]).toMatchObject({
+      doc: "_security",
+      body: { members: { names: ["u1"], roles: [] } },
+    })
   })
 })
