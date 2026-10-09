@@ -182,6 +182,8 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 - **更新发布**：push 到 master 后 CI 构建并推送镜像，然后在服务器执行 `docker compose --env-file .env.production -f docker-compose.prod.yml pull && docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` —— 镜像没变时 `up -d` 不会重建容器，变了则会先跑 migrate 再滚动应用。回滚方式见第 10 节。
 - **构建缓存**：镜像分层与 pnpm store 都走 BuildKit 缓存，首次构建后再次构建很快。缓存占用的磁盘可用 `docker builder prune` 回收（代价是下次构建重新下载依赖）。
 - **资源**：抓取 + AVIF 压缩与 API 抢 CPU/内存，2 核 4GB 起步；抓取量大时优先把 worker 拆成独立进程。
+- **新旧前端混跑**：服务端聚合改造后，浏览器只同步 `user-timeline_<随机名>` 一个库（`GET /api/couchdb/sync-targets`）。**旧版前端（缓存里的 PWA）仍可用**：它打的是保留的 `GET /api/couchdb/targets`，拿到的 feed/bot 库名照旧逐源复制，两条链路在数据上并不冲突（都读同一份 `feed_*`）。升级不必等所有客户端刷新。
+- **存储量随用户数增长**：派生库是每个用户一份条目副本（含按该用户参数压好的图片附件），用户多了要留意 CouchDB 数据卷与 `image-cache/` 前缀的体积 —— 后者跨用户共享，先看它再看派生库。
 
 ## 7. 代码层生产开关（已完成）
 

@@ -87,6 +87,25 @@
 - **原因**：代理只接受真实库名，旧版前端仍按业务 id 拼地址（`/api/couchdb/proxy/feed/<feedId>`）；旧页面还跑着旧 JS（新版 SW 先待命，等用户点更新才激活，见 [offline-and-pwa.md](offline-and-pwa.md)）。
 - **解法**：刷新页面即可，错误响应里的 `hint` 也写了这条。
 
+### 时间线一直空、提示条停在「已同步 0 条」：服务端聚合还没跑完
+
+- **现象**：登录正常、订阅列表有内容、`GET /api/couchdb/sync-targets` 也下发了 `user-timeline_xxx`，但时间线始终空白（或只出现几条），`POST /api/timeline/refresh?wait=1` 返回 `{"accepted":true,"completed":false}`。
+- **原因**：聚合是**服务端**按用户跑的一轮长任务（首次要把窗口内所有源的历史条目逐条搬过来，还要重新压缩图片），`wait=1` 有 15s 上限，超时就返回 `completed:false` 让它在后台继续。客户端那条 live 复制会随着写入逐步收到条目，不需要等整轮结束。
+- **排查**：
+  ```bash
+  docker exec <redis> redis-cli zcard bull:rss-timeline:completed   # 队列在看板 /admin/queues
+  docker logs <server 容器> | grep '\[Timeline\]'                  # 一行「源=… 新增=… 剪枝=…」
+  curl -s -u admin:admin "http://localhost:5984/<user-timeline 库名>" | grep doc_count
+  ```
+  派生库的 `_local/state` 文档存着每个源的游标：它存在说明至少跑完过一轮，之后就是增量（很快）。
+- **解法**：等它跑完，或 `POST /api/timeline/rebuild` 强制删库重建（图片参数改过之后也必须重建）。**每源完成即落盘游标**，所以中途重启不会让进度归零、下一轮接着做。
+
+### 图片接口返回 502 `image_unavailable`
+
+- **现象**：`GET /api/images/cached?url=…&w=…&q=…` 返回 502，响应体 `{"error":"image_unavailable","reason":…}`。
+- **原因**：按 `reason` 区分：`private_host`（源图是内网/回环地址，被 `isPrivateHost` 挡掉，防 SSRF）、`too_large`（源图超过 `maxSourceImageBytes`）、`fetch_failed` / `unsupported_format`（源站不可达或不是可解码的图片）。聚合时遇到这类失败**只记数不阻塞**（`imageFailures`），条目照常入库、只是没有附件。
+- **解法**：先直接 `curl -I <源图 URL>` 确认可达；内网图床需要显式放开（见 `images/fetch.ts` 的白名单开关），大图调大 `MAX_SOURCE_IMAGE_BYTES` 或该用户的 per-user 上限。同一张图 + 同一组参数只会失败一次（结果也进内存缓存），不会反复重试拖慢聚合。
+
 ### 同步全报 `Database does not exist`：库名还登记着，库却没了
 
 - **现象**：订阅列表正常、`GET /api/couchdb/targets` 也下发库名，但同步返回 CouchDB 的 `{"error":"not_found","reason":"Database does not exist."}`。
@@ -96,7 +115,7 @@
   docker exec hono-server-postgres-1 psql -U rssfed -d rssfed -c \
     "update feeds set couch_db_name = null where id='<feedId>';"
   ```
-  用户状态库/ bot 库同理（`user` / `bots` 表的 `couch_db_name`）。重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次。库级 `_security` 也只在建库时设置一次，改坏了同样用置空库名的方式重建。
+  用户状态库/ bot 库同理（`user` / `bots` 表的 `couch_db_name`）；**派生时间线库**置空 `user.timeline_db_name` 后下次聚合会重建（`rebuildUserTimeline` 就是这条路径）。重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次。库级 `_security` 也只在建库时设置一次，改坏了同样用置空库名的方式重建。
 
 ## 反向代理与网络
 
@@ -254,6 +273,14 @@ JS
   ```sql
   ALTER TABLE bots ADD CONSTRAINT bots_preferred_username_unique UNIQUE (preferred_username);
   ```
+- **同坑的非交互表现**：CI / 管道里没有 TTY 时 drizzle 直接报 `Interactive prompts require a TTY terminal` 退出，什么都没改；想加约束就走上面的手工 SQL（旧值全是 NULL 时 NULL 之间不冲突，加约束不会因重复失败）。
+- **推论**：**新加的可空列别顺手加 `.unique()`** —— 唯一性是装饰性的，代价却是一次可能清空整表的迁移（`user.timeline_db_name` 就是这么处理的，见 [auth-schema.ts](../packages/hono-server/src/db/auth-schema.ts) 的注释）。
+
+### `pnpm db:push` 没跑，登录接口直接 500
+
+- **现象**：`POST /api/auth/sign-in/email` 返回 500 且**响应体为空**，所有需要登录的接口都 401（看起来像认证坏了）；只有 `psql` 里能看到 `column "timeline_db_name" does not exist`。
+- **原因**：Better Auth 查询 `user` 表用的是 Drizzle schema 里的完整列集合，**代码先于结构上线**（新增 `user.timeline_db_name` / `user_timeline_settings` 但没 `db:push`）时，任何读用户行的查询都报 SQL 错误。错误没有回显到 HTTP 响应里，很容易误判成 cookie / 代理认证问题。
+- **解法**：`pnpm db:push`（生产由 compose 里的 migrate 服务跑 `push --force`）。排查时先看服务端日志里的 Postgres 报错，别急着怀疑认证链路。
 
 ## 对象存储
 
