@@ -1,5 +1,5 @@
 import { Queue, Worker } from "bullmq"
-import { connection } from "./connection"
+import { connection, createWorkerConnection } from "./connection"
 import { listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
 
 /**
@@ -86,7 +86,7 @@ export const timelineWorker = new Worker("rss-timeline", async (job) => {
     }
   }
   return result
-}, { connection })
+}, { connection: createWorkerConnection() })
 
 /** 定时把「可能有新内容」的用户排进队列（真正的增量判断在 reconcile 里，安静时只花一条 SQL） */
 export async function scheduleTimelineReconciles(): Promise<void> {
@@ -103,6 +103,10 @@ const timelineInterval = setInterval(scheduleTimelineReconciles, TIMELINE_INTERV
 
 export async function shutdownTimelineWorkers(): Promise<void> {
   clearInterval(timelineInterval)
-  await timelineWorker.close()
+  // 强制关闭：一轮聚合（尤其 rebuild）可能跑十几分钟，默认的 close() 会一直等当前 job 结束，
+  // 于是 SIGTERM 后的优雅退出卡死、容器只能等超时被 SIGKILL。
+  // 丢掉的是「正在处理的那个源」的进度，代价可接受：每个源跑完就落盘游标（见 reconcileUserTimeline），
+  // 已完成的源不会重做；被中断的 job 由 BullMQ 按 stall 检测重新入队，聚合本身是幂等的。
+  await timelineWorker.close(true)
   await timelineQueue.close()
 }

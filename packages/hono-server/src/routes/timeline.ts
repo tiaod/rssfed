@@ -6,6 +6,7 @@ import {
   TIMELINE_SETTING_LIMITS,
   getTimelineSettings,
   parseTimelineSettingsPatch,
+  reconcileUserTimeline,
   updateTimelineSettings,
 } from "../services/timeline"
 import { enqueueTimelineRebuild, enqueueTimelineReconcile } from "../workers/timeline"
@@ -15,6 +16,15 @@ type Variables = { userId: string }
 
 /** 本路由的挂载点（app.ts 用同一常量注册） */
 export const TIMELINE_ROUTE_PREFIX = "/api/timeline"
+
+/**
+ * 带 `wait=1` 的刷新请求里，服务端最多等多久（毫秒）。
+ *
+ * 手动同步要一个确定答案，但 HTTP 请求不能无限期挂着：一轮完整的 reconcile 在
+ * 「新订阅了上百个源、窗口内历史都要回填」时可能远超这个值。超时后那轮聚合继续在后台
+ * 跑完，客户端按「仍在聚合」提示即可（见 routes/timeline.ts 的 /refresh）。
+ */
+const TIMELINE_REFRESH_WAIT_MS = parseInt(process.env.TIMELINE_REFRESH_WAIT_MS ?? "15000")
 
 export const timelineRouter = new Hono<{ Variables: Variables }>()
 
@@ -70,12 +80,42 @@ timelineRouter.patch("/settings", async (c) => {
 /**
  * 催一次聚合：订阅/退订/OPML 导入后，以及「同步」按钮按下时调用。
  *
- * 立即返回（202）：聚合的产物会通过派生库的 live 复制自动到端，客户端不需要等它跑完 ——
- * 等待反而会把「几百个源里的那几个有更新的」变成一次阻塞式请求。
+ * 两种模式：
+ *   - 默认（即发即忘）：入队后立刻 202。数据由派生库的 live 复制到端，客户端不该等 ——
+ *     等待会把「几百个源里的那几个有更新的」变成一次阻塞式请求。
+ *   - `?wait=1`：**本请求内**跑完一轮 reconcile 再返回，附上确切的「本轮新增 N 条」。
+ *     手动同步（用户点了按钮）用这个模式，才能给出「同步完成 / 已是最新」的确定结论；
+ *     服务端等待有上限（TIMELINE_REFRESH_WAIT_MS），超时就返回 completed=false，
+ *     而那轮 reconcile 仍在后台跑完 —— 客户端按「服务端仍在聚合」处理即可，不算失败。
  */
 timelineRouter.post("/refresh", async (c) => {
-  await enqueueTimelineReconcile(c.get("userId"))
-  return c.json({ accepted: true }, 202)
+  const userId = c.get("userId")
+
+  if (c.req.query("wait") !== "1") {
+    await enqueueTimelineReconcile(userId)
+    return c.json({ accepted: true, completed: false }, 202)
+  }
+
+  const running = reconcileUserTimeline(userId)
+  const result = await Promise.race([
+    running,
+    new Promise<null>((resolve) => {
+      const timer = setTimeout(() => resolve(null), TIMELINE_REFRESH_WAIT_MS)
+      // 不因这个计时器拖着进程不退出（服务器优雅关闭时尤其重要）
+      timer.unref?.()
+    }),
+  ])
+  if (!result) {
+    // 超时：上面那轮 reconcile 没有被取消，会自己跑完（数据随后由 live 复制到端），
+    // 所以这里**不能**再入队一轮 —— 那只会让同一份工作同时跑两遍
+    return c.json({ accepted: true, completed: false }, 202)
+  }
+  return c.json({
+    accepted: true,
+    completed: true,
+    added: result.addedEntries,
+    sources: result.sources,
+  })
 })
 
 /** 重建派生库（设置里的「重建时间线」/ 图片参数变更后的兜底入口） */

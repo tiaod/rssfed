@@ -8,6 +8,9 @@ const state = vi.hoisted(() => ({
   },
   reconcileQueued: 0,
   rebuildQueued: 0,
+  /** 直连（wait=1）的 reconcile 结果；null 表示模拟「服务端超时仍在跑」 */
+  inlineReconcile: null as null | { addedEntries: number, sources: number },
+  inlineCalls: 0,
 }))
 
 vi.mock("../auth", () => ({
@@ -37,6 +40,15 @@ vi.mock("../services/timeline", async (importOriginal) => {
     ...actual,
     getTimelineSettings: async () => actual.normalizeTimelineSettings({ windowDays: 3 }),
     updateTimelineSettings: async () => state.settings,
+    // wait=1 的刷新会**在本请求内**跑一轮聚合：这里用一个可控的替身，
+    // 既不碰 CouchDB，也能复现「超时后仍在后台跑」的分支
+    reconcileUserTimeline: async () => {
+      state.inlineCalls++
+      if (!state.inlineReconcile) {
+        return await new Promise(() => {}) // 永不 settle：模拟超时
+      }
+      return { ...state.inlineReconcile, addedEntries: state.inlineReconcile.addedEntries, sources: state.inlineReconcile.sources }
+    },
   }
 })
 
@@ -50,6 +62,8 @@ beforeEach(() => {
   }
   state.reconcileQueued = 0
   state.rebuildQueued = 0
+  state.inlineReconcile = null
+  state.inlineCalls = 0
 })
 
 async function patch(body: unknown) {
@@ -118,5 +132,30 @@ describe("/api/timeline", () => {
     expect((await app.request("/api/timeline/rebuild", { method: "POST" })).status).toBe(202)
     expect(state.reconcileQueued).toBe(1)
     expect(state.rebuildQueued).toBe(1)
+  })
+
+  it("POST /refresh?wait=1：本请求内跑完一轮聚合并带上确切条数（手动同步要一个确定答案）", async () => {
+    state.inlineReconcile = { addedEntries: 7, sources: 12 }
+    const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ accepted: true, completed: true, added: 7, sources: 12 })
+    // 直连跑完了，就不该再入队（同一份工作不该跑两遍）
+    expect(state.reconcileQueued).toBe(0)
+  })
+
+  it("POST /refresh?wait=1 超时：202 报 completed=false，聚合仍在后台跑（不重复入队）", async () => {
+    vi.useFakeTimers()
+    try {
+      const pending = app.request("/api/timeline/refresh?wait=1", { method: "POST" })
+      // 让等待计时器到期（服务端等待上限见 routes/timeline.ts 的 TIMELINE_REFRESH_WAIT_MS）
+      await vi.advanceTimersByTimeAsync(60_000)
+      const res = await pending
+      expect(res.status).toBe(202)
+      expect(await res.json()).toMatchObject({ accepted: true, completed: false })
+      expect(state.inlineCalls).toBe(1)
+      expect(state.reconcileQueued).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })

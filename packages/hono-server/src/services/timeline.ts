@@ -537,6 +537,12 @@ export async function reconcileUserTimeline(
   }
 
   // ③ 逐源聚合
+  //
+  // 每个源处理完就把状态落盘（而不是等整轮结束）。理由：一轮聚合在几百个源上可能跑十几分钟，
+  // 「只在最后写一次」意味着跑不完就一步都没前进 —— 大账号会永远停在第一轮（下一轮又从头回填）。
+  // 单个源的处理是原子的（条目全部写完才更新它的游标），所以中途落盘不会留下半截游标；
+  // 而窗口字段（windowDays）仍只在最后写，窗口放大/缩小的判定保持全有或全无。
+  let stateDirty = false
   for (const source of sources) {
     const sourceState = state.sources[source.id]
     const needBackfill = options.backfill === true || !sourceState || windowExpanded
@@ -559,12 +565,17 @@ export async function reconcileUserTimeline(
         // 用回填时的 update_seq 覆盖会把游标往回拨，下一轮重复扫一遍
         sourceState.cursor = outcome.cursor
       }
+      stateDirty = true
     } catch (err) {
       result.failures.push({ sourceId: source.id, error: (err as Error)?.message ?? String(err) })
     }
+    if (stateDirty) {
+      stateDirty = false
+      await writeTimelineState(dbName, state)
+    }
   }
 
-  // ④ 写回状态
+  // ④ 写回状态（含窗口字段：只有整轮跑完才认这一轮的窗口设置）
   state.windowDays = settings.windowDays
   state.settingsUpdatedAt = new Date().toISOString()
   await writeTimelineState(dbName, state)

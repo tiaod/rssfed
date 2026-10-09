@@ -24,8 +24,14 @@ export const user = pgTable("user", {
   /**
    * 关联的 CouchDB 用户时间线库名（服务端聚合的派生库，首次 ensure 时生成随机库名并回写）。
    * 单开一列而不是复用 couchDbName：一个用户同时有两个库，且两个库名都是随机的、互不可推导。
+   *
+   * **故意不加 `.unique()`**（与上面两列不同）：给已有数据的表新加唯一约束时，`drizzle-kit push`
+   * 会问「是否 truncate 表」，而生产 migrate 跑的是 `push --force`（自动批准数据丢失语句）——
+   * 为一个装饰性约束冒清空 `user` 表的风险不值得。库名是 24 位随机串，撞名概率可忽略；
+   * 万一真撞上，`ensureTimelineDatabase` 会重设该库 `_security`，表现为其中一个用户读不到库，
+   * 处置方式与「库被手工删掉」相同（置空库名重建，见 docs/troubleshooting.md）。
    */
-  timelineDbName: text("timeline_db_name").unique(),
+  timelineDbName: text("timeline_db_name"),
 });
 
 export const session = pgTable(

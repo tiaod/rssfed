@@ -5,7 +5,7 @@ import { ensureFeedDatabase, ensureBotDatabase, createCouchDb } from "../couchdb
 import { parseFeedUrl, formatFeedError, type ParsedFeed, type ParsedItem } from "../rss/parser"
 import { cacheEntryImages, cacheSingleImage, FEED_ICON_CACHE_VERSION, type EntryImageOptions } from "../rss/entry-images"
 import { db, feeds, botFeeds, bots as botsTable, type EntryDoc } from "../db"
-import { connection } from "./connection"
+import { connection, createWorkerConnection } from "./connection"
 import { notifyTimelineStale, shutdownTimelineWorkers } from "./timeline"
 
 export const fetchQueue = new Queue("rss-fetch", { connection })
@@ -45,7 +45,7 @@ export const worker = new Worker("rss-fetch", async (job) => {
     await markFeedError(feedId, url, err)
     throw err
   }
-}, { connection })
+}, { connection: createWorkerConnection() })
 
 /** 更新（或首次创建）CouchDB 中的 FeedDoc 元数据；返回是否首次缓存了图标（用于触发前端同步） */
 async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed: ParsedFeed): Promise<boolean> {

@@ -15,3 +15,16 @@ export const connection = new IORedis({
   port: parseInt(process.env.REDIS_PORT ?? "6379"),
   maxRetriesPerRequest: null,
 }) as any
+
+/**
+ * Worker 专用的独立连接。
+ *
+ * BullMQ 的 Worker 靠**阻塞命令**（`BRPOPLPUSH` / `BZPOPMIN`）取任务，阻塞期间这条连接不能再发别的
+ * 命令。两个 Worker 共用一个 ioredis 实例时，先发起的那个阻塞调用会把连接占住，另一个的阻塞命令
+ * 只能排队等它返回 —— 表现为「另一个队列明明有任务却迟迟不动，只在对方偶尔有任务时才顺带走一个」。
+ * 所以每个 Worker 各拿一条 `duplicate()` 出来的连接；Queue 侧（add/getJob 等非阻塞命令）继续共用
+ * `connection` 没问题。
+ */
+export function createWorkerConnection(): any {
+  return connection.duplicate({ maxRetriesPerRequest: null })
+}
