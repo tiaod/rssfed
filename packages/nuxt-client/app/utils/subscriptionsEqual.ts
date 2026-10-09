@@ -3,7 +3,7 @@ import type { SubscriptionItem } from '~/types/rss'
 /**
  * 判断两份订阅列表是否等价（顺序敏感）。
  *
- * 用途：user-state 库同时承载「订阅」与「已读/收藏」，任何一次标记已读都会让
+ * 用途：用户库同时承载「订阅」与「已读/收藏」，任何一次标记已读都会让
  * `syncStatuses['__user_state__'].version` 递增，进而触发侧边栏重新加载。
  * 若不加比较就赋值，`feeds.value` 会换成新数组 → `menuItems` 重算 →
  * 整棵导航菜单重渲染（300 项实测约 30ms），而这类触发绝大多数与订阅无关。

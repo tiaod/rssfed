@@ -2,36 +2,33 @@ import { describe, expect, it } from 'vitest'
 import { LEGACY_LOCAL_DB_NAMES, LEGACY_LOCAL_DB_PREFIXES, lastTimelineRefreshKey, localDbName, isLegacyLocalDbName, isLegacyLocalStorageKey, stripPouchNamePrefix } from '~/utils/localDbName'
 
 describe('localDbName', () => {
-  it('按账号隔离：不同账号的本地库名不同', () => {
-    expect(localDbName('timeline', 'user-a')).toBe('rssfed-timeline-user-a')
-    expect(localDbName('timeline', 'user-b')).toBe('rssfed-timeline-user-b')
-    expect(localDbName('user-state', 'user-a')).toBe('rssfed-user-state-user-a')
+  it('按账号隔离：不同账号的本地库名不同（单库方案下每账号只有一个库）', () => {
+    expect(localDbName('user-a')).toBe('rssfed-timeline-user-a')
+    expect(localDbName('user-b')).toBe('rssfed-timeline-user-b')
+    expect(localDbName('user-a')).not.toBe(localDbName('user-b'))
   })
 
-  it('两类本地库不会撞名', () => {
-    expect(localDbName('timeline', 'u1')).not.toBe(localDbName('user-state', 'u1'))
+  it('沿用 rssfed-timeline- 前缀：改名等于换库，老用户本地的条目要整份重下', () => {
+    // 这不是「碰巧」的命名，见 utils/localDbName.ts 的说明
+    expect(localDbName('u1')).toBe('rssfed-timeline-u1')
   })
 
   it('未登录/会话未就绪落到 guest', () => {
     for (const value of [null, undefined, '']) {
-      expect(localDbName('timeline', value)).toBe('rssfed-timeline-guest')
-      expect(localDbName('user-state', value)).toBe('rssfed-user-state-guest')
+      expect(localDbName(value)).toBe('rssfed-timeline-guest')
     }
   })
 
-  it('隔离后的库名与旧的固定库名不同（否则清理逻辑会删掉正在用的库）', () => {
+  it('账号隔离后的库名与旧的固定库名不同（否则清理逻辑会删掉正在用的库）', () => {
     for (const legacy of LEGACY_LOCAL_DB_NAMES) {
-      expect(localDbName('timeline', null)).not.toBe(legacy)
-      expect(localDbName('user-state', null)).not.toBe(legacy)
-      expect(localDbName('timeline', 'u1')).not.toBe(legacy)
-      expect(localDbName('user-state', 'u1')).not.toBe(legacy)
+      expect(localDbName(null)).not.toBe(legacy)
+      expect(localDbName('u1')).not.toBe(legacy)
     }
   })
 
   it('当前库名不会被历史前缀误伤（清理逻辑按前缀删库）', () => {
     for (const prefix of LEGACY_LOCAL_DB_PREFIXES) {
-      expect(localDbName('timeline', 'u1').startsWith(prefix)).toBe(false)
-      expect(localDbName('user-state', 'u1').startsWith(prefix)).toBe(false)
+      expect(localDbName('u1').startsWith(prefix)).toBe(false)
     }
   })
 })
@@ -51,12 +48,16 @@ describe('历史本地库 / localStorage 键的匹配', () => {
     expect(isLegacyLocalDbName('_pouch_rssfed-entries-2RGBxIeXa-mrview-1312fe8d')).toBe(true)
   })
 
-  it('逻辑名（无前缀）同样命中，当前在用的两个库不命中', () => {
+  it('逻辑名（无前缀）同样命中，当前在用的那个库不命中', () => {
     expect(isLegacyLocalDbName('rssfed-entries')).toBe(true)
     expect(isLegacyLocalDbName('rssfed-feed-x')).toBe(true)
     expect(isLegacyLocalDbName('_pouch_rssfed-timeline-2RGBxIeXa')).toBe(false)
-    expect(isLegacyLocalDbName('_pouch_rssfed-user-state-2RGBxIeXa')).toBe(false)
     expect(isLegacyLocalDbName('_pouch_rssfed-timeline-2RGBxIeXa-mrview-abc')).toBe(false)
+  })
+
+  it('旧的状态库（单开一个本地库的时代）也要清掉，且不带账号后缀的也命中', () => {
+    expect(isLegacyLocalDbName('_pouch_rssfed-user-state-2RGBxIeXa')).toBe(true)
+    expect(isLegacyLocalDbName('rssfed-user-state')).toBe(true)
   })
 
   it('销毁前剥掉 _pouch_ 前缀（PouchDB.destroy 会自己再加回来）', () => {
@@ -71,7 +72,7 @@ describe('历史本地库 / localStorage 键的匹配', () => {
   })
 
   it('当前在用的键不能被误删', () => {
-    expect(isLegacyLocalStorageKey('rssfed-central-migrated-v4')).toBe(false)
+    expect(isLegacyLocalStorageKey('rssfed-central-migrated-v5')).toBe(false)
     expect(isLegacyLocalStorageKey('rssfed-timeline-refresh-2RGBxIeXa')).toBe(false)
     // 前缀相同但不是一个键族（少了分隔符）时不能误判
     expect(isLegacyLocalStorageKey('rssfed-synced-feedsX')).toBe(false)

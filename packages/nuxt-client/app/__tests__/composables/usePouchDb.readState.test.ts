@@ -7,19 +7,19 @@ import { usePouchDb } from '~/composables/usePouchDb'
  * 且不重复写已经是对应状态的条目。
  *
  * 与 feedTitle 测试同一套真实 PouchDB harness（固定 /tmp 路径，跑完即毁）：
- * 已读态跨两个库（条目在集中库、状态在用户状态库），只有真跑一遍才验证得了合并是否正确。
+ * 单库方案下条目与状态文档在**同一个**本地库里（见 utils/localDbName），
+ * 合并查询是否正确只有真跑一遍才验证得了。
  */
 
 const H = vi.hoisted(() => ({
   /** 催促服务端聚合的假实现（返回 completed/added） */
   timelineRefresh: async () => ({ accepted: true, completed: true, added: 0 }),
   uid: 'readstate-test',
-  entriesPath: '/tmp/rssfed-test-timeline-readstate-test',
-  statePath: '/tmp/rssfed-test-user-state-readstate-test'
+  dbPath: '/tmp/rssfed-test-readstate-test'
 }))
 
 vi.mock('~/utils/localDbName', () => ({
-  localDbName: (kind: string, uid: string | null) => `/tmp/rssfed-test-${kind}-${uid ?? 'guest'}`,
+  localDbName: (uid: string | null) => `/tmp/rssfed-test-${uid ?? 'guest'}`,
   syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
@@ -27,7 +27,6 @@ vi.mock('~/utils/localDbName', () => ({
 }))
 
 vi.mock('~/composables/useCouchTargets', () => ({
-  USER_STATE_ID: '__user_state__',
   TIMELINE_ID: '__timeline__',
   useCouchTargets: () => ({
     remoteUrlForId: vi.fn(async () => { throw new Error('测试环境无远端') }),
@@ -47,14 +46,12 @@ const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => ({})
 
 async function destroyDbs() {
-  for (const path of [H.entriesPath, H.statePath]) {
-    await new PouchDB(path).destroy().catch(() => {})
-  }
+  await new PouchDB(H.dbPath).destroy().catch(() => {})
 }
 
-/** 一个源 + 两条条目；其中 entry-a 已经读过并收藏 */
+/** 一个源 + 两条条目；其中 entry-a 已经读过并收藏（全部落在同一个本地库） */
 async function seed() {
-  const entries = new PouchDB(H.entriesPath)
+  const entries = new PouchDB(H.dbPath)
   await entries.bulkDocs([
     { _id: 'feed-a', type: 'feed', title: '某源', url: 'https://a.example/feed' },
     {
@@ -76,10 +73,7 @@ async function seed() {
       insertedAt: '2026-07-01T00:00:00.000Z'
     }
   ])
-  await entries.close()
-
-  const state = new PouchDB(H.statePath)
-  await state.put({
+  await entries.put({
     _id: 'entry-state:entry-a',
     type: 'entry-state',
     entryId: 'entry-a',
@@ -88,7 +82,7 @@ async function seed() {
     readAt: '2026-07-03T00:00:00.000Z',
     saved: true
   })
-  await state.close()
+  await entries.close()
 }
 
 let pouch: ReturnType<typeof usePouchDb>
@@ -105,7 +99,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await pouch.getUserStateDb().close().catch(() => {})
+  await pouch.getUserDb().close().catch(() => {})
   await destroyDbs()
 })
 
@@ -153,7 +147,7 @@ describe('markManyRead 批量标记', () => {
 
 /** 直接读一条状态文档（断言字段级行为用） */
 async function stateDoc(entryId: string) {
-  return await pouch.getUserStateDb().get(`entry-state:${entryId}`) as unknown as {
+  return await pouch.getUserDb().get(`entry-state:${entryId}`) as unknown as {
     read?: boolean
     readAt?: string
     saved?: boolean
@@ -164,7 +158,7 @@ async function stateDoc(entryId: string) {
 
 /** 把某条状态文档标成「已收藏 + 指定收藏时间」，用于给收藏列表造序 */
 async function setSavedAt(entryId: string, savedAt: string) {
-  const db = pouch.getUserStateDb()
+  const db = pouch.getUserDb()
   const existing = await db.get(`entry-state:${entryId}`) as unknown as Record<string, unknown>
   await db.put({ ...existing, saved: true, savedAt })
 }
@@ -210,7 +204,7 @@ describe('querySavedEntries 收藏列表', () => {
     await setSavedAt('entry-a', '2026-07-01T00:00:00.000Z')
     await setSavedAt('entry-b', '2026-07-03T00:00:00.000Z')
     // 收藏了一条本地根本没有的条目（别的设备收藏、条目还没同步过来）
-    await pouch.getUserStateDb().put({
+    await pouch.getUserDb().put({
       _id: 'entry-state:entry-missing',
       type: 'entry-state',
       entryId: 'entry-missing',
@@ -232,7 +226,7 @@ describe('querySavedEntries 收藏列表', () => {
   })
 
   it('没有收藏时返回空数组', async () => {
-    const db = pouch.getUserStateDb()
+    const db = pouch.getUserDb()
     for (const id of ['entry-a', 'entry-b']) {
       const doc = await db.get(`entry-state:${id}`) as unknown as Record<string, unknown>
       await db.put({ ...doc, saved: false })

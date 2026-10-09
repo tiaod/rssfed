@@ -35,11 +35,21 @@ const H = vi.hoisted(() => ({
 
 vi.mock('pouchdb', () => {
   class FakePouchDb {
-    replicate = { from: (url: string, _opts?: unknown) => makeTask(url) }
+    replicate = { from: (url: string, _opts?: unknown) => makeTask(url), to: () => makePushHandle() }
     close = async () => {}
     destroy = async () => {}
     allDocs = async () => ({ rows: [] })
   }
+
+  /**
+   * 状态回写通道（push）不参与这些用例的断言：它们关心的都是拉取通道的生命周期与事件。
+   * 这里返回一个不记录的句柄，避免 H.tasks 里混进第二条任务、把 H.tasks[0] 的语义搞乱。
+   */
+  function makePushHandle() {
+    const handle = { on: () => handle, cancel: () => {}, removeListener: () => handle, then: () => handle }
+    return handle
+  }
+
   function makeTask(url: string) {
     const listeners = new Map<string, Set<(arg: unknown) => void>>()
     let cancelled = false
@@ -86,7 +96,7 @@ vi.mock('pouchdb', () => {
 vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
-  localDbName: (kind: string, uid: string | null) => `fake-${kind}-${uid ?? 'guest'}`,
+  localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []
@@ -94,7 +104,6 @@ vi.mock('~/utils/localDbName', () => ({
 
 vi.mock('~/composables/useCouchTargets', () => ({
   TIMELINE_ID: '__timeline__',
-  USER_STATE_ID: '__user_state__',
   useCouchTargets: () => ({
     remoteUrlForId: (id: string) => H.remoteUrlForId!(id),
     invalidate: () => {}
@@ -141,7 +150,7 @@ beforeEach(() => {
   }
   Reflect.deleteProperty(sharedApp, '$pouchDbState')
   pouch = usePouchDb()
-  pouch.getUserStateDb()
+  pouch.getUserDb()
 })
 
 describe('时间线 live 复制：进度与状态', () => {
@@ -229,9 +238,16 @@ describe('syncNow 的新增条数', () => {
   it('服务端报新增 N 条：等 live 复制把 N 条落地后 added=N', async () => {
     H.refresh = async () => ({ accepted: true, completed: true, added: 5 })
     const pending = pouch.syncNow()
-    // 等 live 复制挂上（resumeSync 会先挂，syncNow 再等它）
+    // 等 live 复制挂上（resumeSync 会先挂，syncNow 再等它）。
+    // 挂载函数在挂完两条通道后才注册事件处理器：等状态落到 idle 再发事件，
+    // 否则事件发在注册之前会被假任务丢掉，用例只能白等到超时
     await vi.waitFor(() => expect(H.tasks).toHaveLength(1))
+    // 挂载函数挂完两条通道后才注册事件处理器：等 idle 出现再发事件，否则会被假任务丢掉
+    await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.status).toBe('idle'))
+    // 先只发 change（不动「已同步条数」），等它被 handler 收到再发 paused。
+    // 这样 syncNow 内部 catchup 的基准值必定是 0：不会出现「事件先落地、基准后取值」的顺序竞争
     H.tasks[0]!.emitChange({ docs_written: 5, pending: 0 })
+    await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.status).toBe('syncing'))
     H.tasks[0]!.emitPaused()
     const result = await pending
     expect(result.ok).toEqual([TIMELINE_ID])

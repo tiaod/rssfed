@@ -1,19 +1,18 @@
 import { resolveApiBase } from '~/utils/apiBase'
 
 /**
- * 同步队列里的两个虚拟 id（也是 usePouchDb 的 syncStatuses key）。
+ * 同步目标的虚拟 id（也是 usePouchDb 的 syncStatuses key）。
  *
- * 服务端聚合后浏览器只有两个同步目标：时间线库（单向 live 拉取）与用户状态库（双向同步）。
- * 它们不是业务 id（feedId/botId），所以用一个不可能与业务 id 撞车的形态（前后双下划线）。
+ * 每个用户只有**一个**库：服务端聚合出的条目与用户自己的订阅/已读同库
+ * （写方向由库里的 validate_doc_update 兜底，见 hono-server 的 couchdb/client.ts）。
+ * 所以浏览器只有一个同步目标 —— 不是业务 id（feedId/botId），
+ * 用一个不可能与业务 id 撞车的形态（前后双下划线）。
  */
 export const TIMELINE_ID = '__timeline__'
-export const USER_STATE_ID = '__user_state__'
 
-/** 代理寻址信息：两个虚拟 id → 真实 CouchDB 库名，由后端 GET /api/couchdb/sync-targets 下发 */
+/** 代理寻址信息：虚拟 id → 真实 CouchDB 库名，由后端 GET /api/couchdb/sync-targets 下发 */
 interface CouchTargets {
-  /** 用户状态库名（已读/收藏/订阅） */
-  userState: string
-  /** 服务端聚合出来的用户时间线库名（条目 + 源元信息） */
+  /** 用户的合并库名（条目 + 源元信息 + 订阅/已读收藏） */
   timeline: string
 }
 
@@ -29,8 +28,8 @@ let inflight: Promise<CouchTargets> | null = null
  * 代理地址形如 /api/couchdb/proxy/<库名>，而库名是后端随机生成、持久化在业务表上的
  * （无法推导），所以前端必须先经 /api/couchdb/sync-targets 拿到库名。
  *
- * 只请求 `/sync-targets`（两个库）而不是旧的 `/targets`：后者会为**每个订阅源**查一次库名，
- * 几百个订阅就是几百次查询，而新版客户端根本不用那些库（旧端点仍为缓存了旧前端的 PWA 保留）。
+ * 这个接口只回一个库名，成本与订阅源数量无关（旧版 /targets 会为每个订阅源查一次库名，
+ * 几百个订阅就是几百次查询，随逐源同步一起删掉了）。
  */
 export function useCouchTargets() {
   const { public: { apiBaseUrl } } = useRuntimeConfig()
@@ -40,13 +39,10 @@ export function useCouchTargets() {
     const res = await fetch(`${base}/api/couchdb/sync-targets`, { credentials: 'include' })
     if (!res.ok) throw new Error(`获取 CouchDB 库名失败（HTTP ${res.status}）`)
     const data = await res.json() as Partial<CouchTargets>
-    if (typeof data?.userState !== 'string' || !data.userState) {
-      throw new Error('获取 CouchDB 库名失败：响应缺少 userState')
-    }
     if (typeof data?.timeline !== 'string' || !data.timeline) {
       throw new Error('获取 CouchDB 库名失败：响应缺少 timeline')
     }
-    return { userState: data.userState, timeline: data.timeline }
+    return { timeline: data.timeline }
   }
 
   /** 取寻址信息（并发调用合并为同一个请求） */
@@ -73,7 +69,6 @@ export function useCouchTargets() {
   /** 取同步目标的库名；未知 id 返回 null（调用方按同步失败上报） */
   async function dbNameFor(id: string): Promise<string | null> {
     const targets = await getTargets()
-    if (id === USER_STATE_ID) return targets.userState || null
     if (id === TIMELINE_ID) return targets.timeline || null
     return null
   }

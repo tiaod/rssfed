@@ -56,11 +56,13 @@ export interface SyncStatusSummary {
   storageError: string | null
 }
 
-/** 弹层里最多逐条列出的「正在同步」库数量（并发上限是 2，留点余量） */
+/** 弹层里最多逐条列出的「正在同步」库数量（状态表最多一两条，留点余量） */
 export const MAX_SYNCING_DETAILS = 4
 
 /**
  * 汇总所有库的同步状态。
+ *
+ * 单库方案下状态表里通常只有一条（用户的合并库），但函数本身不假设数量。
  *
  * 状态优先级：本地存储故障 > 暂停 > 同步中 > 失败 > 成功 > 无记录。
  * 存储故障排最前：此时同步已被熔断，继续显示「正在同步」或「已暂停」都会误导用户
@@ -205,8 +207,8 @@ export function syncStatusDetails(
   }
 
   if (summary.state === 'syncing') {
-    // 同步目标现在只有两个（该用户的时间线派生库 + 用户状态库），不是「订阅源数量」：
-    // 订阅源再多也是一个库、一次复制，说「N 个订阅源」会让用户以为在逐源拉取
+    // 同步目标只有一个（用户的合并库），不是「订阅源数量」：订阅源再多也是一个库、一次同步。
+    // 文案保留 N/total 的形状：状态表在概念上仍是「每个目标一条」，将来多目标也不用改这里
     const lines = [`剩余 ${summary.remaining} / ${summary.total} 个同步目标（${summary.progress}%）`]
     for (const item of summary.syncingDetails) {
       lines.push(syncingDetailLine(item))
@@ -224,7 +226,7 @@ export function syncStatusDetails(
   if (summary.state === 'success') {
     const lines: string[] = []
     if (summary.lastSyncedAt) lines.push(`上次同步：${formatSyncedAt(summary.lastSyncedAt, now)}`)
-    // 不再报「共 N 个同步目标」：目标是时间线库 + 用户状态库两个固定项，
+    // 不再报「共 N 个同步目标」：目标就是那一个用户库，
     // 「覆盖范围」在服务端聚合下已经没有信息量（整条时间线就是一个库）
     return lines
   }

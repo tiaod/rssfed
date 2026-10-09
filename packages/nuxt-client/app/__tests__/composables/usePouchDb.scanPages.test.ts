@@ -6,7 +6,8 @@ import type { ScanCursor } from '~/composables/usePouchDb'
 /**
  * 「只看未读」的扫描层：游标分页 + 只合已读态、**不做 enrich**。
  *
- * 与 readState 测试同一套真实 PouchDB harness（固定 /tmp 路径，跑完即毁）。
+ * 与 readState 测试同一套真实 PouchDB harness（固定 /tmp 路径，跑完即毁）：
+ * 单库方案下条目与状态文档都在同一个本地库里（见 utils/localDbName）。
  * 这里要盯住的性质：
  *   1. 分页不重不漏（游标含端点，靠多要一行抵消重复）；
  *   2. 扫到的行**没有**源元信息与封面 blob（证明没走 enrich —— 深扫几千条也不会去读附件）；
@@ -19,12 +20,11 @@ const H = vi.hoisted(() => ({
   /** 催促服务端聚合的假实现（返回 completed/added） */
   timelineRefresh: async () => ({ accepted: true, completed: true, added: 0 }),
   uid: 'scanpages-test',
-  entriesPath: '/tmp/rssfed-test-timeline-scanpages-test',
-  statePath: '/tmp/rssfed-test-user-state-scanpages-test'
+  dbPath: '/tmp/rssfed-test-scanpages-test'
 }))
 
 vi.mock('~/utils/localDbName', () => ({
-  localDbName: (kind: string, uid: string | null) => `/tmp/rssfed-test-${kind}-${uid ?? 'guest'}`,
+  localDbName: (uid: string | null) => `/tmp/rssfed-test-${uid ?? 'guest'}`,
   syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
@@ -32,7 +32,6 @@ vi.mock('~/utils/localDbName', () => ({
 }))
 
 vi.mock('~/composables/useCouchTargets', () => ({
-  USER_STATE_ID: '__user_state__',
   TIMELINE_ID: '__timeline__',
   useCouchTargets: () => ({
     remoteUrlForId: vi.fn(async () => { throw new Error('测试环境无远端') }),
@@ -74,13 +73,11 @@ function entryDoc(id: string, feedId: string, hoursAgo: number) {
 }
 
 async function destroyDbs() {
-  for (const path of [H.entriesPath, H.statePath]) {
-    await new PouchDB(path).destroy().catch(() => {})
-  }
+  await new PouchDB(H.dbPath).destroy().catch(() => {})
 }
 
 async function seed() {
-  const entries = new PouchDB(H.entriesPath)
+  const entries = new PouchDB(H.dbPath)
   await entries.bulkDocs([
     { _id: 'feed-a', type: 'feed', title: '源 A', url: 'https://a.example/feed', siteUrl: 'https://a.example' },
     { _id: 'feed-b', type: 'feed', title: '源 B', url: 'https://b.example/feed' },
@@ -95,14 +92,12 @@ async function seed() {
       }
     }
   ])
-  await entries.close()
-
-  const state = new PouchDB(H.statePath)
-  await state.bulkDocs([
+  // 已读态与条目同库（单库方案）
+  await entries.bulkDocs([
     { _id: 'entry-state:e1', type: 'entry-state', entryId: 'e1', feedId: 'feed-a', read: true, readAt: at(0), saved: false },
     { _id: 'entry-state:b1', type: 'entry-state', entryId: 'b1', feedId: 'feed-b', read: true, readAt: at(0), saved: false }
   ])
-  await state.close()
+  await entries.close()
 }
 
 let pouch: ReturnType<typeof usePouchDb>
@@ -114,7 +109,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await pouch.getUserStateDb().close().catch(() => {})
+  await pouch.getUserDb().close().catch(() => {})
   await destroyDbs()
 })
 

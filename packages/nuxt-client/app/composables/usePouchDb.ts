@@ -3,7 +3,7 @@ import * as PouchDBFindNS from 'pouchdb-find'
 import { computed, reactive, ref, watch } from 'vue'
 import type { Ref } from 'vue'
 import type { RssCachedImage, RssEntry, SubscriptionItem } from '~/types/rss'
-import { useCouchTargets, TIMELINE_ID, USER_STATE_ID } from '~/composables/useCouchTargets'
+import { useCouchTargets, TIMELINE_ID } from '~/composables/useCouchTargets'
 import { useApi, type TimelineRefreshResult } from '~/composables/useApi'
 import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
@@ -101,7 +101,7 @@ interface ReplicationTaskHandle {
 /**
  * 订阅 id 能否定位到源库：feedId 不能为空串，bot 订阅还需要 botId。
  *
- * 只用于过滤用户状态库里可能存在的脏订阅文档（订阅列表要显示它；至于「这个源在服务端
+ * 只用于过滤用户库里可能存在的脏订阅文档（订阅列表要显示它；至于「这个源在服务端
  * 能不能聚合」由服务端自己判断）。
  */
 function isValidDbId(id: unknown): id is string {
@@ -110,7 +110,7 @@ function isValidDbId(id: unknown): id is string {
   return true
 }
 
-/** 集中库里的 feed 文档（订阅源元信息，由远端 feed 库同步过来） */
+/** 用户库里的 feed 文档（订阅源元信息，服务端聚合时写入） */
 interface FeedDoc {
   _id: string
   _rev: string
@@ -124,7 +124,7 @@ interface FeedDoc {
   imageCached?: { attachment?: string }
 }
 
-/** 集中库里的条目文档 */
+/** 用户库里的条目文档（服务端聚合产物，本地只读） */
 interface EntryDoc {
   _id: string
   _rev?: string
@@ -141,7 +141,7 @@ interface EntryDoc {
   images?: RssCachedImage[]
 }
 
-/** 用户状态库里的文档（按 type 区分 entry-state / subscription） */
+/** 用户库里的状态文档（按 type 区分 entry-state / subscription） */
 interface StateDoc {
   _id: string
   _rev?: string
@@ -200,18 +200,19 @@ type NuxtAppWithPouchState = ReturnType<typeof useNuxtApp> & { $pouchDbState?: P
 /**
  * PouchDB 共享状态：通过 nuxtApp 单例化，确保所有组件使用同一份实例与同步状态。
  *
- * 服务端聚合架构：所有订阅源的条目由服务端聚合进用户自己的时间线库
- * （`user-timeline_*`），浏览器把它**单向 live 复制**到一个本地库（rssfed-timeline-<uid>），
- * 时间线只需一次索引查询（publishedAt 倒序）。已读/收藏/订阅仍在独立库（live 双向同步）。
+ * 单库架构：每个用户在服务端只有**一个**库（`user-timeline_*`），里面既有服务端聚合出的
+ * 条目与源元信息，也有客户端自己的订阅与已读/收藏。浏览器把它整份同步到本地一个库
+ * （rssfed-timeline-<uid>）：
+ *   - 拉取（pull，live）：条目 + 附件 + 状态，一路进来；
+ *   - 回写（push，live，带过滤）：只把客户端可写的状态文档推回服务端。
+ * 写方向的边界在服务端由库里的 validate_doc_update 兜底，客户端这份过滤只是不白跑请求。
  */
 interface PouchDbState {
-  /** 本地时间线库（服务端聚合结果的单向 live 复制目标） */
+  /** 本地用户库（服务端合并库的同步目标：条目只读 + 状态可写） */
   entriesDb: PouchDB.Database | null
-  /** 用户状态库（已读/收藏/订阅，live 双向同步） */
-  userStateDb: PouchDB.Database | null
   /** 本地条目视图是否已安装（避免每次重复 put 设计文档） */
   entriesIndexed: boolean
-  /** 同步句柄集合（时间线库单向 live 复制 / 用户状态库双向 live 同步） */
+  /** 同步句柄集合（拉取通道 + 状态回写通道） */
   syncHandles: Map<string, ReplicationTaskHandle>
   /** 同步状态（响应式，供组件 watch） */
   syncStatuses: Record<string, SyncStatus>
@@ -230,10 +231,8 @@ interface PouchDbState {
    * 或把一个已取消的句柄的写入数记进新库的账上）。
    */
   timelineSyncGeneration: number
-  /** 用户暂停同步（左下角指示器点击暂停）：暂停期间停掉时间线 live 复制 */
+  /** 用户暂停同步（左下角指示器点击暂停）：暂停期间停掉**拉取**（状态回写继续） */
   paused: Ref<boolean>
-  /** 用户状态库 live 同步的启动 Promise（syncNow 暂停它之前必须先等它挂上 handle） */
-  userStateSyncPromise: Promise<void> | null
   /** 当前本地实例所属的账号 id：本地库按账号隔离，见 switchUser */
   dbUserId: string | null
   /** 账号切换监听是否已注册（多个组件都会调用 usePouchDb，只需注册一次） */
@@ -297,11 +296,37 @@ export function computeReplicateProgress(
 /**
  * 单次复制的拉取批大小（PouchDB 默认 100）。
  *
- * 集中库的文档带 AVIF 附件，单篇上限 1MB；一批 100 篇在极端情况下是上百 MB 的
+ * 用户库的文档带 AVIF 附件，单篇上限 1MB；一批 100 篇在极端情况下是上百 MB 的
  * 单次事务，实测在 495MB 数据量时直接触发 QuotaExceededError 把整个库打成
  * global failure。降到 20 让写入峰值可控，代价只是每批多几个请求。
  */
 const REPLICATE_BATCH_SIZE = 20
+
+/**
+ * 状态回写通道在 syncHandles 里的 key（**不是**同步目标，所以不进 syncStatuses）。
+ *
+ * 合并成单库之后，远端那一个库里既有条目也有用户状态：条目只能由服务端写（库里的
+ * validate_doc_update 会把客户端的写入拒掉），用户状态必须由客户端推上去。于是同一个远端库
+ * 配两条 live 通道 —— 拉取（全量）与回写（过滤后只推状态文档）。
+ */
+const STATE_PUSH_ID = '__state_push__'
+
+/**
+ * 回写通道的过滤函数：只推客户端可写的文档。
+ *
+ * 挡掉两类：
+ *   - `_design/*`：本地库里的视图/索引设计文档（客户端自己装的），服务端既不需要也不允许写；
+ *   - `entry` / `feed`：服务端聚合产物。推上去也会被服务端的 validate_doc_update 拒掉，
+ *     但那样每次同步都白跑一趟并刷出 403，不如在源头就过滤掉。
+ *
+ * 传函数而不是设计文档名：push 的源库是本机 PouchDB，PouchDB 在本地求值过滤函数
+ *（远端设计文档形式只适用于「源是远端」的拉取方向）。真正的安全边界不在这里，
+ * 而在服务端的 validate_doc_update —— 客户端改得了自己的过滤函数，改不了服务端的闸门。
+ */
+function isClientWritableDoc(doc: { _id?: string, type?: string }): boolean {
+  if (doc._id?.startsWith('_design/')) return false
+  return doc.type !== 'entry' && doc.type !== 'feed'
+}
 
 /**
  * 「优先同步当前列表」的等待上限（毫秒）。
@@ -362,14 +387,13 @@ async function destroyLegacyLocalDbs(): Promise<void> {
 function createPouchState(): PouchDbState {
   return {
     entriesDb: null,
-    userStateDb: null,
     entriesIndexed: false,
     syncHandles: new Map<string, ReplicationTaskHandle>(),
     syncStatuses: reactive<Record<string, SyncStatus>>({}),
     timelineSyncPromise: null,
     timelineSyncGeneration: 0,
     paused: ref(false),
-    userStateSyncPromise: null,
+
     dbUserId: null,
     userWatchReady: false,
     syncedDocsByTarget: reactive<Record<string, number>>({}),
@@ -394,11 +418,13 @@ export function usePouchSyncStatus(): Readonly<Record<string, SyncStatus>> {
 /**
  * 管理 PouchDB 本地库与同步，提供条目/订阅查询能力。
  *
- * 条目由**服务端**按用户聚合进 `user-timeline_xxx` 派生库，客户端只用一条 live 单向复制
- * （replicate.from）把它拉到本地，时间线/单源/分组查询都在这一个本地库里做（map view 倒序）。
- * 用户状态库（已读/收藏/订阅）仍然 live 双向同步：它是用户自己的写入口。
+ * 服务端按用户把条目聚合进唯一的用户库（`user-timeline_xxx`：条目 + 源元信息 + 订阅/已读收藏），
+ * 客户端把它整份同步到本地一个库（见 utils/localDbName）：
+ *   1. 拉取通道（live）：条目、附件与状态一路进来，时间线/单源/分组查询都在这一个本地库里做；
+ *   2. 回写通道（live，带过滤）：只把客户端可写的状态文档推回去 —— 已读/收藏/订阅是用户自己的写入口。
+ * 写方向的边界由服务端库里的 validate_doc_update 兜底（见 hono-server 的 couchdb/client.ts）。
  *
- * 于是「订阅源数量」不再影响同步开销 —— 拉的是一个库，不是 N 个库。
+ * 于是「订阅源数量」不再影响同步开销 —— 同步的是一个库，不是 N 个库。
  *
  * 本地库名带当前账号 id（见 utils/localDbName）：换账号就是换一套本地库，
  * 避免上一个账号的本地数据经双向同步被推进新账号的远端库。
@@ -415,7 +441,7 @@ export function usePouchDb() {
   const nuxtApp = useNuxtApp() as NuxtAppWithPouchState
   nuxtApp.$pouchDbState ??= createPouchState()
   const { syncHandles, syncStatuses } = nuxtApp.$pouchDbState
-  // 队列与集中库字段需通过对象引用读写（解构 number 会丢失状态）
+  // 计数与库字段需通过对象引用读写（解构 number 会丢失状态）
   const pouchState = nuxtApp.$pouchDbState
 
   /** 迁移清理的幂等 Promise（避免并发重复执行） */
@@ -427,10 +453,10 @@ export function usePouchDb() {
   }
 
   /**
-   * 暂停同步（左下角指示器在「正在同步」时点击）：停掉时间线库的 live 复制，
+   * 暂停同步（左下角指示器在「正在同步」时点击）：停掉**拉取**通道，
    * 并阻止新的复制/催促发起，直到用户点同步恢复。
    *
-   * 只作用于「拉取服务端聚合结果」这条线；用户状态库的 live 双向同步不动：
+   * 只作用于拉取（服务端聚合结果 → 本地）；状态回写通道不动：
    * 它是已读/收藏的实时通道，暂停拉取新条目不该顺带停掉状态回写。
    *
    * 被中断的库状态归位为 idle：UI 上不再是「同步中」（顶部进度条随之消失），
@@ -438,7 +464,7 @@ export function usePouchDb() {
    */
   function pauseSync() {
     pouchState.paused.value = true
-    stopTimelineLiveSync()
+    stopPullSync()
     const status = syncStatuses[TIMELINE_ID]
     if (status && (status.status === 'syncing' || status.status === 'queued')) {
       syncStatuses[TIMELINE_ID] = { ...status, status: 'idle' }
@@ -472,12 +498,7 @@ export function usePouchDb() {
       pouchState.entriesDb.close()
       pouchState.entriesDb = null
     }
-    if (pouchState.userStateDb) {
-      pouchState.userStateDb.close()
-      pouchState.userStateDb = null
-    }
     pouchState.entriesIndexed = false
-    pouchState.userStateSyncPromise = null
     feedIconBlobs.clear()
     entryCoverBlobs.clear()
     for (const key of Object.keys(syncStatuses)) {
@@ -517,7 +538,7 @@ export function usePouchDb() {
   function openEntriesDb(): PouchDB.Database {
     syncDbUser()
     if (!pouchState.entriesDb) {
-      pouchState.entriesDb = new PouchDB(localDbName('timeline', pouchState.dbUserId))
+      pouchState.entriesDb = new PouchDB(localDbName(pouchState.dbUserId))
     }
     return pouchState.entriesDb
   }
@@ -554,7 +575,9 @@ export function usePouchDb() {
    *   1. per-feed 多库时代（rssfed-feed-*）与集中条目库时代（rssfed-entries[-uid]）——
    *      它们的结构与新版时间线库不兼容（条目附件现在是按**用户**参数压的），
    *      数据都能从服务端重新拉，所以一律丢弃而不是迁移；
-   *   2. 账号隔离之前的固定库名（rssfed-entries / rssfed-user-state）——它们可能混着
+   *   2. 用户状态单开一个本地库时代（rssfed-user-state[-uid]）——单库方案下状态文档
+   *      跟着同一个远端库同步下来，本地那份已无用；
+   *   3. 账号隔离之前的固定库名（rssfed-entries / rssfed-user-state）——它们可能混着
    *      多个账号的数据（固定库名 + 双向同步 = 串号），搬进当前账号的隔离库会把上一个
    *      账号的数据固化下来并推上远端，比丢弃更糟。
    *
@@ -563,10 +586,12 @@ export function usePouchDb() {
    */
   async function cleanupLegacyDbs() {
     try {
-      // v4：服务端聚合架构的迁移标记（与 v1 per-feed / v2 集中库区分，各迁移一次）。
-      // 为什么是 v4 而不是 v3：v3 那版按前缀匹配 `allDbs()` 的实际库名（带 `_pouch_` 前缀），
-      // 一个都没删掉，凡是已经打过 v3 标记的浏览器就再也不会清理旧条目库了 —— 必须换新标记重跑一次。
-      if (!localStorage.getItem('rssfed-central-migrated-v4')) {
+      // v5：单库方案的迁移标记（v1 per-feed / v2 集中库 / v4 服务端聚合，各迁移一次）。
+      // 为什么每轮都要换标记：这些清理都是「打过标记就不再跑」，加了新要删的库名/键族就必须换新标记，
+      // 否则早就打过旧标记的浏览器永远不会执行这一轮清理。
+      // （v3 那版按前缀匹配 `allDbs()` 的实际库名（带 `_pouch_` 前缀），一个都没删掉，
+      // 所以 v4 是第一次真正生效的清理；v5 追加了旧状态库 rssfed-user-state-*。）
+      if (!localStorage.getItem('rssfed-central-migrated-v5')) {
         try {
           // 旧增量记录（水位表 / 退避表 / 窗口锚点）已不再使用，清掉免得占着 localStorage。
           // 旧版本会再拼一个 `-<userId>` 后缀（每账号一份），所以按前缀扫全部键，
@@ -582,7 +607,7 @@ export function usePouchDb() {
         }
         // 删除旧库（限时 3 秒，超时放弃）
         await destroyLegacyLocalDbs()
-        localStorage.setItem('rssfed-central-migrated-v4', '1')
+        localStorage.setItem('rssfed-central-migrated-v5', '1')
       }
 
       // 账号隔离前的固定库名：无条件清理（库不存在时 destroy 会报错，忽略即可）
@@ -606,13 +631,14 @@ export function usePouchDb() {
     pouchState.storageBroken.value = detail
   }
 
-  // ── 同步引擎：两个 live 复制（时间线库单向 / 用户状态库双向） ──
+  // ── 同步引擎：同一个库上的两条 live 通道（拉取全量 / 回写状态） ──
   //
   // 服务端聚合之后，浏览器不再逐源同步，因此**没有**一次性复制队列、没有增量水位表、
   // 也没有同步窗口锚点：那三样东西存在的前提是「浏览器自己决定拉哪些源的哪些条目」，
-  // 而这个决定已经移到服务端。客户端只剩两个动作：
+  // 而这个决定已经移到服务端。客户端只剩三个动作：
   //   1. 催服务端聚合（POST /api/timeline/refresh，订阅/打开列表/手动同步时）；
-  //   2. 把时间线库 live 复制下来（服务端一写就到端，不需要客户端判断该不该拉）。
+  //   2. 把用户库拉下来（服务端一写就到端，不需要客户端判断该不该拉）；
+  //   3. 把本地写的状态文档推上去（只推状态，见 isClientWritableDoc）。
   //
   // 关于进度：live 复制也在写库，所以「正在同步」不再等于「用户点了同步」——
   // 状态机只有三档：syncing（有批次在写）/ idle（安静，已跟上服务端）/ error。
@@ -678,12 +704,27 @@ export function usePouchDb() {
     return (await requestTimelineRefresh(false)) !== null
   }
 
-  /** 停掉时间线 live 复制（暂停同步 / 换账号 / 存储故障时用） */
-  function stopTimelineLiveSync() {
+  /** 停掉拉取通道（暂停同步 / 存储故障时用；状态回写不受影响） */
+  function stopPullSync() {
     // 先换代次：取消是异步的，之后迟到的回调一律作废
     pouchState.timelineSyncGeneration += 1
-    const handle = syncHandles.get(TIMELINE_ID)
-    syncHandles.delete(TIMELINE_ID)
+    cancelHandle(TIMELINE_ID)
+  }
+
+  /** 停掉状态回写通道 */
+  function stopPushSync() {
+    cancelHandle(STATE_PUSH_ID)
+  }
+
+  /** 停掉两条通道（换账号 / 重建本地库 / 存储故障时用） */
+  function stopAllLiveSync() {
+    stopPullSync()
+    stopPushSync()
+  }
+
+  function cancelHandle(key: string) {
+    const handle = syncHandles.get(key)
+    syncHandles.delete(key)
     try {
       handle?.cancel()
     } catch {
@@ -702,7 +743,7 @@ export function usePouchDb() {
   async function ensureTimelineLiveSync(restart = false): Promise<void> {
     if (pouchState.paused.value || pouchState.storageBroken.value) return
     if (restart) {
-      stopTimelineLiveSync()
+      stopAllLiveSync()
     } else {
       if (syncHandles.has(TIMELINE_ID)) return
       // 已有一次挂载流程在跑：等它，而不是另起一条（两条 live 复制写同一个库）
@@ -719,6 +760,10 @@ export function usePouchDb() {
 
   /** 真正挂上 live 复制的动作（由 ensureTimelineLiveSync 做去重与错误归位） */
   async function startTimelineLiveSync(): Promise<void> {
+    // 先打开本地库对齐账号：openEntriesDb 内部会 syncDbUser（会话未就绪→guest、登录后切到该账号）。
+    // ownerUserId 必须取对齐**之后**的值 —— 否则第一次挂载时它还是 null，回调里的 isCurrent()
+    // 永远为假，整条通道变成哑巴：同步状态不更新、存储故障也不熔断。
+    const db = openEntriesDb()
     /** 本次挂载归属的账号：期间换账号则结果一律作废，不能写进新账号的同步状态 */
     const ownerUserId = pouchState.dbUserId
     const generation = ++pouchState.timelineSyncGeneration
@@ -740,13 +785,40 @@ export function usePouchDb() {
       // 等待寻址信息期间可能切了账号 / 被暂停 / 熔断：不能拿上一个账号的地址挂到新账号的库上
       if (pouchState.dbUserId !== ownerUserId || pouchState.paused.value || pouchState.storageBroken.value) return
 
-      const task = openEntriesDb().replicate.from(url, {
+      const task = db.replicate.from(url, {
         live: true,
         retry: true,
         batch_size: REPLICATE_BATCH_SIZE
       })
       const handle = task as unknown as ReplicationTaskHandle
       syncHandles.set(TIMELINE_ID, handle)
+
+      // 状态回写通道：同一个远端库、只把客户端可写的文档推上去（见 isClientWritableDoc）。
+      // 它不写 syncStatuses（同步目标只有一个，UI 上不该出现第二个目标）：回写失败通常是
+      // 与拉取同源的网络问题，统一由下面的 error 处理器报到同一个状态上。
+      const pushTask = db.replicate.to(url, {
+        live: true,
+        retry: true,
+        filter: (doc: { _id?: string, type?: string }) => isClientWritableDoc(doc)
+      })
+      const pushHandle = pushTask as unknown as ReplicationTaskHandle
+      syncHandles.set(STATE_PUSH_ID, pushHandle)
+      if (typeof pushHandle.on === 'function') {
+        pushHandle.on('denied', (err: unknown) => {
+          // 服务端 validate_doc_update 拒了某篇文档：正常不该发生（过滤函数与闸门口径一致），
+          // 留一条日志，便于发现「客户端过滤」与「服务端闸门」两边口径漂移
+          console.warn('[PouchDB] 状态回写被服务端拒绝：', errorMessage(err))
+        })
+        pushHandle.on('error', (err: unknown) => {
+          if (!isCurrent()) return
+          syncStatuses[TIMELINE_ID] = {
+            feedId: TIMELINE_ID,
+            status: 'error',
+            version: syncStatuses[TIMELINE_ID]?.version ?? 0,
+            error: `状态回写失败：${errorMessage(err)}`
+          }
+        })
+      }
 
       /**
        * 上一次收尾时已经计入「已同步条数」的累计写入数。
@@ -807,7 +879,7 @@ export function usePouchDb() {
           // live 复制的 retry 会无限重试，存储坏掉时必须主动停下：否则会一直砸在同一块
           // 坏掉的库上（既写不进数据又把错误刷屏），唯一出路是让用户重置本地缓存
           setStorageBroken('本地缓存写入失败（存储空间不足或数据库已损坏），已暂停同步。请到「我的 → 重置本地缓存」清理后重试')
-          stopTimelineLiveSync()
+          stopAllLiveSync()
           return
         }
         syncStatuses[TIMELINE_ID] = {
@@ -963,7 +1035,7 @@ export function usePouchDb() {
     }
   }
 
-  // ── 集中库查询（Mango 索引，一次查询） ──
+  // ── 条目查询与列表拼装（本地 map view + 游标分页） ──
 
   /**
    * feed 图标 blob 缓存（按 feedId + _rev 失效；FeedDoc 更新后自动重新生成）。
@@ -971,7 +1043,7 @@ export function usePouchDb() {
    */
   const feedIconBlobs = new Map<string, { rev: string, url: string }>()
 
-  /** 从集中库 FeedDoc 解析 feed 图标：AVIF 附件 blob 优先，回退原始 URL；无图标返回 null */
+  /** 从用户库 FeedDoc 解析 feed 图标：AVIF 附件 blob 优先，回退原始 URL；无图标返回 null */
   async function resolveFeedImage(feedDoc: FeedDoc | null): Promise<string | null> {
     if (!feedDoc) return null
     const cached = feedDoc.imageCached as { attachment?: string } | undefined
@@ -998,7 +1070,7 @@ export function usePouchDb() {
   const entryCoverBlobs = new Map<string, string>()
 
   /**
-   * 读取用户在订阅列表里自定义的源名（用户状态库 `subscription:{feedId}` 文档的 title）。
+   * 读取用户在订阅列表里自定义的源名（用户库 `subscription:{feedId}` 文档的 title）。
    * 侧边栏展示的正是这个名字，条目上的源名必须与之一致；没订阅过或没改过名时没有对应项，
    * 调用方回退注册表抓来的标题。按 keys 精确取，只读当前页涉及的源。
    */
@@ -1006,7 +1078,7 @@ export function usePouchDb() {
     const titles = new Map<string, string>()
     if (feedIds.length === 0) return titles
     try {
-      const res = await getUserStateDb().allDocs({
+      const res = await getUserDb().allDocs({
         include_docs: true,
         keys: feedIds.map(id => `subscription:${id}`)
       })
@@ -1035,14 +1107,15 @@ export function usePouchDb() {
   /**
    * 合并条目的已读 / 收藏状态。
    *
-   * 条目本体在集中库、用户状态在另一个库（`entry-state:{entryId}`），列表要显示已读态就得单独取一次。
+   * 条目与状态文档都在同一个用户库里，但状态是独立文档（`entry-state:{entryId}`），
+   * 列表要显示已读态就得按 key 单独取一次。
    * 只按**当前窗口**的 id 批量 allDocs（页大小几十条），不扫全库；取不到就当作未读，
-   * 列表照常渲染 —— 已读态是锦上添花，不该因为用户状态库没就绪而让列表空掉。
+   * 列表照常渲染 —— 已读态是锦上添花，不该因为状态文档没就绪而让列表空掉。
    */
   async function attachReadState(entries: RssEntry[]): Promise<void> {
     if (entries.length === 0) return
     try {
-      const res = await getUserStateDb().allDocs({
+      const res = await getUserDb().allDocs({
         include_docs: true,
         keys: entries.map(e => `entry-state:${e.id}`)
       })
@@ -1057,7 +1130,7 @@ export function usePouchDb() {
         entry.starred = state.saved === true
       }
     } catch {
-      // 用户状态库不可用：保持未读，不影响列表
+      // 状态文档读不到：保持未读，不影响列表
     }
   }
 
@@ -1073,7 +1146,7 @@ export function usePouchDb() {
     read = true
   ): Promise<number> {
     if (entries.length === 0) return 0
-    const stateDb = getUserStateDb()
+    const stateDb = getUserDb()
     const now = new Date().toISOString()
     const existing = new Map<string, StateDoc>()
     try {
@@ -1111,7 +1184,7 @@ export function usePouchDb() {
   }
 
   /**
-   * 收藏列表：状态在用户状态库、条目本体在集中库，map view 没法 join，只能分两步查。
+   * 收藏列表：状态与条目本体现在同库，但状态文档不带发布时间，map view 没法 join，只能分两步查。
    *
    * 窗口按**收藏时间**切（savedAt 倒序），分块回查窗口内的条目。窗口只在「本地真的存在」
    * 的条目上计数：状态文档可能指向本机还没有的条目（别的设备刚收藏、条目还没同步过来），
@@ -1120,7 +1193,7 @@ export function usePouchDb() {
   async function querySavedEntries(limit = 50): Promise<RssEntry[]> {
     let states: StateDoc[] = []
     try {
-      const res = await getUserStateDb().allDocs({
+      const res = await getUserDb().allDocs({
         include_docs: true,
         startkey: 'entry-state:',
         endkey: 'entry-state:\uffff'
@@ -1170,14 +1243,14 @@ export function usePouchDb() {
 
   /**
    * 补全条目的 feed 元信息（源名/站点/图标）与封面图 blob。
-   * FeedDoc 随库同步到集中库（replicate 无 filter），一次 allDocs 读取全部所需文档；
+   * FeedDoc 随拉取通道同步到本地库，一次 allDocs 读取全部所需文档；
    * 图标优先本地缓存的 AVIF 附件（blob URL），离线可用；无缓存回退原始 URL。
    * 源名以用户自定义的订阅名（见 loadSubscriptionTitles）优先，注册表标题仅作兜底，
    * 保证与侧边栏显示的名字一致（自定义名可覆盖抓取到的原始标题）。
    */
   async function enrichEntries(entries: RssEntry[]): Promise<RssEntry[]> {
     if (entries.length === 0) return entries
-    // 先合已读状态：它来自用户状态库，与下面的 feed 元信息互不依赖
+    // 先合已读状态：它是状态文档，与下面的 feed 元信息互不依赖
     await attachReadState(entries)
     const feedIds = [...new Set(entries.map(e => e.feedId))]
     let docs: FeedDoc[] = []
@@ -1240,8 +1313,10 @@ export function usePouchDb() {
    * 只清本地：服务端的派生库不动（那是「再拉一次」的来源）。
    */
   async function resetLocalData() {
-    // 停掉 live 复制再删库：否则在途的写入会砸在一个已被销毁的实例上
-    stopTimelineLiveSync()
+    // 停掉两条通道再删库：否则在途的写入会砸在一个已被销毁的实例上
+    // 注意：单库之后重置会连同**未推送**的状态改动一起丢掉（订阅/已读）。重置是用户显式操作，
+    // 服务端那份才是权威，重建后整库重新拉下来即可。
+    stopAllLiveSync()
     // 销毁本地时间线库（旧数据/冲突分支一并清除），下次访问自动重建空库
     if (pouchState.entriesDb) {
       await pouchState.entriesDb.destroy().catch(() => {})
@@ -1290,7 +1365,7 @@ export function usePouchDb() {
     return fallback ?? null
   }
 
-  /** 将集中库文档映射为 RssEntry（列表展示用，feed 元信息由 enrichEntries 补全） */
+  /** 将本地库文档映射为 RssEntry（列表展示用，feed 元信息由 enrichEntries 补全） */
   function docToEntry(doc: EntryDoc): RssEntry {
     return {
       id: doc._id,
@@ -1318,7 +1393,7 @@ export function usePouchDb() {
   }
 
   /**
-   * 集中库查询：走本地 map view，desc 只取一页窗口，不再把全库文档拉进内存排序。
+   * 条目查询：走本地 map view，desc 只取一页窗口，不再把全库文档拉进内存排序。
    *
    * 背景：PouchDB 9 的 Mango（pouchdb-find）对自建索引无法可靠做 desc 排序，
    * 旧实现退化为 find 一次拉 1 万条 + JS 整体排序，翻页还会重复整库查询，
@@ -1560,89 +1635,18 @@ export function usePouchDb() {
     return await getEntriesDb().getAttachment(entryId, attachmentName) as Blob
   }
 
-  // ── 用户状态库（已读/收藏/订阅，live 双向同步） ──
+  // ── 用户库（同一个本地库：条目只读，状态可写） ──
 
   /**
-   * 启动用户状态库的 live 双向同步（db 必须已创建）。
-   * 与 getUserStateDb 分离，便于手动同步（syncNow）暂停后恢复实时同步。
+   * 拿到本地用户库（已读/收藏/订阅与条目同库）。
+   *
+   * 服务端合并成单库之后，这里与 getEntriesDb 是同一个实例：拉取通道负责把远端那一个库
+   * 整份同步下来（含状态文档），状态回写通道负责把客户端可写的文档推上去
+   * （见 startTimelineLiveSync 里的 push 复制）。保留一个独立入口是为了让「写状态」的调用点
+   * 读起来仍然是在操作状态，而不是顺手写条目库。
    */
-  async function startUserStateLiveSync() {
-    const key = USER_STATE_ID
-    const db = pouchState.userStateDb
-    if (!db) return
-
-    // 远端地址要带真实库名，先取寻址信息；取不到就记错误，等下次触发再试。
-    // 这里也不能往上抛：返回值会作为 userStateSyncPromise 被 syncNow await。
-    let remoteUrl: string | null = null
-    let lookupError: string | null = null
-    try {
-      remoteUrl = await remoteUrlForId(key)
-    } catch (e: unknown) {
-      lookupError = errorMessage(e)
-    }
-    if (!remoteUrl) {
-      syncStatuses[key] = {
-        feedId: key,
-        status: 'error',
-        version: syncStatuses[key]?.version ?? 0,
-        error: lookupError ?? '未取到用户状态库名，实时同步未启动'
-      }
-      return
-    }
-
-    // 启动双向同步；错误写入 syncStatuses，供 UI 展示
-    syncStatuses[key] = {
-      feedId: key,
-      status: 'syncing',
-      version: syncStatuses[key]?.version ?? 0
-    }
-    const sync = PouchDB.sync(db, remoteUrl, {
-      live: true,
-      retry: true
-    })
-      .on('change', () => {
-        syncStatuses[key] = {
-          feedId: key,
-          status: 'idle',
-          version: (syncStatuses[key]?.version ?? 0) + 1,
-          lastSyncedAt: new Date().toISOString()
-        }
-      })
-      .on('paused', (err) => {
-        // 初始复制完成、进入等待变化时置为 idle（err 为空表示正常暂停）
-        if (!err && syncStatuses[key]?.status !== 'idle') {
-          syncStatuses[key] = {
-            feedId: key,
-            status: 'idle',
-            version: syncStatuses[key]?.version ?? 0,
-            lastSyncedAt: new Date().toISOString()
-          }
-        }
-      })
-      .on('error', (err) => {
-        syncStatuses[key] = {
-          feedId: key,
-          status: 'error',
-          version: syncStatuses[key]?.version ?? 0,
-          error: String(err)
-        }
-      })
-
-    // 存入 handle：live 句柄统一由 syncHandles 管理（暂停/换账号时逐个 cancel）
-    syncHandles.set(key, sync as unknown as ReplicationTaskHandle)
-  }
-
-  /**
-   * 获取用户状态库 PouchDB 实例（用于已读/收藏标记）
-   */
-  function getUserStateDb(): PouchDB.Database {
-    syncDbUser()
-    if (!pouchState.userStateDb) {
-      pouchState.userStateDb = new PouchDB(localDbName('user-state', pouchState.dbUserId))
-      // 记下启动 Promise：syncNow 要等它挂上 handle 才能暂停 live 同步
-      pouchState.userStateSyncPromise = startUserStateLiveSync()
-    }
-    return pouchState.userStateDb
+  function getUserDb(): PouchDB.Database {
+    return getEntriesDb()
   }
 
   /**
@@ -1659,7 +1663,7 @@ export function usePouchDb() {
     feedId: string,
     mutate: (prev: StateDoc | null) => Partial<StateDoc>
   ): Promise<StateDoc> {
-    const stateDb = getUserStateDb()
+    const stateDb = getUserDb()
     const docId = `entry-state:${entryId}`
     const maxAttempts = 3
 
@@ -1731,7 +1735,7 @@ export function usePouchDb() {
    * 获取本地订阅列表（离线可用，从 PouchDB 读取）
    */
   async function listSubscriptions(): Promise<SubscriptionItem[]> {
-    const stateDb = getUserStateDb()
+    const stateDb = getUserDb()
     const result = await stateDb.allDocs({
       include_docs: true,
       startkey: 'subscription:',
@@ -1759,7 +1763,7 @@ export function usePouchDb() {
    * 添加订阅（写入本地 PouchDB，自动同步到远端 CouchDB）
    */
   async function addSubscription(feedId: string, info: { title: string, siteUrl?: string, description?: string, image?: string }, category?: string) {
-    const stateDb = getUserStateDb()
+    const stateDb = getUserDb()
     await stateDb.put({
       _id: `subscription:${feedId}`,
       type: 'subscription',
@@ -1779,7 +1783,7 @@ export function usePouchDb() {
    * 删除订阅（移除本地文档，自动同步删除到远端）
    */
   async function removeSubscription(feedId: string) {
-    const stateDb = getUserStateDb()
+    const stateDb = getUserDb()
     const docId = `subscription:${feedId}`
     try {
       const doc = await stateDb.get(docId)
@@ -1797,7 +1801,7 @@ export function usePouchDb() {
    * 与 feed 订阅共用 `subscription:` 前缀，但 _id 带 `bot:` 避免与真实 feed 撞 key。
    */
   async function addBotSubscription(botId: string, info: { title: string, description?: string, image?: string }) {
-    const stateDb = getUserStateDb()
+    const stateDb = getUserDb()
     await stateDb.put({
       _id: `subscription:bot:${botId}`,
       type: 'subscription',
@@ -1822,7 +1826,7 @@ export function usePouchDb() {
     feedId: string,
     patch: { title?: string, category?: string, view?: ListView | null }
   ) {
-    const stateDb = getUserStateDb()
+    const stateDb = getUserDb()
     const docId = `subscription:${feedId}`
     const doc = await stateDb.get(docId) as unknown as StateDoc
     const next: StateDoc = {
@@ -1859,7 +1863,7 @@ export function usePouchDb() {
     feedId: string
   ): Promise<{ view: ListView | null, category: string | null }> {
     try {
-      const doc = await getUserStateDb().get(`subscription:${feedId}`) as unknown as StateDoc
+      const doc = await getUserDb().get(`subscription:${feedId}`) as unknown as StateDoc
       return {
         view: isListView(doc.view) ? doc.view : null,
         category: doc.category?.trim() || null
@@ -1873,7 +1877,7 @@ export function usePouchDb() {
   async function getGroupView(name: string): Promise<ListView | null> {
     if (!name) return null
     try {
-      const doc = await getUserStateDb().get(groupPrefId(name)) as unknown as StateDoc
+      const doc = await getUserDb().get(groupPrefId(name)) as unknown as StateDoc
       return isListView(doc.view) ? doc.view : null
     } catch {
       return null
@@ -1889,7 +1893,7 @@ export function usePouchDb() {
   async function listGroupViews(): Promise<Record<string, ListView>> {
     const out: Record<string, ListView> = {}
     try {
-      const res = await getUserStateDb().allDocs({
+      const res = await getUserDb().allDocs({
         include_docs: true,
         startkey: GROUP_PREF_PREFIX,
         endkey: `${GROUP_PREF_PREFIX}\uffff`
@@ -1909,7 +1913,7 @@ export function usePouchDb() {
   /** 写入 / 清除某个分组的默认视图（null = 清除，回退到全局默认） */
   async function setGroupView(name: string, view: ListView | null) {
     if (!name) return
-    const db = getUserStateDb()
+    const db = getUserDb()
     const docId = groupPrefId(name)
     let existing: (StateDoc & { _rev: string }) | null = null
     try {
@@ -1978,7 +1982,7 @@ export function usePouchDb() {
     getEntryAttachment,
     getFeedImageUrl,
     resetLocalData,
-    getUserStateDb,
+    getUserDb,
     markRead,
     markManyRead,
     toggleSaved,

@@ -19,10 +19,7 @@ beforeEach(() => {
   vi.resetModules()
   calls = []
   responseStatus = 200
-  responseBody = {
-    timeline: 'user-timeline_aaa',
-    userState: 'user-state_bbb'
-  }
+  responseBody = { timeline: 'user-timeline_aaa' }
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url)
     if (responseStatus !== 200) return new Response('{}', { status: responseStatus })
@@ -43,15 +40,13 @@ afterEach(() => {
 })
 
 describe('useCouchTargets', () => {
-  it('两个同步目标各自拼出带真实库名的代理地址', async () => {
-    const { useCouchTargets, TIMELINE_ID, USER_STATE_ID } = await loadComposable()
+  it('唯一的同步目标拼出带真实库名的代理地址', async () => {
+    const { useCouchTargets, TIMELINE_ID } = await loadComposable()
     const targets = useCouchTargets()
 
     await expect(targets.remoteUrlForId(TIMELINE_ID))
       .resolves.toBe(`${PROXY}/${encodeURIComponent('user-timeline_aaa')}`)
-    await expect(targets.remoteUrlForId(USER_STATE_ID))
-      .resolves.toBe(`${PROXY}/${encodeURIComponent('user-state_bbb')}`)
-    // 打的是只查这两个库的 /sync-targets（旧的 /targets 会为每个订阅源查一次库名）
+    // 打的是只回一个库名的 /sync-targets（旧的 /targets 会为每个订阅源查一次库名）
     expect(calls).toEqual([`${BASE}/api/couchdb/sync-targets`])
   })
 
@@ -65,11 +60,11 @@ describe('useCouchTargets', () => {
   })
 
   it('多次取地址只打一次接口（缓存）', async () => {
-    const { useCouchTargets, TIMELINE_ID, USER_STATE_ID } = await loadComposable()
+    const { useCouchTargets, TIMELINE_ID } = await loadComposable()
     const targets = useCouchTargets()
 
     await targets.remoteUrlForId(TIMELINE_ID)
-    await targets.remoteUrlForId(USER_STATE_ID)
+    await targets.remoteUrlForId(TIMELINE_ID)
     await targets.remoteUrlForId(TIMELINE_ID)
     expect(calls).toHaveLength(1)
   })
@@ -80,7 +75,7 @@ describe('useCouchTargets', () => {
 
     await targets.remoteUrlForId(TIMELINE_ID)
     targets.invalidate()
-    responseBody = { timeline: 'user-timeline_ccc', userState: 'user-state_bbb' }
+    responseBody = { timeline: 'user-timeline_ccc' }
 
     await expect(targets.remoteUrlForId(TIMELINE_ID))
       .resolves.toBe(`${PROXY}/${encodeURIComponent('user-timeline_ccc')}`)
@@ -96,18 +91,10 @@ describe('useCouchTargets', () => {
   })
 
   it('响应缺少 timeline 时抛错（避免拿 undefined 拼地址）', async () => {
-    responseBody = { userState: 'user-state_bbb' }
+    responseBody = {}
     const { useCouchTargets, TIMELINE_ID } = await loadComposable()
     const targets = useCouchTargets()
 
     await expect(targets.remoteUrlForId(TIMELINE_ID)).rejects.toThrow(/timeline/)
-  })
-
-  it('响应缺少 userState 时抛错', async () => {
-    responseBody = { timeline: 'user-timeline_aaa' }
-    const { useCouchTargets, USER_STATE_ID } = await loadComposable()
-    const targets = useCouchTargets()
-
-    await expect(targets.remoteUrlForId(USER_STATE_ID)).rejects.toThrow(/userState/)
   })
 })

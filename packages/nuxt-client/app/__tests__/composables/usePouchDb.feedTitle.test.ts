@@ -3,9 +3,9 @@ import PouchDB from 'pouchdb'
 import { usePouchDb } from '~/composables/usePouchDb'
 
 /**
- * 条目上的「源名」必须与侧边栏一致：侧边栏显示的是用户状态库里
+ * 条目上的「源名」必须与侧边栏一致：侧边栏显示的是用户库里
  * `subscription:{feedId}` 文档的 title（用户在订阅列表改过的名字），
- * 而集中库的 FeedDoc.title 是抓取时的原始源标题。
+ * 而 FeedDoc.title 是抓取时的原始源标题（单库方案下两者在同一个本地库里）。
  *
  * 这里用真实 PouchDB（固定 /tmp 路径）跑查询链路，保障三条不变量：
  *   1. 有自定义订阅名 → 覆盖注册表标题；
@@ -18,15 +18,14 @@ const H = vi.hoisted(() => {
   const uid = 'feedtitle-test'
   return {
     uid,
-    entriesPath: `/tmp/rssfed-test-timeline-${uid}`,
-    statePath: `/tmp/rssfed-test-user-state-${uid}`,
+    dbPath: `/tmp/rssfed-test-${uid}`,
     /** 催促服务端聚合的假实现：这些用例不关心同步，只要不抛错 */
     timelineRefresh: async () => ({ accepted: true, completed: true, added: 0 })
   }
 })
 
 vi.mock('~/utils/localDbName', () => ({
-  localDbName: (kind: string, uid: string | null) => `/tmp/rssfed-test-${kind}-${uid ?? 'guest'}`,
+  localDbName: (uid: string | null) => `/tmp/rssfed-test-${uid ?? 'guest'}`,
   syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
@@ -34,7 +33,6 @@ vi.mock('~/utils/localDbName', () => ({
 }))
 
 vi.mock('~/composables/useCouchTargets', () => ({
-  USER_STATE_ID: '__user_state__',
   TIMELINE_ID: '__timeline__',
   useCouchTargets: () => ({
     // 测试环境没有远端：取寻址信息必然失败，用户状态库的 live 同步就此停下（不联网）
@@ -56,14 +54,12 @@ const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => ({})
 
 async function destroyDbs() {
-  for (const path of [H.entriesPath, H.statePath]) {
-    await new PouchDB(path).destroy().catch(() => {})
-  }
+  await new PouchDB(H.dbPath).destroy().catch(() => {})
 }
 
 /** 造数据：一个改过名的源、一个没订阅文档的源，各带一条条目 */
 async function seed() {
-  const entries = new PouchDB(H.entriesPath)
+  const entries = new PouchDB(H.dbPath)
   await entries.bulkDocs([
     { _id: 'feed-custom', type: 'feed', title: '注册表抓来的名字', url: 'https://a.example/feed' },
     { _id: 'feed-plain', type: 'feed', title: '注册表原始标题', url: 'https://b.example/feed' },
@@ -86,17 +82,14 @@ async function seed() {
       insertedAt: '2026-07-02T00:00:00.000Z'
     }
   ])
-  await entries.close()
-
-  const state = new PouchDB(H.statePath)
-  await state.put({
+  await entries.put({
     _id: 'subscription:feed-custom',
     type: 'subscription',
     feedId: 'feed-custom',
     title: '我在订阅列表里改的名字',
     createdAt: '2026-06-01T00:00:00.000Z'
   })
-  await state.close()
+  await entries.close()
 }
 
 let pouch: ReturnType<typeof usePouchDb>
@@ -108,7 +101,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await pouch.getUserStateDb().close().catch(() => {})
+  await pouch.getUserDb().close().catch(() => {})
   await destroyDbs()
 })
 

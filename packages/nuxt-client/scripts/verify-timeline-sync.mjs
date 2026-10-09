@@ -1,19 +1,24 @@
 #!/usr/bin/env node
 /**
- * 验证「服务端聚合 + 客户端 live 复制」这条链路是真的通（单测里服务端与 PouchDB 都是替身，
+ * 验证「服务端聚合 + 客户端单库双向同步」这条链路是真的通（单测里服务端与 PouchDB 都是替身，
  * 这里全部打真的：真 Hono、真 CouchDB、真 PouchDB）。
  *
  * 它替代了旧的 `verify-sync-window.mjs`：那时客户端自己按窗口 selector 逐源复制（所以要验证
- * selector 与 checkpoint 的稳定性）；现在聚合在服务端完成，客户端只把派生库 live 复制下来，
- * 于是要验证的性质变成了：
+ * selector 与 checkpoint 的稳定性）；现在聚合在服务端完成，客户端只同步**一个**库。
+ * 要验证的性质：
  *
- *   ① 派生库确实按用户生成，并且**只有本人**能读（_security.members.names = [userId]）；
- *   ② 源库（feed 库）里新写入的条目会在下一轮聚合里出现在派生库中；
- *   ③ 客户端 live 复制能在**不重启复制**的情况下拿到服务端后来写入的条目 ——
+ *   ① 用户库确实按用户生成，并且**只有本人**能读（_security.members.names = [userId]）；
+ *   ② sync-targets 只下发这一个库（订阅与条目同库，旧版逐源下发的 /targets 已删除）；
+ *   ③ 源库（feed 库）里新写入的条目会在下一轮聚合里出现在用户库中；
+ *   ④ 拉取通道能在**不重启复制**的情况下拿到服务端后来写入的条目 ——
  *      这是「服务端一有新内容，浏览器几秒内自动看到」的全部依据；
- *   ④ 源库里的条目被删除后，客户端也删掉本地副本（退订 / 窗口收窄的语义：本地跟随服务端）；
- *   ⑤ 未登录访问代理被拒（401）；
- *   ⑥ 同一张图在两个用户下压出的附件**不同**（图片参数是按用户生效的，不是一个全局值）。
+ *   ⑤ 源库里的条目被删除后，客户端也删掉本地副本（退订 / 窗口收窄的语义：本地跟随服务端）；
+ *   ⑥ **写方向闸门**（用户库设计文档里的 validate_doc_update）：
+ *      经代理写 `entry` 文档被拒（403，否则客户端能影子化/删掉服务端聚合产物）、
+ *      写 `entry-state` / `subscription` 这类状态文档放行；
+ *   ⑦ 回写通道只推状态文档：本地写的已读/收藏能自己上去；
+ *   ⑧ 未登录访问代理被拒（401）；
+ *   ⑨ 同一张图在两个用户下压出的附件**不同**（图片参数是按用户生效的，不是一个全局值）。
  *
  * 用法：
  *   node scripts/verify-timeline-sync.mjs
@@ -23,8 +28,8 @@
  * 脚本会自己注册一个临时账号 + 一条订阅（指向一个必然连不上的本地端口，因此不会真的抓取），
  * 直接往该源的 CouchDB 库里写探针条目来模拟抓取结果。
  *
- * **清理是必达的**：正常结束与中途抛错都会走 `cleanup()` —— 销毁本地 PouchDB、删掉派生库与
- * 用户状态库、（有管理员账号时）删掉临时账号，并清掉写进探针源库的两条探针条目。
+ * **清理是必达的**：正常结束与中途抛错都会走 `cleanup()` —— 销毁本地 PouchDB、删掉用户库、
+ * （有管理员账号时）删掉临时账号，并清掉写进探针源库的两条探针条目。
  *
  * 探针地址是**固定**的（不带时间戳），所以重复运行复用同一行 `feeds` 记录，不会累积。
  * **探针源库（`feed_xxx`）特意不删**：`feeds.couch_db_name` 一旦登记就走快路径、
@@ -59,31 +64,34 @@ const localPath = path.join(process.cwd(), `.tmp-verify-timeline-${stamp}`)
  * 一次中途失败（探针异常）就在 dev 库里留下临时用户 + 两个空库 + 一行 feeds。
  */
 const resources = {
-  /** 依次创建的所有临时账号及其派生库（每项 { userId, timelineDb, userStateDb }） */
+  /** 依次创建的所有临时账号及其用户库（每项 { userId, timelineDb }） */
   accounts: [],
   feedDbName: null,
   feedId: null,
   local: null,
-  replication: null
+  /** 拉取通道 */
+  replication: null,
+  /** 状态回写通道 */
+  pushing: null
 }
 
 /** 尽力而为地回收：每一步独立 catch，一个失败不影响其它步骤 */
 async function cleanup() {
   // 每一步独立 catch：清理是「尽力而为」，某一步失败不能让后面的步骤跟着跳过
   const ignore = () => {}
-  try {
-    resources.replication?.cancel()
-  } catch { ignore() }
+  for (const channel of [resources.replication, resources.pushing]) {
+    try {
+      channel?.cancel()
+    } catch { ignore() }
+  }
   try {
     await resources.local?.destroy()
   } catch { ignore() }
   for (const account of resources.accounts) {
-    for (const name of [account.timelineDb, account.userStateDb]) {
-      if (!name) continue
-      try {
-        await couch(`/${name}`, { method: 'DELETE' })
-      } catch { ignore() }
-    }
+    if (!account.timelineDb) continue
+    try {
+      await couch(`/${account.timelineDb}`, { method: 'DELETE' })
+    } catch { ignore() }
   }
   // 探针源库留着（见文件头说明），但把探针条目清掉：下次运行从干净状态开始，图片附件也一并消失
   if (resources.feedDbName && resources.feedId) {
@@ -194,6 +202,23 @@ function probeEntry(id, title, imageUrl) {
   }
 }
 
+/**
+ * 反查探针源的 CouchDB 库名。
+ *
+ * 旧版是问 `GET /api/couchdb/targets`（逐源下发库名），那个端点随逐源同步一起删掉了；
+ * 库名是随机生成、只存在业务表里的，客户端也不再需要它。脚本要直接写探针条目，
+ * 只能按 `_id = feedId` 在 `feed_*` 库里反查（dev 环境约两百个库，本地请求很快）。
+ */
+async function findFeedDb(feedId) {
+  const dbs = await couch('/_all_dbs')
+  for (const name of dbs) {
+    if (!name.startsWith('feed_')) continue
+    const doc = await couch(`/${name}/${encodeURIComponent(feedId)}`).catch(() => null)
+    if (doc?._id === feedId) return name
+  }
+  return null
+}
+
 async function main() {
   console.log(`API: ${API}\nCouchDB: ${COUCH}\n临时账号: ${TEMP_EMAIL}\n本地库: ${localPath}\n`)
 
@@ -206,7 +231,7 @@ async function main() {
   if (!signUp.ok) throw new Error(`注册临时账号失败（HTTP ${signUp.status}）：${await signUp.text()}`)
   const signedUp = await signUp.json()
   const userId = signedUp?.user?.id
-  const primary = { userId: userId ?? null, timelineDb: null, userStateDb: null }
+  const primary = { userId: userId ?? null, timelineDb: null }
   resources.accounts.push(primary)
   check('临时账号注册成功并拿到登录态', !!userId && !!session.cookie, `userId=${userId}`)
 
@@ -230,11 +255,10 @@ async function main() {
   resources.feedId = subscription?.feedId ?? null
   check('订阅列表里有这条订阅', !!subscription, subscription ? `feedId=${subscription.feedId}` : '')
 
-  // ── 2. 拿到该源的库名，直接写一条探针条目（模拟抓取结果） ──
-  const targets = await (await session.request('/api/couchdb/targets')).json()
-  const feedDbName = targets?.feeds?.[subscription.feedId]
+  // ── 2. 反查该源的库名，直接写一条探针条目（模拟抓取结果） ──
+  const feedDbName = await findFeedDb(subscription.feedId)
   resources.feedDbName = feedDbName ?? null
-  check('能取到探针源的 CouchDB 库名', typeof feedDbName === 'string' && feedDbName.length > 0, feedDbName)
+  check('能反查到探针源的 CouchDB 库名', typeof feedDbName === 'string' && feedDbName.length > 0, feedDbName)
 
   const IMAGE_URL = process.env.PROBE_IMAGE_URL ?? 'https://httpbin.org/image/png'
   const ENTRY_ID = `entry:${subscription.feedId}:verify1`
@@ -258,8 +282,12 @@ async function main() {
   const syncTargets = await (await session.request('/api/couchdb/sync-targets')).json()
   const timelineDb = syncTargets?.timeline
   primary.timelineDb = timelineDb ?? null
-  primary.userStateDb = syncTargets?.userState ?? null
-  check('sync-targets 下发的是按用户的时间线库', typeof timelineDb === 'string' && timelineDb.startsWith('user-timeline_'), String(timelineDb))
+  check('sync-targets 下发的是按用户的合并库', typeof timelineDb === 'string' && timelineDb.startsWith('user-timeline_'), String(timelineDb))
+  check('sync-targets 只回一个库（订阅与条目同库）',
+    Object.keys(syncTargets).join(',') === 'timeline' && syncTargets.userState === undefined,
+    Object.keys(syncTargets).join(','))
+  const legacyTargets = await session.request('/api/couchdb/targets')
+  check('旧版逐源下发的 /api/couchdb/targets 已删除（404）', legacyTargets.status === 404, `HTTP ${legacyTargets.status}`)
 
   const security = await couch(`/${timelineDb}/_security`)
   const members = security?.members?.names ?? []
@@ -286,6 +314,16 @@ async function main() {
   resources.replication = replicating
   const replicationErrors = []
   replicating.on('error', err => replicationErrors.push(err))
+
+  // 回写通道：与 usePouchDb 的 isClientWritableDoc 同口径（设计文档与 entry/feed 一概不推）
+  const pushing = local.replicate.to(proxyUrl, {
+    live: true,
+    retry: true,
+    fetch: pouchFetch,
+    filter: doc => !String(doc._id).startsWith('_design/') && doc.type !== 'entry' && doc.type !== 'feed'
+  })
+  resources.pushing = pushing
+  pushing.on('error', err => replicationErrors.push(err))
 
   const firstLocal = await waitFor('首轮同步把探针条目 1 拉下来', async () => {
     const doc = await local.get(ENTRY_ID).catch(() => null)
@@ -336,6 +374,71 @@ async function main() {
   const anonymous = await fetch(`${proxyUrl}/_all_docs`)
   check('未登录访问派生库被拒（401）', anonymous.status === 401, `HTTP ${anonymous.status}`)
 
+  // ── 8.1 写方向闸门：客户端能写状态文档，写不了服务端聚合产物 ──
+  // 单库之后客户端与聚合侧写的是同一个库，所以这条边界必须在数据库层成立
+  // （库设计文档里的 validate_doc_update，见 hono-server 的 couchdb/client.ts）。
+  const dbPath = `/api/couchdb/proxy/${encodeURIComponent(timelineDb)}`
+
+  const forgedEntry = await session.request(`${dbPath}/${encodeURIComponent(`entry:${subscription.feedId}:forged`)}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      type: 'entry',
+      feedId: subscription.feedId,
+      title: '伪造条目',
+      publishedAt: new Date().toISOString()
+    })
+  })
+  check('客户端经代理写 entry 文档被拒（403）', forgedEntry.status === 403, `HTTP ${forgedEntry.status}`)
+
+  const forgedFeed = await session.request(`${dbPath}/${encodeURIComponent(`feed:${subscription.feedId}`)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ type: 'feed', title: '伪造源名' })
+  })
+  check('客户端经代理写 feed 文档被拒（403）', forgedFeed.status === 403, `HTTP ${forgedFeed.status}`)
+
+  // 删掉服务端刚聚合出来的条目也该被拒（否则本地删除会推上来把内容抹掉）
+  const aggregated = await couch(`/${timelineDb}/${encodeURIComponent(ENTRY_ID)}`)
+  const forgedDelete = await session.request(
+    `${dbPath}/${encodeURIComponent(ENTRY_ID)}?rev=${aggregated._rev}`,
+    { method: 'DELETE' }
+  )
+  check('客户端经代理删聚合条目被拒（403）', forgedDelete.status === 403, `HTTP ${forgedDelete.status}`)
+  const survived = await couch(`/${timelineDb}/${encodeURIComponent(ENTRY_ID)}`).catch(() => null)
+  check('被拒之后聚合条目还在（闸门只是拒绝，不产生副作用）', !!survived)
+
+  const stateViaProxy = await session.request(`${dbPath}/${encodeURIComponent('entry-state:proxy-check')}`, {
+    method: 'PUT',
+    body: JSON.stringify({
+      type: 'entry-state',
+      entryId: ENTRY_ID,
+      feedId: subscription.feedId,
+      read: true,
+      saved: false
+    })
+  })
+  check('客户端经代理写 entry-state 文档被放行（2xx）',
+    stateViaProxy.status === 201 || stateViaProxy.status === 202, `HTTP ${stateViaProxy.status}`)
+
+  const subViaProxy = await session.request(`${dbPath}/${encodeURIComponent(`subscription:${subscription.feedId}`)}`)
+  check('订阅文档就在这一个库里（聚合读的就是它）', subViaProxy.status === 200, `HTTP ${subViaProxy.status}`)
+
+  // ── 8.2 回写通道：本地写的状态文档自己上去（不经过任何显式推库代码） ──
+  await local.put({
+    _id: `entry-state:${ENTRY_ID}`,
+    type: 'entry-state',
+    entryId: ENTRY_ID,
+    feedId: subscription.feedId,
+    read: true,
+    saved: true
+  })
+  const pushedUp = await waitFor('本地状态文档经回写通道到达服务端', async () => {
+    const doc = await couch(`/${timelineDb}/${encodeURIComponent(`entry-state:${ENTRY_ID}`)}`).catch(() => null)
+    return doc?.saved === true ? doc : null
+  }, 30_000)
+  check('本地写的已读/收藏经回写通道同步到了服务端', !!pushedUp)
+  check('回写通道只推状态：本地没有 entry 文档被推上去',
+    !(await couch(`/${timelineDb}/${encodeURIComponent(`entry:${subscription.feedId}:forged`)}`).catch(() => null)))
+
   // ── 9. 同一张图 + 不同用户参数 → 附件必须不同（图片策略是按用户生效的，不是一个全局值） ──
   const session2 = makeSession()
   const TEMP_EMAIL_2 = `verify-timeline-b-${stamp}@rssfed.local`
@@ -344,7 +447,7 @@ async function main() {
     body: JSON.stringify({ email: TEMP_EMAIL_2, password: TEMP_PASSWORD, name: '时间线验证 B' })
   })
   if (!signUp2.ok) throw new Error(`注册第二个临时账号失败（HTTP ${signUp2.status}）：${await signUp2.text()}`)
-  const second = { userId: (await signUp2.json())?.user?.id ?? null, timelineDb: null, userStateDb: null }
+  const second = { userId: (await signUp2.json())?.user?.id ?? null, timelineDb: null }
   resources.accounts.push(second)
 
   // 小图 + 低质量：与第一个账号的默认值（1200px / q45）必然产出不同字节
@@ -359,11 +462,15 @@ async function main() {
     body: JSON.stringify({ opml })
   })
   const refresh2 = await session2.request('/api/timeline/refresh?wait=1', { method: 'POST' })
-  check('第二个账号的聚合在请求内跑完', refresh2.status === 200, `HTTP ${refresh2.status}`)
+  const refresh2Body = refresh2.ok ? await refresh2.json() : {}
+  check('第二个账号的聚合在请求内跑完', refresh2.status === 200, `HTTP ${refresh2.status} ${JSON.stringify(refresh2Body)}`)
+
+  const subs2 = await (await session2.request('/api/feeds/subscriptions')).json()
+  check('第二个账号的订阅落在自己的用户库里（改设置触发重建后也不该丢）',
+    subs2.some(s => s.feedId === subscription.feedId), `共 ${subs2.length} 条订阅`)
 
   const targets2 = await (await session2.request('/api/couchdb/sync-targets')).json()
   second.timelineDb = targets2?.timeline ?? null
-  second.userStateDb = targets2?.userState ?? null
   const ownDb = typeof second.timelineDb === 'string'
     && second.timelineDb.startsWith('user-timeline_')
     && second.timelineDb !== primary.timelineDb
@@ -390,6 +497,15 @@ async function main() {
   if (attachmentNames.length > 0) {
     const bytesA = await attachmentBytes(primary.timelineDb, ENTRY_ID)
     const bytesB = await attachmentBytes(second.timelineDb, ENTRY_ID)
+    if (!bytesA || !bytesB) {
+      // 失败时把两边的条目状态打出来：区分「条目没聚合出来」/「条目在但没附件」/「源图这次没下下来」
+      for (const [label, db] of [['A', primary.timelineDb], ['B', second.timelineDb]]) {
+        const doc = db ? await couch(`/${db}/${encodeURIComponent(ENTRY_ID)}`).catch(() => null) : null
+        const atts = Object.keys(doc?._attachments ?? {})
+        const images = (doc?.images ?? []).map(i => i.attachment ?? '(无附件)')
+        console.log(`  · 账号 ${label}：${doc ? `条目存在，_attachments=[${atts}]，images=${JSON.stringify(images)}` : '条目不存在'}`)
+      }
+    }
     check('两个账号都拿到了同一张图的附件', !!bytesA && !!bytesB, `A=${bytesA}B B=${bytesB}B`)
     check('附件按各自用户参数压缩（字节数不同，小图/低质量的更小）',
       !!bytesA && !!bytesB && bytesB < bytesA, `A=${bytesA}B → B=${bytesB}B`)
@@ -402,7 +518,7 @@ async function main() {
   check('临时账号已清理', accountRemoved, `共 ${resources.accounts.length} 个临时账号`)
 
   console.log(failures.length === 0
-    ? '\n全部通过：服务端聚合 → 派生库归属 → live 复制 → 删除跟随 → 按用户图片策略，链路行为符合设计。'
+    ? '\n全部通过：单库下发 → 聚合入库 → 拉取/回写两条通道 → 删除跟随 → 写方向闸门 → 按用户图片策略，链路行为符合设计。'
     : `\n失败 ${failures.length} 项：${failures.join('；')}`)
   process.exit(failures.length === 0 ? 0 : 1)
 }

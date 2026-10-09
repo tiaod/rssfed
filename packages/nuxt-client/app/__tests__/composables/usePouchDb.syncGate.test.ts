@@ -27,11 +27,21 @@ const H = vi.hoisted(() => ({
 
 vi.mock('pouchdb', () => {
   class FakePouchDb {
-    replicate = { from: (url: string) => makeTask(url) }
+    replicate = { from: (url: string) => makeTask(url), to: () => makePushHandle() }
     close = async () => {}
     destroy = async () => {}
     allDocs = async () => ({ rows: [] })
   }
+
+  /**
+   * 状态回写通道（push）不参与这些用例的断言：它们关心的都是拉取通道的生命周期与事件。
+   * 这里返回一个不记录的句柄，避免 H.tasks 里混进第二条任务、把 H.tasks[0] 的语义搞乱。
+   */
+  function makePushHandle() {
+    const handle = { on: () => handle, cancel: () => {}, removeListener: () => handle, then: () => handle }
+    return handle
+  }
+
   function makeTask(url: string) {
     const listeners = new Map<string, Set<(arg: unknown) => void>>()
     let cancelled = false
@@ -70,7 +80,7 @@ vi.mock('pouchdb', () => {
 vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
-  localDbName: (kind: string, uid: string | null) => `fake-${kind}-${uid ?? 'guest'}`,
+  localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []
@@ -78,7 +88,6 @@ vi.mock('~/utils/localDbName', () => ({
 
 vi.mock('~/composables/useCouchTargets', () => ({
   TIMELINE_ID: '__timeline__',
-  USER_STATE_ID: '__user_state__',
   useCouchTargets: () => ({
     remoteUrlForId: async (id: string) => (id === '__timeline__' ? 'http://remote.test/timeline' : null),
     invalidate: () => {}
@@ -120,7 +129,9 @@ beforeEach(() => {
   }
   Reflect.deleteProperty(sharedApp, '$pouchDbState')
   pouch = usePouchDb()
-  pouch.getUserStateDb()
+  // 单库方案下不再需要预先创建本地库：条目与状态同一个库，第一次真正用到时懒建。
+  // （若在这里先取库，会顺带挂上一条 live 复制，把「没有订阅/已暂停时不该挂复制」这类用例的
+  //  H.tasks 断言搅乱。）
 })
 
 describe('自动同步（syncFeedsIfChanged）', () => {
