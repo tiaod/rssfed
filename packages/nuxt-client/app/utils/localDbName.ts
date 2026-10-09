@@ -50,3 +50,32 @@ export const LEGACY_LOCAL_DB_NAMES = ['rssfed-entries', 'rssfed-user-state'] as 
  * （条目现在带按用户参数压缩的附件），所以一律丢弃而不是迁移。
  */
 export const LEGACY_LOCAL_DB_PREFIXES = ['rssfed-feed-', 'rssfed-entries'] as const
+
+/**
+ * PouchDB 在 IndexedDB 里的**实际**库名带 `_pouch_` 前缀，视图库还多一个 `-mrview-<hash>` 后缀。
+ *
+ * `PouchDB.allDbs()` 返回的就是这种实际名字，而 `LEGACY_LOCAL_DB_PREFIXES` 是**逻辑**名。
+ * 直接拿前缀去匹配实际名永远不命中 —— 旧条目库会一直躺在用户的浏览器里（实测
+ * `_pouch_rssfed-entries-<userId>` 升级后仍在）。所以匹配前先剥掉 `_pouch_`。
+ */
+export function stripPouchNamePrefix(raw: string): string {
+  return raw.startsWith('_pouch_') ? raw.slice('_pouch_'.length) : raw
+}
+
+/** 实际（IndexedDB）库名是否属于要清理的历史库；视图库后缀不影响判断 */
+export function isLegacyLocalDbName(raw: string): boolean {
+  const name = stripPouchNamePrefix(raw)
+  return LEGACY_LOCAL_DB_PREFIXES.some(prefix => name.startsWith(prefix))
+}
+
+/** 账号隔离之前用过的 localStorage 键前缀（旧版本会再拼一个 `-<userId>` 后缀） */
+export const LEGACY_LOCAL_STORAGE_PREFIXES = [
+  'rssfed-synced-feeds',
+  'rssfed-sync-retry',
+  'rssfed-sync-window'
+] as const
+
+/** 是否为要清理的历史 localStorage 键（含带账号后缀的形式） */
+export function isLegacyLocalStorageKey(key: string): boolean {
+  return LEGACY_LOCAL_STORAGE_PREFIXES.some(prefix => key === prefix || key.startsWith(`${prefix}-`))
+}

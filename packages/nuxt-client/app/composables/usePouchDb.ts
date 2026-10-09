@@ -8,7 +8,14 @@ import { useApi, type TimelineRefreshResult } from '~/composables/useApi'
 import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
 import { isStorageFailure } from '~/utils/storageFailure'
-import { localDbName, lastTimelineRefreshKey, LEGACY_LOCAL_DB_NAMES, LEGACY_LOCAL_DB_PREFIXES } from '~/utils/localDbName'
+import {
+  localDbName,
+  lastTimelineRefreshKey,
+  LEGACY_LOCAL_DB_NAMES,
+  isLegacyLocalDbName,
+  isLegacyLocalStorageKey,
+  stripPouchNamePrefix
+} from '~/utils/localDbName'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 import { isListView, type ListView } from '~/utils/listViews'
 
@@ -306,6 +313,51 @@ const REPLICATE_BATCH_SIZE = 20
  */
 const PRIORITY_SYNC_WAIT_MS = 5000
 
+/**
+ * 删除历史遗留的本地库（迁移一次性动作）。
+ *
+ * 优先用 **IndexedDB 原生 API**：`indexedDB.databases()` 给出的就是实际库名，删的时候不需要任何
+ * 名字映射。走 PouchDB 会踩到一层映射：`allDbs()` 返回带 `_pouch_` 前缀的实际名，而 `destroy(name)`
+ * 又会自己再加一次前缀 —— 早期版本直接拿「逻辑名前缀」去匹配实际名，结果一个旧库都删不掉
+ * （实测 `_pouch_rssfed-entries-<userId>` 升级后一直留着，白占几百 MB）。
+ *
+ * `indexedDB.databases()` 目前只有 Chromium 系支持，其它浏览器回退到 PouchDB 路径（名字剥前缀）。
+ * `onblocked`（还有别的标签页开着旧库）时放弃这一个，不拖住整轮清理。
+ */
+async function destroyLegacyLocalDbs(): Promise<void> {
+  const idb = globalThis.indexedDB as (IDBFactory & { databases?: () => Promise<{ name?: string }[]> }) | undefined
+  const timeout = new Promise<void>(resolve => setTimeout(resolve, 3000))
+  try {
+    if (idb && typeof idb.databases === 'function') {
+      const names = (await idb.databases()).map(db => db.name).filter((name): name is string => !!name)
+      const legacy = names.filter(isLegacyLocalDbName)
+      await Promise.race([
+        Promise.all(legacy.map(name => new Promise<void>((resolve) => {
+          const req = idb.deleteDatabase(name)
+          req.onsuccess = () => resolve()
+          req.onerror = () => resolve()
+          req.onblocked = () => resolve()
+        }))),
+        timeout
+      ])
+      return
+    }
+    // 回退：PouchDB 的静态方法（allDbs / destroy）不在类型定义里，按实际签名断言
+    const pouchStatic = PouchDB as unknown as {
+      allDbs: () => Promise<string[]>
+      destroy: (name: string) => Promise<void>
+    }
+    const dbs: string[] = await pouchStatic.allDbs()
+    const legacy = dbs.filter(isLegacyLocalDbName)
+    await Promise.race([
+      Promise.all(legacy.map(name => pouchStatic.destroy(stripPouchNamePrefix(name)).catch(() => {}))),
+      timeout
+    ])
+  } catch {
+    // 删库失败不影响主流程（旧库残留只是占磁盘）
+  }
+}
+
 /** 构造共享状态（usePouchDb 与 usePouchSyncStatus 共用同一份结构） */
 function createPouchState(): PouchDbState {
   return {
@@ -511,34 +563,26 @@ export function usePouchDb() {
    */
   async function cleanupLegacyDbs() {
     try {
-      // v3：服务端聚合架构的迁移标记（与 v1 per-feed / v2 集中库区分，各迁移一次）
-      if (!localStorage.getItem('rssfed-central-migrated-v3')) {
+      // v4：服务端聚合架构的迁移标记（与 v1 per-feed / v2 集中库区分，各迁移一次）。
+      // 为什么是 v4 而不是 v3：v3 那版按前缀匹配 `allDbs()` 的实际库名（带 `_pouch_` 前缀），
+      // 一个都没删掉，凡是已经打过 v3 标记的浏览器就再也不会清理旧条目库了 —— 必须换新标记重跑一次。
+      if (!localStorage.getItem('rssfed-central-migrated-v4')) {
         try {
-          // 旧增量记录（水位表 / 退避表 / 窗口锚点）已不再使用，清掉免得占着 localStorage
-          localStorage.removeItem('rssfed-synced-feeds')
-          localStorage.removeItem('rssfed-sync-retry')
-          localStorage.removeItem('rssfed-sync-window')
+          // 旧增量记录（水位表 / 退避表 / 窗口锚点）已不再使用，清掉免得占着 localStorage。
+          // 旧版本会再拼一个 `-<userId>` 后缀（每账号一份），所以按前缀扫全部键，
+          // 不能只 removeItem 那三个不带后缀的名字 —— 那样一个都清不掉。
+          const stale: string[] = []
+          for (let i = 0; i < localStorage.length; i++) {
+            const key = localStorage.key(i)
+            if (key && isLegacyLocalStorageKey(key)) stale.push(key)
+          }
+          for (const key of stale) localStorage.removeItem(key)
         } catch {
           // localStorage 不可用时忽略
         }
         // 删除旧库（限时 3 秒，超时放弃）
-        try {
-          // PouchDB 的静态方法（allDbs / destroy）不在类型定义里，这里按实际签名断言
-          const pouchStatic = PouchDB as unknown as {
-            allDbs: () => Promise<string[]>
-            destroy: (name: string) => Promise<void>
-          }
-          const dbs: string[] = await pouchStatic.allDbs()
-          const legacy = dbs.filter(name =>
-            LEGACY_LOCAL_DB_PREFIXES.some(prefix => name.startsWith(prefix)))
-          await Promise.race([
-            Promise.all(legacy.map(name => pouchStatic.destroy(name).catch(() => {}))),
-            new Promise(resolve => setTimeout(resolve, 3000))
-          ])
-        } catch {
-          // 删库失败不影响主流程
-        }
-        localStorage.setItem('rssfed-central-migrated-v3', '1')
+        await destroyLegacyLocalDbs()
+        localStorage.setItem('rssfed-central-migrated-v4', '1')
       }
 
       // 账号隔离前的固定库名：无条件清理（库不存在时 destroy 会报错，忽略即可）

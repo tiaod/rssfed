@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LEGACY_LOCAL_DB_NAMES, LEGACY_LOCAL_DB_PREFIXES, lastTimelineRefreshKey, localDbName } from '~/utils/localDbName'
+import { LEGACY_LOCAL_DB_NAMES, LEGACY_LOCAL_DB_PREFIXES, lastTimelineRefreshKey, localDbName, isLegacyLocalDbName, isLegacyLocalStorageKey, stripPouchNamePrefix } from '~/utils/localDbName'
 
 describe('localDbName', () => {
   it('按账号隔离：不同账号的本地库名不同', () => {
@@ -41,5 +41,39 @@ describe('lastTimelineRefreshKey', () => {
     expect(lastTimelineRefreshKey('user-a')).toBe('rssfed-timeline-refresh-user-a')
     expect(lastTimelineRefreshKey('user-a')).not.toBe(lastTimelineRefreshKey('user-b'))
     expect(lastTimelineRefreshKey(null)).toBe('rssfed-timeline-refresh-guest')
+  })
+})
+
+describe('历史本地库 / localStorage 键的匹配', () => {
+  it('PouchDB 实际库名带 _pouch_ 前缀也能命中（升级后旧条目库确实长这样）', () => {
+    expect(isLegacyLocalDbName('_pouch_rssfed-entries-2RGBxIeXa')).toBe(true)
+    expect(isLegacyLocalDbName('_pouch_rssfed-feed-abc123')).toBe(true)
+    expect(isLegacyLocalDbName('_pouch_rssfed-entries-2RGBxIeXa-mrview-1312fe8d')).toBe(true)
+  })
+
+  it('逻辑名（无前缀）同样命中，当前在用的两个库不命中', () => {
+    expect(isLegacyLocalDbName('rssfed-entries')).toBe(true)
+    expect(isLegacyLocalDbName('rssfed-feed-x')).toBe(true)
+    expect(isLegacyLocalDbName('_pouch_rssfed-timeline-2RGBxIeXa')).toBe(false)
+    expect(isLegacyLocalDbName('_pouch_rssfed-user-state-2RGBxIeXa')).toBe(false)
+    expect(isLegacyLocalDbName('_pouch_rssfed-timeline-2RGBxIeXa-mrview-abc')).toBe(false)
+  })
+
+  it('销毁前剥掉 _pouch_ 前缀（PouchDB.destroy 会自己再加回来）', () => {
+    expect(stripPouchNamePrefix('_pouch_rssfed-entries-x')).toBe('rssfed-entries-x')
+    expect(stripPouchNamePrefix('rssfed-entries-x')).toBe('rssfed-entries-x')
+  })
+
+  it('旧 localStorage 键按前缀匹配，带账号后缀的也要清', () => {
+    expect(isLegacyLocalStorageKey('rssfed-synced-feeds')).toBe(true)
+    expect(isLegacyLocalStorageKey('rssfed-synced-feeds-2RGBxIeXa')).toBe(true)
+    expect(isLegacyLocalStorageKey('rssfed-sync-window-2RGBxIeXa')).toBe(true)
+  })
+
+  it('当前在用的键不能被误删', () => {
+    expect(isLegacyLocalStorageKey('rssfed-central-migrated-v4')).toBe(false)
+    expect(isLegacyLocalStorageKey('rssfed-timeline-refresh-2RGBxIeXa')).toBe(false)
+    // 前缀相同但不是一个键族（少了分隔符）时不能误判
+    expect(isLegacyLocalStorageKey('rssfed-synced-feedsX')).toBe(false)
   })
 })
