@@ -19,11 +19,9 @@ export const user = pgTable("user", {
   banned: boolean("banned").default(false),
   banReason: text("ban_reason"),
   banExpires: timestamp("ban_expires"),
-  /** 关联的 CouchDB 用户状态库名（首次 ensure 时生成随机库名并回写） */
-  couchDbName: text("couch_db_name").unique(),
   /**
-   * 关联的 CouchDB 用户时间线库名（服务端聚合的派生库，首次 ensure 时生成随机库名并回写）。
-   * 单开一列而不是复用 couchDbName：一个用户同时有两个库，且两个库名都是随机的、互不可推导。
+   * 关联的 CouchDB 用户库名（一个用户一个库：服务端聚合的条目 + 用户自己的订阅/已读收藏）。
+   * 首次 ensure 时生成随机库名并回写。
    *
    * **故意不加 `.unique()`**（与上面两列不同）：给已有数据的表新加唯一约束时，`drizzle-kit push`
    * 会问「是否 truncate 表」，而生产 migrate 跑的是 `push --force`（自动批准数据丢失语句）——

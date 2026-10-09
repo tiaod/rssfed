@@ -5,12 +5,8 @@ import {
   couchUrl,
   proxySecret,
   isProxyableDbName,
-  ensureFeedDatabase,
-  ensureUserStateDatabase,
   ensureTimelineDatabase,
-  ensureBotDatabase,
 } from "../couchdb/client"
-import { listSubscriptionsForUser } from "../services/feeds"
 import { auth } from "../auth"
 
 /** 中间件写入的请求级变量 */
@@ -35,15 +31,16 @@ export const couchdbRouter = new Hono<{ Variables: Variables }>()
  *   <method> /api/couchdb/proxy/<库名>/<库内路径>?<query>
  *     → {COUCHDB_URL}/<库名>/<库内路径>?<query>
  *
- * 库名由 GET /api/couchdb/targets 下发，那是「业务 id → 库名」的唯一权威来源 ——
- * 库名是随机生成并持久化在业务表（feeds / bots / user 的 couch_db_name 列）上的，
+ * 库名由 GET /api/couchdb/sync-targets 下发，那是「业务 id → 库名」的唯一权威来源 ——
+ * 库名是随机生成并持久化在业务表（feeds / bots 的 couch_db_name、user 的 timeline_db_name 列）上的，
  * 不能由业务 id 推导，所以只能先取库名再用库名拼代理地址。
  *
  * 代理侧因此只剩两件事：认证（补 Proxy Auth 签名头）与转发；至于「谁有权读哪个库」，
- * 仍由 CouchDB 的库级 _security 兜底（用户状态库限本人 names，feed/bot 库放行 user 角色）。
+ * 仍由 CouchDB 的库级 _security 兜底（用户库限本人 names，feed/bot 库放行 user 角色），
+ * 「谁能写哪类文档」再由用户库的 validate_doc_update 兜底。
  */
 
-// 认证中间件：targets 与代理都需要登录态
+// 认证中间件：sync-targets 与代理都需要登录态
 couchdbRouter.use("/*", async (c: Context<{ Variables: Variables }>, next: Next) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
@@ -52,55 +49,23 @@ couchdbRouter.use("/*", async (c: Context<{ Variables: Variables }>, next: Next)
 })
 
 /**
- * 代理寻址信息（**旧版**：每个订阅源一个库）。
+ * 代理寻址信息（同步面收敛成**一个**库）。
  *
- *   { userState: "user-state_xxx", feeds: { <feedId>: "feed_xxx" }, bots: { <botId>: "bot_xxx" } }
+ *   { timeline: "user-timeline_xxx" }
  *
- * 服务端聚合改造后浏览器不再逐源同步，新版客户端改用 `GET /sync-targets`。
- * 这个端点**保留**是为了让缓存了旧前端的 PWA（Service Worker 里的旧 shell 会继续跑一段时间）
- * 不至于整体失效：旧客户端拿不到 feed 库名会把每个源标成同步失败，用户看到的是「一片红」。
- * 等旧前端淘汰后可以连同 `feeds`/`bots` 一起删掉。
+ * 每个用户只有一个库，里面既有服务端聚合出来的条目（`entry:*` / `feed:*`），
+ * 也有客户端自己写的订阅与已读收藏（`subscription:*` / `entry-state:*`）——
+ * 写方向的边界由库里的 validate_doc_update 兜底（见 couchdb/client.ts 的 TIMELINE_DESIGN_DOC），
+ * 所以浏览器可以对同一个库做**一条双向 live sync**：
+ *   - 往上的只有状态文档（客户端手上没有远端缺失的 entry 修订可推）；
+ *   - 往下的条目与附件照旧是服务端算好的结果。
  *
- * 顺带 ensure 一次：订阅是刚建立时库可能还不存在，先把库建好，前端不必关心建库时机。
- * 已有库名的都是纯读（见 couchdb/client.ts 的 resolveDatabase），所以这个接口对老订阅几乎零成本。
- */
-couchdbRouter.get("/targets", async (c) => {
-  const userId = c.get("userId")
-  const subscriptions = await listSubscriptionsForUser(userId)
-
-  const feeds: Record<string, string> = {}
-  const bots: Record<string, string> = {}
-  await Promise.all(
-    subscriptions.map(async (sub) => {
-      if (sub.kind === "bot") {
-        // 订阅文档里 bot 的 feedId 形如 `bot:<botId>`
-        const botId = String(sub.feedId).replace(/^bot:/, "")
-        if (botId) bots[botId] = await ensureBotDatabase(botId)
-        return
-      }
-      feeds[sub.feedId] = await ensureFeedDatabase(sub.feedId)
-    }),
-  )
-
-  return c.json({ userState: await ensureUserStateDatabase(userId), feeds, bots })
-})
-
-/**
- * 代理寻址信息（**新版**：同步面收敛成两个库）。
- *
- *   { userState: "user-state_xxx", timeline: "user-timeline_xxx" }
- *
- * 浏览器现在只做两件事：单向 live 复制 timeline 库（服务端聚合好的条目）、
- * 双向同步 userState 库（订阅关系与已读/收藏）。这里**不再** ensure 每个 feed 库 ——
- * 那曾是这个接口最重的一部分（订阅源上百个就是上百次库名查询）。
+ * 这里**不再** ensure 每个 feed 库 —— 那个接口曾经最重的部分（订阅源上百个就是上百次库名查询）
+ * 随逐源同步一起删掉了；旧版 `GET /targets` 也已删除（项目未发布，没有需要兼容的老前端）。
  */
 couchdbRouter.get("/sync-targets", async (c) => {
   const userId = c.get("userId")
-  const [userState, timeline] = await Promise.all([
-    ensureUserStateDatabase(userId),
-    ensureTimelineDatabase(userId),
-  ])
-  return c.json({ userState, timeline })
+  return c.json({ timeline: await ensureTimelineDatabase(userId) })
 })
 
 /**

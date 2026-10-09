@@ -2,7 +2,7 @@ import crypto from "node:crypto"
 import { eq, inArray } from "drizzle-orm"
 import { parseFeedUrl, formatFeedError, type ParsedFeed } from "../rss/parser"
 import type { OpmlFeed } from "../rss/opml"
-import { createCouchDb, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
+import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
 import { db, feeds, bots } from "../db"
 import { enqueueFetch } from "../workers"
 
@@ -128,14 +128,14 @@ export async function addSubscriptionIfAbsent(
 export async function addSubscriptionByUrl(userId: string, url: string, category?: string) {
   const item: OpmlFeed = { title: url, url, category }
   const meta = await ensureFeedRegistered(item)
-  const userDb = createCouchDb(await ensureUserStateDatabase(userId))
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   const added = await addSubscriptionIfAbsent(userDb, item, meta)
   return { feedId: meta.feedId, title: meta.title, added }
 }
 
 /** 读取当前用户已订阅的 feedId 集合（用于归属校验，避免全量读文档） */
 export async function getSubscribedFeedIds(userId: string): Promise<Set<string>> {
-  const userDb = createCouchDb(await ensureUserStateDatabase(userId))
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   const { rows } = await userDb.list({
     startkey: "subscription:",
     endkey: "subscription:\uffff",
@@ -149,11 +149,11 @@ export async function getSubscribedFeedIds(userId: string): Promise<Set<string>>
 }
 
 /**
- * 删除当前用户的某个订阅（CouchDB user-state 库的 subscription 文档）。
+ * 删除当前用户的某个订阅（用户库里的 subscription 文档）。
  * @returns true=已删除，false=未找到该订阅
  */
 export async function removeSubscription(userId: string, feedId: string): Promise<boolean> {
-  const userDb = createCouchDb(await ensureUserStateDatabase(userId))
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   const docId = `subscription:${feedId}`
   try {
     const doc = await userDb.get(docId) as { _id: string, _rev: string }
@@ -214,7 +214,7 @@ export async function refetchFeed(userId: string, feedId: string): Promise<boole
 
 /** 当前用户订阅列表（feed + bot），合并注册表抓取状态（active/paused/error） */
 export async function listSubscriptionsForUser(userId: string) {
-  const userDb = createCouchDb(await ensureUserStateDatabase(userId))
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   const { rows } = await userDb.list({
     startkey: "subscription:",
     endkey: "subscription:\uffff",

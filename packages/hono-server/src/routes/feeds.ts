@@ -2,7 +2,7 @@ import { Hono, type Context, type Next } from "hono"
 import { eq } from "drizzle-orm"
 import { parseFeedUrl, formatFeedError, type ParsedFeed } from "../rss/parser"
 import { parseOpml, type OpmlFeed } from "../rss/opml"
-import { createCouchDb, ensureFeedDatabase, ensureUserStateDatabase } from "../couchdb/client"
+import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
 import { db, feeds } from "../db"
 import { enqueueFetch } from "../workers"
 import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
@@ -92,7 +92,7 @@ feedsRouter.post("/import-opml", requireAuth, async (c) => {
   // 2. 按 URL 去重（同一订阅源可能在文件中出现多次）
   const unique = [...new Map(items.map((i) => [i.url, i])).values()]
 
-  const userDb = createCouchDb(await ensureUserStateDatabase(userId))
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   const failed: { url: string, error: string }[] = []
   let imported = 0
   let skipped = 0

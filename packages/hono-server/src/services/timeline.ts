@@ -6,7 +6,6 @@ import {
   ensureBotDatabase,
   ensureFeedDatabase,
   ensureTimelineDatabase,
-  ensureUserStateDatabase,
   nanoServer,
 } from "../couchdb/client"
 import { DEFAULT_IMAGE_OPTIONS, cacheEntryImages, type EntryImageOptions, type ImageAttachment } from "../rss/entry-images"
@@ -15,14 +14,14 @@ import { DEFAULT_IMAGE_OPTIONS, cacheEntryImages, type EntryImageOptions, type I
  * 用户时间线聚合服务：把用户订阅的 feed / bot 增量聚合进他自己的 CouchDB 派生库。
  *
  * 为什么是「拉」而不是在抓取时扇出：
- *   订阅关系**只**存在于各用户的 user-state 库（客户端离线也能改，见 ARCHITECTURE.md），
+ *   订阅关系**只**存在于各用户的用户库（客户端离线也能改，见 ARCHITECTURE.md），
  *   PostgreSQL 里没有「谁订阅了什么」的表。抓取时扇出就得先引入这样一张索引表（或监听
- *   每个 user-state 库的 _changes）才能知道该推给谁；而按用户拉只需要读他自己的订阅列表，
+ *   每个用户库的 _changes）才能知道该推给谁；而按用户拉只需要读他自己的订阅列表，
  *   与既有代码（listSubscriptionsForUser）同源，没有额外状态需要维护。
  *
  * 成本闸门全在「一条 SQL」上：只有该用户订阅的源里 `lastNewEntryAt > 自己的游标` 的那些
  * 才会去碰 CouchDB（见 changedSourceIds）。没有新内容的用户，整轮 reconcile 只有
- * 1 次 user-state 库读取 + 1 次用户时间线库的状态文档读取。
+ * 1 次用户库读取（订阅）+ 1 次同一库里的状态文档读取。
  *
  * 触发方：定时任务（workers/timeline.ts，默认 5 分钟）+ 客户端主动刷新
  * （POST /api/timeline/refresh，订阅/退订后调用）。
@@ -140,7 +139,7 @@ export async function getTimelineSettings(userId: string): Promise<TimelineSetti
  *
  * 只改窗口不需要重建：窗口是「回填/剪枝」的边界，由 reconcile 自己处理（缩小剪枝、
  * 放大回填）。改图片参数必须重建 —— 已聚合条目的附件是按旧参数压的，逐条重压不如
- * 直接把派生库丢掉重算（库名置空 + 下次 reconcile 全量回填，见 rebuildUserTimeline）。
+ * 把服务端写的条目/源元信息整体删掉再全量回填（见 rebuildUserTimeline；用户状态文档不动）。
  */
 export async function updateTimelineSettings(
   userId: string,
@@ -186,9 +185,9 @@ export interface TimelineSource {
   kind: "feed" | "bot"
 }
 
-/** 读取用户的订阅源集合（只读 user-state 库的 subscription 文档，不查 PG 注册表） */
+/** 读取用户的订阅源集合（只读用户库的 subscription 文档，不查 PG 注册表） */
 export async function listSubscriptionSources(userId: string): Promise<TimelineSource[]> {
-  const userDb = createCouchDb(await ensureUserStateDatabase(userId))
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   const { rows } = await userDb.list({
     startkey: "subscription:",
     endkey: "subscription:\uffff",
@@ -731,16 +730,24 @@ async function deleteDocsByIds(scope: DocumentScope<unknown>, ids: string[]): Pr
 }
 
 /**
- * 重建用户的派生库：删库 + 清库名 + 全量回填。
+ * 重建用户的派生内容：删掉**服务端独占写**的文档（`entry:` / `feed:`）+ 全量回填。
  *
- * 走「删库」而不是逐条重压：派生库里的内容全部可以从 feed/bot 库重算，
- * 图片压缩又有内容寻址缓存兜着（同参数不会重新压），所以重建是廉价且一定能收敛的动作。
+ * 为什么是「就地删文档」而不是「删库重建」：合并成单库之后，这个库里还装着用户自己写的
+ * 状态文档（订阅、已读收藏、分组偏好）。删库会把它们一起抹掉 —— 订阅关系是用户意图，
+ * 丢了就是「重建一次设置，订阅全没了」，而且客户端手上那份还会因为远端消失而失去同步对象。
+ * 库名不变还有一个好处：客户端的 live 复制不必因为一次设置改动而重新取库名。
+ *
+ * 可以就地删是因为派生内容全部能从 feed/bot 库重算，图片压缩又有内容寻址缓存兜着
+ * （同参数不会重新压），所以重建是廉价且一定能收敛的动作。
+ *
+ * 删除按前缀范围走（`entry:` 与 `feed:`）：`entry-state:` 在字典序上小于 `entry:`（'-' < ':'），
+ * 不会被这个范围碰到，状态文档天然安全。
  */
 export async function rebuildUserTimeline(userId: string): Promise<TimelineReconcileResult> {
   const dbName = await ensureTimelineDatabase(userId)
-  await nanoServer.db.destroy(dbName)
-  // 库名置空：下次 ensure 会生成新库名并重装维护视图（库名是随机的，不复用已删库的名字）
-  await db.update(user).set({ timelineDbName: null }).where(eq(user.id, userId))
+  const scope = createCouchDb(dbName)
+  await deleteByPrefix(scope, "entry:", "entry:\uffff")
+  await deleteByPrefix(scope, "feed:", "feed:\uffff")
   return await reconcileUserTimeline(userId, { backfill: true })
 }
 

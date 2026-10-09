@@ -20,16 +20,9 @@ vi.mock("../couchdb/client", async (importOriginal) => {
     ...actual,
     ensureFeedDatabase: async (feedId: string) => `feed_${feedId}`,
     ensureBotDatabase: async (botId: string) => `bot_${botId}`,
-    ensureUserStateDatabase: async (userId: string) => `user-state_${userId}`,
+    ensureTimelineDatabase: async (userId: string) => `user-timeline_${userId}`,
   }
 })
-
-vi.mock("../services/feeds", () => ({
-  listSubscriptionsForUser: async () => [
-    { feedId: "f1", kind: "feed" },
-    { feedId: "bot:b1", kind: "bot" },
-  ],
-}))
 
 const { app } = await import("../app")
 const { couchUrl } = await import("../couchdb/client")
@@ -164,24 +157,26 @@ describe("CouchDB 代理：PouchDB 实例 uuid 探测", () => {
   })
 })
 
-describe("GET /api/couchdb/targets", () => {
-  it("下发用户状态库与各订阅库的真实库名（含 bot）", async () => {
-    const res = await app.request("/api/couchdb/targets")
+describe("GET /api/couchdb/sync-targets", () => {
+  it("只下发一个库：合并后的用户库（订阅与条目同库）", async () => {
+    const res = await app.request("/api/couchdb/sync-targets")
 
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({
-      userState: "user-state_test-user",
-      feeds: { f1: "feed_f1" },
-      bots: { b1: "bot_b1" },
-    })
+    expect(await res.json()).toEqual({ timeline: "user-timeline_test-user" })
   })
 
   it("未登录返回 401", async () => {
     state.session = null
 
-    const res = await app.request("/api/couchdb/targets")
+    const res = await app.request("/api/couchdb/sync-targets")
 
     expect(res.status).toBe(401)
+  })
+
+  it("旧版 /targets（逐源下发库名）已经删除，不再消耗订阅查询", async () => {
+    const res = await app.request("/api/couchdb/targets")
+
+    expect(res.status).toBe(404)
   })
 })
 
