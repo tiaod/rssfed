@@ -168,8 +168,14 @@ services:
     # （源码 internal/docker/compose_deploy.go: service.Build），只要存在 build 段，
     # 它就会在 2G 内存的生产机上尝试构建 Nuxt → OOM。生产镜像一律来自 CI。
     image: ghcr.io/tiaod/rssfed/migrate:${IMAGE_TAG:-latest}
+    # CouchDB 那三项是给一次性运维脚本用的（scripts/*.ts 会连 CouchDB），
+    # 例如合并用户库时的 `run --rm migrate pnpm exec tsx scripts/merge-user-state-into-timeline.ts`；
+    # push 本身只用 DATABASE_URL。不写 depends_on: couchdb —— compose 的托管依赖变体会删掉该服务。
     environment:
       DATABASE_URL: ${DATABASE_URL:-postgresql://rssfed:${POSTGRES_PASSWORD}@postgres:5432/rssfed}
+      COUCHDB_URL: ${COUCHDB_URL:-http://couchdb:5984}
+      COUCHDB_USER: ${COUCHDB_USER:-admin}
+      COUCHDB_PASSWORD: ${COUCHDB_PASSWORD:?未设置 COUCHDB_PASSWORD，请先准备 .env.production}
     depends_on:
       postgres:
         condition: service_healthy
