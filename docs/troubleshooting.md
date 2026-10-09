@@ -103,8 +103,9 @@
 ### 图片接口返回 502 `image_unavailable`
 
 - **现象**：`GET /api/images/cached?url=…&w=…&q=…` 返回 502，响应体 `{"error":"image_unavailable","reason":…}`。
-- **原因**：按 `reason` 区分：`private_host`（源图是内网/回环地址，被 `isPrivateHost` 挡掉，防 SSRF）、`too_large`（源图超过 `maxSourceImageBytes`）、`fetch_failed` / `unsupported_format`（源站不可达或不是可解码的图片）。聚合时遇到这类失败**只记数不阻塞**（`imageFailures`），条目照常入库、只是没有附件。
-- **解法**：先直接 `curl -I <源图 URL>` 确认可达；内网图床需要显式放开（见 `images/fetch.ts` 的白名单开关），大图调大 `MAX_SOURCE_IMAGE_BYTES` 或该用户的 per-user 上限。同一张图 + 同一组参数只会失败一次（结果也进内存缓存），不会反复重试拖慢聚合。
+- **原因**：看 `reason`（取值见 `images/fetch.ts` 的 `ImageFailReason`）——`invalid-url`（URL 不合法，或**公网接口**拿到内网/回环地址被 `isPrivateHost` 挡掉，防 SSRF）、`http-status`（403 防盗链 / 404 / 5xx）、`content-type`（返回的不是图片）、`too-large`（源图超过 `maxSourceImageBytes`）、`timeout` / `network`（连不上或读取超时）、`redirect-limit`（跳转超过 3 次）、`decode`（sharp 解不出来）。聚合时这类失败**只记数不阻塞**（`imageFailures`），条目照常入库、只是没有附件。
+- **注意**：`invalid-url` 有两种来源（URL 本身非法 vs. 内网地址被拒），响应里不区分；本地 dev 用内网图床调试时要在调用侧显式 `allowPrivateHosts`（见 `images/cache.ts` 的依赖注入），抓取路径与公网接口的默认值不同。
+- **解法**：先直接 `curl -I <源图 URL>` 确认可达；大图调大 `MAX_SOURCE_IMAGE_BYTES` 或该用户的 per-user 上限。同一张图 + 同一组参数只会失败一次（结果也进内存缓存），不会反复重试拖慢聚合。
 
 ### 同步全报 `Database does not exist`：库名还登记着，库却没了
 

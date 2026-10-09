@@ -12,7 +12,8 @@
  *   ③ 客户端 live 复制能在**不重启复制**的情况下拿到服务端后来写入的条目 ——
  *      这是「服务端一有新内容，浏览器几秒内自动看到」的全部依据；
  *   ④ 源库里的条目被删除后，客户端也删掉本地副本（退订 / 窗口收窄的语义：本地跟随服务端）；
- *   ⑤ 未登录访问代理被拒（401）。
+ *   ⑤ 未登录访问代理被拒（401）；
+ *   ⑥ 同一张图在两个用户下压出的附件**不同**（图片参数是按用户生效的，不是一个全局值）。
  *
  * 用法：
  *   node scripts/verify-timeline-sync.mjs
@@ -57,7 +58,14 @@ const localPath = path.join(process.cwd(), `.tmp-verify-timeline-${stamp}`)
  * 结束时要回收的东西。放模块级是为了让异常路径也能清干净 —— 之前只在正常路径里清理，
  * 一次中途失败（探针异常）就在 dev 库里留下临时用户 + 两个空库 + 一行 feeds。
  */
-const resources = { userId: null, timelineDb: null, userStateDb: null, feedDbName: null, feedId: null, local: null, replication: null }
+const resources = {
+  /** 依次创建的所有临时账号及其派生库（每项 { userId, timelineDb, userStateDb }） */
+  accounts: [],
+  feedDbName: null,
+  feedId: null,
+  local: null,
+  replication: null
+}
 
 /** 尽力而为地回收：每一步独立 catch，一个失败不影响其它步骤 */
 async function cleanup() {
@@ -69,11 +77,13 @@ async function cleanup() {
   try {
     await resources.local?.destroy()
   } catch { ignore() }
-  for (const name of [resources.timelineDb, resources.userStateDb]) {
-    if (!name) continue
-    try {
-      await couch(`/${name}`, { method: 'DELETE' })
-    } catch { ignore() }
+  for (const account of resources.accounts) {
+    for (const name of [account.timelineDb, account.userStateDb]) {
+      if (!name) continue
+      try {
+        await couch(`/${name}`, { method: 'DELETE' })
+      } catch { ignore() }
+    }
   }
   // 探针源库留着（见文件头说明），但把探针条目清掉：下次运行从干净状态开始，图片附件也一并消失
   if (resources.feedDbName && resources.feedId) {
@@ -87,7 +97,7 @@ async function cleanup() {
       } catch { ignore() }
     }
   }
-  if (!resources.userId) return true
+  if (resources.accounts.length === 0) return true
   try {
     const admin = makeSession()
     const login = await admin.request('/api/auth/sign-in/email', {
@@ -95,11 +105,16 @@ async function cleanup() {
       body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD })
     })
     if (!login.ok) return false
-    const removed = await admin.request('/api/auth/admin/remove-user', {
-      method: 'POST',
-      body: JSON.stringify({ userId: resources.userId })
-    })
-    return removed.ok
+    let allRemoved = true
+    for (const account of resources.accounts) {
+      if (!account.userId) continue
+      const removed = await admin.request('/api/auth/admin/remove-user', {
+        method: 'POST',
+        body: JSON.stringify({ userId: account.userId })
+      })
+      if (!removed.ok) allRemoved = false
+    }
+    return allRemoved
   } catch {
     return false
   }
@@ -191,7 +206,8 @@ async function main() {
   if (!signUp.ok) throw new Error(`注册临时账号失败（HTTP ${signUp.status}）：${await signUp.text()}`)
   const signedUp = await signUp.json()
   const userId = signedUp?.user?.id
-  resources.userId = userId ?? null
+  const primary = { userId: userId ?? null, timelineDb: null, userStateDb: null }
+  resources.accounts.push(primary)
   check('临时账号注册成功并拿到登录态', !!userId && !!session.cookie, `userId=${userId}`)
 
   // ── 1. 订阅一个探针源（不会真的抓取：端口 9 无人监听） ──
@@ -241,8 +257,8 @@ async function main() {
   // ── 4. 派生库：命名、归属、_security ──
   const syncTargets = await (await session.request('/api/couchdb/sync-targets')).json()
   const timelineDb = syncTargets?.timeline
-  resources.timelineDb = timelineDb ?? null
-  resources.userStateDb = syncTargets?.userState ?? null
+  primary.timelineDb = timelineDb ?? null
+  primary.userStateDb = syncTargets?.userState ?? null
   check('sync-targets 下发的是按用户的时间线库', typeof timelineDb === 'string' && timelineDb.startsWith('user-timeline_'), String(timelineDb))
 
   const security = await couch(`/${timelineDb}/_security`)
@@ -320,12 +336,73 @@ async function main() {
   const anonymous = await fetch(`${proxyUrl}/_all_docs`)
   check('未登录访问派生库被拒（401）', anonymous.status === 401, `HTTP ${anonymous.status}`)
 
-  // ── 清理：本地库 + 三个远端库 + 临时账号（探针源库也一并销毁，避免 dev 里堆空库） ──
+  // ── 9. 同一张图 + 不同用户参数 → 附件必须不同（图片策略是按用户生效的，不是一个全局值） ──
+  const session2 = makeSession()
+  const TEMP_EMAIL_2 = `verify-timeline-b-${stamp}@rssfed.local`
+  const signUp2 = await session2.request('/api/auth/sign-up/email', {
+    method: 'POST',
+    body: JSON.stringify({ email: TEMP_EMAIL_2, password: TEMP_PASSWORD, name: '时间线验证 B' })
+  })
+  if (!signUp2.ok) throw new Error(`注册第二个临时账号失败（HTTP ${signUp2.status}）：${await signUp2.text()}`)
+  const second = { userId: (await signUp2.json())?.user?.id ?? null, timelineDb: null, userStateDb: null }
+  resources.accounts.push(second)
+
+  // 小图 + 低质量：与第一个账号的默认值（1200px / q45）必然产出不同字节
+  const patched = await session2.request('/api/timeline/settings', {
+    method: 'PATCH',
+    body: JSON.stringify({ maxImageWidth: 64, avifQuality: 30 })
+  })
+  check('第二个账号的时间线设置可改（PATCH 生效）', patched.ok, `HTTP ${patched.status}`)
+
+  await session2.request('/api/feeds/import-opml', {
+    method: 'POST',
+    body: JSON.stringify({ opml })
+  })
+  const refresh2 = await session2.request('/api/timeline/refresh?wait=1', { method: 'POST' })
+  check('第二个账号的聚合在请求内跑完', refresh2.status === 200, `HTTP ${refresh2.status}`)
+
+  const targets2 = await (await session2.request('/api/couchdb/sync-targets')).json()
+  second.timelineDb = targets2?.timeline ?? null
+  second.userStateDb = targets2?.userState ?? null
+  const ownDb = typeof second.timelineDb === 'string'
+    && second.timelineDb.startsWith('user-timeline_')
+    && second.timelineDb !== primary.timelineDb
+  check('第二个账号拿到自己的派生库', ownDb, String(second.timelineDb))
+
+  /**
+   * 取派生库里某条目附件的**字节数**。
+   *
+   * 附件本体必须走 `/db/doc/att` 这个端点：`?attachments=true` 在 CouchDB 3.5 上对带附件的文档
+   * 返回 `multipart/related`（不是 JSON），`?atts=true` 又只给 stub、不带 data。
+   */
+  async function attachmentBytes(dbName, entryId) {
+    if (!dbName) return null
+    const doc = await couch(`/${dbName}/${encodeURIComponent(entryId)}`).catch(() => null)
+    const name = Object.keys(doc?._attachments ?? {})[0]
+    if (!name) return null
+    const res = await fetch(`${COUCH}/${dbName}/${encodeURIComponent(entryId)}/${encodeURIComponent(name)}`, {
+      headers: { Authorization: couchAuth }
+    })
+    if (!res.ok) return null
+    return (await res.arrayBuffer()).byteLength
+  }
+
+  if (attachmentNames.length > 0) {
+    const bytesA = await attachmentBytes(primary.timelineDb, ENTRY_ID)
+    const bytesB = await attachmentBytes(second.timelineDb, ENTRY_ID)
+    check('两个账号都拿到了同一张图的附件', !!bytesA && !!bytesB, `A=${bytesA}B B=${bytesB}B`)
+    check('附件按各自用户参数压缩（字节数不同，小图/低质量的更小）',
+      !!bytesA && !!bytesB && bytesB < bytesA, `A=${bytesA}B → B=${bytesB}B`)
+  } else {
+    console.log('  · 跳过按用户参数的附件对比：源图未能下载')
+  }
+
+  // ── 清理：本地库 + 各账号的远端库 + 临时账号（探针源库保留，见文件头说明） ──
   const accountRemoved = await cleanup()
-  check('临时账号已清理', accountRemoved, resources.userId ? '' : '未拿到 userId')
+  check('临时账号已清理', accountRemoved, `共 ${resources.accounts.length} 个临时账号`)
 
   console.log(failures.length === 0
-    ? '\n全部通过：服务端聚合 → 派生库归属 → live 复制 → 删除跟随，链路行为符合设计。'
+    ? '\n全部通过：服务端聚合 → 派生库归属 → live 复制 → 删除跟随 → 按用户图片策略，链路行为符合设计。'
     : `\n失败 ${failures.length} 项：${failures.join('；')}`)
   process.exit(failures.length === 0 ? 0 : 1)
 }
