@@ -163,7 +163,7 @@ describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
     expect(syncStatusLabel(s.state)).toBe('正在同步')
     // 第二个源还没拿到 pending：只说「正在拉取」，不显示 0%（那是谎报）
     expect(syncStatusDetails(s, now)).toEqual([
-      '剩余 2 / 3 个订阅源（33%）',
+      '剩余 2 / 3 个同步目标（33%）',
       '正在拉取…'
     ])
   })
@@ -174,7 +174,7 @@ describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
       b: { status: 'syncing', progress: 60, docsWritten: 40 }
     })
     expect(syncStatusDetails(s, now)).toEqual([
-      '剩余 1 / 2 个订阅源（80%）',
+      '剩余 1 / 2 个同步目标（80%）',
       '已同步 60%（40 条）'
     ])
   })
@@ -184,7 +184,7 @@ describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
       b: { status: 'syncing', progress: 100, docsWritten: 120 }
     })
     expect(syncStatusDetails(s, now)).toEqual([
-      '剩余 1 / 1 个订阅源（100%）',
+      '剩余 1 / 1 个同步目标（100%）',
       '即将完成（已同步 120 条）'
     ])
   })
@@ -198,7 +198,7 @@ describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
     expect(syncStatusLabel(s.state)).toBe('同步失败')
     expect(syncStatusDetails(s, now)).toEqual([
       '未取到订阅对应的库名',
-      '另有 1 个订阅源同步失败',
+      '另有 1 个同步目标失败',
       '上次成功同步：30 分钟前'
     ])
   })
@@ -214,7 +214,7 @@ describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
       b: { status: 'idle', lastSyncedAt: '2026-09-27T11:00:00.000Z' }
     })
     expect(syncStatusLabel(s.state)).toBe('同步成功')
-    expect(syncStatusDetails(s, now)).toEqual(['上次同步：30 分钟前', '共 2 个订阅源'])
+    expect(syncStatusDetails(s, now)).toEqual(['上次同步：30 分钟前'])
   })
 
   it('无记录：提示本次会话还没同步过', () => {

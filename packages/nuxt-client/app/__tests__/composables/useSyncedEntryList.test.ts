@@ -279,10 +279,11 @@ describe('useSyncedEntryList', () => {
       expect(ids(list)).toEqual(['a'])
     })
 
+    // 手动同步的异常收尾只有两类：目标失败、本地存储熔断（暂停不再取消手动同步：
+    // 服务端聚合已经跑完，取消它只会让用户的点击白费）
     const abortedOutcomes: Array<[string, SyncOutcomeLike]> = [
-      ['有源失败', { added: 0, failed: 1, cancelled: 0, storageBroken: false }],
-      ['用户中途暂停', { added: 0, failed: 0, cancelled: 1, storageBroken: false }],
-      ['本地存储熔断', { added: 0, failed: 0, cancelled: 0, storageBroken: true }]
+      ['有源失败', { added: 0, failed: 1, storageBroken: false }],
+      ['本地存储熔断', { added: 0, failed: 0, storageBroken: true }]
     ]
 
     for (const [name, outcome] of abortedOutcomes) {

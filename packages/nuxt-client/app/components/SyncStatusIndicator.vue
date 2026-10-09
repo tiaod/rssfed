@@ -64,7 +64,7 @@ function handleClick() {
     pouch.pauseSync()
     toast.add({
       title: '已暂停同步',
-      description: '剩余订阅源不再拉取，点击图标可继续',
+      description: '不再拉取新内容，点击图标可继续',
       color: 'neutral'
     })
     return

@@ -1,11 +1,14 @@
 <script setup lang="ts">
 /**
- * 全局同步进度条：任一 feed/用户状态库处于同步中（排队/进行中）时，
- * 在页面顶部显示真实进度条与统计信息（正在同步几个、剩余几个），
- * 全部完成后自动消失。放置于 app.vue 根组件，所有页面共享。
+ * 全局同步进度条：时间线库 / 用户状态库处于同步中（排队/进行中）时，
+ * 在页面顶部显示真实进度条与百分比，全部完成后自动消失。
+ * 放置于 app.vue 根组件，所有页面共享。
  *
- * 进度按「源内进度」加权（见 utils/syncStatusSummary）：一个几千条的源拉到一半，
- * 进度条会跟着走到一半，而不是停在 done/total 上等它整源结束。
+ * 具体在拉什么由左下角指示器的弹层说（那里逐条列出目标与已写入条数），
+ * 这里只留一个百分比：同步目标固定为两个，报「N 个」没有信息量。
+ *
+ * 进度按「库内进度」加权（见 utils/syncStatusSummary）：时间线库几千条拉到一半时，
+ * 进度条会跟着走到一半，而不是停在 done/total 上等整个库结束。
  *
  * 本地存储故障（配额耗尽 / 数据库损坏）时改为常驻警示条：此时同步已被熔断，
  * 继续显示进度只会让人以为还在正常拉取，真正要做的是重置本地缓存。
@@ -27,9 +30,6 @@ const summary = computed(() => summarizeSyncStatuses(pouch.syncStatuses, {
   paused: pouch.paused.value,
   storageError: pouch.storageBroken.value
 }))
-
-/** 当前正在同步的库数量 */
-const syncingCount = computed(() => summary.value.syncing)
 
 /** 剩余（排队 + 进行中） */
 const remainingCount = computed(() => summary.value.remaining)
@@ -63,7 +63,7 @@ const isSyncing = computed(() => remainingCount.value > 0 || !!storageError.valu
           {{ storageError }}
         </template>
         <template v-else>
-          正在同步 {{ syncingCount }} 个 · 剩余 {{ remainingCount }} 个（{{ progress }}%）
+          正在同步（{{ progress }}%）
         </template>
       </span>
     </div>

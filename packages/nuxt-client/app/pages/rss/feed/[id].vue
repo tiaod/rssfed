@@ -36,7 +36,7 @@ const {
   applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   query: limit => pouch.queryFeedEntries(feedId, limit),
-  syncedDocs: () => pouch.syncedDocsByFeed[feedId] ?? 0
+  syncedDocs: pouch.timelineSyncedDocs
 })
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
@@ -44,7 +44,7 @@ const {
 const { loading, renderFirstPaint } = useListFirstPaint({
   load,
   hasEntries: () => entries.value.length > 0,
-  sync: () => pouch.syncPriority([feedId])
+  sync: () => pouch.syncPriority()
 })
 
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
@@ -121,11 +121,8 @@ onMounted(async () => {
   attachListContext()
 })
 
-// 该源同步完成时累计「已同步 N 条」；列表不动，等用户点提示条
-watch(
-  () => pouch.syncStatuses[feedId]?.version ?? 0,
-  () => refreshFromSync()
-)
+// 时间线库有新批次落库时累计「已同步 N 条」；列表不动，等用户点提示条
+watch(pouch.timelineVersion, () => refreshFromSync())
 
 /**
  * 编辑订阅：弹窗只用到名字 / 分类 / 默认视图，所以从本地订阅文档拼一个最小集，
@@ -195,7 +192,6 @@ async function unsubscribe() {
             @reset="resetView"
           />
           <ListActionsBar
-            :feed-ids="[feedId]"
             sync-label="刷新订阅"
             :feed-id="feedId"
             :entry-count="visibleEntries.length"

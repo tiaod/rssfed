@@ -4,40 +4,74 @@ import { usePouchDb } from '~/composables/usePouchDb'
 /**
  * 「暂停同步」的底层行为（左下角指示器点击暂停时走的那条路）。
  *
- * 关注三件事：
- *   1. 暂停要真的停下来：在途复制被取消、排队任务被清空，结果以 cancelled 上报（不算失败）；
- *   2. 暂停期间自动同步不再入队（不发请求），归位为 idle 且不递增 version（不触发列表重查）；
- *   3. 用户主动点同步（syncNow）即视为恢复。
+ * 关注四件事：
+ *   1. 暂停要真的停下来：时间线 live 复制被取消（否则服务端一有新条目又自动拉进来）；
+ *   2. 暂停归位为 idle 且不递增 version（不触发列表重查）；
+ *   3. 暂停期间自动同步不再催、不再挂复制；迟到的复制事件也不再改状态；
+ *   4. 用户主动点同步（syncNow）即视为恢复。
  *
- * 这里用假的 PouchDB：复制的 Promise 由测试控制何时完成 / 取消，才能稳定复现「同步途中暂停」。
+ * 注意用户状态库（已读/收藏）的 live 双向同步**不**受影响：暂停拉新条目不该停掉状态回写。
  */
 
-interface PendingTask {
+interface FakeTask {
   url: string
-  cancel: () => void
-  finish: (result: { ok: boolean }) => void
+  cancelled: boolean
+  emitChange: (info: { docs_written?: number, pending?: number }) => void
+  emitPaused: () => void
 }
 
 const H = vi.hoisted(() => ({
-  pending: [] as PendingTask[],
-  replicateFrom: null as null | ((url: string) => unknown),
-  remoteUrlForId: null as null | ((id: string) => Promise<string>)
+  tasks: [] as FakeTask[],
+  refreshCalls: 0,
+  /** 用户状态库的 live 双向同步句柄被取消过几次 */
+  stateSyncCancels: 0,
+  refresh: async () => ({ accepted: true, completed: true, added: 0 }) as { accepted: boolean, completed?: boolean, added?: number }
 }))
 
 vi.mock('pouchdb', () => {
   class FakePouchDb {
-    replicate = { from: (url: string) => H.replicateFrom!(url) }
+    replicate = { from: (url: string) => makeTask(url) }
     close = async () => {}
     destroy = async () => {}
     allDocs = async () => ({ rows: [] })
+  }
+  function makeTask(url: string) {
+    const listeners = new Map<string, Set<(arg: unknown) => void>>()
+    let cancelled = false
+    const task = {
+      on: (event: string, fn: (arg: unknown) => void) => {
+        if (!listeners.has(event)) listeners.set(event, new Set())
+        listeners.get(event)!.add(fn)
+        return task
+      },
+      removeListener: () => task,
+      cancel: () => {
+        cancelled = true
+      },
+      then: () => task
+    }
+    const emit = (event: string, arg?: unknown) => listeners.get(event)?.forEach(fn => fn(arg))
+    H.tasks.push({
+      url,
+      get cancelled() {
+        return cancelled
+      },
+      emitChange: info => emit('change', info),
+      emitPaused: () => emit('paused')
+    })
+    return task
   }
   const statics = FakePouchDb as unknown as Record<string, unknown>
   statics.plugin = () => {}
   statics.allDbs = async () => []
   statics.destroy = async () => {}
-  // 用户状态库的 live 同步（PouchDB.sync）：给一个可链式 on() 且能 cancel 的空壳
   statics.sync = () => {
-    const handle = { on: () => handle, cancel: () => {} }
+    const handle = {
+      on: () => handle,
+      cancel: () => {
+        H.stateSyncCancels++
+      }
+    }
     return handle
   }
   return { default: FakePouchDb }
@@ -47,138 +81,123 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (kind: string, uid: string | null) => `fake-${kind}-${uid ?? 'guest'}`,
-  syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
-  syncRetryKey: (uid: string | null) => `rssfed-test-retry-${uid ?? 'guest'}`,
-  syncWindowKey: (uid: string | null) => `rssfed-test-window-${uid ?? 'guest'}`,
-  LEGACY_LOCAL_DB_NAMES: []
+  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
+  LEGACY_LOCAL_DB_NAMES: [],
+  LEGACY_LOCAL_DB_PREFIXES: []
 }))
 
 vi.mock('~/composables/useCouchTargets', () => ({
+  TIMELINE_ID: '__timeline__',
   USER_STATE_ID: '__user_state__',
   useCouchTargets: () => ({
-    remoteUrlForId: (id: string) => H.remoteUrlForId!(id),
+    remoteUrlForId: async (id: string) => `http://remote.test/${id}`,
     invalidate: () => {}
   })
 }))
 
 vi.mock('~/composables/useApi', () => ({
-  useApi: () => ({ feeds: { subscriptions: vi.fn(async () => []) } })
+  useApi: () => ({
+    feeds: { subscriptions: async () => [] },
+    timeline: {
+      refresh: () => {
+        H.refreshCalls++
+        return H.refresh()
+      }
+    }
+  })
 }))
 
 vi.mock('~/stores/user', () => ({
   useUserStore: () => ({ user: { id: 'pause-test' } })
 }))
 
-// Nuxt auto-import：共享状态挂在 nuxtApp 单例上，这里必须每次返回同一个对象
 const sharedApp: Record<string, unknown> = {}
 const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => sharedApp
 
+const TIMELINE_ID = '__timeline__'
+const FEEDS = [{ feedId: 'feed-a' }]
 let pouch: ReturnType<typeof usePouchDb>
 
 beforeEach(() => {
-  H.pending.length = 0
-  H.remoteUrlForId = async (id: string) => `http://remote.test/${id}`
-  H.replicateFrom = vi.fn((url: string) => {
-    let finish!: (result: { ok: boolean }) => void
-    let fail!: (error: unknown) => void
-    const promise = new Promise<{ ok: boolean }>((resolve, reject) => {
-      finish = resolve
-      fail = reject
-    })
-    // 模拟 PouchDB 的复制任务：await 得结果，cancel() 让 Promise 以错误 reject
-    const task = {
-      then: (onFulfilled?: (v: { ok: boolean }) => unknown, onRejected?: (e: unknown) => unknown) =>
-        promise.then(onFulfilled, onRejected),
-      catch: (onRejected?: (e: unknown) => unknown) => promise.catch(onRejected),
-      cancel: () => fail(new Error('cancelled'))
-    }
-    H.pending.push({ url, cancel: task.cancel, finish })
-    return task
-  })
-
-  // 每个用例都从干净的共享状态开始
+  H.tasks.length = 0
+  H.refreshCalls = 0
+  H.stateSyncCancels = 0
+  H.refresh = async () => ({ accepted: true, completed: true, added: 0 })
+  try {
+    localStorage.clear()
+  } catch {
+    // 无 localStorage 时忽略
+  }
   Reflect.deleteProperty(sharedApp, '$pouchDbState')
   pouch = usePouchDb()
-  // 模拟「进入页面时账号已就位」：真实应用里同步前已经读过用户状态库（如侧边栏订阅列表），
-  // 本地库与账号已完成对齐；否则首次 getEntriesDb() 内的 switchUser 会让这次复制的归属账号判空
   pouch.getUserStateDb()
 })
 
 describe('暂停同步（usePouchDb）', () => {
-  it('暂停：取消在途复制、清空排队任务，结果按 cancelled 上报', async () => {
-    // 三个目标、并发上限 2：前两个在跑，第三个排队
-    const syncPromise = pouch.syncNow(['feed-a', 'feed-b', 'feed-c'], { full: true })
-    await vi.waitFor(() => expect(H.pending).toHaveLength(2))
-    expect(pouch.syncStatuses['feed-c']?.status).toBe('queued')
+  it('暂停：取消时间线 live 复制，状态归位 idle 且不递增 version', async () => {
+    await pouch.syncFeedsIfChanged(FEEDS)
+    const version = pouch.syncStatuses[TIMELINE_ID]!.version
+    H.tasks[0]!.emitChange({ docs_written: 10, pending: 5 })
 
     pouch.pauseSync()
 
-    const result = await syncPromise
-    expect(result.cancelled).toBe(3)
-    expect(result.ok).toEqual([])
-    // 暂停不是失败：不写 error 状态、不产生失败项（否则会弹「同步失败」）
-    expect(result.failed).toEqual([])
-    expect(pouch.syncStatuses['feed-a']?.status).toBe('idle')
-    expect(pouch.syncStatuses['feed-b']?.status).toBe('idle')
-    expect(pouch.syncStatuses['feed-c']?.status).toBe('idle')
+    expect(H.tasks[0]!.cancelled).toBe(true)
     expect(pouch.paused.value).toBe(true)
+    expect(pouch.syncStatuses[TIMELINE_ID]!.status).toBe('idle')
+    expect(pouch.syncStatuses[TIMELINE_ID]!.version).toBe(version)
   })
 
-  it('暂停归位不递增同步版本（不触发列表重查）', async () => {
-    const syncPromise = pouch.syncNow(['feed-a'], { full: true })
-    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
-    const before = pouch.syncStatuses['feed-a']?.version
-    expect(before).toBe(0)
-
+  it('暂停后迟到的复制事件不再改状态（代次已变）', async () => {
+    await pouch.syncFeedsIfChanged(FEEDS)
     pouch.pauseSync()
-    await syncPromise
-
-    expect(pouch.syncStatuses['feed-a']?.version).toBe(0)
+    H.tasks[0]!.emitChange({ docs_written: 99, pending: 1 })
+    H.tasks[0]!.emitPaused()
+    expect(pouch.syncStatuses[TIMELINE_ID]!.status).toBe('idle')
+    expect(pouch.syncStatuses[TIMELINE_ID]!.progress).toBeUndefined()
+    expect(pouch.syncedDocsByTarget[TIMELINE_ID]).toBeUndefined()
   })
 
-  it('暂停期间：自动同步不再入队（不发复制请求）', async () => {
+  it('暂停期间：自动同步既不催聚合，也不挂复制', async () => {
+    await pouch.syncFeedsIfChanged(FEEDS)
+    expect(H.refreshCalls).toBe(1)
+    expect(H.tasks).toHaveLength(1)
+
     pouch.pauseSync()
-
-    expect(await pouch.syncFeedsIfChanged([{ feedId: 'feed-a' }])).toBe(0)
-    pouch.syncFeed('feed-b')
-    await new Promise(resolve => setTimeout(resolve, 20))
-
-    expect(H.replicateFrom).not.toHaveBeenCalled()
+    await pouch.syncFeedsIfChanged(FEEDS)
+    expect(H.refreshCalls).toBe(1)
+    expect(H.tasks).toHaveLength(1)
   })
 
-  it('暂停发生在取库名期间：不再发起复制（此时任务已出队，取消不到它）', async () => {
-    let release!: () => void
-    H.remoteUrlForId = (id: string) => new Promise<string>((resolve) => {
-      release = () => resolve(`http://remote.test/${id}`)
-    })
-
-    const syncPromise = pouch.syncNow(['feed-a'], { full: true })
-    await vi.waitFor(() => expect(typeof release).toBe('function'))
-
-    // 寻址请求还在途中时用户点了暂停：任务已经被移出队列，只能靠 replicateDb 自己检查
+  it('暂停不停用户状态库的 live 双向同步（已读/收藏的实时通道）', () => {
+    pouch.getUserStateDb()
     pouch.pauseSync()
-    release()
-
-    const result = await syncPromise
-    expect(result.cancelled).toBe(1)
-    expect(H.replicateFrom).not.toHaveBeenCalled()
-    expect(pouch.syncStatuses['feed-a']?.status).toBe('idle')
+    expect(H.stateSyncCancels).toBe(0)
   })
 
-  it('暂停状态下调用 syncNow（用户点同步）= 恢复并正常拉取', async () => {
+  it('恢复同步：重新挂上 live 复制，并可再次催聚合', async () => {
+    await pouch.syncFeedsIfChanged(FEEDS)
     pouch.pauseSync()
-
-    const syncPromise = pouch.syncNow(['feed-a'], { full: true })
-    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
+    pouch.resumeSync()
     expect(pouch.paused.value).toBe(false)
+    await vi.waitFor(() => expect(H.tasks).toHaveLength(2))
+    expect(H.tasks[1]!.cancelled).toBe(false)
 
-    H.pending[0]!.finish({ ok: true })
-    const result = await syncPromise
+    await pouch.syncFeedsIfChanged(FEEDS)
+    expect(H.refreshCalls).toBe(2)
+  })
 
-    expect(result.ok).toEqual(['feed-a'])
-    expect(result.cancelled).toBe(0)
-    expect(pouch.syncStatuses['feed-a']?.status).toBe('idle')
-    expect(pouch.syncStatuses['feed-a']?.lastSyncedAt).toBeTruthy()
+  it('暂停状态下点同步（syncNow）= 恢复并正常拉取', async () => {
+    pouch.pauseSync()
+    H.refresh = async () => ({ accepted: true, completed: true, added: 3 })
+    const pending = pouch.syncNow()
+    await vi.waitFor(() => expect(H.tasks).toHaveLength(1))
+    H.tasks[0]!.emitChange({ docs_written: 3, pending: 0 })
+    H.tasks[0]!.emitPaused()
+    const result = await pending
+
+    expect(pouch.paused.value).toBe(false)
+    expect(result.added).toBe(3)
+    expect(result.failed).toHaveLength(0)
   })
 })

@@ -27,8 +27,6 @@ import { useSyncAction } from '~/composables/useSyncAction'
 import type { ManualSyncOutcome } from '~/composables/useManualSync'
 
 const props = withDefaults(defineProps<{
-  /** 限定同步范围的库 id；不传 = 所有已激活的库（同步全部订阅） */
-  feedIds?: string[]
   /** 同步那一项的文案：单源 / bot 页是「刷新订阅」，聚合页是「同步订阅」 */
   syncLabel?: string
   /** 传了才显示订阅类动作（编辑订阅 / 取消订阅 / 订阅） */
@@ -40,7 +38,6 @@ const props = withDefaults(defineProps<{
   /** 「只看未读」是否开启（状态由页面持有，这里只渲染开关） */
   unreadOnly?: boolean
 }>(), {
-  feedIds: undefined,
   syncLabel: '同步订阅',
   feedId: undefined,
   entryCount: 0,
@@ -57,7 +54,7 @@ const emit = defineEmits<{
   'unsubscribe': []
 }>()
 
-const { syncing, hasError, errorDetail, statusText, sync } = useSyncAction(() => props.feedIds)
+const { syncing, hasError, errorDetail, statusText, sync } = useSyncAction()
 
 async function handleSync() {
   const outcome = await sync()

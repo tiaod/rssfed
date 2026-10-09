@@ -39,7 +39,7 @@ const {
       feed: { ...entry.feed, title: feedTitleMap.value[entry.feedId] ?? '' }
     }))
   },
-  syncedDocs: () => groupFeeds.value.reduce((n, feed) => n + (pouch.syncedDocsByFeed[feed.id] ?? 0), 0)
+  syncedDocs: pouch.timelineSyncedDocs
 })
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
@@ -47,7 +47,7 @@ const {
 const { loading, renderFirstPaint } = useListFirstPaint({
   load,
   hasEntries: () => entries.value.length > 0,
-  sync: () => pouch.syncPriority(groupFeeds.value.map(feed => feed.id))
+  sync: () => pouch.syncPriority()
 })
 
 // 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
@@ -95,11 +95,8 @@ onMounted(async () => {
   await renderFirstPaint()
 })
 
-// 组内任一源同步完成时累计「已同步 N 条」；列表不动，等用户点提示条
-watch(
-  () => groupFeeds.value.map(feed => pouch.syncStatuses[feed.id]?.version ?? 0).join(','),
-  () => refreshFromSync()
-)
+// 时间线库有新批次落库时累计「已同步 N 条」；列表不动，等用户点提示条
+watch(pouch.timelineVersion, () => refreshFromSync())
 </script>
 
 <template>
@@ -131,7 +128,6 @@ watch(
             @reset="resetView"
           />
           <ListActionsBar
-            :feed-ids="groupFeeds.map(f => f.id)"
             :entry-count="visibleEntries.length"
             :unread-only="unreadOnly"
             @toggle-unread-only="toggleUnreadOnly"

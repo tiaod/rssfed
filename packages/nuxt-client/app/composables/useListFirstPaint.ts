@@ -6,7 +6,8 @@ export interface ListFirstPaintOptions {
   /** 上屏之后列表里有没有内容（`load` 完成后调用） */
   hasEntries: () => boolean
   /**
-   * 优先同步这个列表包含的源（`usePouchDb` 的 `syncPriority`）。
+   * 优先同步这个列表要看的内容（`usePouchDb` 的 `syncPriority`：催一次服务端聚合 +
+   * 等 live 复制把这一批送到本地）。
    *
    * 契约：不抛错、有等待上限。超时后复制仍在后台跑，剩下的条目照旧走提示条。
    */
@@ -25,7 +26,7 @@ export interface ListFirstPaintOptions {
  *     并等优先同步跑完（最多 5s，见 `syncPriority`）再渲染，把刚拉到的条目**直接**上屏、
  *     不折叠成提示条。
  *
- * 边界：没缓存又超时（首轮同步一个很大的源、网络又慢）时，会按现有内容渲染一次，剩下的条目
+ * 边界：没缓存又超时（服务端首轮聚合还没跑完、网络又慢）时，会按现有内容渲染一次，剩下的条目
  * 之后仍走提示条 —— 宁可先给用户一个可点的「已同步 N 条」，也不要让页面一直白着。
  *
  * 判据必须在 `load()` 之后取：`useSyncedEntryList` 的列表是一份快照，只有它才知道

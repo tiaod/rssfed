@@ -18,19 +18,24 @@ const H = vi.hoisted(() => {
   const uid = 'feedtitle-test'
   return {
     uid,
-    entriesPath: `/tmp/rssfed-test-entries-${uid}`,
-    statePath: `/tmp/rssfed-test-user-state-${uid}`
+    entriesPath: `/tmp/rssfed-test-timeline-${uid}`,
+    statePath: `/tmp/rssfed-test-user-state-${uid}`,
+    /** 催促服务端聚合的假实现：这些用例不关心同步，只要不抛错 */
+    timelineRefresh: async () => ({ accepted: true, completed: true, added: 0 })
   }
 })
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (kind: string, uid: string | null) => `/tmp/rssfed-test-${kind}-${uid ?? 'guest'}`,
   syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
-  LEGACY_LOCAL_DB_NAMES: []
+  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
+  LEGACY_LOCAL_DB_NAMES: [],
+  LEGACY_LOCAL_DB_PREFIXES: []
 }))
 
 vi.mock('~/composables/useCouchTargets', () => ({
   USER_STATE_ID: '__user_state__',
+  TIMELINE_ID: '__timeline__',
   useCouchTargets: () => ({
     // 测试环境没有远端：取寻址信息必然失败，用户状态库的 live 同步就此停下（不联网）
     remoteUrlForId: vi.fn(async () => { throw new Error('测试环境无远端') }),
@@ -39,7 +44,7 @@ vi.mock('~/composables/useCouchTargets', () => ({
 }))
 
 vi.mock('~/composables/useApi', () => ({
-  useApi: () => ({ feeds: { subscriptions: vi.fn(async () => []) } })
+  useApi: () => ({ feeds: { subscriptions: vi.fn(async () => []) }, timeline: { refresh: () => H.timelineRefresh() } })
 }))
 
 vi.mock('~/stores/user', () => ({

@@ -1,5 +1,4 @@
 import { isListView, type ListView } from '~/utils/listViews'
-import { DEFAULT_SYNC_WINDOW_DAYS, normalizeSyncWindowDays } from '~/utils/syncWindow'
 
 export type EntryModalSize = 'sm:max-w-xl' | 'sm:max-w-2xl' | 'sm:max-w-4xl' | 'sm:max-w-6xl' | 'fullscreen'
 
@@ -19,19 +18,12 @@ export interface AppSettings {
    * 默认值只由显式配置入口修改。
    */
   view?: ListView
-  /**
-   * 同步窗口：每个源首轮同步只拉取最近多少天的条目（0 = 不限时间）。
-   *
-   * 语义与锚点机制见 utils/syncWindow：只影响「往回补多长历史」，不影响之后的增量同步。
-   */
-  syncWindowDays: number
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
   entryModalSize: 'sm:max-w-6xl',
-  fixedBars: true,
+  fixedBars: true
   // view 刻意不给默认值：undefined = 用户没配过，各页回退到自己的内置默认（时间线是社交动态）
-  syncWindowDays: DEFAULT_SYNC_WINDOW_DAYS
 }
 
 // 首次在客户端调用时从 localStorage 读取持久化的设置（模块级标记，避免重复读取）
@@ -59,10 +51,9 @@ export function useSettings() {
         if (!isListView(parsed.view)) {
           delete parsed.view
         }
-        // 同步窗口只接受固定档位，非法值回退默认（同一个理由：存量数据可能有任意数字）
-        if ('syncWindowDays' in parsed) {
-          parsed.syncWindowDays = normalizeSyncWindowDays(parsed.syncWindowDays)
-        }
+        // 同步窗口等聚合设置已移到服务端（每用户一份，见 useTimelineSettings），
+        // 存量 localStorage 里的 syncWindowDays 直接丢弃即可（不迁移：它已经没有消费者）
+        delete parsed.syncWindowDays
         settings.value = { ...settings.value, ...parsed }
       }
     } catch {

@@ -28,8 +28,6 @@ export interface SyncOutcomeLike {
   added: number
   /** 复制失败的目标数 */
   failed: number
-  /** 被用户暂停中断的目标数 */
-  cancelled: number
   /** 本地存储故障导致本轮熔断（结果不完整） */
   storageBroken: boolean
 }
@@ -150,7 +148,7 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
    * 既然同步没带来任何新条目，把攒着的「已同步 N 条」上屏既不会把用户正在读的内容推走，
    * 又省掉用户再点一次「查看」。三个条件同时满足才动列表：
    *
-   *   1. 本轮同步正常收尾（无失败、未被用户暂停、未触发存储熔断）——
+   *   1. 本轮同步正常收尾（无失败、未触发存储熔断）——
    *      异常状态下不替用户改列表，先让 toast 把问题说清楚；
    *   2. 本轮没有新条目写入（added = 0，即「同步马上就结束了」这一情形）；
    *   3. 列表里确实还折叠着待查看条目（newCount > 0），否则无事可做。
@@ -158,7 +156,7 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
    * 返回是否真的展开了，便于调用方与测试判断。
    */
   async function applyNewIfSyncAddedNothing(outcome: SyncOutcomeLike): Promise<boolean> {
-    if (outcome.storageBroken || outcome.failed > 0 || outcome.cancelled > 0) return false
+    if (outcome.storageBroken || outcome.failed > 0) return false
     if (outcome.added > 0) return false
     if (newCount.value <= 0) return false
     await applyNew()

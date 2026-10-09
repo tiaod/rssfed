@@ -23,7 +23,7 @@ const {
   applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   query: limit => pouch.queryTimeline(limit),
-  syncedDocs: () => feedIds.value.reduce((n, id) => n + (pouch.syncedDocsByFeed[id] ?? 0), 0)
+  syncedDocs: pouch.timelineSyncedDocs
 })
 
 // 首屏要等本地库重查一次
@@ -82,17 +82,15 @@ onMounted(async () => {
       return
     }
 
-    // 增量同步：只同步「上次同步后有过新内容」或「从未同步过」的源；
-    // 离线时回退为全量同步本地缓存的源
+    // 自动同步：服务端按它读到的订阅集合做增量聚合，客户端只负责「确保 live 复制在跑 +
+    // 带节流地催一次」；离线时同样催一次（live 复制会在有网后自己补上）
     if (remoteSubs) {
       await pouch.syncFeedsIfChanged(remoteSubs.map(s => ({
         feedId: s.feedId,
         lastNewEntryAt: s.lastNewEntryAt
       })))
     } else {
-      for (const feedId of feedIds.value) {
-        pouch.syncFeed(feedId)
-      }
+      pouch.syncFeed()
     }
     await load()
   } catch (e: unknown) {
@@ -102,12 +100,9 @@ onMounted(async () => {
   }
 })
 
-// 任一订阅源同步完成时累计「已同步 N 条」。列表不动：新条目什么时候进列表由用户点提示条决定
-// （见 useSyncedEntryList），因此这里不需要判断这次同步是不是用户按的按钮。
-watch(
-  () => feedIds.value.map(id => pouch.syncStatuses[id]?.version ?? 0).join(','),
-  () => refreshFromSync()
-)
+// 时间线库有新的批次落库时累计「已同步 N 条」。列表不动：新条目什么时候进列表由用户点
+// 提示条决定（见 useSyncedEntryList），因此这里不需要判断这次同步是不是用户按的按钮。
+watch(pouch.timelineVersion, () => refreshFromSync())
 </script>
 
 <template>

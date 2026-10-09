@@ -55,7 +55,7 @@ async function toggleSubscribe(bot: PublicBot) {
         image: bot.avatarUrl
       })
       // 订阅后立即触发产出库复制，马上能看到产出
-      pouch.syncFeed(`bot:${bot.id}`)
+      pouch.syncFeed()
       subscribed.value.add(bot.id)
       toast.add({ title: '订阅成功', description: bot.name, color: 'success' })
     }

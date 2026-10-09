@@ -20,9 +20,8 @@ beforeEach(() => {
   calls = []
   responseStatus = 200
   responseBody = {
-    userState: 'user-state_aaa',
-    feeds: { f1: 'feed_f1' },
-    bots: { b1: 'bot_b1' }
+    timeline: 'user-timeline_aaa',
+    userState: 'user-state_bbb'
   }
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     calls.push(typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url)
@@ -44,70 +43,71 @@ afterEach(() => {
 })
 
 describe('useCouchTargets', () => {
-  it('按业务 id 拼出带真实库名的代理地址', async () => {
-    const { useCouchTargets, USER_STATE_ID } = await loadComposable()
+  it('两个同步目标各自拼出带真实库名的代理地址', async () => {
+    const { useCouchTargets, TIMELINE_ID, USER_STATE_ID } = await loadComposable()
     const targets = useCouchTargets()
 
-    expect(await targets.remoteUrlForId('f1')).toBe(`${PROXY}/feed_f1`)
-    expect(await targets.remoteUrlForId('bot:b1')).toBe(`${PROXY}/bot_b1`)
-    expect(await targets.remoteUrlForId(USER_STATE_ID)).toBe(`${PROXY}/user-state_aaa`)
-
-    // 三次取地址只拉一次 targets
-    expect(calls).toEqual([`${BASE}/api/couchdb/targets`])
+    await expect(targets.remoteUrlForId(TIMELINE_ID))
+      .resolves.toBe(`${PROXY}/${encodeURIComponent('user-timeline_aaa')}`)
+    await expect(targets.remoteUrlForId(USER_STATE_ID))
+      .resolves.toBe(`${PROXY}/${encodeURIComponent('user-state_bbb')}`)
+    // 打的是只查这两个库的 /sync-targets（旧的 /targets 会为每个订阅源查一次库名）
+    expect(calls).toEqual([`${BASE}/api/couchdb/sync-targets`])
   })
 
-  it('缓存里没有该 id 时，冷却期内不重复刷新（返回 null）', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+  it('业务 id（feed/bot）不再是同步目标：返回 null', async () => {
     const { useCouchTargets } = await loadComposable()
     const targets = useCouchTargets()
 
-    expect(await targets.remoteUrlForId('unknown')).toBeNull()
+    await expect(targets.remoteUrlForId('feed-1')).resolves.toBeNull()
+    await expect(targets.remoteUrlForId('bot:42')).resolves.toBeNull()
     expect(calls).toHaveLength(1)
-
-    vi.useRealTimers()
   })
 
-  it('冷却期过后仍未命中会强制刷新一次', async () => {
-    vi.useFakeTimers()
-    vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
-    const { useCouchTargets } = await loadComposable()
+  it('多次取地址只打一次接口（缓存）', async () => {
+    const { useCouchTargets, TIMELINE_ID, USER_STATE_ID } = await loadComposable()
     const targets = useCouchTargets()
 
-    expect(await targets.remoteUrlForId('unknown')).toBeNull()
+    await targets.remoteUrlForId(TIMELINE_ID)
+    await targets.remoteUrlForId(USER_STATE_ID)
+    await targets.remoteUrlForId(TIMELINE_ID)
     expect(calls).toHaveLength(1)
-
-    // 越过冷却期（10s）：允许再拉一次，拿别的设备刚建的订阅
-    vi.setSystemTime(new Date('2026-01-01T00:00:11Z'))
-    expect(await targets.remoteUrlForId('unknown')).toBeNull()
-    expect(calls).toHaveLength(2)
-
-    vi.useRealTimers()
   })
 
-  it('invalidate 后重新拉取（订阅变更场景）', async () => {
-    const { useCouchTargets } = await loadComposable()
+  it('invalidate 后重新拉取（订阅变更 / 库重建场景）', async () => {
+    const { useCouchTargets, TIMELINE_ID } = await loadComposable()
     const targets = useCouchTargets()
 
-    await targets.remoteUrlForId('f1')
+    await targets.remoteUrlForId(TIMELINE_ID)
     targets.invalidate()
-    responseBody = { userState: 'user-state_aaa', feeds: { f1: 'feed_f1', f2: 'feed_f2' }, bots: {} }
+    responseBody = { timeline: 'user-timeline_ccc', userState: 'user-state_bbb' }
 
-    expect(await targets.remoteUrlForId('f2')).toBe(`${PROXY}/feed_f2`)
+    await expect(targets.remoteUrlForId(TIMELINE_ID))
+      .resolves.toBe(`${PROXY}/${encodeURIComponent('user-timeline_ccc')}`)
     expect(calls).toHaveLength(2)
   })
 
   it('接口失败时抛错，不返回半成品缓存', async () => {
     responseStatus = 500
-    const { useCouchTargets } = await loadComposable()
+    const { useCouchTargets, TIMELINE_ID } = await loadComposable()
+    const targets = useCouchTargets()
 
-    await expect(useCouchTargets().remoteUrlForId('f1')).rejects.toThrow('HTTP 500')
+    await expect(targets.remoteUrlForId(TIMELINE_ID)).rejects.toThrow(/HTTP 500/)
   })
 
-  it('响应缺少 userState 时抛错（避免拿 undefined 拼地址）', async () => {
-    responseBody = { feeds: { f1: 'feed_f1' } }
-    const { useCouchTargets } = await loadComposable()
+  it('响应缺少 timeline 时抛错（避免拿 undefined 拼地址）', async () => {
+    responseBody = { userState: 'user-state_bbb' }
+    const { useCouchTargets, TIMELINE_ID } = await loadComposable()
+    const targets = useCouchTargets()
 
-    await expect(useCouchTargets().remoteUrlForId('f1')).rejects.toThrow('缺少 userState')
+    await expect(targets.remoteUrlForId(TIMELINE_ID)).rejects.toThrow(/timeline/)
+  })
+
+  it('响应缺少 userState 时抛错', async () => {
+    responseBody = { timeline: 'user-timeline_aaa' }
+    const { useCouchTargets, USER_STATE_ID } = await loadComposable()
+    const targets = useCouchTargets()
+
+    await expect(targets.remoteUrlForId(USER_STATE_ID)).rejects.toThrow(/userState/)
   })
 })

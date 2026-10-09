@@ -11,7 +11,20 @@ import type {
 } from '~/types/bot'
 import type { SiteSettingsPublic, SiteSettingsFull, SiteSettingsUpdate } from '~/types/site'
 import type { McpToken, McpTokenCreated } from '~/types/mcp'
+import type { TimelineSettings as TimelineSettingsPayload } from '~/utils/timelineSettings'
 import { resolveApiBase } from '~/utils/apiBase'
+
+/** 催促聚合的响应（POST /api/timeline/refresh） */
+export interface TimelineRefreshResult {
+  /** 是否已受理（永远为 true；服务端拒绝的情况走 HTTP 错误） */
+  accepted: boolean
+  /** 服务端是否在本请求内跑完了聚合（未带 wait 时为 undefined） */
+  completed?: boolean
+  /** 本轮写入派生库的新条目数（仅 completed 时有意义） */
+  added?: number
+  /** 该用户的订阅源总数 */
+  sources?: number
+}
 
 function apiFetch<T>(url: string, options: Parameters<typeof $fetch<T>>[1] = {}) {
   return $fetch<T>(url, { credentials: 'include', ...options })
@@ -60,6 +73,34 @@ export function useApi() {
         `${base}/api/feeds/import-opml`,
         { method: 'POST', body: { opml } }
       )
+    },
+    /**
+     * 服务端时间线聚合（每用户一个派生库）。
+     *
+     * 条目本身走 CouchDB 的 live 复制，不经这些接口；它们只负责设置与「催一次聚合」。
+     */
+    timeline: {
+      /** 读取当前设置（顺带下发服务端默认值与合法区间） */
+      settings: () => apiFetch<{ settings: TimelineSettingsPayload, defaults: TimelineSettingsPayload, limits: Record<string, { min: number, max: number }> }>(
+        `${base}/api/timeline/settings`
+      ),
+      /** 更新设置；改图片参数时服务端会入队一次重建（rebuildQueued=true） */
+      updateSettings: (body: Partial<TimelineSettingsPayload>) => apiFetch<{ settings: TimelineSettingsPayload, rebuildQueued: boolean }>(
+        `${base}/api/timeline/settings`,
+        { method: 'PATCH', body }
+      ),
+      /**
+       * 催一次聚合（订阅/退订/打开列表/手动同步时调用）。
+       *
+       * `wait: 1` 时服务端会在本请求内跑完一轮 reconcile 再返回（有服务端超时上限），
+       * 于是手动同步能拿到确切的「本轮新增 N 条」；不传则立即 202，数据靠 live 复制到端。
+       */
+      refresh: (params?: { wait?: 1 }) => apiFetch<TimelineRefreshResult>(
+        `${base}/api/timeline/refresh`,
+        { method: 'POST', params }
+      ),
+      /** 重建派生库（设置页的「重建时间线」） */
+      rebuild: () => apiFetch<{ accepted: boolean }>(`${base}/api/timeline/rebuild`, { method: 'POST' })
     },
     bots: {
       list: () => apiFetch<BotInfo[]>(`${base}/api/bots`),

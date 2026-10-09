@@ -26,7 +26,7 @@ const {
 } = useSyncedEntryList({
   // bot 产出以虚拟 feedId `bot:{id}` 入库
   query: limit => pouch.queryFeedEntries(virtualFeedId, limit),
-  syncedDocs: () => pouch.syncedDocsByFeed[virtualFeedId] ?? 0
+  syncedDocs: pouch.timelineSyncedDocs
 })
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
@@ -34,7 +34,7 @@ const {
 const { loading, renderFirstPaint } = useListFirstPaint({
   load,
   hasEntries: () => entries.value.length > 0,
-  sync: () => pouch.syncPriority([virtualFeedId])
+  sync: () => pouch.syncPriority()
 })
 
 // 列表视图：订阅源默认 -> 所属分组默认 -> 全局默认；切换按钮只改本次会话，不落盘
@@ -105,10 +105,7 @@ onMounted(async () => {
 })
 
 // 该虚拟源同步完成时累计「已同步 N 条」；列表不动，等用户点提示条
-watch(
-  () => pouch.syncStatuses[virtualFeedId]?.version ?? 0,
-  () => refreshFromSync()
-)
+watch(pouch.timelineVersion, () => refreshFromSync())
 
 async function toggleSubscribe() {
   try {
@@ -122,7 +119,7 @@ async function toggleSubscribe() {
         image: bot.value?.avatarUrl
       })
       // 订阅后立即触发产出库复制
-      pouch.syncFeed(virtualFeedId)
+      pouch.syncFeed()
       toast.add({ title: '订阅成功', color: 'success' })
     }
     subscribed.value = !subscribed.value
@@ -144,7 +141,6 @@ async function toggleSubscribe() {
             @reset="resetView"
           />
           <ListActionsBar
-            :feed-ids="[virtualFeedId]"
             sync-label="刷新订阅"
             :feed-id="virtualFeedId"
             :subscribed="subscribed"

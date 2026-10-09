@@ -7,7 +7,16 @@ import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimate'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
-import { SYNC_WINDOW_CHOICES } from '~/utils/syncWindow'
+import {
+  TIMELINE_ENTRY_BYTES_CHOICES,
+  TIMELINE_IMAGE_COUNT_CHOICES,
+  TIMELINE_IMAGE_WIDTH_CHOICES,
+  TIMELINE_QUALITY_CHOICES,
+  TIMELINE_SOURCE_BYTES_CHOICES,
+  TIMELINE_WINDOW_CHOICES,
+  timelineSettingsEqual,
+  withCurrentChoice
+} from '~/utils/timelineSettings'
 
 definePageMeta({
   layout: 'default'
@@ -43,8 +52,50 @@ const handleAvatarChange = async (e: Event) => {
 // 设置草稿：修改后需点击“保存”按钮才生效并持久化
 const draftSettings = ref<AppSettings>({ ...settings.value })
 
-const saveSettings = () => {
+/**
+ * 时间线聚合设置（服务端，每用户一份）。
+ *
+ * 与本地偏好一起由「保存设置」提交：两类设置都在同一张页面上，两个保存按钮反而更容易漏点。
+ * 图片参数变更会触发服务端重建派生库，提示语必须说清楚（用户在等服务端重算）。
+ */
+const {
+  settings: timelineSettings, loaded: timelineLoaded, saving: timelineSaving,
+  error: timelineError, load: loadTimelineSettings, save: saveTimelineSettings
+} = useTimelineSettings()
+const draftTimeline = ref({ ...timelineSettings.value })
+
+// 服务端设置到达后同步草稿（进入页面时 load 是异步的）
+watch(timelineSettings, (next) => {
+  draftTimeline.value = { ...next }
+})
+
+onMounted(() => {
+  void loadTimelineSettings()
+})
+
+const saving = ref(false)
+
+const saveSettings = async () => {
   updateSettings({ ...draftSettings.value })
+  // 本地偏好与时间线聚合设置一起保存：时间线设置没变就不发请求
+  if (timelineLoaded.value && !timelineSettingsEqual(draftTimeline.value, timelineSettings.value)) {
+    saving.value = true
+    try {
+      const { rebuildQueued } = await saveTimelineSettings({ ...draftTimeline.value })
+      toast.add({
+        title: '设置已保存',
+        description: rebuildQueued
+          ? '图片参数已变，服务端正在后台重建你的时间线（完成后自动同步到本地）'
+          : undefined,
+        color: 'success'
+      })
+    } catch (e: unknown) {
+      toast.add({ title: '时间线设置保存失败', description: errorMessage(e), color: 'error' })
+    } finally {
+      saving.value = false
+    }
+    return
+  }
   toast.add({ title: '设置已保存', color: 'success' })
 }
 
@@ -57,8 +108,18 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
   { label: '全屏', value: 'fullscreen' }
 ]
 
-// 同步窗口选项（0 = 不限时间），语义见 utils/syncWindow
-const syncWindowOptions = SYNC_WINDOW_CHOICES
+/**
+ * 时间线聚合设置的下拉档位（值直接就是服务端字段的取值）。
+ *
+ * 一律经过 `withCurrentChoice`：服务端默认值可以用环境变量调，档位表列不全所有可能取值，
+ * 而「当前值不在 items 里」会让下拉显示空白（看起来像设置丢了）。
+ */
+const timelineWindowOptions = computed(() => withCurrentChoice(TIMELINE_WINDOW_CHOICES, draftTimeline.value.windowDays, '当前'))
+const timelineImageCountOptions = computed(() => withCurrentChoice(TIMELINE_IMAGE_COUNT_CHOICES, draftTimeline.value.maxImageCount, '当前：张'))
+const timelineEntryBytesOptions = computed(() => withCurrentChoice(TIMELINE_ENTRY_BYTES_CHOICES, draftTimeline.value.maxEntryImageBytes, '当前：字节'))
+const timelineImageWidthOptions = computed(() => withCurrentChoice(TIMELINE_IMAGE_WIDTH_CHOICES, draftTimeline.value.maxImageWidth, '当前：px'))
+const timelineQualityOptions = computed(() => withCurrentChoice(TIMELINE_QUALITY_CHOICES, draftTimeline.value.avifQuality, '当前：质量'))
+const timelineSourceBytesOptions = computed(() => withCurrentChoice(TIMELINE_SOURCE_BYTES_CHOICES, draftTimeline.value.maxSourceImageBytes, '当前：字节'))
 
 /**
  * 「默认列表视图」里的「跟随内置默认」项：选中它 = 不写设置（view 为 undefined）。
@@ -177,10 +238,10 @@ const confirmReset = async () => {
   resetting.value = true
   resetError.value = null
   try {
+    // 清本地 → 重新拉：服务端派生库不动，重置后从头复制一遍（新库没有 checkpoint，
+    // 必然是完整的首轮同步）
     await pouch.resetLocalData()
-    // 重置后必须全量：本地库与 checkpoint 都已清空，且水位线已删，
-    // 若走默认增量，服务器「从未抓到新条目」的源会被 needsSync 挡掉，本地永远补不回来
-    await pouch.syncNow(undefined, { full: true })
+    await pouch.syncNow()
     // 重置清空了本地库：立刻重算用量，让用户看到「缓存已清」而不是旧数字
     void storageEstimate.refresh()
     resetOpen.value = false
@@ -338,21 +399,98 @@ const confirmReset = async () => {
                   </h3>
 
                   <!--
-                    同步窗口只影响「每个源第一次同步时往回补多长历史」：窗口外的历史条目不下载，
-                    之后的同步都是增量（见 utils/syncWindow）。因此文案要讲清两点：
-                    调大/调小各自会发生什么，以及本地已有的条目不会被删掉。
+                    这些设置由**服务端**在聚合时执行（每用户一份，见 useTimelineSettings）：
+                    窗口决定「往回补多长历史」，图片参数决定服务端替你缓存多少图。
+                    与旧的同步窗口不同：窗口调小现在真的会删掉窗口外的派生数据
+                    （派生库是冗余副本，随时能从源库重算），所以文案必须写明。
                   -->
                   <UFormField
-                    label="同步最近多久的数据"
-                    description="每个订阅源第一次同步时只拉取这段时间内的条目，之后的同步都是增量、不受影响；调大后会按新窗口把更早的条目补回来，调小不会删除本地已缓存的条目。"
+                    label="时间线窗口"
+                    :description="timelineLoaded
+                      ? '只聚合这段时间内发布的条目；调大会把更早的条目补回来，调小会删掉窗口外的本地条目（源数据不受影响）。'
+                      : '正在读取服务端设置…'"
                   >
                     <USelect
-                      v-model="draftSettings.syncWindowDays"
-                      :items="syncWindowOptions"
+                      v-model="draftTimeline.windowDays"
+                      :items="timelineWindowOptions"
                       value-key="value"
                       class="w-48"
                     />
                   </UFormField>
+
+                  <UFormField
+                    label="每篇缓存图片"
+                    description="服务端按这个上限把正文图压缩成 AVIF 后再同步给你；封面不计入张数。"
+                  >
+                    <USelect
+                      v-model="draftTimeline.maxImageCount"
+                      :items="timelineImageCountOptions"
+                      value-key="value"
+                      class="w-48"
+                    />
+                  </UFormField>
+
+                  <UFormField
+                    label="每篇图片体积上限"
+                    description="单篇条目的图片附件总大小上限，超出的图片不再缓存（第一张始终保留）。"
+                  >
+                    <USelect
+                      v-model="draftTimeline.maxEntryImageBytes"
+                      :items="timelineEntryBytesOptions"
+                      value-key="value"
+                      class="w-48"
+                    />
+                  </UFormField>
+
+                  <UFormField
+                    label="图片最大宽度"
+                    description="压缩后按此宽度等比缩放；越宽越清晰，也越占本地空间。"
+                  >
+                    <USelect
+                      v-model="draftTimeline.maxImageWidth"
+                      :items="timelineImageWidthOptions"
+                      value-key="value"
+                      class="w-48"
+                    />
+                  </UFormField>
+
+                  <UFormField
+                    label="图片质量"
+                    description="AVIF 编码质量。离线阅读为主的场景可以选省流量。"
+                  >
+                    <USelect
+                      v-model="draftTimeline.avifQuality"
+                      :items="timelineQualityOptions"
+                      value-key="value"
+                      class="w-48"
+                    />
+                  </UFormField>
+
+                  <UFormField
+                    label="源图大小上限"
+                    description="原图超过这个体积就放弃缓存（避免为一张巨图拖慢整轮聚合）。"
+                  >
+                    <USelect
+                      v-model="draftTimeline.maxSourceImageBytes"
+                      :items="timelineSourceBytesOptions"
+                      value-key="value"
+                      class="w-64"
+                    />
+                  </UFormField>
+
+                  <UFormField
+                    label="AI 摘要"
+                    description="为每条内容生成摘要。开关已经可以设置，生成链路还在开发中，开启后暂时不会产出摘要。"
+                  >
+                    <USwitch v-model="draftTimeline.aiSummaryEnabled" />
+                  </UFormField>
+
+                  <p
+                    v-if="timelineError"
+                    class="text-sm text-error"
+                  >
+                    {{ timelineError }}
+                  </p>
                 </section>
 
                 <USeparator />
@@ -361,6 +499,7 @@ const confirmReset = async () => {
                   <UButton
                     color="primary"
                     icon="i-lucide-save"
+                    :loading="saving || timelineSaving"
                     @click="saveSettings"
                   >
                     保存设置

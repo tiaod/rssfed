@@ -162,7 +162,7 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
     H.statuses!['feed-b'] = { status: 'syncing', version: 0, progress: 0 }
     await wrapper.vm.$nextTick()
     expect(detailLines(wrapper)).toEqual([
-      '剩余 2 / 2 个订阅源（0%）',
+      '剩余 2 / 2 个同步目标（0%）',
       '已同步 0%',
       '已同步 0%'
     ])
@@ -171,19 +171,19 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
     H.statuses!['feed-b'] = { status: 'syncing', version: 0, progress: 30, docsWritten: 60 }
     await wrapper.vm.$nextTick()
     expect(detailLines(wrapper)).toEqual([
-      '剩余 2 / 2 个订阅源（15%）',
+      '剩余 2 / 2 个同步目标（15%）',
       '已同步 0%',
       '已同步 30%（60 条）'
     ])
 
-    // 两个源都结束 → 成功态：只该剩「上次同步 + 共 N 个订阅源」，一行多的都不许有
+    // 两个库都结束 → 成功态：只剩「上次同步」一行，多一行都不许有
     const now = new Date().toISOString()
     H.statuses!['feed-a'] = { status: 'idle', version: 1, lastSyncedAt: now }
     H.statuses!['feed-b'] = { status: 'idle', version: 1, lastSyncedAt: now }
     await wrapper.vm.$nextTick()
 
     expect(wrapper.text()).toContain('同步成功')
-    expect(detailLines(wrapper)).toEqual(['上次同步：刚刚', '共 2 个订阅源'])
+    expect(detailLines(wrapper)).toEqual(['上次同步：刚刚'])
   })
 
   it('本地存储故障：优先于同步中/暂停，点击走「重置本地缓存 + 重新同步」', async () => {

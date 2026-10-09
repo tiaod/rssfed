@@ -16,19 +16,24 @@ import type { ScanCursor } from '~/composables/usePouchDb'
  */
 
 const H = vi.hoisted(() => ({
+  /** 催促服务端聚合的假实现（返回 completed/added） */
+  timelineRefresh: async () => ({ accepted: true, completed: true, added: 0 }),
   uid: 'scanpages-test',
-  entriesPath: '/tmp/rssfed-test-entries-scanpages-test',
+  entriesPath: '/tmp/rssfed-test-timeline-scanpages-test',
   statePath: '/tmp/rssfed-test-user-state-scanpages-test'
 }))
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (kind: string, uid: string | null) => `/tmp/rssfed-test-${kind}-${uid ?? 'guest'}`,
   syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
-  LEGACY_LOCAL_DB_NAMES: []
+  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
+  LEGACY_LOCAL_DB_NAMES: [],
+  LEGACY_LOCAL_DB_PREFIXES: []
 }))
 
 vi.mock('~/composables/useCouchTargets', () => ({
   USER_STATE_ID: '__user_state__',
+  TIMELINE_ID: '__timeline__',
   useCouchTargets: () => ({
     remoteUrlForId: vi.fn(async () => { throw new Error('测试环境无远端') }),
     invalidate: vi.fn()
@@ -36,7 +41,7 @@ vi.mock('~/composables/useCouchTargets', () => ({
 }))
 
 vi.mock('~/composables/useApi', () => ({
-  useApi: () => ({ feeds: { subscriptions: vi.fn(async () => []) } })
+  useApi: () => ({ feeds: { subscriptions: vi.fn(async () => []) }, timeline: { refresh: () => H.timelineRefresh() } })
 }))
 
 vi.mock('~/stores/user', () => ({

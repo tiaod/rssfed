@@ -2,10 +2,13 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { useManualSync } from '../../composables/useManualSync'
 
 /**
- * 手动同步门面：toast 文案（原有行为）+ 交给调用方的结果对象。
+ * 手动同步门面：toast 文案 + 交给调用方的结果对象。
  *
  * SyncButton 把结果转成 `synced` 事件，列表页据此判断「这一轮有没有带来新条目」：
  * added 为 0 且同步正常收尾时，才可以顺手把折叠着的「已同步 N 条」展开上屏。
+ *
+ * 服务端聚合之后还要区分一种新情况：服务端在本轮请求里超时（completed=false，仍在后台聚合），
+ * 这时既不能说「已是最新」，也不能说「失败」。
  */
 
 const H = vi.hoisted(() => ({
@@ -34,10 +37,10 @@ function syncResult(over: Partial<{
   ok: string[]
   failed: Array<{ id: string, error: string }>
   skipped: number
-  cancelled: number
   added: number
+  serverPending: boolean
 }> = {}) {
-  return { ok: [], failed: [], skipped: 0, cancelled: 0, added: 0, ...over }
+  return { ok: [], failed: [], skipped: 0, added: 0, serverPending: false, ...over }
 }
 
 beforeEach(() => {
@@ -47,29 +50,39 @@ beforeEach(() => {
 })
 
 describe('useManualSync（手动同步）', () => {
-  it('源全部被跳过（没有新内容）→ 报「已是最新」，结果里 added 为 0', async () => {
-    H.syncNow.mockResolvedValue(syncResult({ skipped: 3 }))
+  it('服务端本轮没有新内容 → 报「已是最新」，结果里 added 为 0', async () => {
+    H.syncNow.mockResolvedValue(syncResult({ skipped: 1 }))
 
     const outcome = await useManualSync().sync()
 
-    expect(outcome).toEqual({ added: 0, skipped: 3, failed: 0, cancelled: 0, storageBroken: false })
+    expect(outcome).toEqual({ added: 0, skipped: 1, failed: 0, storageBroken: false })
     expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({ title: '已是最新' }))
   })
 
-  it('有源真的复制过 → 报「同步完成」，并带上被跳过的数量', async () => {
-    H.syncNow.mockResolvedValue(syncResult({ ok: ['feed-a'], skipped: 2, added: 5 }))
+  it('有新增内容 → 报「同步完成」并带上条数', async () => {
+    H.syncNow.mockResolvedValue(syncResult({ ok: ['__timeline__'], added: 5 }))
 
     const outcome = await useManualSync().sync()
 
-    expect(outcome).toMatchObject({ added: 5, skipped: 2, failed: 0 })
+    expect(outcome).toMatchObject({ added: 5, failed: 0 })
     expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({
       title: '同步完成',
-      description: '另有 2 个订阅源无更新，已跳过'
+      description: '新增 5 条'
     }))
   })
 
-  it('有源失败 → 结果里报出失败数，并弹失败提示', async () => {
-    H.syncNow.mockResolvedValue(syncResult({ failed: [{ id: 'feed-a', error: '网络错误' }] }))
+  it('服务端仍在后台聚合（本轮请求超时）→ 报「仍在聚合」，不谎报已是最新', async () => {
+    H.syncNow.mockResolvedValue(syncResult({ ok: ['__timeline__'], serverPending: true }))
+
+    const outcome = await useManualSync().sync()
+
+    // 结果对象只报「本轮没带来新条目」，是不是服务端还在聚合由 toast 说明
+    expect(outcome).toMatchObject({ added: 0, failed: 0 })
+    expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({ title: '服务端仍在聚合' }))
+  })
+
+  it('同步失败 → 结果里报出失败数，并弹失败提示', async () => {
+    H.syncNow.mockResolvedValue(syncResult({ failed: [{ id: '__timeline__', error: '网络错误' }] }))
 
     const outcome = await useManualSync().sync()
 
@@ -79,15 +92,6 @@ describe('useManualSync（手动同步）', () => {
       description: '网络错误',
       color: 'error'
     }))
-  })
-
-  it('用户中途暂停 → 静默收尾（不报失败），结果里 cancelled 有值', async () => {
-    H.syncNow.mockResolvedValue(syncResult({ cancelled: 2 }))
-
-    const outcome = await useManualSync().sync()
-
-    expect(outcome).toMatchObject({ cancelled: 2 })
-    expect(H.toastAdd).not.toHaveBeenCalled()
   })
 
   it('本地存储熔断 → 结果标记 storageBroken（调用方不能据此改列表）', async () => {

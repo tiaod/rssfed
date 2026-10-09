@@ -1,5 +1,4 @@
-import { computed, toValue } from 'vue'
-import type { MaybeRefOrGetter } from 'vue'
+import { computed } from 'vue'
 import { usePouchDb } from '~/composables/usePouchDb'
 import { useManualSync } from '~/composables/useManualSync'
 import type { ManualSyncOutcome } from '~/composables/useManualSync'
@@ -14,19 +13,17 @@ import type { ManualSyncOutcome } from '~/composables/useManualSync'
  * `syncing` 只表示**手动**同步进行中：live 同步的状态只驱动全局进度条，否则初始同步因连接
  * 竞争卡住时按钮会一直禁用，用户反而没法重试。
  *
- * 不传 feedIds 时作用于所有已激活的库（时间线 / 分组页传各自的源）。
+ * 状态取自 syncStatuses 的全部条目：服务端聚合之后同步目标只有时间线库与用户状态库两个，
+ * 调用方（各列表页）不再需要、也无法按「本页涉及哪些源」来切分同步状态。
  */
-export function useSyncAction(feedIds?: MaybeRefOrGetter<string[] | undefined>) {
+export function useSyncAction() {
   const pouch = usePouchDb()
-  const ids = computed(() => toValue(feedIds) ?? [])
 
-  /** 相关库的 id 集合（缺省 = 所有已激活的库） */
-  const relatedIds = computed(() =>
-    ids.value.length ? ids.value : Object.keys(pouch.syncStatuses)
-  )
+  /** 相关库的 id 集合（= 当前有同步状态的全部目标） */
+  const relatedIds = computed(() => Object.keys(pouch.syncStatuses))
 
   // 手动同步逻辑与侧边栏的状态指示器共用（toast 文案只有一处）
-  const { syncing, sync } = useManualSync(() => (ids.value.length ? ids.value : undefined))
+  const { syncing, sync } = useManualSync()
 
   const hasError = computed(() =>
     relatedIds.value.some(id => pouch.syncStatuses[id]?.status === 'error')

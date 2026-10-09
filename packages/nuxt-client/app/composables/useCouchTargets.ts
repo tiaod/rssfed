@@ -1,53 +1,52 @@
 import { resolveApiBase } from '~/utils/apiBase'
 
-/** 用户状态库在同步队列里的虚拟 id（与 usePouchDb 的 syncStatuses key 一致） */
+/**
+ * 同步队列里的两个虚拟 id（也是 usePouchDb 的 syncStatuses key）。
+ *
+ * 服务端聚合后浏览器只有两个同步目标：时间线库（单向 live 拉取）与用户状态库（双向同步）。
+ * 它们不是业务 id（feedId/botId），所以用一个不可能与业务 id 撞车的形态（前后双下划线）。
+ */
+export const TIMELINE_ID = '__timeline__'
 export const USER_STATE_ID = '__user_state__'
 
-/** 代理寻址信息：业务 id → 真实 CouchDB 库名，由后端 GET /api/couchdb/targets 下发 */
+/** 代理寻址信息：两个虚拟 id → 真实 CouchDB 库名，由后端 GET /api/couchdb/sync-targets 下发 */
 interface CouchTargets {
   /** 用户状态库名（已读/收藏/订阅） */
   userState: string
-  /** feedId → feed 库名 */
-  feeds: Record<string, string>
-  /** botId → bot 产出库名 */
-  bots: Record<string, string>
+  /** 服务端聚合出来的用户时间线库名（条目 + 源元信息） */
+  timeline: string
 }
-
-/** 未命中缓存时强制刷新的冷却时间：避免脏 id（服务端已无此订阅）每次同步都打一次较重的 targets 接口 */
-const REFRESH_COOLDOWN_MS = 10_000
 
 // 模块级缓存：所有组件共享一份，避免每次取远端地址都打接口。
 // 只放内存、不落 localStorage —— 库名与账号绑定，持久化会让同一浏览器换账号后
 // 继续用上一个账号的库名（拿到 403 而非自动纠正）。
 let cached: CouchTargets | null = null
 let inflight: Promise<CouchTargets> | null = null
-let lastRefreshAt = 0
-
-/** 从寻址信息里取某个业务 id 的库名；找不到返回 null */
-function pickDbName(targets: CouchTargets, id: string): string | null {
-  if (id === USER_STATE_ID) return targets.userState || null
-  if (id.startsWith('bot:')) return targets.bots[id.slice('bot:'.length)] ?? null
-  return targets.feeds[id] ?? null
-}
 
 /**
  * CouchDB 代理的寻址信息。
  *
  * 代理地址形如 /api/couchdb/proxy/<库名>，而库名是后端随机生成、持久化在业务表上的
- * （无法由 feedId/botId 推导），所以前端必须先经 /api/couchdb/targets 拿到库名。
+ * （无法推导），所以前端必须先经 /api/couchdb/sync-targets 拿到库名。
+ *
+ * 只请求 `/sync-targets`（两个库）而不是旧的 `/targets`：后者会为**每个订阅源**查一次库名，
+ * 几百个订阅就是几百次查询，而新版客户端根本不用那些库（旧端点仍为缓存了旧前端的 PWA 保留）。
  */
 export function useCouchTargets() {
   const { public: { apiBaseUrl } } = useRuntimeConfig()
   const base = resolveApiBase(apiBaseUrl)
 
   async function fetchTargets(): Promise<CouchTargets> {
-    const res = await fetch(`${base}/api/couchdb/targets`, { credentials: 'include' })
+    const res = await fetch(`${base}/api/couchdb/sync-targets`, { credentials: 'include' })
     if (!res.ok) throw new Error(`获取 CouchDB 库名失败（HTTP ${res.status}）`)
     const data = await res.json() as Partial<CouchTargets>
     if (typeof data?.userState !== 'string' || !data.userState) {
       throw new Error('获取 CouchDB 库名失败：响应缺少 userState')
     }
-    return { userState: data.userState, feeds: data.feeds ?? {}, bots: data.bots ?? {} }
+    if (typeof data?.timeline !== 'string' || !data.timeline) {
+      throw new Error('获取 CouchDB 库名失败：响应缺少 timeline')
+    }
+    return { userState: data.userState, timeline: data.timeline }
   }
 
   /** 取寻址信息（并发调用合并为同一个请求） */
@@ -57,7 +56,6 @@ export function useCouchTargets() {
       inflight = fetchTargets()
         .then((targets) => {
           cached = targets
-          lastRefreshAt = Date.now()
           return targets
         })
         .finally(() => {
@@ -67,23 +65,20 @@ export function useCouchTargets() {
     return inflight
   }
 
-  /** 订阅关系变更后调用：下次取地址时重新拉取 */
+  /** 订阅/设置变更或本地库重建后调用：下次取地址时重新拉取 */
   function invalidate() {
     cached = null
   }
 
-  /** 取某个业务 id（feedId / `bot:<botId>` / USER_STATE_ID）对应的库名 */
+  /** 取同步目标的库名；未知 id 返回 null（调用方按同步失败上报） */
   async function dbNameFor(id: string): Promise<string | null> {
-    const hit = pickDbName(await getTargets(), id)
-    if (hit) return hit
-    // 缓存里没有这个 id —— 别的设备刚订阅、或本地有服务端已删的脏订阅。
-    // 强制刷新一次再试（带冷却，避免脏 id 反复触发刷新）。
-    if (Date.now() - lastRefreshAt < REFRESH_COOLDOWN_MS) return null
-    invalidate()
-    return pickDbName(await getTargets(), id)
+    const targets = await getTargets()
+    if (id === USER_STATE_ID) return targets.userState || null
+    if (id === TIMELINE_ID) return targets.timeline || null
+    return null
   }
 
-  /** 某个业务 id 的远端代理地址（PouchDB 的 remote URL）；拿不到库名返回 null */
+  /** 某个同步目标的远端代理地址（PouchDB 的 remote URL）；拿不到库名返回 null */
   async function remoteUrlForId(id: string): Promise<string | null> {
     const dbName = await dbNameFor(id)
     return dbName ? `${base}/api/couchdb/proxy/${encodeURIComponent(dbName)}` : null

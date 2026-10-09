@@ -1,44 +1,55 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { usePouchDb } from '~/composables/usePouchDb'
-import { DAY_MS } from '~/utils/syncWindow'
 
 /**
- * 「进入具体列表 → 优先同步这个列表 → 再显示」与「同步窗口」的接线。
+ * 「优先同步当前列表」（`syncPriority`）：进入列表时催一次服务端聚合，并等新内容落库。
  *
- * 锁定四条规则：
- *   1. 优先同步把目标插到复制队列**最前面**（普通队列里排着几百个后台源）；
- *   2. 同一个库已有排队 / 在途任务时复用那一条（去重）—— 一遍页面切换不该发两份复制
- *      去写同一个 checkpoint；
- *   3. 等待有上限：超时不取消复制（页面先用本地缓存渲染，之后照旧弹「已同步 N 条」）；
- *      用户显式暂停时也不偷偷恢复；
- *   4. feed 库复制带同步窗口 selector，用户状态库不带；锚点落盘后跨轮保持一致
- *      （锚点一变，PouchDB 复制 id 就变，等于每天把所有源全量重扫一遍）。
+ * 语义已经比旧版简单得多 —— 所有源都在同一个时间线库里，服务端一次聚合全带上，
+ * 因此「优先同步哪些源」这件事不存在了。这里锁定四条：
+ *   1. 只催一次（且是即发即忘的催促，不是 wait=1 的同步请求：首屏不能被 HTTP 请求挂住）；
+ *   2. 新内容在预算内落库 → done=true，并报出新增条数；
+ *   3. 超时 → done=false，但**不取消** live 复制（数据随后自己到端）；
+ *   4. 用户已暂停 → 什么都不做（暂停是显式动作，进列表不该偷偷恢复）。
  */
 
-interface PendingTask {
+interface FakeTask {
   url: string
-  /** replicate.from 的第二个参数：这里面才有 selector */
-  opts: unknown
-  finish: (result: { ok: boolean }) => void
-  fail: (error: unknown) => void
+  emitChange: (info: { docs_written?: number, pending?: number }) => void
+  emitPaused: () => void
 }
 
-const LNA = '2026-01-01T00:00:00.000Z'
-
 const H = vi.hoisted(() => ({
-  pending: [] as PendingTask[],
-  replicateFrom: null as null | ((url: string, opts?: unknown) => unknown),
-  remoteUrlForId: null as null | ((id: string) => Promise<string>),
-  /** 远端订阅列表：syncPriority / syncNow 的增量过滤依据 */
-  subscriptions: async () => [] as Array<{ feedId: string, lastNewEntryAt?: string }>
+  tasks: [] as FakeTask[],
+  refreshArgs: [] as unknown[][],
+  refresh: async () => ({ accepted: true, completed: true, added: 0 }) as { accepted: boolean, completed?: boolean, added?: number }
 }))
 
 vi.mock('pouchdb', () => {
   class FakePouchDb {
-    replicate = { from: (url: string, opts?: unknown) => H.replicateFrom!(url, opts) }
+    replicate = { from: (url: string) => makeTask(url) }
     close = async () => {}
     destroy = async () => {}
     allDocs = async () => ({ rows: [] })
+  }
+  function makeTask(url: string) {
+    const listeners = new Map<string, Set<(arg: unknown) => void>>()
+    const task = {
+      on: (event: string, fn: (arg: unknown) => void) => {
+        if (!listeners.has(event)) listeners.set(event, new Set())
+        listeners.get(event)!.add(fn)
+        return task
+      },
+      removeListener: () => task,
+      cancel: () => {},
+      then: () => task
+    }
+    const emit = (event: string, arg?: unknown) => listeners.get(event)?.forEach(fn => fn(arg))
+    H.tasks.push({
+      url,
+      emitChange: info => emit('change', info),
+      emitPaused: () => emit('paused')
+    })
+    return task
   }
   const statics = FakePouchDb as unknown as Record<string, unknown>
   statics.plugin = () => {}
@@ -55,23 +66,30 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (kind: string, uid: string | null) => `fake-${kind}-${uid ?? 'guest'}`,
-  syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
-  syncRetryKey: (uid: string | null) => `rssfed-test-retry-${uid ?? 'guest'}`,
-  syncWindowKey: (uid: string | null) => `rssfed-test-window-${uid ?? 'guest'}`,
-  LEGACY_LOCAL_DB_NAMES: []
+  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
+  LEGACY_LOCAL_DB_NAMES: [],
+  LEGACY_LOCAL_DB_PREFIXES: []
 }))
 
 vi.mock('~/composables/useCouchTargets', () => ({
+  TIMELINE_ID: '__timeline__',
   USER_STATE_ID: '__user_state__',
   useCouchTargets: () => ({
-    remoteUrlForId: (id: string) => H.remoteUrlForId!(id),
+    remoteUrlForId: async (id: string) => (id === '__timeline__' ? 'http://remote.test/timeline' : null),
     invalidate: () => {}
   })
 }))
 
 vi.mock('~/composables/useApi', () => ({
-  // 转发而不是直接抓 H.subscriptions：usePouchDb 在创建时就把该函数闭包住了
-  useApi: () => ({ feeds: { subscriptions: () => H.subscriptions() } })
+  useApi: () => ({
+    feeds: { subscriptions: async () => [] },
+    timeline: {
+      refresh: (...args: unknown[]) => {
+        H.refreshArgs.push(args)
+        return H.refresh()
+      }
+    }
+  })
 }))
 
 vi.mock('~/stores/user', () => ({
@@ -82,189 +100,62 @@ const sharedApp: Record<string, unknown> = {}
 const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => sharedApp
 
-const WINDOW_KEY = 'rssfed-test-window-priority-test'
-const SYNCED_KEY = 'rssfed-test-synced-priority-test'
-
 let pouch: ReturnType<typeof usePouchDb>
 
-/** 让所有在途任务立即成功，并等队列重新泵一轮（把新开跑的任务也收掉） */
-async function drainAll() {
-  for (let i = 0; i < 8; i++) {
-    for (const task of [...H.pending]) task.finish({ ok: true })
-    await new Promise(resolve => setTimeout(resolve, 5))
-  }
-}
-
 beforeEach(() => {
-  H.pending.length = 0
-  H.remoteUrlForId = async (id: string) => `http://remote.test/${id}`
-  H.subscriptions = async () => []
-  H.replicateFrom = vi.fn((url: string, opts?: unknown) => {
-    let finish!: (result: { ok: boolean }) => void
-    let fail!: (error: unknown) => void
-    const promise = new Promise<{ ok: boolean }>((resolve, reject) => {
-      finish = resolve
-      fail = reject
-    })
-    const task = {
-      // 让 replicateDb 的 `await task` 拿到复制结果
-      then: (onFulfilled?: (v: { ok: boolean }) => unknown, onRejected?: (e: unknown) => unknown) =>
-        promise.then(onFulfilled, onRejected),
-      catch: (onRejected?: (e: unknown) => unknown) => promise.catch(onRejected),
-      cancel: () => fail(new Error('cancelled'))
-    }
-    H.pending.push({ url, opts, finish, fail })
-    return task
-  })
-  localStorage.clear()
+  H.tasks.length = 0
+  H.refreshArgs.length = 0
+  H.refresh = async () => ({ accepted: true, completed: true, added: 0 })
+  try {
+    localStorage.clear()
+  } catch {
+    // 无 localStorage 时忽略
+  }
   Reflect.deleteProperty(sharedApp, '$pouchDbState')
   pouch = usePouchDb()
-  // 账号对齐（与其它 usePouchDb 测试同规则）
   pouch.getUserStateDb()
 })
 
-describe('优先同步（进入列表时插队）', () => {
-  it('等目标复制结束再返回；同库已有在途任务时复用（去重）', async () => {
-    const round = pouch.syncFeedsIfChanged([{ feedId: 'feed-a', lastNewEntryAt: LNA }])
-    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
+describe('优先同步（进入列表时催一次并等结果）', () => {
+  it('催促一次（不带 wait），新内容落库后 done=true 并报出条数', async () => {
+    const pending = pouch.syncPriority(1000)
+    // refresh 是即发即忘的催促：参数为 undefined（不是 { wait: 1 }）
+    await vi.waitFor(() => expect(H.refreshArgs).toHaveLength(1))
+    expect(H.refreshArgs[0]).toEqual([undefined])
+    await vi.waitFor(() => expect(H.tasks).toHaveLength(1))
 
-    const priority = pouch.syncPriority(['feed-a'])
-    await new Promise(resolve => setTimeout(resolve, 10))
-    // 去重：没有再发第二条复制（两条并发复制会写同一个 checkpoint）
-    expect(H.replicateFrom).toHaveBeenCalledTimes(1)
+    H.tasks[0]!.emitChange({ docs_written: 4, pending: 0 })
+    H.tasks[0]!.emitPaused()
 
-    H.pending[0]!.finish({ ok: true })
-    await expect(priority).resolves.toEqual({ done: true, added: 0, skipped: 0 })
-    await round
+    const result = await pending
+    expect(result.done).toBe(true)
+    expect(result.added).toBe(4)
+    expect(result.skipped).toBe(0)
   })
 
-  it('插到普通队列前面：普通源排队时，优先源先跑', async () => {
-    void pouch.syncFeedsIfChanged(['n1', 'n2', 'n3'].map(id => ({ feedId: id, lastNewEntryAt: LNA })))
-    // 并发上限 2：n1 / n2 在跑，n3 排队
-    await vi.waitFor(() => expect(H.pending).toHaveLength(2))
-
-    const priority = pouch.syncPriority(['feed-p'], { waitMs: 200 })
-    H.pending[0]!.finish({ ok: true })
-
-    await vi.waitFor(() => expect(H.pending).toHaveLength(3))
-    // 让出的并发位被优先源拿走，而不是排在队首的 n3
-    expect(H.pending[2]!.url).toContain('/feed-p')
-
-    await drainAll()
-    await expect(priority).resolves.toMatchObject({ done: true })
+  it('超时不再等（done=false），但复制没有被取消', async () => {
+    const result = await pouch.syncPriority(50)
+    expect(result.done).toBe(false)
+    expect(result.added).toBe(0)
+    // 句柄还在：数据随后自己到端
+    expect(H.tasks).toHaveLength(1)
   })
 
-  it('已在普通队列里的源被提到最前', async () => {
-    void pouch.syncFeedsIfChanged(['n1', 'n2', 'n3', 'n4'].map(id => ({ feedId: id, lastNewEntryAt: LNA })))
-    await vi.waitFor(() => expect(H.pending).toHaveLength(2))
-
-    const priority = pouch.syncPriority(['n4'], { waitMs: 200 })
-    H.pending[0]!.finish({ ok: true })
-
-    await vi.waitFor(() => expect(H.pending).toHaveLength(3))
-    expect(H.pending[2]!.url).toContain('/n4')
-
-    await drainAll()
-    await expect(priority).resolves.toMatchObject({ done: true })
-  })
-
-  it('超时不再等，但复制不取消（仍在后台跑）', async () => {
-    const result = await pouch.syncPriority(['feed-a'], { waitMs: 20 })
-    expect(result).toEqual({ done: false, added: 0, skipped: 0 })
-    expect(H.pending).toHaveLength(1)
-    expect(pouch.syncStatuses['feed-a']?.status).toBe('syncing')
-
-    await drainAll()
-    expect(pouch.syncStatuses['feed-a']?.status).toBe('idle')
-  })
-
-  it('远端没有新内容时直接返回（不排队、不发请求）', async () => {
-    localStorage.setItem(SYNCED_KEY, JSON.stringify({ 'feed-a': { at: LNA, seen: LNA } }))
-    H.subscriptions = async () => [{ feedId: 'feed-a', lastNewEntryAt: LNA }]
-
-    const result = await pouch.syncPriority(['feed-a'], { waitMs: 1000 })
-    expect(result).toEqual({ done: true, added: 0, skipped: 1 })
-    expect(H.replicateFrom).not.toHaveBeenCalled()
-  })
-
-  it('用户已暂停同步时不动：暂停是显式动作，进列表不该偷偷恢复', async () => {
+  it('用户已暂停时不动：不催、不挂复制', async () => {
     pouch.pauseSync()
-    const result = await pouch.syncPriority(['feed-a'], { waitMs: 50 })
-    expect(result).toEqual({ done: true, added: 0, skipped: 1 })
-    expect(H.replicateFrom).not.toHaveBeenCalled()
-    expect(pouch.paused.value).toBe(true)
-  })
-})
-
-describe('同步窗口 selector', () => {
-  /** 取某次 replicate.from 的 selector */
-  function selectorOf(index: number): Record<string, unknown> | undefined {
-    return (H.pending[index]!.opts as { selector?: Record<string, unknown> }).selector
-  }
-
-  it('feed 库带窗口 selector，用户状态库不带', async () => {
-    const round = pouch.syncNow(['feed-a', '__user_state__'])
-    await vi.waitFor(() => expect(H.pending).toHaveLength(2))
-
-    const feed = H.pending.find(t => t.url.endsWith('/feed-a'))!
-    const state = H.pending.find(t => t.url.endsWith('/__user_state__'))!
-    const selector = (feed.opts as { selector?: { $or: unknown[] } }).selector!
-    expect(selector.$or[0]).toEqual({ type: 'feed' })
-
-    const anchor = (selector.$or[1] as { publishedAt: { $gte: string } }).publishedAt.$gte
-    // 默认窗口 3 天：锚点落在 now - 3 天附近
-    expect(Math.abs(Date.parse(anchor) - (Date.now() - 3 * DAY_MS))).toBeLessThan(10_000)
-    // 用户状态库装的是订阅关系与已读/收藏，没有条目时间可过滤
-    expect((state.opts as { selector?: unknown }).selector).toBeUndefined()
-
-    // 锚点落盘（它必须跨会话稳定，见 utils/syncWindow）
-    expect(JSON.parse(localStorage.getItem(WINDOW_KEY)!)['feed-a|3']).toBe(anchor)
-
-    await drainAll()
-    await round
+    const result = await pouch.syncPriority(1000)
+    expect(result.done).toBe(true)
+    expect(result.added).toBe(0)
+    expect(H.refreshArgs).toHaveLength(0)
+    expect(H.tasks).toHaveLength(0)
   })
 
-  it('时间前进一天后仍用同一个锚点（否则每天全量重扫一遍）', async () => {
-    // 第一轮带上服务端 lastNewEntryAt，好让水位表记下 seen 值（下一轮的增量判据）
-    H.subscriptions = async () => [{ feedId: 'feed-a', lastNewEntryAt: LNA }]
-    const first = pouch.syncNow(['feed-a'])
-    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
-    const firstSelector = JSON.stringify(selectorOf(0))
-    H.pending[0]!.finish({ ok: true })
-    await first
-
-    H.pending.length = 0
-    const now = Date.now()
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(now + DAY_MS)
-    try {
-      // 远端 lastNewEntryAt 变了才会重新入队
-      void pouch.syncFeedsIfChanged([{ feedId: 'feed-a', lastNewEntryAt: '2026-02-02T00:00:00.000Z' }])
-      await vi.waitFor(() => expect(H.pending).toHaveLength(1))
-      expect(JSON.stringify(selectorOf(0))).toBe(firstSelector)
-    } finally {
-      nowSpy.mockRestore()
+  it('催促请求失败（离线）→ skipped=1，仍照常等本地是否有内容', async () => {
+    H.refresh = async () => {
+      throw new Error('offline')
     }
-    await drainAll()
-  })
-
-  it('不限时间（0）时不加 selector，退回改动前的全量复制', async () => {
-    localStorage.setItem('app-settings', JSON.stringify({ syncWindowDays: 0 }))
-    const round = pouch.syncNow(['feed-a'])
-    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
-    expect(selectorOf(0)).toBeUndefined()
-
-    H.pending[0]!.finish({ ok: true })
-    await round
-  })
-
-  it('重置本地缓存会清掉窗口锚点：窗口从重置那一刻重新起算', async () => {
-    const round = pouch.syncNow(['feed-a'])
-    await vi.waitFor(() => expect(H.pending).toHaveLength(1))
-    H.pending[0]!.finish({ ok: true })
-    await round
-    expect(localStorage.getItem(WINDOW_KEY)).toBeTruthy()
-
-    await pouch.resetLocalData()
-    expect(localStorage.getItem(WINDOW_KEY)).toBeNull()
+    const result = await pouch.syncPriority(50)
+    expect(result.skipped).toBe(1)
+    expect(result.added).toBe(0)
   })
 })

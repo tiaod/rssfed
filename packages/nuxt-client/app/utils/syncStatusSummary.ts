@@ -205,7 +205,9 @@ export function syncStatusDetails(
   }
 
   if (summary.state === 'syncing') {
-    const lines = [`剩余 ${summary.remaining} / ${summary.total} 个订阅源（${summary.progress}%）`]
+    // 同步目标现在只有两个（该用户的时间线派生库 + 用户状态库），不是「订阅源数量」：
+    // 订阅源再多也是一个库、一次复制，说「N 个订阅源」会让用户以为在逐源拉取
+    const lines = [`剩余 ${summary.remaining} / ${summary.total} 个同步目标（${summary.progress}%）`]
     for (const item of summary.syncingDetails) {
       lines.push(syncingDetailLine(item))
     }
@@ -214,7 +216,7 @@ export function syncStatusDetails(
 
   if (summary.state === 'error') {
     const lines = [summary.errors[0] ?? '同步失败，请稍后重试']
-    if (summary.errorCount > 1) lines.push(`另有 ${summary.errorCount - 1} 个订阅源同步失败`)
+    if (summary.errorCount > 1) lines.push(`另有 ${summary.errorCount - 1} 个同步目标失败`)
     if (summary.lastSyncedAt) lines.push(`上次成功同步：${formatSyncedAt(summary.lastSyncedAt, now)}`)
     return lines
   }
@@ -222,7 +224,8 @@ export function syncStatusDetails(
   if (summary.state === 'success') {
     const lines: string[] = []
     if (summary.lastSyncedAt) lines.push(`上次同步：${formatSyncedAt(summary.lastSyncedAt, now)}`)
-    lines.push(`共 ${summary.total} 个订阅源`)
+    // 不再报「共 N 个同步目标」：目标是时间线库 + 用户状态库两个固定项，
+    // 「覆盖范围」在服务端聚合下已经没有信息量（整条时间线就是一个库）
     return lines
   }
 

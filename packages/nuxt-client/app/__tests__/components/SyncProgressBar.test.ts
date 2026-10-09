@@ -5,9 +5,12 @@ import SyncProgressBar from '../../components/SyncProgressBar.vue'
 /**
  * 顶部同步进度条的展示口径。
  *
- * 关键行为：进度按「源内进度」加权（见 utils/syncStatusSummary）。
- * 老口径是 done/total：一个几千条的源在拉到一半时，进度条纹丝不动，
+ * 关键行为：进度按「库内进度」加权（见 utils/syncStatusSummary）。
+ * 老口径是 done/total：一个几千条的时间线库在拉到一半时，进度条纹丝不动，
  * 而这段时间恰恰是用户盯着进度条看的全部时间。
+ *
+ * 文案只报百分比、不报「N 个」：聚合改造后同步目标是固定的两个库（时间线 + 用户状态），
+ * 说「正在同步 1 个」既没信息量又容易被读成「1 个订阅源」。
  */
 
 const H = vi.hoisted(() => ({
@@ -52,16 +55,14 @@ describe('SyncProgressBar（顶部进度条）', () => {
     expect(wrapper.find('.progress').exists()).toBe(false)
   })
 
-  it('进行中的源按源内进度加权：拉到一半时进度条走到一半', () => {
+  it('进行中的库按库内进度加权：拉到一半时进度条走到一半', () => {
     H.statuses = { a: { feedId: 'a', status: 'syncing', version: 0, progress: 50 } }
     const wrapper = mountBar()
     expect(wrapper.find('.progress').attributes('data-value')).toBe('50')
-    expect(wrapper.text()).toContain('正在同步 1 个')
-    expect(wrapper.text()).toContain('剩余 1 个')
-    expect(wrapper.text()).toContain('50%')
+    expect(wrapper.text()).toBe('正在同步（50%）')
   })
 
-  it('没有 progress 的源按 0 计：完成的库满格、进行中的库不虚报', () => {
+  it('没有 progress 的库按 0 计：完成的库满格、进行中的库不虚报', () => {
     H.statuses = {
       a: { feedId: 'a', status: 'idle', version: 1 },
       b: { feedId: 'b', status: 'syncing', version: 0 }
