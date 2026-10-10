@@ -126,13 +126,7 @@ async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed
 
 /** 更新 PostgreSQL feed 注册表 */
 async function updateFeedRegistry(feedId: string, url: string, parsed: ParsedFeed) {
-  await db.update(feeds).set({
-    title: parsed.title ?? url,
-    description: parsed.description,
-    siteUrl: parsed.link,
-    errorMessage: undefined,
-    lastFetchedAt: new Date(),
-  }).where(eq(feeds.id, feedId))
+  await db.update(feeds).set(buildFeedRegistryUpdate(url, parsed)).where(eq(feeds.id, feedId))
 }
 
 /** 写入新条目到 per-feed CouchDB 库，返回本次新增的条目列表 */
