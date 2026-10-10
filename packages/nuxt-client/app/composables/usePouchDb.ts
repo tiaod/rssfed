@@ -9,6 +9,7 @@ import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
 import { isStorageFailure } from '~/utils/storageFailure'
 import {
+  lastTimelineUrlKey,
   localDbName,
   lastTimelineRefreshKey,
   LEGACY_LOCAL_DB_NAMES,
@@ -758,6 +759,24 @@ export function usePouchDb() {
     }
   }
 
+  /** 读「上次同步过的远端地址」；localStorage 不可用（隐私模式/配额）时当作没有记录 */
+  function readLastTimelineUrl(userId: string | null): string | null {
+    try {
+      return localStorage.getItem(lastTimelineUrlKey(userId))
+    } catch {
+      return null
+    }
+  }
+
+  /** 记住「这次同步的是哪个远端地址」；写不进去不影响同步（下次最多多丢一次本地缓存） */
+  function writeLastTimelineUrl(userId: string | null, url: string): void {
+    try {
+      localStorage.setItem(lastTimelineUrlKey(userId), url)
+    } catch {
+      // 忽略：拿不到 localStorage 时退化成"每次都当作首次同步"
+    }
+  }
+
   /** 真正挂上 live 复制的动作（由 ensureTimelineLiveSync 做去重与错误归位） */
   async function startTimelineLiveSync(): Promise<void> {
     // 先打开本地库对齐账号：openEntriesDb 内部会 syncDbUser（会话未就绪→guest、登录后切到该账号）。
@@ -784,6 +803,19 @@ export function usePouchDb() {
       }
       // 等待寻址信息期间可能切了账号 / 被暂停 / 熔断：不能拿上一个账号的地址挂到新账号的库上
       if (pouchState.dbUserId !== ownerUserId || pouchState.paused.value || pouchState.storageBroken.value) return
+
+      // 服务端把聚合库换掉了（重建 / v1→v2 升级 / 手工删库后重建）→ 本地这份是**上一版库的镜像**：
+      // 同一批 `_id` 上带着旧修订谱系，留着会让新库搬来的内容变成冲突分支、甚至显示成旧数据。
+      // 地址一变就丢掉本地缓存重新全量拉一遍（只动本地，服务端那份才是权威）。
+      const rememberedUrl = readLastTimelineUrl(ownerUserId)
+      if (rememberedUrl && rememberedUrl !== url) {
+        // 先记账再重置：重置会重新挂载 live 复制，否则这里会来回判"换库"
+        writeLastTimelineUrl(ownerUserId, url)
+        console.log('[Timeline] 远端聚合库已更换，丢掉本地缓存重新全量同步')
+        await resetLocalData()
+        return
+      }
+      if (!rememberedUrl) writeLastTimelineUrl(ownerUserId, url)
 
       const task = db.replicate.from(url, {
         live: true,
@@ -1982,6 +2014,13 @@ export function usePouchDb() {
     getEntryAttachment,
     getFeedImageUrl,
     resetLocalData,
+    /**
+     * 重新挂上时间线 live 复制（先停旧的）。
+     *
+     * 供「远端库可能已更换」的调用方用：重建之后库名会变，重挂时里面的换库检测会丢掉本地
+     * 旧镜像、按新库重新全量拉一遍（见 startTimelineLiveSync）。
+     */
+    ensureTimelineLiveSync,
     getUserDb,
     markRead,
     markManyRead,

@@ -37,6 +37,17 @@ export function lastTimelineRefreshKey(userId: string | null | undefined): strin
   return `rssfed-timeline-refresh-${dbSuffix(userId)}`
 }
 
+/**
+ * 会话内「上次同步过的远端聚合库地址」的 localStorage 键（按账号隔离）。
+ *
+ * 服务端可能把用户的聚合库**换掉**（重建、v1 → v2 升级、手工删库后重建）：新库与本地这份
+ * 镜像的修订谱系对不上，同一批 `_id` 上留着旧修订会让新库搬来的内容变成冲突分支。所以记下
+ * 上次同步的地址，一变就把本地镜像丢掉重拉（见 usePouchDb 的 startTimelineLiveSync）。
+ */
+export function lastTimelineUrlKey(userId: string | null | undefined): string {
+  return `rssfed-timeline-url-${dbSuffix(userId)}`
+}
+
 /** 账号隔离之前使用的固定库名（升级时清理，见 usePouchDb 的 cleanupLegacyDbs） */
 export const LEGACY_LOCAL_DB_NAMES = ['rssfed-entries', 'rssfed-user-state'] as const
 

@@ -20,6 +20,8 @@ interface FakeTask {
 }
 
 const H = vi.hoisted(() => ({
+  /** 服务端下发的远端聚合库地址（换库用例会改它） */
+  remoteUrl: 'http://remote.test/timeline',
   tasks: [] as FakeTask[],
   refreshArgs: [] as unknown[][],
   refresh: async () => ({ accepted: true, completed: true, added: 0 }) as { accepted: boolean, completed?: boolean, added?: number }
@@ -82,6 +84,7 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
+  lastTimelineUrlKey: (uid: string | null) => `rssfed-test-url-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []
 }))
@@ -89,7 +92,8 @@ vi.mock('~/utils/localDbName', () => ({
 vi.mock('~/composables/useCouchTargets', () => ({
   TIMELINE_ID: '__timeline__',
   useCouchTargets: () => ({
-    remoteUrlForId: async (id: string) => (id === '__timeline__' ? 'http://remote.test/timeline' : null),
+    remoteUrlForId: async (id: string) => (id === '__timeline__' ? H.remoteUrl : null),
+    dbNameFor: async (id: string) => (id === '__timeline__' ? H.remoteUrl : null),
     invalidate: () => {}
   })
 }))
@@ -119,6 +123,7 @@ const FEEDS = [{ feedId: 'feed-a', lastNewEntryAt: '2026-01-01T00:00:00.000Z' }]
 let pouch: ReturnType<typeof usePouchDb>
 
 beforeEach(() => {
+  H.remoteUrl = 'http://remote.test/timeline'
   H.tasks.length = 0
   H.refreshArgs.length = 0
   H.refresh = async () => ({ accepted: true, completed: true, added: 0 })
@@ -203,5 +208,42 @@ describe('resetLocalData', () => {
     await pouch.resetLocalData()
     expect(pouch.storageBroken.value).toBeNull()
     expect(H.tasks).toHaveLength(2)
+  })
+})
+
+describe('远端聚合库被换掉（重建 / v1→v2 升级）', () => {
+  const URL_KEY = 'rssfed-test-url-syncgate-test'
+
+  it('首次同步：记下这次同步的远端地址', async () => {
+    await pouch.syncFeedsIfChanged(FEEDS)
+
+    expect(H.tasks).toHaveLength(1)
+    expect(localStorage.getItem(URL_KEY)).toBe('http://remote.test/timeline')
+  })
+
+  it('地址没变：接着同步，不丢本地缓存', async () => {
+    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync(true)
+
+    // 只多挂了一条（旧的那条被停掉），没有因为"换库"多清一次本地库
+    expect(H.tasks).toHaveLength(2)
+    expect(H.tasks.filter(t => t.cancelled)).toHaveLength(1)
+    expect(localStorage.getItem(URL_KEY)).toBe('http://remote.test/timeline')
+  })
+
+  it('地址变了：丢掉本地旧镜像、按新库重新全量拉一遍（旧修订谱系会让新库内容变成冲突分支）', async () => {
+    await pouch.syncFeedsIfChanged(FEEDS)
+    expect(H.tasks).toHaveLength(1)
+
+    // 服务端换库：新地址
+    H.remoteUrl = 'http://remote.test/timeline-2'
+    await pouch.ensureTimelineLiveSync(true)
+
+    // 旧句柄被取消，新句柄指向新库；记账也跟着更新（否则会来回判"换库"）
+    expect(H.tasks[0]!.cancelled).toBe(true)
+    expect(H.tasks.at(-1)!.url).toBe('http://remote.test/timeline-2')
+    expect(localStorage.getItem(URL_KEY)).toBe('http://remote.test/timeline-2')
+    // 同步状态被重置（本地库已重建，计数从零开始）
+    expect(pouch.syncedDocsByTarget[TIMELINE_ID]).toBeUndefined()
   })
 })

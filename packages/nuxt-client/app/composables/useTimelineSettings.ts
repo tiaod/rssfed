@@ -57,8 +57,8 @@ export function useTimelineSettings() {
    *   ① 寻址缓存的还是旧库名，同步会打到一个已经不存在的库上；
    *   ② 本地为「被剪掉的条目」留着删除记录（tombstone，修订号更高），重建搬回来的内容在本地
    *      会被判成冲突、看不见。
-   * 所以这里等库名真的换过去，再丢掉本地缓存重新全量拉一遍（`resetLocalData` 只动本地，服务端
-   * 那份才是权威）。等不到就算了：同步通道自己会重试，用户也可以再点一次。
+   * 所以这里等库名真的换过去，再重挂 live 复制 —— 挂载时会发现远端地址变了、丢掉本地旧镜像重新
+   * 全量拉一遍（只动本地，服务端那份才是权威）。等不到就算了：同步通道自己会重试，用户也可以再点一次。
    */
   async function rebuild(): Promise<void> {
     rebuilding.value = true
@@ -73,7 +73,8 @@ export function useTimelineSettings() {
         invalidate()
         const current = await dbNameFor(TIMELINE_ID).catch(() => null)
         if (current && current !== before) {
-          await usePouchDb().resetLocalData()
+          // 换库后的收尾统一在同步挂载里做：它发现远端地址变了会丢掉本地旧镜像重新全量拉一遍
+          await usePouchDb().ensureTimelineLiveSync(true)
           return
         }
       }
