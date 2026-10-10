@@ -79,5 +79,5 @@ export function useCouchTargets() {
     return dbName ? `${base}/api/couchdb/proxy/${encodeURIComponent(dbName)}` : null
   }
 
-  return { remoteUrlForId, invalidate }
+  return { remoteUrlForId, dbNameFor, invalidate }
 }

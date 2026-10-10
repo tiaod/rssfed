@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { TIMELINE_ID, useCouchTargets } from '~/composables/useCouchTargets'
 import type { TimelineSettings } from '~/utils/timelineSettings'
 import { DEFAULT_TIMELINE_SETTINGS, normalizeTimelineSettings } from '~/utils/timelineSettings'
 
@@ -47,11 +48,35 @@ export function useTimelineSettings() {
     }
   }
 
-  /** 手动重建派生库（服务端写的条目/源元信息整体删掉再全量回填；运维兜底入口） */
+  /**
+   * 手动重建聚合库（运维兜底入口）。
+   *
+   * 服务端的重建是**换一个聚合库**（复制是变更投递不是投影，就地清空搬不回来，见 hono-server
+   * 的 services/timeline.ts），而且是异步入队的：库名要过一会儿才变。本地那份是它的镜像，
+   * 直接接着同步会有两个问题 ——
+   *   ① 寻址缓存的还是旧库名，同步会打到一个已经不存在的库上；
+   *   ② 本地为「被剪掉的条目」留着删除记录（tombstone，修订号更高），重建搬回来的内容在本地
+   *      会被判成冲突、看不见。
+   * 所以这里等库名真的换过去，再丢掉本地缓存重新全量拉一遍（`resetLocalData` 只动本地，服务端
+   * 那份才是权威）。等不到就算了：同步通道自己会重试，用户也可以再点一次。
+   */
   async function rebuild(): Promise<void> {
     rebuilding.value = true
     try {
+      const { dbNameFor, invalidate } = useCouchTargets()
+      const before = await dbNameFor(TIMELINE_ID).catch(() => null)
       await api.timeline.rebuild()
+      if (!before) return
+      // 重建在服务端是异步入队的（202），库名要等它跑起来才变；最多等 60s
+      for (let attempt = 0; attempt < 30; attempt++) {
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        invalidate()
+        const current = await dbNameFor(TIMELINE_ID).catch(() => null)
+        if (current && current !== before) {
+          await usePouchDb().resetLocalData()
+          return
+        }
+      }
     } finally {
       rebuilding.value = false
     }
