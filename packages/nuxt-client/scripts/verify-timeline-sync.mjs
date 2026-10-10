@@ -138,6 +138,44 @@ async function cleanup() {
 
 const couchAuth = `Basic ${Buffer.from(`${COUCH_USER}:${COUCH_PASS}`).toString('base64')}`
 
+/**
+ * 读 OPML 导入的 NDJSON 进度流，返回最终汇总。
+ *
+ * `/api/feeds/import-opml` 是流式接口（逐源一行进度事件，供前端画进度条），
+ * 最后一次 `done` 事件才是老的 JSON 响应体；这里顺带数一下 progress 事件条数。
+ */
+async function readImportStream(res) {
+  if (!res.body) throw new Error('导入响应没有响应体，读不到进度流')
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let final = null
+  let progressEvents = 0
+  const handle = (line) => {
+    const trimmed = line.trim()
+    if (!trimmed) return
+    const event = JSON.parse(trimmed)
+    if (event.type === 'progress') progressEvents++
+    else if (event.type === 'done') final = event
+    else if (event.type === 'error') throw new Error(`导入流内报错：${event.message}`)
+  }
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    let index = buffer.indexOf('\n')
+    while (index >= 0) {
+      handle(buffer.slice(0, index))
+      buffer = buffer.slice(index + 1)
+      index = buffer.indexOf('\n')
+    }
+  }
+  buffer += decoder.decode()
+  if (buffer.trim()) handle(buffer)
+  if (!final) throw new Error('导入流没有 done 事件，拿不到汇总')
+  return { final, progressEvents }
+}
+
 const failures = []
 function check(label, ok, detail = '') {
   console.log(`${ok ? '  ✓' : '  ✗'} ${label}${detail ? ` — ${detail}` : ''}`)
@@ -288,9 +326,10 @@ async function main() {
     body: JSON.stringify({ opml })
   })
   if (!imported.ok) throw new Error(`导入 OPML 失败（HTTP ${imported.status}）：${await imported.text()}`)
-  const importResult = await imported.json()
+  const { final: importResult, progressEvents } = await readImportStream(imported)
   // 探针地址是固定的：第一次跑是新建（imported=1），之后是「已存在」（skipped=1），两者都算成功
   check('探针源已订阅', importResult.imported === 1 || importResult.skipped === 1, JSON.stringify(importResult))
+  check('导入逐源回报进度事件', progressEvents === importResult.total, `${progressEvents}/${importResult.total}`)
 
   const subs = await (await session.request('/api/feeds/subscriptions')).json()
   const subscription = subs.find(s => s.feedId)

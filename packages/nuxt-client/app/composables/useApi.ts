@@ -13,6 +13,7 @@ import type { SiteSettingsPublic, SiteSettingsFull, SiteSettingsUpdate } from '~
 import type { McpToken, McpTokenCreated } from '~/types/mcp'
 import type { TimelineSettings as TimelineSettingsPayload } from '~/utils/timelineSettings'
 import { resolveApiBase } from '~/utils/apiBase'
+import { importOpmlStreaming, type OpmlImportEvent } from '~/utils/opmlImport'
 
 /** 催促聚合的响应（POST /api/timeline/refresh） */
 export interface TimelineRefreshResult {
@@ -68,11 +69,14 @@ export function useApi() {
       imageDefaults: () => apiFetch<{ maxImageCount: number, maxEntryImageBytes: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number }>(
         `${base}/api/feeds/image-defaults`
       ),
-      /** 导入 OPML：批量注册订阅源并创建订阅，返回导入汇总 */
-      importOpml: (opml: string) => apiFetch<{ total: number, imported: number, skipped: number, failed: { url: string, error: string }[] }>(
-        `${base}/api/feeds/import-opml`,
-        { method: 'POST', body: { opml } }
-      )
+      /**
+       * 导入 OPML：批量注册订阅源并创建订阅。
+       *
+       * 这是个流式接口（后端逐源推 NDJSON 进度事件，见 utils/opmlImport.ts），
+       * 因此不走 $fetch —— 它要等流结束才返回，进度就没了。
+       */
+      importOpml: (opml: string, options: { onEvent?: (event: OpmlImportEvent) => void, signal?: AbortSignal } = {}) =>
+        importOpmlStreaming(`${base}/api/feeds/import-opml`, opml, options)
     },
     /**
      * 服务端时间线聚合（每用户一个派生库）。

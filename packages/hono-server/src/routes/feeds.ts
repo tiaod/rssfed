@@ -70,7 +70,27 @@ feedsRouter.post("/discover", async (c) => {
   }
 })
 
-/** 导入 OPML：批量注册订阅源并按 OPML 分组结构为当前用户创建订阅 */
+/**
+ * OPML 导入过程中的进度事件（每行一个 JSON，见下方 import-opml 的响应格式）。
+ *
+ * 前端据 progress 渲染进度条；done/error 是流的终点，二者必有其一。
+ */
+type ImportOpmlEvent =
+  | { type: "start", total: number }
+  | { type: "progress", done: number, total: number, imported: number, skipped: number, failed: number, title: string }
+  | { type: "done", total: number, imported: number, skipped: number, failed: { url: string, error: string }[] }
+  | { type: "error", message: string }
+
+/**
+ * 导入 OPML：批量注册订阅源并按 OPML 分组结构为当前用户创建订阅。
+ *
+ * 响应体是 **NDJSON 进度流**（每处理完一个源推一行），不是单个 JSON —— 导入要给每个源
+ * 联网解析一次，几十上百个源会跑几分钟，单次 JSON 响应期间前端只能转圈、无法给出任何反馈。
+ * 解析/去重等开流前的失败仍走普通 JSON 错误（带 HTTP 状态码）；开流之后的意外失败
+ * 只能以 `error` 事件送达（此刻状态码已经发出去了），由前端抛成同样的错误。
+ *
+ * 客户端中途断开（用户取消导入）时停止继续处理未开始的源；已写入的订阅保留。
+ */
 feedsRouter.post("/import-opml", requireAuth, async (c) => {
   const userId = c.get("userId")
   const { opml } = await c.req.json()
@@ -92,24 +112,78 @@ feedsRouter.post("/import-opml", requireAuth, async (c) => {
   // 2. 按 URL 去重（同一订阅源可能在文件中出现多次）
   const unique = [...new Map(items.map((i) => [i.url, i])).values()]
 
+  // 用户库在开流前准备好：这里失败仍是可读的 JSON 错误，而不是流里的半截进度
   const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   const failed: { url: string, error: string }[] = []
   let imported = 0
   let skipped = 0
+  let done = 0
+  /** 客户端是否已断开：断开后不再枚举新的事件，也停止处理剩余的源 */
+  let clientGone = false
 
-  // 3. 有限并发处理：注册 feed + 写入用户订阅，单个失败不影响其余
-  await mapWithConcurrency(unique, 5, async (item) => {
-    try {
-      const meta = await ensureFeedRegistered(item)
-      const subscribed = await addSubscriptionIfAbsent(userDb, item, meta)
-      if (subscribed) imported++
-      else skipped++
-    } catch (err) {
-      failed.push({ url: item.url, error: formatFeedError(item.url, err) })
-    }
+  // 客户端断开要认 **请求信号**：@hono/node-server 在连接提前关闭时 abort 的是
+  // `c.req.raw.signal`，并不会去 cancel 我们返回的 ReadableStream（实测断开后
+  // 导入仍会继续跑完），只监听下面的 cancel() 会漏掉真实的中断。
+  const requestSignal = c.req.raw.signal
+  if (requestSignal.aborted) clientGone = true
+  else requestSignal.addEventListener("abort", () => { clientGone = true }, { once: true })
+
+  const encoder = new TextEncoder()
+  const stream = new ReadableStream<Uint8Array>({
+    async start(controller) {
+      const send = (event: ImportOpmlEvent) => {
+        if (clientGone) return
+        try {
+          controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`))
+        } catch {
+          // 断开与 enqueue 之间可能有竞态：吞掉即可，请求信号已经标记 clientGone
+          clientGone = true
+        }
+      }
+
+      try {
+        send({ type: "start", total: unique.length })
+
+        // 3. 有限并发处理：注册 feed + 写入用户订阅，单个失败不影响其余
+        await mapWithConcurrency(unique, 5, async (item) => {
+          if (clientGone) return
+          try {
+            const meta = await ensureFeedRegistered(item)
+            const subscribed = await addSubscriptionIfAbsent(userDb, item, meta)
+            if (subscribed) imported++
+            else skipped++
+          } catch (err) {
+            failed.push({ url: item.url, error: formatFeedError(item.url, err) })
+          }
+          done++
+          send({ type: "progress", done, total: unique.length, imported, skipped, failed: failed.length, title: item.title })
+        })
+
+        send({ type: "done", total: unique.length, imported, skipped, failed })
+      } catch (err) {
+        send({ type: "error", message: err instanceof Error ? err.message : String(err) })
+      } finally {
+        try {
+          controller.close()
+        } catch {
+          // 已随断开关闭
+        }
+      }
+    },
+    cancel() {
+      // 补充路径：某些适配器（Bun / Deno 等）会 cancel 流而不是 abort 请求信号。
+      // 正在处理的源不会被打断，但接下来不会再取新的源。
+      clientGone = true
+    },
   })
 
-  return c.json({ total: unique.length, imported, skipped, failed })
+  return c.body(stream, 200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    // 进度事件是即时数据：任何一层反代/浏览器缓存它都没有意义
+    "Cache-Control": "no-store",
+    // nginx 系反代默认缓冲响应体，缓冲会让进度条变成「结束后突然跳到 100%」
+    "X-Accel-Buffering": "no",
+  })
 })
 
 /** 有限并发处理任务（批量导入时避免并发打爆目标站点 / 数据库） */
