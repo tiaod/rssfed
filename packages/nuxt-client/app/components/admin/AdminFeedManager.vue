@@ -1,8 +1,17 @@
 <script setup lang="ts">
 import type { AdminFeed, FeedStatus } from '~/types/rss'
+import { resolveApiBase } from '~/utils/apiBase'
 
 const api = useApi()
 const toast = useToast()
+const { public: { apiBaseUrl } } = useRuntimeConfig()
+
+/**
+ * BullMQ 任务看板地址（后端 /admin/queues，BullBoard）。
+ * 它是后端路由、没有对应的前端页面，所以这里给管理员一个直达入口；
+ * 打开后仍要管理员会话才能进（requireAdmin）。
+ */
+const queueBoardUrl = computed(() => `${resolveApiBase(apiBaseUrl)}/admin/queues`)
 
 const feeds = ref<AdminFeed[]>([])
 const loading = ref(true)
@@ -213,13 +222,27 @@ onMounted(load)
           :content="false"
           size="sm"
         />
-        <UInput
-          v-model="keyword"
-          icon="i-lucide-search"
-          placeholder="搜索名称或 URL…"
-          class="w-full sm:w-72"
-          clearable
-        />
+        <div class="flex w-full items-center gap-2 sm:w-auto">
+          <UInput
+            v-model="keyword"
+            icon="i-lucide-search"
+            placeholder="搜索名称或 URL…"
+            class="flex-1 sm:w-72"
+            clearable
+          />
+          <UButton
+            :to="queueBoardUrl"
+            target="_blank"
+            rel="noopener"
+            icon="i-lucide-list-tree"
+            color="neutral"
+            variant="outline"
+            size="sm"
+            class="shrink-0"
+          >
+            队列看板
+          </UButton>
+        </div>
       </div>
 
       <div
