@@ -313,6 +313,72 @@ function requestOnce(url: string, useProxy: boolean, redirects: number): Promise
 }
 
 /**
+ * 「这个域名走代理网络级失败过」的短期记忆（TTL 10 分钟）。
+ *
+ * 代理链路是按域名好坏不一的，而失败要等满超时才有结论。图片缓存是**逐张**下载的
+ * （images/fetch.ts 还带 4 次重试），要是每张图都先撞一次代理超时，一个源就能跑几分钟
+ * （2026-10-10 实测单个抓取 job 158.9s、队列吞吐掉到 0.4 个/分钟）。所以把失败过的域名
+ * 记下来：TTL 内直连优先；代理下一次成功会自动清掉这条记录，节点恢复后不用重启。
+ */
+const PROXY_FAIL_TTL_MS = 10 * 60 * 1000
+const proxyFailedHosts = new Map<string, number>()
+
+function urlHost(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase()
+  } catch {
+    return ""
+  }
+}
+
+function proxyRecentlyFailed(host: string): boolean {
+  if (!host) return false
+  const at = proxyFailedHosts.get(host)
+  if (at === undefined) return false
+  if (Date.now() - at > PROXY_FAIL_TTL_MS) {
+    proxyFailedHosts.delete(host)
+    return false
+  }
+  return true
+}
+
+/**
+ * 按「先代理、网络级失败回退直连」的顺序取一次 URL，取数逻辑交给 request(useProxy)。
+ *
+ * 两条链路都要试的原因见 fetchUrl 注释；HTTP 4xx/5xx 是服务器给的答复，不换链路重试。
+ * 订阅抓取（fetchUrl）与图片下载（images/fetch.ts 的 httpGet）共用这一层，
+ * 所以「哪条链路能用」的记忆也是两边共享的。
+ */
+export async function withProxyFallback<T>(url: string, request: (useProxy: boolean) => Promise<T>): Promise<T> {
+  if (!shouldProxy(url)) return request(false)
+
+  const host = urlHost(url)
+  // 失败过的域名直连优先；否则代理优先（被墙站点快）
+  const proxyFirst = !proxyRecentlyFailed(host)
+  const first = proxyFirst ? { useProxy: true, name: "代理" } : { useProxy: false, name: "直连" }
+  const second = proxyFirst ? { useProxy: false, name: "直连" } : { useProxy: true, name: "代理" }
+  let firstError: unknown
+
+  for (const [i, attempt] of [first, second].entries()) {
+    try {
+      const result = await request(attempt.useProxy)
+      // 代理这次通了：清掉失败记忆，下一轮恢复「代理优先」
+      if (attempt.useProxy) proxyFailedHosts.delete(host)
+      return result
+    } catch (err) {
+      if (!isNetworkError(err)) throw err
+      if (attempt.useProxy) proxyFailedHosts.set(host, Date.now())
+      if (i === 0) {
+        firstError = err
+        continue
+      }
+      throw new Error(`${first.name}失败（${describeError(firstError)}）；${second.name}也失败（${describeError(err)}）`)
+    }
+  }
+  throw firstError as Error
+}
+
+/**
  * 抓取 URL 返回文本内容，支持代理、代理失败回退直连、重定向。
  * 超时 10 秒，最多跟随 5 次重定向。
  *
@@ -323,18 +389,7 @@ function requestOnce(url: string, useProxy: boolean, redirects: number): Promise
  */
 async function fetchUrl(url: string, redirects = 0): Promise<string> {
   if (redirects > 5) throw new Error("Too many redirects")
-  if (!shouldProxy(url)) return requestOnce(url, false, redirects)
-
-  try {
-    return await requestOnce(url, true, redirects)
-  } catch (err) {
-    if (!isNetworkError(err)) throw err
-    try {
-      return await requestOnce(url, false, redirects)
-    } catch (directErr) {
-      throw new Error(`代理失败（${describeError(err)}）；直连也失败（${describeError(directErr)}）`)
-    }
-  }
+  return withProxyFallback(url, (useProxy) => requestOnce(url, useProxy, redirects))
 }
 
 /**

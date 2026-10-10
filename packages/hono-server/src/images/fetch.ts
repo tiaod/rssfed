@@ -1,7 +1,7 @@
 import http from "node:http"
 import https from "node:https"
 import sharp from "sharp"
-import { httpAgent, httpsAgent, shouldProxy } from "../rss/parser"
+import { httpAgent, httpsAgent, withProxyFallback } from "../rss/parser"
 
 /**
  * 单张远程图片的下载与压缩原语。
@@ -77,7 +77,8 @@ export async function downloadImage(url: string, maxBytes?: number): Promise<Dow
     let current = url
     // 最多跟随 3 次重定向
     for (let i = 0; i < 4; i++) {
-      const res = await httpGet(current, maxBytes)
+      // 走同一个「先代理、网络级失败回退直连」策略：图床走代理挂死时不再每张图都白等一次超时
+      const res = await withProxyFallback(current, (useProxy) => httpGet(current, maxBytes, useProxy))
       if (res.status >= 300 && res.status < 400 && res.headers.location) {
         current = new URL(res.headers.location, current).toString()
         continue
@@ -98,13 +99,14 @@ export async function downloadImage(url: string, maxBytes?: number): Promise<Dow
   }
 }
 
-/** 发起 HTTP(S) GET 并流式收集响应体（超时、大小超限时抛错终止） */
-function httpGet(url: string, maxBytes?: number): Promise<{ status: number, headers: http.IncomingHttpHeaders, buffer: Buffer }> {
+/** 发起 HTTP(S) GET 并流式收集响应体（超时、大小超限时抛错终止）；useProxy 由 withProxyFallback 决定 */
+function httpGet(url: string, maxBytes: number | undefined, useProxy: boolean): Promise<{ status: number, headers: http.IncomingHttpHeaders, buffer: Buffer }> {
   // 未显式指定时用全局默认上限
   const limit = maxBytes ?? DEFAULT_MAX_SOURCE_IMAGE_BYTES
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith("https:") ? https : http
-    const agent = shouldProxy(url) ? (url.startsWith("https:") ? httpsAgent : httpAgent) : undefined
+    const isHttps = url.startsWith("https:")
+    const mod = isHttps ? https : http
+    const agent = useProxy ? (isHttps ? httpsAgent : httpAgent) : undefined
     // 只让第一个结果生效：主动断开连接后还会冒出 error/close 事件，不能覆盖已定结论
     let settled = false
     const fail = (err: Error): void => {

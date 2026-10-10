@@ -136,4 +136,64 @@ describe("代理失败回退直连", () => {
     expect(isNetworkError(new Error("HTTP 403"))).toBe(false)
     expect(isNetworkError(new Error("Unsupported feed format: html"))).toBe(false)
   })
+
+  /**
+   * 回退要「记住」：图片缓存是逐张下载的（还带 4 次重试），每个域名都先撞一次代理超时的话，
+   * 一个源就能跑几分钟（实测单 job 158.9s）。订阅抓取与图片下载共用这一层，记忆也共享。
+   */
+  it("代理失败后记住该域名：同一域名第二次直连优先，别的域名不受影响", async () => {
+    const parser = await load({ RSS_FETCH_PROXY: "http://127.0.0.1:7890" })
+    const calls: boolean[] = []
+    const request = async (useProxy: boolean) => {
+      calls.push(useProxy)
+      if (useProxy) throw Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" })
+      return "ok"
+    }
+
+    expect(await parser.withProxyFallback("https://example.com/feed", request)).toBe("ok")
+    expect(calls).toEqual([true, false])
+
+    calls.length = 0
+    expect(await parser.withProxyFallback("https://example.com/feed", request)).toBe("ok")
+    expect(calls).toEqual([false])
+
+    calls.length = 0
+    await parser.withProxyFallback("https://other.example.org/feed", request)
+    expect(calls).toEqual([true, false])
+  })
+
+  it("HTTP 状态码不换链路（4xx/5xx 换代理也一样）", async () => {
+    const parser = await load({ RSS_FETCH_PROXY: "http://127.0.0.1:7890" })
+    const calls: boolean[] = []
+    const request = async (useProxy: boolean) => {
+      calls.push(useProxy)
+      throw new Error("HTTP 404")
+    }
+
+    await expect(parser.withProxyFallback("https://example.com/feed", request)).rejects.toThrow("HTTP 404")
+    expect(calls).toEqual([true])
+  })
+
+  it("两条链路都断时，错误里带两边的原因", async () => {
+    const parser = await load({ RSS_FETCH_PROXY: "http://127.0.0.1:7890" })
+    const request = async (useProxy: boolean) => {
+      throw Object.assign(new Error(useProxy ? "connect ETIMEDOUT" : "connect ECONNREFUSED"), {
+        code: useProxy ? "ETIMEDOUT" : "ECONNREFUSED",
+      })
+    }
+
+    await expect(parser.withProxyFallback("https://example.com/feed", request))
+      .rejects.toThrow(/代理失败.*ETIMEDOUT.*直连也失败.*ECONNREFUSED/)
+  })
+
+  it("未配代理时只走一次直连", async () => {
+    const parser = await load({})
+    const calls: boolean[] = []
+
+    await parser.withProxyFallback("https://example.com/feed", async (useProxy: boolean) => {
+      calls.push(useProxy)
+      return "ok"
+    })
+    expect(calls).toEqual([false])
+  })
 })
