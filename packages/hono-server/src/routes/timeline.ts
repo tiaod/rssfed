@@ -8,6 +8,7 @@ import {
   parseTimelineSettingsPatch,
   reconcileUserTimeline,
   updateTimelineSettings,
+  waitForSync,
 } from "../services/timeline"
 import { enqueueTimelineRebuild, enqueueTimelineReconcile } from "../workers/timeline"
 
@@ -81,10 +82,10 @@ timelineRouter.patch("/settings", async (c) => {
  * 两种模式：
  *   - 默认（即发即忘）：入队后立刻 202。数据由派生库的 live 复制到端，客户端不该等 ——
  *     等待会把「几百个源里的那几个有更新的」变成一次阻塞式请求。
- *   - `?wait=1`：**本请求内**跑完一轮 reconcile 再返回，附上确切的「本轮新增 N 条」。
- *     手动同步（用户点了按钮）用这个模式，才能给出「同步完成 / 已是最新」的确定结论；
- *     服务端等待有上限（TIMELINE_REFRESH_WAIT_MS），超时就返回 completed=false，
- *     而那轮 reconcile 仍在后台跑完 —— 客户端按「服务端仍在聚合」处理即可，不算失败。
+ *   - `?wait=1`：本请求内把拓扑对齐（新订阅/退订/换窗口在这一步生效），再**轮询派生库**
+ *     等复制器把内容送到，返回确切的「本轮新增 N 条」。手动同步（用户点了按钮）用这个模式，
+ *     才能给出「同步完成 / 已是最新」的确定结论；等待有上限（TIMELINE_REFRESH_WAIT_MS），
+ *     超时就返回 completed=false，而复制仍在后台继续 —— 客户端按「服务端仍在聚合」处理即可。
  */
 timelineRouter.post("/refresh", async (c) => {
   const userId = c.get("userId")
@@ -94,24 +95,15 @@ timelineRouter.post("/refresh", async (c) => {
     return c.json({ accepted: true, completed: false }, 202)
   }
 
-  const running = reconcileUserTimeline(userId)
-  const result = await Promise.race([
-    running,
-    new Promise<null>((resolve) => {
-      const timer = setTimeout(() => resolve(null), TIMELINE_REFRESH_WAIT_MS)
-      // 不因这个计时器拖着进程不退出（服务器优雅关闭时尤其重要）
-      timer.unref?.()
-    }),
-  ])
-  if (!result) {
-    // 超时：上面那轮 reconcile 没有被取消，会自己跑完（数据随后由 live 复制到端），
-    // 所以这里**不能**再入队一轮 —— 那只会让同一份工作同时跑两遍
-    return c.json({ accepted: true, completed: false }, 202)
-  }
+  // 拓扑对齐本身很轻（列一次订阅 + 列一次 _replicator，稳态下一个写请求都不发），
+  // 所以不进超时预算：超时只用来限制「等复制器送数据」这一段
+  const deadline = Date.now() + TIMELINE_REFRESH_WAIT_MS
+  const result = await reconcileUserTimeline(userId)
+  const sync = await waitForSync(userId, Math.max(0, deadline - Date.now()))
   return c.json({
     accepted: true,
-    completed: true,
-    added: result.addedEntries,
+    completed: sync.completed,
+    added: sync.added,
     sources: result.sources,
   })
 })

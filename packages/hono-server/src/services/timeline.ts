@@ -3,29 +3,38 @@ import { eq } from "drizzle-orm"
 import { db, user, userTimelineSettings, type NewUserTimelineSettings } from "../db"
 import {
   createCouchDb,
+  createTimelineDatabase,
   ensureBotDatabase,
   ensureFeedDatabase,
   ensureTimelineDatabase,
   nanoServer,
 } from "../couchdb/client"
+import {
+  deleteReplications,
+  ensureReplication,
+  listUserReplications,
+} from "../couchdb/replicator"
 
 /**
- * 用户时间线聚合服务：把用户订阅的 feed / bot 增量聚合进他自己的 CouchDB 派生库。
+ * 用户时间线聚合服务：维护「用户聚合库 = 他订阅的源在当前窗口内的子集」这份拓扑。
  *
- * 为什么是「拉」而不是在抓取时扇出：
- *   订阅关系**只**存在于各用户的用户库（客户端离线也能改，见 ARCHITECTURE.md），
- *   PostgreSQL 里没有「谁订阅了什么」的表。抓取时扇出就得先引入这样一张索引表（或监听
- *   每个用户库的 _changes）才能知道该推给谁；而按用户拉只需要读他自己的订阅列表，
- *   与既有代码（listSubscriptionsForUser）同源，没有额外状态需要维护。
+ * **聚合库由 CouchDB 复制器搬出来**（见 couchdb/replicator.ts）：每个 (用户 × 订阅源) 一条
+ * 常驻复制，JS filter 按窗口过滤。所以这一层只管四件事：
+ *   ① 拓扑：订阅了谁就该有谁的任务；退订、换窗口就把过期任务删掉（换窗口 = 换复制哈希 = 重扫回填）；
+ *   ② 剪枝：复制器不会因为过滤变严而删目标端已有的文档，窗口的权威在 pruneOlderThan；
+ *   ③ 重建：聚合库是从源库"修剪"出来的，修剪坏了/要按新窗口整体重来时就换一个空库重搬
+ *      （见 rederiveUserTimeline —— 复制是变更投递，就地清空是搬不回来的）；
+ *   ④ 状态：`_local/state` 只留版本标记与设置快照（任务清单本身就是"哪些源在搬"的真相）。
  *
- * 成本闸门全在「一条 SQL」上：只有该用户订阅的源里 `lastNewEntryAt > 自己的游标` 的那些
- * 才会去碰 CouchDB（见 changedSourceIds）。没有新内容的用户，整轮 reconcile 只有
- * 1 次用户库读取（订阅）+ 1 次同一库里的状态文档读取。
+ * 稳态下一轮的成本是「一次订阅列表读 + 一次 `_replicator` 列 + 一次剪枝视图查询」，一个写
+ * 请求都不发；新订阅 / 窗口变化才建删任务，由复制器自己去扫源库。客户端侧与订阅数无关。
+ *
+ * **客户端不做二次修剪**：浏览器把聚合库整份同步下来（条目只读、状态可写），窗口的裁剪只发生
+ * 在服务端 —— 服务端剪掉的条目会作为删除事件复制过去，本地跟着删，前端不需要再判一遍窗口。
  *
  * **附件不由这里产生**：正文图在抓取时按 **per-feed 策略**下载压缩成 AVIF 附件写进源库
- * （见 rss/entry-images.ts 与 workers/index.ts），聚合只把附件**原样搬运**进用户库
- * （一次 GET 取字节 + 一次 bulk 写，不下载、不重压、不看任何 per-user 参数）。
- * 于是「同一张图在 N 个用户库里字节完全一致」，图片的 CPU/带宽成本与用户数无关。
+ * （见 rss/entry-images.ts 与 workers/index.ts）。复制器在 CouchDB 内部以 multipart 搬运它们
+ * ——二进制、不经过我们的进程、不吃内存、不做 base64 往返，所以同一张图在所有用户库里字节一致。
  *
  * 触发方：定时任务（workers/timeline.ts，默认 5 分钟）+ 客户端主动刷新
  * （POST /api/timeline/refresh，订阅/退订后调用）。
@@ -134,14 +143,6 @@ export function windowStartIso(windowDays: number, now: number = Date.now()): st
   return new Date(now - windowDays * 86_400_000).toISOString()
 }
 
-/** 条目是否在窗口内（发布时间缺失/不可解析视为不在窗口内，与客户端 Mango selector 的行为一致） */
-function inWindow(doc: { publishedAt?: unknown }, windowStart: string | null): boolean {
-  if (!windowStart) return true
-  if (typeof doc.publishedAt !== "string") return false
-  const ms = Date.parse(doc.publishedAt)
-  return Number.isFinite(ms) && ms >= Date.parse(windowStart)
-}
-
 // ── 源 ──
 
 export interface TimelineSource {
@@ -171,10 +172,10 @@ export async function listSubscriptionSources(userId: string): Promise<TimelineS
   return sources
 }
 
-/** 源 id → 源库 DocumentScope（bot 订阅读 bot 产出库） */
-async function resolveSourceScope(source: TimelineSource): Promise<DocumentScope<unknown>> {
-  if (source.kind === "bot") return createCouchDb(await ensureBotDatabase(source.id.slice("bot:".length)))
-  return createCouchDb(await ensureFeedDatabase(source.id))
+/** 源 id → 源库**名**（bot 订阅读 bot 产出库；复制文档里直接写库名，不需要 DocumentScope） */
+async function resolveSourceDbName(source: TimelineSource): Promise<string> {
+  if (source.kind === "bot") return await ensureBotDatabase(source.id.slice("bot:".length))
+  return await ensureFeedDatabase(source.id)
 }
 
 /** 源 id 对应的条目 `_id` 前缀（退订时按它做范围删除） */
@@ -187,38 +188,46 @@ export function entryIdPrefix(sourceId: string): string {
 // ── 状态文档（`_local/state`） ──
 //
 // 放 `_local/` 而不是普通文档：`_local` 文档**不参与复制**，所以浏览器不会同步到
-// 「服务端记到哪了」这种纯内部状态；同时它随派生库一起删除，重建即重来。
+// 「服务端做到哪了」这种纯内部状态；同时它随聚合库一起删除，重建即重来。
+//
+// 内容只剩「版本标记 + 设置快照」：每源游标已经没有用了 —— 增量由复制器自己按 checkpoint
+// 续跑，而"哪些源已经在搬"的真相是 `_replicator` 里属于这个用户的文档（见 listUserReplications）。
 
 const STATE_DOC_ID = "_local/state"
 
-interface TimelineSourceState {
-  /** 该源 `_changes` 的游标（CouchDB 3 是字符串 seq）；null 表示还没扫过 */
-  cursor: string | number | null
-  /** 首次聚合时间（诊断用） */
-  addedAt?: string
-}
+/**
+ * 状态版本 2：搬运从「自己读 `_changes`、按窗口写文档」换成「CouchDB 复制器搬运」。
+ *
+ * 版本 1 的聚合库里，文档是用**我们自己的修订**写进去的；复制器按源库修订谱系落库
+ * （`new_edits: false`），同一个 `_id` 上会出现两条互不相干的修订 → 冲突。而"就地清空再重搬"
+ * 做不到（目标端删过的 rev 复制器不会再送），所以 v1 → v2 的升级走的是**换库重搬**：
+ * 另建一个空聚合库、把用户自己写的状态文档搬过去，让复制器从头搬一遍。
+ */
+const STATE_VERSION = 2
 
 interface TimelineState {
   version: number
-  /** 上次 reconcile 生效的窗口天数，用来判断窗口是放大还是缩小 */
+  /** 上次 reconcile 生效的窗口天数（诊断用） */
   windowDays: number | null
   settingsUpdatedAt: string | null
-  sources: Record<string, TimelineSourceState>
 }
 
 function emptyState(): TimelineState {
-  return { version: 1, windowDays: null, settingsUpdatedAt: null, sources: {} }
+  return { version: STATE_VERSION, windowDays: null, settingsUpdatedAt: null }
 }
 
-/** 读状态文档；不存在（首次）返回空状态 */
+/** 读状态文档；不存在（首次/新库）返回空状态 */
 async function readTimelineState(dbName: string): Promise<TimelineState> {
   try {
     const doc = await nanoServer.request({ db: dbName, doc: STATE_DOC_ID, method: "GET" }) as Partial<TimelineState>
+    // 只有**明确写着 version 1** 的老库才算需要换库重搬。老实现是显式写 `version: 1` 的（核对过
+    // 线上库），所以"没有 version 字段"只可能是取不到文档（nano 在 404 时也可能回一个 error 体），
+    // 这时必须当成当前版本 —— 否则每个新账号的第一次 reconcile 都会白换一次库。
+    if (typeof doc?.version !== "number") return emptyState()
     return {
-      version: 1,
+      version: doc.version,
       windowDays: typeof doc.windowDays === "number" ? doc.windowDays : null,
       settingsUpdatedAt: typeof doc.settingsUpdatedAt === "string" ? doc.settingsUpdatedAt : null,
-      sources: doc.sources && typeof doc.sources === "object" ? doc.sources : {},
     }
   } catch {
     return emptyState()
@@ -227,8 +236,8 @@ async function readTimelineState(dbName: string): Promise<TimelineState> {
 
 /** 写状态文档（`_local` 文档必须走 PUT /db/_local/state，不能用 insert） */
 async function writeTimelineState(dbName: string, state: TimelineState): Promise<void> {
-  // 冲突（同用户的两次 reconcile 撞车）就地重读一次 rev 再写：状态文档丢了不影响正确性，
-  // 但会让下一轮把全部源重新扫一遍，代价不小，值得重试一次
+  // 冲突（同用户的两次 reconcile 撞车）就地重读一次 rev 再写：状态文档丢了不影响正确性
+  // （下一轮最多多做一次幂等的换库重搬），但会让日志噪声大，值得重试一次
   for (let attempt = 0; attempt < 2; attempt++) {
     let rev: string | undefined
     try {
@@ -251,175 +260,9 @@ async function writeTimelineState(dbName: string, state: TimelineState): Promise
   }
 }
 
-// ── 写入派生库 ──
-
-type TimelineDoc = Record<string, unknown> & { _id: string }
-
-/**
- * 由源条目构造派生库里的条目文档：**附件与 images 原样搬运**，其余字段原样保留。
- *
- * 图片只在抓取时按 per-feed 策略下载压缩一次（见 rss/entry-images.ts），聚合不再重压，
- * 所以这里保留源文档的 `_attachments` 与 `images`。只掐掉不该跨库带过去的两样东西：
- *   - `_rev`：派生库里是另一份文档；
- *   - `_revisions`：带过去会诱导 CouchDB 按源库的修订历史解冲突。
- */
-export function toTimelineEntryDoc(sourceDoc: Record<string, unknown>): TimelineDoc {
-  const { _rev: _omitRev, _revisions: _omitRevisions, _attachments: rawAttachments, ...rest } = sourceDoc
-  const doc: TimelineDoc = { ...rest, _id: String(sourceDoc._id) }
-  const attachments = normalizeAttachments(rawAttachments)
-  if (attachments) doc._attachments = attachments
-  else Reflect.deleteProperty(doc, "_attachments")
-  return doc
-}
-
-/**
- * 附件收敛成 `_bulk_docs` 接受的形状：只留 `content_type` + base64 `data`。
- *
- * `GET ?attachments=true` 给的附件对象还带 `revpos`/`digest`/`length` 等元数据：那些是
- * **在源库那一版文档上**成立的定位信息，抄到另一个库里没有意义（digest+stub 会被当成
- * 「附件已存在」而拒绝）。没有 `data`（stub）的附件一律丢掉，调用方按「附件缺失」计数。
- */
-export function normalizeAttachments(
-  raw: unknown,
-): Record<string, { content_type: string, data: string }> | undefined {
-  if (!raw || typeof raw !== "object") return undefined
-  const out: Record<string, { content_type: string, data: string }> = {}
-  for (const [name, att] of Object.entries(raw as Record<string, { content_type?: unknown, data?: unknown }>)) {
-    if (typeof att?.data !== "string" || att.data.length === 0) continue
-    out[name] = {
-      content_type: typeof att.content_type === "string" ? att.content_type : "application/octet-stream",
-      data: att.data,
-    }
-  }
-  return Object.keys(out).length > 0 ? out : undefined
-}
-
-/**
- * 把源条目写进派生库（只写库里还没有的）。
- *
- * 「先查存在性再写」这一步不能省：`_bulk_docs` 的 `_attachments` 是 base64 内联的，
- * 对一条库里已有、只是再次被扫到的条目重传附件是纯浪费（回填/游标回退时会大量出现）。
- */
-export async function writeEntries(
-  scope: DocumentScope<unknown>,
-  sourceScope: DocumentScope<unknown>,
-  sourceDocs: Array<Record<string, unknown>>,
-): Promise<{ written: number, attachmentFailures: number }> {
-  const entries = sourceDocs.filter(doc => doc.type === "entry" && typeof doc._id === "string")
-  if (entries.length === 0) return { written: 0, attachmentFailures: 0 }
-
-  const existing = await fetchExistingIds(scope, entries.map(doc => String(doc._id)))
-  const fresh = entries.filter(doc => !existing.has(String(doc._id)))
-  if (fresh.length === 0) return { written: 0, attachmentFailures: 0 }
-
-  // 条目之间限并发：占大头的等待是「按 _id 连源库取附件」的往返（源库在外面、附件还不小），
-  // 并发只是让这些等待重叠，不改变写入内容。结果按下标回填，写入顺序仍是源库顺序。
-  const docs: TimelineDoc[] = new Array<TimelineDoc>(fresh.length)
-  let attachmentFailures = 0
-  let next = 0
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      const index = next++
-      if (index >= fresh.length) return
-      const { doc, missingAttachments } = await fetchSourceDoc(sourceScope, fresh[index]!)
-      // 累加不需要原子性：JS 单线程，+= 之间没有 await
-      if (missingAttachments) attachmentFailures++
-      docs[index] = toTimelineEntryDoc(doc)
-    }
-  }
-  await Promise.all(
-    Array.from({ length: Math.min(ENTRY_WRITE_CONCURRENCY, fresh.length) }, () => worker()),
-  )
-
-  let written = 0
-  for (const batch of chunkByAttachmentBytes(docs)) {
-    const results = await scope.bulk({ docs: batch })
-    // 409（同一轮里重复扫到 / 与别的 worker 撞车）不算失败：库里已经有这条了就达到目的
-    written += results.filter(r => !r.error || r.error === "conflict").length
-  }
-  return { written, attachmentFailures }
-}
-
-/**
- * 按 `_id` 取源条目**含附件本体**。
- *
- * `_changes` 与视图的 `include_docs` 只带附件 stub（没有 `data`），而派生库要的是能离线
- * 阅读的完整副本，所以每条新条目都得再取一次。取不到（源库抖动 / 条目刚好被删）时退回
- * 那份不含附件的文档：条目照常入库、只是没图 —— 比让整个源聚合失败划算，失败数由调用方
- * 计入 attachmentFailures 打一行日志。
- */
-async function fetchSourceDoc(
-  sourceScope: DocumentScope<unknown>,
-  doc: Record<string, unknown>,
-): Promise<{ doc: Record<string, unknown>, missingAttachments: boolean }> {
-  const hadAttachments = !!(doc._attachments && typeof doc._attachments === "object"
-    && Object.keys(doc._attachments as object).length > 0)
-  try {
-    const full = await sourceScope.get(String(doc._id), { attachments: true }) as unknown as Record<string, unknown>
-    const ok = !!normalizeAttachments(full?._attachments)
-    return { doc: full ?? doc, missingAttachments: hadAttachments && !ok }
-  } catch {
-    return { doc, missingAttachments: hadAttachments }
-  }
-}
-
-/**
- * 一批 bulk 里最多内联多少附件字节（base64 之后）。
- *
- * 附件在 `_bulk_docs` 里是 base64 内联的，请求体大小 ≈ 附件字节 × 4/3。以前每用户有 1MB
- * 预算兜着，一批 200 条最多也就几十 MB；现在附件沿用 per-feed 策略（`cacheImages` 的漫画源
- * 整篇不设限），一个源一页就可能上百 MB，一次 bulk 会把内存打爆。所以按附件量分批提交；
- * 常规源远达不到这个量，仍旧是一批写完。
- */
-const BULK_ATTACHMENT_BUDGET = 8 * 1024 * 1024
-/** 单批文档数上限（纯文本条目也要有个上限，避免一条 `_bulk_docs` 过大） */
-const BULK_DOCS_PER_BATCH = 100
-
-/** 按附件字节与条数把待写文档切批（纯函数，便于单测） */
-export function chunkByAttachmentBytes(docs: TimelineDoc[]): TimelineDoc[][] {
-  const batches: TimelineDoc[][] = []
-  let current: TimelineDoc[] = []
-  let currentBytes = 0
-  for (const doc of docs) {
-    let docBytes = 0
-    for (const att of Object.values((doc._attachments ?? {}) as Record<string, { data?: unknown }>)) {
-      if (typeof att?.data === "string") docBytes += att.data.length
-    }
-    if (current.length > 0 && (currentBytes + docBytes > BULK_ATTACHMENT_BUDGET || current.length >= BULK_DOCS_PER_BATCH)) {
-      batches.push(current)
-      current = []
-      currentBytes = 0
-    }
-    current.push(doc)
-    currentBytes += docBytes
-  }
-  if (current.length > 0) batches.push(current)
-  return batches
-}
-
-/** 查一批 `_id` 在派生库里是否存在 */
-async function fetchExistingIds(scope: DocumentScope<unknown>, ids: string[]): Promise<Set<string>> {
-  const existing = new Set<string>()
-  const CHUNK = 200
-  for (let i = 0; i < ids.length; i += CHUNK) {
-    const keys = ids.slice(i, i + CHUNK)
-    try {
-      const res = await scope.fetch({ keys })
-      for (const row of res.rows) {
-        // 有 rev 说明文档真实存在（`_all_docs` 对不存在的 key 返回 {error: not_found}，没有 value）
-        if ("value" in row && row.value?.rev) existing.add(row.id)
-      }
-    } catch {
-      // 查询失败按「都不存在」处理：多写一次由 409 兜底，不会造成数据错误
-    }
-  }
-  return existing
-}
-
-/** 按 `_id` 前缀范围删除（退订某个源时清掉它的全部条目） */
 async function deleteByPrefix(scope: DocumentScope<unknown>, startkey: string, endkey: string): Promise<number> {
   let deleted = 0
-  for (let page = 0; page < 200; page++) {
+  for (let page = 0; page < MAX_PAGE_LOOPS; page++) {
     const res = await scope.list({ startkey, endkey, limit: 500 })
     if (res.rows.length === 0) break
     const docs = res.rows.map(row => ({
@@ -434,290 +277,35 @@ async function deleteByPrefix(scope: DocumentScope<unknown>, startkey: string, e
   return deleted
 }
 
-/** 删除单条文档（不存在则忽略） */
-async function deleteDocIfExists(scope: DocumentScope<unknown>, id: string): Promise<void> {
-  try {
-    const doc = await scope.get(id) as { _rev: string }
-    await scope.destroy(id, doc._rev)
-  } catch {
-    // 不存在 / 已被删：忽略
-  }
-}
-
 /**
- * 拷贝源库的 FeedDoc（源名、站点、图标附件）到派生库。
+ * 删除单条文档（不存在则忽略），返回是否真的删掉了。
  *
- * 必须单独 `get(..., {attachments: true})`：`_changes` 的 include_docs 不带附件，
- * 直接照抄会得到一个没有图标附件的 FeedDoc，侧边栏图标会在客户端变成原图直链。
+ * 带 3 次重试：退订是「先删复制任务、再删目标端文档」，而任务被删掉的那一刻复制器可能
+ * 正好还在写这个文档（`_rev` 变了 → 409）。不重试的话这份 FeedDoc 副本会永久留在用户库里
+ * —— 下一轮 reconcile 已经没有这个源了，不会再来删它。
  */
-async function copyFeedDoc(
-  scope: DocumentScope<unknown>,
-  sourceScope: DocumentScope<unknown>,
-  sourceId: string,
-): Promise<void> {
-  let source: Record<string, unknown>
-  try {
-    source = await sourceScope.get(sourceId, { attachments: true }) as unknown as Record<string, unknown>
-  } catch {
-    return // 源库还没有 FeedDoc（刚订阅、还没抓过），下次 reconcile 再来
-  }
-  let existingRev: string | undefined
-  try {
-    const existing = await scope.get(sourceId) as { _rev: string }
-    existingRev = existing._rev
-  } catch {
-    // 还没有副本
-  }
-  const { _rev: _omitRev, _attachments, ...rest } = source
-  const doc = { ...rest, _id: sourceId }
-  if (_attachments && typeof _attachments === "object") {
-    const attachments = Object.entries(_attachments as Record<string, { content_type?: string, data?: string }>)
-      .filter(([, att]) => typeof att?.data === "string")
-      .map(([name, att]) => ({
-        name,
-        data: Buffer.from(att.data as string, "base64"),
-        content_type: att.content_type ?? "application/octet-stream",
-      }))
-    if (attachments.length > 0) {
-      await scope.multipart.insert(doc as never, attachments as never, { docName: sourceId, ...(existingRev ? { rev: existingRev } : {}) } as never)
-      return
-    }
-  }
-  await scope.insert(existingRev ? { ...doc, _rev: existingRev } as never : doc as never)
-}
-
-// ── reconcile ──
-
-export interface TimelineReconcileResult {
-  userId: string
-  /** 订阅源总数 */
-  sources: number
-  /** 本轮扫过的源（有新内容 / 新订阅 / 需要回填的） */
-  scannedSources: number
-  /** 写入派生库的新条目数 */
-  addedEntries: number
-  /** 因退订删除的条目数 */
-  removedEntries: number
-  /** 因窗口缩小剪枝掉的条目数 */
-  prunedEntries: number
-  /** 搬运时没取到附件的条目数（源库抖动等原因；条目已入库但没图） */
-  attachmentFailures: number
-  /** 逐源失败的源数与原因（不阻塞其余源） */
-  failures: Array<{ sourceId: string, error: string }>
-}
-
-/** 回填时的分页大小（一页 100 条 × 最多 200 页 = 单源上限 2 万条） */
-const BACKFILL_PAGE = 100
-const BACKFILL_MAX_PAGES = 200
-/** 增量 `_changes` 的分页大小 */
-const CHANGES_PAGE = 200
-
-/**
- * 一轮写入里**同时处理多少条目**（每条目内部仍是串行的，见 writeEntries）。
- *
- * 需要它是因为每条新条目都要按 `_id` 回源库取一次附件（`_changes` 的 include_docs 不带附件
- * 本体）：源库与用户库之间的往返在这里是主要等待，逐条串行会让一次首轮回填（一个源几百条）
- * 退化成「几十分钟没有进展」。并发 4 让往返重叠，同时把同时在手的附件字节限住，避免一次
- * 把几百条附件的 base64 同时堆进内存。
- */
-const ENTRY_WRITE_CONCURRENCY = 4
-
-/**
- * 把一个用户的时间线派生库对齐到「当前订阅集合 + 当前设置」。
- *
- * 顺序是有意的：
- *   ① 退订清理 → ② 窗口剪枝 → ③ 逐源增量/回填 → ④ 写回状态
- * 先删后增保证「同一轮里先退订再加回同一个源」不会留下孤儿数据；状态最后写，
- * 中途失败时游标不会前移（宁可下一轮重扫一遍，也不漏条目）。
- *
- * 单个源失败只记进 failures：一个源的 CouchDB 抖动不该让剩下几百个源都不同步。
- */
-export async function reconcileUserTimeline(
-  userId: string,
-  options: { backfill?: boolean } = {},
-): Promise<TimelineReconcileResult> {
-  const settings = await getTimelineSettings(userId)
-  const dbName = await ensureTimelineDatabase(userId)
-  const scope = createCouchDb(dbName)
-  const state = await readTimelineState(dbName)
-  const sources = await listSubscriptionSources(userId)
-  const subscribed = new Set(sources.map(s => s.id))
-
-  const result: TimelineReconcileResult = {
-    userId,
-    sources: sources.length,
-    scannedSources: 0,
-    addedEntries: 0,
-    removedEntries: 0,
-    prunedEntries: 0,
-    attachmentFailures: 0,
-    failures: [],
-  }
-
-  // ① 退订清理：状态里有、订阅列表里没有的源
-  for (const sourceId of Object.keys(state.sources)) {
-    if (subscribed.has(sourceId)) continue
-    const prefix = entryIdPrefix(sourceId)
-    result.removedEntries += await deleteByPrefix(scope, prefix, `${prefix}\uffff`)
-    await deleteDocIfExists(scope, sourceId)
-    Reflect.deleteProperty(state.sources, sourceId)
-  }
-
-  // ② 窗口：缩小则剪枝（放大走③的回填）
-  const windowStart = windowStartIso(settings.windowDays)
-  const prevWindow = state.windowDays
-  const windowExpanded = prevWindow !== null && settings.windowDays !== prevWindow
-    && (settings.windowDays === 0 || settings.windowDays > prevWindow)
-  const windowShrank = prevWindow !== null && settings.windowDays > 0
-    && (prevWindow === 0 || prevWindow > settings.windowDays)
-  if (windowShrank && windowStart) {
-    result.prunedEntries += await pruneOlderThan(scope, windowStart)
-  }
-
-  // ③ 逐源聚合
-  //
-  // 每个源处理完就把状态落盘（而不是等整轮结束）。理由：一轮聚合在几百个源上可能跑十几分钟，
-  // 「只在最后写一次」意味着跑不完就一步都没前进 —— 大账号会永远停在第一轮（下一轮又从头回填）。
-  // 单个源的处理是原子的（条目全部写完才更新它的游标），所以中途落盘不会留下半截游标；
-  // 而窗口字段（windowDays）仍只在最后写，窗口放大/缩小的判定保持全有或全无。
-  let stateDirty = false
-  for (const source of sources) {
-    const sourceState = state.sources[source.id]
-    const needBackfill = options.backfill === true || !sourceState || windowExpanded
+async function deleteDocIfExists(scope: DocumentScope<unknown>, id: string): Promise<boolean> {
+  for (let attempt = 0; attempt < 3; attempt++) {
     try {
-      const sourceScope = await resolveSourceScope(source)
-      if (!sourceState) await copyFeedDoc(scope, sourceScope, source.id)
-
-      const outcome = needBackfill
-        ? await backfillSource(scope, sourceScope, windowStart)
-        : await incrementalSource(scope, sourceScope, source.id, sourceState!.cursor, windowStart)
-
-      result.scannedSources += 1
-      result.addedEntries += outcome.written
-      result.attachmentFailures += outcome.attachmentFailures
-      if (!sourceState) {
-        // 新源：游标取回填前记录的 update_seq（工具返回），下次走增量
-        state.sources[source.id] = { cursor: outcome.cursor, addedAt: new Date().toISOString() }
-      } else if (!needBackfill) {
-        // 回填（窗口放大 / 显式重建）时**不动游标**：回填扫的是视图，与 `_changes` 游标无关，
-        // 用回填时的 update_seq 覆盖会把游标往回拨，下一轮重复扫一遍
-        sourceState.cursor = outcome.cursor
-      }
-      stateDirty = true
+      const doc = await scope.get(id) as { _rev: string }
+      await scope.destroy(id, doc._rev)
+      return true
     } catch (err) {
-      result.failures.push({ sourceId: source.id, error: (err as Error)?.message ?? String(err) })
-    }
-    if (stateDirty) {
-      stateDirty = false
-      await writeTimelineState(dbName, state)
+      if ((err as { statusCode?: number })?.statusCode === 404) return false
+      // 409 = 复制器刚写过，重读 rev 再试
+      await new Promise(resolve => setTimeout(resolve, 150))
     }
   }
-
-  // ④ 写回状态（含窗口字段：只有整轮跑完才认这一轮的窗口设置）
-  state.windowDays = settings.windowDays
-  state.settingsUpdatedAt = new Date().toISOString()
-  await writeTimelineState(dbName, state)
-
-  return result
+  return false
 }
 
-/** 回填：按源库的 entries-by-date 视图取窗口内的条目（不依赖 _changes 游标） */
-async function backfillSource(
-  scope: DocumentScope<unknown>,
-  sourceScope: DocumentScope<unknown>,
-  windowStart: string | null,
-): Promise<{ written: number, attachmentFailures: number, cursor: string | number | null }> {
-  // 游标取「扫描前」的 update_seq：扫描期间新写入的条目会由下一轮 _changes(since=seq) 补上，
-  // 顺序反过来（先扫后取 seq）则会漏掉这中间写入的条目
-  const before = await sourceScope.info()
-  const cursor = (before as { update_seq?: string | number }).update_seq ?? null
+/** 分页循环上限（删除/剪枝都是"删到空为止"，这是兜底防死循环） */
+const MAX_PAGE_LOOPS = 200
 
-  let written = 0
-  let attachmentFailures = 0
-  // 视图 key 是 publishedAt 字符串（ISO），按窗口下界做范围起点即可跳过窗口外的历史
-  let startkey: string | undefined = windowStart ?? undefined
-  let startkeyDocid: string | undefined
-  for (let page = 0; page < BACKFILL_MAX_PAGES; page++) {
-    const res = await sourceScope.view("main", "entries-by-date", {
-      ...(startkey !== undefined ? { startkey } : {}),
-      ...(startkeyDocid !== undefined ? { startkey_docid: startkeyDocid } : {}),
-      // 第二页起跳过上一页的最后一行（startkey/startkey_docid 都是含端点的）
-      ...(startkeyDocid !== undefined ? { skip: 1 } : {}),
-      limit: BACKFILL_PAGE,
-      include_docs: true,
-      reduce: false,
-    })
-    if (res.rows.length === 0) break
-    const docs = res.rows
-      .map(row => row.doc as Record<string, unknown> | undefined)
-      .filter((doc): doc is Record<string, unknown> => !!doc && doc.type === "entry" && inWindow(doc, windowStart))
-    const outcome = await writeEntries(scope, sourceScope, docs)
-    written += outcome.written
-    attachmentFailures += outcome.attachmentFailures
-    if (res.rows.length < BACKFILL_PAGE) break
-    const last = res.rows[res.rows.length - 1]!
-    startkey = String(last.key)
-    startkeyDocid = last.id
-  }
-  return { written, attachmentFailures, cursor }
-}
-
-/** 增量：从游标续跑源库的 `_changes`，只处理窗口内的条目 */
-async function incrementalSource(
-  scope: DocumentScope<unknown>,
-  sourceScope: DocumentScope<unknown>,
-  sourceId: string,
-  cursor: string | number | null,
-  windowStart: string | null,
-): Promise<{ written: number, attachmentFailures: number, cursor: string | number | null }> {
-  let since = cursor ?? 0
-  let written = 0
-  let attachmentFailures = 0
-  let lastSeq: string | number | null = since
-  /** 游标失效（源库被重建过）时只允许回退重扫一次，避免死循环 */
-  let resetDone = false
-
-  for (let page = 0; page < BACKFILL_MAX_PAGES; page++) {
-    let res: { results?: Array<{ id: string, seq: string | number, deleted?: boolean, doc?: Record<string, unknown> }>, last_seq: string | number }
-    try {
-      res = await sourceScope.changes({ since, include_docs: true, limit: CHANGES_PAGE }) as never
-    } catch (err) {
-      if (!resetDone) {
-        // 源库被删除重建 / 清空过：旧 seq 不再有效，退回从头扫一遍（游标只在成功后前移）
-        resetDone = true
-        since = 0
-        continue
-      }
-      throw err
-    }
-    const rows = res.results ?? []
-    const feedDocTouched = rows.some(row => row.id === sourceId && !row.deleted)
-    if (feedDocTouched) await copyFeedDoc(scope, sourceScope, sourceId)
-
-    const docs = rows
-      .filter(row => !row.deleted && row.doc && row.doc.type === "entry" && inWindow(row.doc, windowStart))
-      .map(row => row.doc as Record<string, unknown>)
-    const outcome = await writeEntries(scope, sourceScope, docs)
-    written += outcome.written
-    attachmentFailures += outcome.attachmentFailures
-
-    // 源库删掉的条目，派生库里也删掉（保持「派生库 = 源库窗口内的投影」）
-    const deletedIds = rows
-      .filter(row => row.deleted && row.id.startsWith("entry:"))
-      .map(row => row.id)
-    for (const id of deletedIds) await deleteDocIfExists(scope, id)
-
-    lastSeq = res.last_seq
-    since = res.last_seq
-    if (rows.length < CHANGES_PAGE) break
-  }
-  return { written, attachmentFailures, cursor: lastSeq }
-}
-
-/** 剪枝：删掉发布时间早于窗口下界的条目 */
+/** 剪枝：删掉发布时间早于窗口下界的条目（复制器不会因为 selector 变严而删目标端已有文档） */
 async function pruneOlderThan(scope: DocumentScope<unknown>, windowStart: string): Promise<number> {
   let pruned = 0
-  for (let page = 0; page < BACKFILL_MAX_PAGES; page++) {
+  for (let page = 0; page < MAX_PAGE_LOOPS; page++) {
     const res = await scope.view("timeline-maintain", "by_published_at", {
       endkey: windowStart,
       inclusive_end: false,
@@ -745,27 +333,291 @@ async function deleteDocsByIds(scope: DocumentScope<unknown>, ids: string[]): Pr
   return results.filter(r => !r.error).length
 }
 
+export interface TimelineReconcileResult {
+  userId: string
+  /** 订阅源总数 */
+  sources: number
+  /** 本轮新建的复制任务数（新订阅、窗口变化、重建 / 换库重搬） */
+  createdReplications: number
+  /** 本轮删掉的复制任务数（退订、窗口变化、重建 / 换库重搬） */
+  removedReplications: number
+  /** 因退订删除的条目数 */
+  removedEntries: number
+  /** 因窗口剪枝删除的条目数 */
+  prunedEntries: number
+  /** 逐源失败的原因（不阻塞其余源） */
+  failures: Array<{ sourceId: string, error: string }>
+}
+
 /**
- * 重建用户的派生内容：删掉**服务端独占写**的文档（`entry:` / `feed:`）+ 全量回填。
+ * 把一个用户的聚合库对齐到「当前订阅集合 + 当前设置」。
  *
- * 为什么是「就地删文档」而不是「删库重建」：合并成单库之后，这个库里还装着用户自己写的
- * 状态文档（订阅、已读收藏、分组偏好）。删库会把它们一起抹掉 —— 订阅关系是用户意图，
- * 丢了就是「重建一次设置，订阅全没了」，而且客户端手上那份还会因为远端消失而失去同步对象。
- * 库名不变还有一个好处：客户端的 live 复制不必因为一次设置改动而重新取库名。
+ * 顺序是有意的：① 换库重搬（仅 v1 → v2 升级）→ ② 退订/换窗口清理 → ③ 剪枝 → ④ 补建任务
+ * → ⑤ 写状态。先删后建保证「同一轮里先退订再加回同一个源」不会留下孤儿数据；任务补建在剪枝
+ * 之后，新任务的 query_params 就是当前窗口（= 新的复制哈希），复制器会从 0 扫一遍源库。
  *
- * 可以就地删是因为派生内容全部能从 feed/bot 库重算（附件在源库里已是成品，搬运即可），
- * 所以重建是廉价且一定能收敛的动作。触发入口：设置页的「重建时间线」与
- * `POST /api/timeline/rebuild`（窗口以外的内容不会自己变，重建主要是运维兜底）。
- *
- * 删除按前缀范围走（`entry:` 与 `feed:`）：`entry-state:` 在字典序上小于 `entry:`（'-' < ':'），
- * 不会被这个范围碰到，状态文档天然安全。
+ * 单个源失败只记进 failures：一个源的库抖动不该让剩下几百个源都不同步。
  */
-export async function rebuildUserTimeline(userId: string): Promise<TimelineReconcileResult> {
+export async function reconcileUserTimeline(
+  userId: string,
+  options: { backfill?: boolean } = {},
+): Promise<TimelineReconcileResult> {
+  const settings = await getTimelineSettings(userId)
+  let dbName = await ensureTimelineDatabase(userId)
+  let scope = createCouchDb(dbName)
+  let state = await readTimelineState(dbName)
+
+  // ① v1 → v2 一次性升级：老库里服务端独占文档带的是我们自己的修订，留着会和复制器搬来的
+  //    修订谱系冲突；而"就地清空再重搬"做不到（目标端删过的 rev 复制器不会再送）。所以换成
+  //    一个空库重搬（用户自己写的状态文档跟着搬过去），后面的 ④ 会按当前窗口重建任务。
+  if (state.version < STATE_VERSION) {
+    dbName = await rederiveUserTimeline(userId, dbName)
+    scope = createCouchDb(dbName)
+    state = await readTimelineState(dbName)
+  }
+
+  const sources = await listSubscriptionSources(userId)
+  const subscribed = new Set(sources.map(source => source.id))
+
+  const result: TimelineReconcileResult = {
+    userId,
+    sources: sources.length,
+    createdReplications: 0,
+    removedReplications: 0,
+    removedEntries: 0,
+    prunedEntries: 0,
+    failures: [],
+  }
+
+  // ② 清理：退订的源，以及窗口天数已经变了的源（id 里带着 windowDays）。
+  //    「换窗口」只删任务不删数据：缩小由 ③ 剪枝兜底，放大由 ④ 的新任务重扫回填
+  //    （query_params 变了 = 换了复制哈希 = 从 0 扫源库）。
+  let existing = await listUserReplications(userId)
+  const stale = existing.filter(item =>
+    !subscribed.has(item.sourceId) || item.windowDays !== settings.windowDays)
+  if (stale.length > 0) {
+    await deleteReplications(stale.map(item => ({ docId: item.docId, rev: item.rev })))
+    result.removedReplications += stale.length
+    const staleIds = new Set(stale.map(item => item.docId))
+    existing = existing.filter(item => !staleIds.has(item.docId))
+    for (const item of stale) {
+      if (subscribed.has(item.sourceId)) continue // 只是窗口变了：数据留着，别删
+      const prefix = entryIdPrefix(item.sourceId)
+      result.removedEntries += await deleteByPrefix(scope, prefix, `${prefix}\uffff`)
+      await deleteDocIfExists(scope, item.sourceId)
+    }
+  }
+
+  // ③ 剪枝：窗口的权威在这里。复制器的过滤下界是创建时固定的（见 replicator.ts），
+  //    会越来越松，所以只要有窗口就每轮都剪一遍（视图查询，没东西可删时是空结果）。
+  const windowStart = windowStartIso(settings.windowDays)
+  if (windowStart) result.prunedEntries += await pruneOlderThan(scope, windowStart)
+
+  // ④ 补建任务：复制器接手初始回填（从 0 扫源库）与后续增量。
+  //    走到这里说明该源没有"当前窗口"的任务，也就是复制哈希是新的
+  const current = new Map(existing.map(item => [item.sourceId, item]))
+  for (const source of sources) {
+    if (current.has(source.id)) continue
+    try {
+      const sourceDb = await resolveSourceDbName(source)
+      const outcome = await ensureReplication({
+        userId,
+        windowDays: settings.windowDays,
+        sourceId: source.id,
+        sourceDb,
+        targetDb: dbName,
+      })
+      if (outcome === "created") result.createdReplications += 1
+    } catch (err) {
+      result.failures.push({ sourceId: source.id, error: (err as Error)?.message ?? String(err) })
+    }
+  }
+
+  // ⑤ 写回状态（含窗口字段）
+  state.version = STATE_VERSION
+  state.windowDays = settings.windowDays
+  state.settingsUpdatedAt = new Date().toISOString()
+  await writeTimelineState(dbName, state)
+
+  return result
+}
+
+/** 换库重搬时每批搬运的文档数（`_all_docs` 一页 + `_bulk_docs` 一次） */
+const INTENT_COPY_BATCH = 500
+/** 换库重搬时最多搬多少页（每页 500，够一个用户的订阅 + 已读收藏量级） */
+const INTENT_COPY_MAX_PAGES = 400
+
+/**
+ * 换一个空聚合库并接管该用户，把**用户自己写的文档**搬过去（重建与 v1→v2 升级共用）。
+ *
+ * 搬的是"非服务端独占"的文档：`entry:*` 是聚合产物（复制器会重搬一遍），裸 id 的 FeedDoc
+ * 副本同理；其余（`subscription:*` 订阅、`entry-state:*` 已读收藏、`group-pref:*` 列表偏好，
+ * 以及将来客户端加的任何状态文档）都是用户意图，必须跟着走。
+ *
+ * 为什么换库而不是就地清空：聚合库是复制器的目标端，而复制是**变更投递不是投影** ——
+ * 目标端自己删过的 rev，复制器不会再送回来（实测）；换一个空库则连 checkpoint（在库的
+ * `_local` 里）一起消失，新任务会从 0 扫源库、把窗口内的内容完整重搬一遍。
+ *
+ * 返回新库名。
+ */
+async function rederiveUserTimeline(userId: string, oldDbName: string): Promise<string> {
+  const oldScope = createCouchDb(oldDbName)
+  const sourceIds = new Set((await listSubscriptionSources(userId)).map(source => source.id))
+
+  // 先换库（顺带把 user.timeline_db_name 指向新库），再搬意图文档，最后删旧库
+  const newDbName = await createTimelineDatabase(userId)
+  const newScope = createCouchDb(newDbName)
+  let copied = 0
+  let startkey: string | undefined
+  for (let page = 0; page < INTENT_COPY_MAX_PAGES; page++) {
+    const listed = await oldScope.list({
+      limit: INTENT_COPY_BATCH,
+      include_docs: true,
+      ...(startkey ? { startkey, skip: 1 } : {}),
+    }) as never as { rows: Array<{ id: string, doc?: Record<string, unknown> }> }
+    const rows = listed.rows ?? []
+    if (rows.length === 0) break
+    const docs = rows
+      .filter(row => row.doc && keepOnRebuild(row.id, sourceIds))
+      .map(row => {
+        const { _rev: _ignoredRev, _revisions: _ignoredRevs, ...rest } = row.doc as Record<string, unknown>
+        return rest
+      })
+    if (docs.length > 0) {
+      await newScope.bulk({ docs } as never)
+      copied += docs.length
+    }
+    if (rows.length < INTENT_COPY_BATCH) break
+    startkey = rows[rows.length - 1]!.id
+  }
+
+  // 并发重建（定时 reconcile 撞上手动重建）时只留一个赢家：库名最后写进去的那个生效，
+  // 输的那个把自己刚建的空库删掉、改用赢家的库 —— 否则会多一个装着一份订阅副本的孤儿库，
+  // 而它上面永远不会有复制任务（内容再也不会更新）。
+  const winner = await ensureTimelineDatabase(userId)
+  if (winner !== newDbName) {
+    try {
+      await nanoServer.db.destroy(newDbName)
+    } catch {
+      // 已删 / 正被删：忽略
+    }
+    console.warn(`[Timeline] 用户=${userId} 并发重建：丢弃 ${newDbName}，改用 ${winner}`)
+    return winner
+  }
+
+  // 旧库上的复制任务全部作废：目标库换了，任务必须按新库重建
+  const jobs = await listUserReplications(userId)
+  await deleteReplications(jobs.map(item => ({ docId: item.docId, rev: item.rev })))
+
+  // 旧库已经没用了（新库接管 + 任务已删），删掉省空间；删失败不影响正确性
+  try {
+    await nanoServer.db.destroy(oldDbName)
+  } catch {
+    // 旧库已被删/正被删：忽略
+  }
+
+  console.log(`[Timeline] 用户=${userId} 换库重搬：${oldDbName} → ${newDbName}（搬走用户状态 ${copied} 条，作废复制任务 ${jobs.length} 条）`)
+  return newDbName
+}
+
+/**
+ * 换库重搬时是否保留这个文档：服务端独占的聚合产物不搬（复制器会重搬一遍），其余都搬。
+ *
+ * 判据与服务端写方向闸门一致（见 client.ts 的 TIMELINE_VALIDATE_DOC_UPDATE）：客户端只能写
+ * 非 `entry`/`feed` 文档，所以"不是 `entry:*` 前缀、也不是订阅源的裸 FeedDoc id"就是用户自己的东西。
+ */
+function keepOnRebuild(id: string, sourceIds: Set<string>): boolean {
+  if (id.startsWith("_design/")) return false
+  if (id.startsWith("entry:")) return false // '-' < ':'，所以不会误伤 entry-state:*
+  if (sourceIds.has(id)) return false
+  return true
+}
+
+/**
+ * 等派生库安静下来（「手动同步」的 `wait=1`）。
+ *
+ * 复制是异步的，没有「现在同步一次」的触发接口，所以等待的判据是**派生库自己的 `_changes`**：
+ * 从开始时的 `update_seq` 往后读增量，连续若干轮没有新条目就认为追平了。
+ *
+ * 两个必须的保守设置（都是从真库里量出来的）：
+ *   - `minWaitMs`（默认 4s）：任务刚建好时复制器还没开始写，此时派生库就是"安静的"。
+ *     不设最短等待就会立刻返回 added=0，而内容其实还在路上（实测首轮搬运 0.5~2.8s）。
+ *   - `quietRounds`（默认 5 轮 × 400ms = 2s）：单轮空读可能只是复制器在批量落盘的间隙。
+ *
+ * 为什么不用复制器的状态（`_scheduler/docs` 的 `checkpointed_source_seq` / `changes_pending`）：
+ * 实测这两个字段在首次扫描期间是 undefined，checkpoint 又要到批末才落盘 —— 都滞后于文档真正到端，
+ * 用它们会把"已到端"误判成"还没追上"。
+ *
+ * 返回这期间**新到的条目数**与是否在超时前追平；超时不算失败（复制仍在后台跑）。
+ */
+export async function waitForSync(
+  userId: string,
+  timeoutMs: number,
+  options: { quietRounds?: number, pollIntervalMs?: number, minWaitMs?: number } = {},
+): Promise<{ completed: boolean, added: number }> {
+  const quietRounds = options.quietRounds ?? 5
+  const pollIntervalMs = options.pollIntervalMs ?? 400
+  const minWaitMs = options.minWaitMs ?? 4000
   const dbName = await ensureTimelineDatabase(userId)
   const scope = createCouchDb(dbName)
-  await deleteByPrefix(scope, "entry:", "entry:\uffff")
-  await deleteByPrefix(scope, "feed:", "feed:\uffff")
-  return await reconcileUserTimeline(userId, { backfill: true })
+
+  let since: string | number = (await scope.info() as { update_seq?: string | number }).update_seq ?? 0
+  let added = 0
+  let quiet = 0
+  const startedAt = Date.now()
+  const deadline = startedAt + timeoutMs
+
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs))
+    let rows: Array<{ id: string, seq: string | number, deleted?: boolean }> = []
+    let lastSeq: string | number = since
+    try {
+      const res = await scope.changes({ since, include_docs: false, limit: 500 }) as never as {
+        results?: Array<{ id: string, seq: string | number, deleted?: boolean }>
+        last_seq: string | number
+      }
+      rows = res.results ?? []
+      lastSeq = res.last_seq
+    } catch {
+      // 读 `_changes` 失败（库正忙/重启）：按"这一轮没有新东西"处理，由超时兜底
+      continue
+    }
+    // `entry-state:` 等客户端状态文档也在这条流里，只数条目
+    const entries = rows.filter(row => !row.deleted && row.id.startsWith("entry:")).length
+    added += entries
+    since = lastSeq
+    if (rows.length === 0) {
+      quiet += 1
+      // 「安静」+ 「已经等够最短时间」才敢说追平了（否则任务可能还没开始搬）
+      if (quiet >= quietRounds && Date.now() - startedAt >= minWaitMs) return { completed: true, added }
+    } else {
+      quiet = 0
+    }
+  }
+  return { completed: false, added }
+}
+
+/**
+ * 重建聚合库：换一个空库重新"修剪"一遍（重新从全量源库按当前窗口搬），用户状态跟着走。
+ *
+ * 为什么必须是换库：聚合库是复制器的目标端，而复制是**变更投递不是投影** —— 目标端自己删过的
+ * rev 复制器不会再送（实测），所以"就地删文档 + 删任务"搬不回来；换库则连 checkpoint
+ * （存在库的 `_local` 里）一起清掉，新任务从 0 扫源库。
+ *
+ * 用户自己写的文档（订阅、已读收藏、分组偏好）由 rederiveUserTimeline 搬到新库，
+ * 所以重建不会丢订阅关系（丢了就等于"重建一次，订阅全没了"）。
+ *
+ * 触发入口：设置页的「重建时间线」与 `POST /api/timeline/rebuild`。
+ */
+export async function rebuildUserTimeline(userId: string): Promise<TimelineReconcileResult> {
+  const oldDbName = await ensureTimelineDatabase(userId)
+  const existing = await listUserReplications(userId)
+  await rederiveUserTimeline(userId, oldDbName)
+  const result = await reconcileUserTimeline(userId, { backfill: true })
+  return {
+    ...result,
+    removedReplications: result.removedReplications + existing.length,
+  }
 }
 
 /** 所有用户 id（定时 reconcile 用；自建服务用户量小，一次全查没有问题） */

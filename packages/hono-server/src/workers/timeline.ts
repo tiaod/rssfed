@@ -74,12 +74,14 @@ export const timelineWorker = new Worker("rss-timeline", async (job) => {
     ? await rebuildUserTimeline(userId)
     : await reconcileUserTimeline(userId)
 
-  // 只在「真的发生了什么」时打日志：每 5 分钟一轮的安静 tick 不该刷屏
-  if (result.addedEntries > 0 || result.removedEntries > 0 || result.prunedEntries > 0 || result.failures.length > 0) {
+  // 只在「真的发生了什么」时打日志：每 5 分钟一轮的安静 tick 不该刷屏（增量都归复制器，
+  // 它自己会写 _scheduler 的状态；这里只在拓扑变化/清理发生时留一行）
+  if (result.createdReplications > 0 || result.removedReplications > 0
+    || result.removedEntries > 0 || result.prunedEntries > 0 || result.failures.length > 0) {
     console.log(
-      `[Timeline] user=${userId} 源=${result.sources} 扫过=${result.scannedSources} ` +
-      `新增=${result.addedEntries} 退订删除=${result.removedEntries} 剪枝=${result.prunedEntries} ` +
-      `附件缺失=${result.attachmentFailures} 失败源=${result.failures.length}`,
+      `[Timeline] user=${userId} 源=${result.sources} ` +
+      `新建复制=${result.createdReplications} 删除复制=${result.removedReplications} ` +
+      `退订删除=${result.removedEntries} 剪枝=${result.prunedEntries} 失败源=${result.failures.length}`,
     )
     for (const failure of result.failures.slice(0, 5)) {
       console.warn(`[Timeline] 源 ${failure.sourceId} 聚合失败：${failure.error}`)

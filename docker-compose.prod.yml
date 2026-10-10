@@ -73,6 +73,9 @@ services:
       # 注意这里的路径是交给 Docker daemon 解析的，要用**宿主机**路径 ——
       # 与上面 env_file（由 Doco CD 进程自己读，用容器内路径）不是一回事。
       - ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-proxy-auth.ini:/opt/couchdb/etc/local.d/00-proxy-auth.ini
+      # 复制器调参（max_jobs / max_churn）：聚合搬运是「每 (用户 × 订阅源) 一条常驻复制」，
+      # 默认 max_jobs=500 在「几个账号 × 几百个源」时会被顶住。理由与取值见该文件头注释。
+      - ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-replicator.ini:/opt/couchdb/etc/local.d/01-replicator.ini
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:5984/"]
       interval: 10s

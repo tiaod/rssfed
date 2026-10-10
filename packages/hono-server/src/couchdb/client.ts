@@ -1,6 +1,6 @@
 import nano from "nano"
 import { customAlphabet } from "nanoid"
-import { eq } from "drizzle-orm"
+import { and, eq, isNull } from "drizzle-orm"
 import { db, feeds, user, bots, COUCHDB_FEED_PREFIX, COUCHDB_BOT_PREFIX, COUCHDB_USER_TIMELINE_PREFIX } from "../db"
 
 export const couchUrl = process.env.COUCHDB_URL ?? "http://localhost:5984"
@@ -28,7 +28,52 @@ export const authenticatedUrl = couchUrlWithAuth()
 
 export const nanoServer = nano(authenticatedUrl)
 
-/** 每个 feed 库的设计文档：entries-by-date 视图 */
+/**
+ * 某个库的**带凭据** URL：复制器（`_replicator` 文档里的 source/target）专用。
+ *
+ * CouchDB 的复制器不接受裸库名 —— 它会把 source/target 当作 `http://any:5984/<库名>`
+ * 去连，然后因为没有凭据而报 `replication_auth_error`（session_request_failed → nxdomain）。
+ * 所以复制文档里的两端都必须是带凭据的完整 URL；凭据落在 `_replicator` 库里，
+ * 而那个库的 `_security` 只放行 `_admin`（客户端也进不来，见 isProxyableDbName）。
+ */
+export function authenticatedDbUrl(dbName: string): string {
+  const url = new URL(authenticatedUrl)
+  url.pathname = `/${dbName}`
+  return url.toString()
+}
+
+/**
+ * 聚合复制用的**过滤函数**（装在 feed / bot 库的设计文档里，由复制器在源端执行）。
+ *
+ * 为什么是 JS filter 而不是 Mango selector —— 两条实测结论：
+ *
+ *   1. **selector 复制不搬删除**。Mango 只能对文档正文字段求值，而删除后的文档只有
+ *      `_id/_rev/_deleted`，没有任何字段可匹配，于是被静默跳过：源端删掉的条目会在用户库里
+ *      永久留着（`_changes` 里那条 `deleted:true` 根本不会被选中）。JS filter 会拿到
+ *      `{_deleted: true}`，所以这里第一行就放行删除 —— 这是「源端删除 → 用户库 / 浏览器跟随删除」
+ *      唯一可靠的实现方式。
+ *   2. 窗口下界走 `req.query`（`query_params`）而不是写死在函数里。**参数名不能叫 `since`**：
+ *      它会和 `_changes` 自己的 `since`（起始序号）撞车，filter 里读到的就成了序号字符串，
+ *      于是 `publishedAt >= "0"` 恒真、窗口形同虚设。
+ *
+ * 窗口下界在**创建复制任务时**算一次并固定（见 couchdb/replicator.ts），所以这个过滤器只会
+ * 越来越松；窗口的权威是服务端每轮的 prune（selector 变严不会删目标端已有文档）。
+ */
+export const TIMELINE_REPLICATION_FILTER_QUERY_PARAM = "minPublishedAt"
+
+export const TIMELINE_REPLICATION_FILTER = `function(doc, req) {
+  if (doc._deleted) return true;
+  if (doc.type === 'feed') return true;
+  if (doc.type !== 'entry') return false;
+  var bound = req.query.${TIMELINE_REPLICATION_FILTER_QUERY_PARAM};
+  if (!bound) return true;
+  return typeof doc.publishedAt === 'string' && doc.publishedAt >= bound;
+}`
+
+/** 复制文档里引用过滤器的方式：`<设计文档名>/<过滤器名>` */
+export const REPLICATION_FILTER_PATH = "main/timeline"
+
+/** 每个 feed 库的设计文档：entries-by-date 视图 + 聚合复制过滤器 */
 const FEED_DESIGN_DOC = {
   _id: "_design/main",
   language: "javascript",
@@ -41,6 +86,42 @@ const FEED_DESIGN_DOC = {
       }`,
     },
   },
+  filters: { timeline: TIMELINE_REPLICATION_FILTER },
+}
+
+/** 过滤器是后加的，存量 feed / bot 库要补装；进程内按库名缓存，稳态零成本 */
+const ensuredReplicationFilters = new Set<string>()
+
+/**
+ * 确保源库的设计文档里带着聚合复制过滤器（幂等；**保留**已有的视图等其它内容）。
+ *
+ * 只在新库安装是不够的：存量 feed 库（几百个）里没有 `filters.timeline`，
+ * 而复制文档引用一个不存在的过滤器会直接失败（任务进 crashing）。所以这里比对源码，
+ * 不一致才带 `_rev` 覆盖；进程内缓存避免每次 ensure 都打一次 GET。
+ */
+export async function ensureReplicationFilter(dbName: string): Promise<void> {
+  if (ensuredReplicationFilters.has(dbName)) return
+  const db = nanoServer.use(dbName)
+  try {
+    const existing = await db.get(FEED_DESIGN_DOC._id) as {
+      _rev?: string
+      filters?: Record<string, string>
+    }
+    if (existing.filters?.timeline !== TIMELINE_REPLICATION_FILTER) {
+      await db.insert({
+        ...existing,
+        _rev: existing._rev,
+        filters: { ...(existing.filters ?? {}), timeline: TIMELINE_REPLICATION_FILTER },
+      } as never)
+    }
+  } catch {
+    try {
+      await db.insert(FEED_DESIGN_DOC as never)
+    } catch {
+      // 并发创建时另一个请求已写入：视为已到位（缓存兜底）
+    }
+  }
+  ensuredReplicationFilters.add(dbName)
 }
 
 /**
@@ -151,17 +232,75 @@ type DbKind = "feed" | "user-timeline" | "bot"
 async function resolveDatabase(kind: DbKind, refId: string, prefix: string): Promise<string> {
   const existing = await getCouchDbName(kind, refId)
   if (existing) {
-    // 写方向闸门是后加的设计文档内容，存量库也得补上 —— 而存量库走的正是这条快路径，
-    // 所以这里要显式 ensure 一次。进程内按库名缓存（见 ensureTimelineDesignDoc），
+    // 写方向闸门 / 复制过滤器都是后加的设计文档内容，存量库也得补上 —— 而存量库走的正是
+    // 这条快路径，所以这里要显式 ensure 一次。两者都进程内按库名缓存
+    // （见 ensureTimelineDesignDoc / ensureReplicationFilter），
     // 稳态下只是 Set 查询，不会给高频路径加上 CouchDB 往返。
     if (kind === "user-timeline") await ensureTimelineDesignDoc(existing)
+    if (kind === "feed" || kind === "bot") await ensureReplicationFilter(existing)
     return existing
   }
 
   const dbName = `${prefix}${generateDbNameSuffix()}`
   await ensureDbExists(dbName, kind, refId)
-  await saveCouchDbName(kind, refId, dbName)
+  const claim = await claimCouchDbName(kind, refId, dbName)
+
+  // 并发建库：另一个请求先认领了库名。我们刚建的是**空库**（还没写过任何内容），直接删掉，
+  // 改用赢家的库 —— 否则会出现"订阅写进了 A 库、之后所有解析都指向 B 库"这种丢数据的现象
+  // （实测：临时账号的订阅落在自己的用户库里，但 sync-targets 下发的是另一个库）。
+  if (claim.dbName !== dbName) {
+    try {
+      await nanoServer.db.destroy(dbName)
+    } catch {
+      // 已删 / 正被删：忽略
+    }
+    if (kind === "user-timeline") await ensureTimelineDesignDoc(claim.dbName)
+    if (kind === "feed" || kind === "bot") await ensureReplicationFilter(claim.dbName)
+    console.warn(`[CouchDB] ${kind} ${refId} 并发建库：丢弃 ${dbName}，改用 ${claim.dbName}`)
+    return claim.dbName
+  }
+  if (!claim.persisted) {
+    console.warn(`[CouchDB] ${kind} ${refId} 未注册，库名 ${dbName} 未持久化`)
+  }
   return dbName
+}
+
+/**
+ * 认领库名：只在业务表这一列**还是空**的时候写（条件更新，一次 CAS）。
+ *
+ * 为什么需要：解析库名的路径（订阅、聚合、代理）可能**并发**走到"这一列还没有值"这一步，
+ * 各自建一个库、各自写一次列值 —— 后写的赢，先写的那个库就变成**没人指得着**的孤儿
+ * （用户能在里面看到自己的订阅写进去了，但之后所有读取都去另一个库）。实测有 5 个这样的
+ * 残留库，而且它表现为"订阅莫名丢了"，很难查。所以这里用条件更新把"建库 + 认领"变成竞争安全的。
+ *
+ * 返回真正生效的库名；`persisted=false` 表示业务行还不存在（无法持久化，沿用旧行为只告警）。
+ */
+async function claimCouchDbName(
+  kind: DbKind,
+  refId: string,
+  dbName: string,
+): Promise<{ dbName: string, persisted: boolean }> {
+  let won = false
+  if (kind === "feed") {
+    const rows = await db.update(feeds).set({ couchDbName: dbName })
+      .where(and(eq(feeds.id, refId), isNull(feeds.couchDbName)))
+      .returning({ id: feeds.id })
+    won = rows.length > 0
+  } else if (kind === "bot") {
+    const rows = await db.update(bots).set({ couchDbName: dbName })
+      .where(and(eq(bots.id, refId), isNull(bots.couchDbName)))
+      .returning({ id: bots.id })
+    won = rows.length > 0
+  } else if (kind === "user-timeline") {
+    const rows = await db.update(user).set({ timelineDbName: dbName })
+      .where(and(eq(user.id, refId), isNull(user.timelineDbName)))
+      .returning({ id: user.id })
+    won = rows.length > 0
+  }
+  if (won) return { dbName, persisted: true }
+  const existing = await getCouchDbName(kind, refId)
+  if (existing) return { dbName: existing, persisted: true }
+  return { dbName, persisted: false }
 }
 
 /** 读取业务表上的库名列；行不存在时返回 null */
@@ -212,6 +351,7 @@ async function ensureDbExists(dbName: string, kind: DbKind, refId: string) {
     created = true
   }
   // feed/bot 库的设计文档只在建库时装一次：内容不会变，重装只会带来并发 409
+  // （复制过滤器随设计文档一起装，并在此标进程内缓存）
   if (created && (kind === "feed" || kind === "bot")) {
     await installFeedDesignDoc(dbName)
   }
@@ -260,10 +400,12 @@ export async function ensureFeedDatabase(feedId: string): Promise<string> {
 async function installFeedDesignDoc(dbName: string) {
   const db = nanoServer.use(dbName)
   try {
-    await db.insert(FEED_DESIGN_DOC)
+    await db.insert(FEED_DESIGN_DOC as never)
   } catch {
     // 并发创建时另一个请求可能已安装，忽略冲突
   }
+  // 设计文档里已经带着复制过滤器，直接标缓存：新建路径不必再为了 ensure 打一次 GET
+  ensuredReplicationFilters.add(dbName)
 }
 
 // ── 用户库（合并后每用户唯一） ──
@@ -281,6 +423,21 @@ async function installFeedDesignDoc(dbName: string) {
  */
 export async function ensureTimelineDatabase(userId: string): Promise<string> {
   return await resolveDatabase("user-timeline", userId, COUCHDB_USER_TIMELINE_PREFIX)
+}
+
+/**
+ * **另起一个**聚合库并接管该用户（重建用；`ensureTimelineDatabase` 走的是"有就复用"）。
+ *
+ * 为什么重建要换库而不是就地把内容删掉：聚合库现在是「源库窗口子集的镜像」（由复制器搬运），
+ * 而复制是**变更投递不是投影** —— 目标端自己删过的文档，复制器不会再送回来（实测），
+ * 所以"清空 + 重建任务"是搬不回来的。换一个空库则连 checkpoint（在库的 `_local` 里）一起消失，
+ * 新的复制任务从 0 扫源库，窗口内的内容会被完整重搬一遍。
+ */
+export async function createTimelineDatabase(userId: string): Promise<string> {
+  const dbName = `${COUCHDB_USER_TIMELINE_PREFIX}${generateDbNameSuffix()}`
+  await ensureDbExists(dbName, "user-timeline", userId)
+  await saveCouchDbName("user-timeline", userId, dbName)
+  return dbName
 }
 
 /**

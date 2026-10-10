@@ -14,18 +14,19 @@ const mocks = vi.hoisted(() => ({
   insert: vi.fn(),
   findFirst: vi.fn(),
   returning: vi.fn(),
+  dbDestroy: vi.fn(),
 }))
 
 vi.mock("nano", () => ({
   default: () => ({
-    db: { get: mocks.dbGet, create: mocks.dbCreate },
+    db: { get: mocks.dbGet, create: mocks.dbCreate, destroy: mocks.dbDestroy },
     request: mocks.securityPut,
     use: () => ({ insert: mocks.insert, get: mocks.dbGet }),
   }),
 }))
 
-// drizzle 的 eq 只用来拼 SQL 条件，这里不需要真实列元数据
-vi.mock("drizzle-orm", () => ({ eq: () => ({}) }))
+// drizzle 的 eq/and/isNull 只用来拼 SQL 条件，这里不需要真实列元数据
+vi.mock("drizzle-orm", () => ({ eq: () => ({}), and: () => ({}), isNull: () => ({}) }))
 
 vi.mock("../db", () => ({
   db: {
@@ -48,26 +49,63 @@ vi.mock("../db", () => ({
 
 const { ensureFeedDatabase, ensureTimelineDatabase } = await import("../couchdb/client")
 
-/** 已登记的库名（24 位随机后缀） */
-const EXISTING = `feed_${"a".repeat(24)}`
-
 beforeEach(() => {
   vi.clearAllMocks()
   mocks.returning.mockResolvedValue([{ id: "x" }])
   mocks.dbGet.mockResolvedValue({ db_name: "x" })
   mocks.securityPut.mockResolvedValue({ ok: true })
   mocks.insert.mockResolvedValue({ ok: true })
+  mocks.dbDestroy.mockResolvedValue({ ok: true })
 })
 
 describe("resolveDatabase：库名已登记", () => {
-  it("直接返回库名，一个 CouchDB 请求都不发", async () => {
-    mocks.findFirst.mockResolvedValue({ couchDbName: EXISTING })
+  it("源库快路径只补装一次复制过滤器（进程内缓存），不建库、不重设授权", async () => {
+    // 每个用例用不同的库名：过滤器「已 ensure」是进程内缓存的，同名会跨用例串味
+    const dbName = `feed_${"b".repeat(24)}`
+    mocks.findFirst.mockResolvedValue({ couchDbName: dbName })
+    const { TIMELINE_REPLICATION_FILTER } = await import("../couchdb/client")
+    mocks.dbGet.mockResolvedValue({
+      _id: "_design/main",
+      _rev: "1-ok",
+      views: { "entries-by-date": {} },
+      filters: { timeline: TIMELINE_REPLICATION_FILTER },
+    })
 
-    expect(await ensureFeedDatabase("f1")).toBe(EXISTING)
+    expect(await ensureFeedDatabase("f1")).toBe(dbName)
 
-    expect(mocks.dbGet).not.toHaveBeenCalled()
+    // 正好一次设计文档 GET（比对过滤器源码）；过滤器已在 → 一个写请求都不发
+    expect(mocks.dbGet).toHaveBeenCalledTimes(1)
+    expect(mocks.dbGet).toHaveBeenCalledWith("_design/main")
     expect(mocks.dbCreate).not.toHaveBeenCalled()
     expect(mocks.securityPut).not.toHaveBeenCalled()
+    expect(mocks.insert).not.toHaveBeenCalled()
+  })
+
+  it("存量源库补装过滤器：设计文档缺 filters.timeline 时带 _rev 覆盖一次（保留视图），之后缓存命中不再查", async () => {
+    const dbName = `feed_${"c".repeat(24)}`
+    mocks.findFirst.mockResolvedValue({ couchDbName: dbName })
+    mocks.dbGet.mockResolvedValue({
+      _id: "_design/main",
+      _rev: "2-old",
+      views: { "entries-by-date": { map: "function(doc){}" } },
+    })
+
+    await ensureFeedDatabase("f2")
+    expect(mocks.insert).toHaveBeenCalledTimes(1)
+    const written = mocks.insert.mock.calls[0]![0] as {
+      _rev?: string
+      filters?: Record<string, string>
+      views?: Record<string, unknown>
+    }
+    expect(written._rev).toBe("2-old")
+    expect(typeof written.filters?.timeline).toBe("string")
+    // 覆盖时不能把视图弄丢（复制过滤器是后加的，视图是老库本来就有的）
+    expect(written.views).toEqual({ "entries-by-date": { map: "function(doc){}" } })
+
+    mocks.dbGet.mockClear()
+    mocks.insert.mockClear()
+    await ensureFeedDatabase("f2")
+    expect(mocks.dbGet).not.toHaveBeenCalled()
     expect(mocks.insert).not.toHaveBeenCalled()
   })
 
@@ -86,6 +124,27 @@ describe("resolveDatabase：库名已登记", () => {
     expect(mocks.dbCreate).not.toHaveBeenCalled()
     expect(mocks.insert).not.toHaveBeenCalled()
     expect(mocks.securityPut).not.toHaveBeenCalled()
+  })
+
+  it("并发建库：没抢到库名的一方删掉自己刚建的空库，改用赢家的库（否则订阅会写进没人指得着的孤儿库）", async () => {
+    const winner = `feed_${"e".repeat(24)}`
+    // 第一次 findFirst（解析前查列）没有库名；认领失败后回读，拿到赢家的库名
+    mocks.findFirst.mockResolvedValueOnce(null).mockResolvedValue({ couchDbName: winner })
+    // 认领失败：条件更新（列还是空才写）没写到任何行
+    mocks.returning.mockResolvedValue([])
+    mocks.dbGet.mockRejectedValueOnce(new Error("not_found")).mockResolvedValue({
+      _id: "_design/main",
+      _rev: "1-ok",
+      views: { "entries-by-date": {} },
+      filters: { timeline: "function(doc, req) { return true; }" },
+    })
+
+    const name = await ensureFeedDatabase("f-race")
+
+    expect(name).toBe(winner)
+    expect(mocks.dbDestroy).toHaveBeenCalledTimes(1)
+    expect(String(mocks.dbDestroy.mock.calls[0]![0])).toMatch(/^feed_/)
+    expect(String(mocks.dbDestroy.mock.calls[0]![0])).not.toBe(winner)
   })
 
   it("用户库快路径同样会补装闸门：老库（设计文档缺闸门）带 _rev 覆盖一次，之后不再查", async () => {
@@ -115,8 +174,11 @@ describe("resolveDatabase：库名缺失（首次）", () => {
 
     expect(dbName).toMatch(/^feed_[a-z0-9]{24}$/)
     expect(mocks.dbCreate).toHaveBeenCalledWith(dbName)
-    // feed 库的设计文档（entries-by-date 视图）
+    // feed 库的设计文档：entries-by-date 视图 + 聚合复制过滤器（一起装，只装一次）
     expect(mocks.insert).toHaveBeenCalledTimes(1)
+    const designDoc = mocks.insert.mock.calls[0]![0] as { views?: Record<string, unknown>, filters?: Record<string, string> }
+    expect(Object.keys(designDoc.views ?? {})).toEqual(["entries-by-date"])
+    expect(typeof designDoc.filters?.timeline).toBe("string")
     // 库级 _security：feed 库放行 user 角色
     expect(mocks.securityPut).toHaveBeenCalledTimes(1)
     expect(mocks.securityPut.mock.calls[0]![0]).toMatchObject({

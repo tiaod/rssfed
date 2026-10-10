@@ -7,9 +7,12 @@ const state = vi.hoisted(() => ({
   },
   reconcileQueued: 0,
   rebuildQueued: 0,
-  /** 直连（wait=1）的 reconcile 结果；null 表示模拟「服务端超时仍在跑」 */
-  inlineReconcile: null as null | { addedEntries: number, sources: number },
+  /** wait=1 时拓扑对齐（reconcile）返回的订阅源数 */
+  inlineSources: 12,
+  /** wait=1 时「等复制器送到」的结果；completed=false 模拟超时 */
+  inlineSync: { completed: true, added: 7 } as { completed: boolean, added: number },
   inlineCalls: 0,
+  syncCalls: 0,
 }))
 
 vi.mock("../auth", () => ({
@@ -39,14 +42,15 @@ vi.mock("../services/timeline", async (importOriginal) => {
     ...actual,
     getTimelineSettings: async () => actual.normalizeTimelineSettings({ windowDays: 3 }),
     updateTimelineSettings: async () => state.settings,
-    // wait=1 的刷新会**在本请求内**跑一轮聚合：这里用一个可控的替身，
-    // 既不碰 CouchDB，也能复现「超时后仍在后台跑」的分支
+    // wait=1 的刷新分两步：先在本请求内对齐复制拓扑，再轮询派生库等复制器送到。
+    // 两个替身都不碰 CouchDB，覆盖「追平」与「超时」两条分支。
     reconcileUserTimeline: async () => {
       state.inlineCalls++
-      if (!state.inlineReconcile) {
-        return await new Promise(() => {}) // 永不 settle：模拟超时
-      }
-      return { ...state.inlineReconcile, addedEntries: state.inlineReconcile.addedEntries, sources: state.inlineReconcile.sources }
+      return { sources: state.inlineSources }
+    },
+    waitForSync: async () => {
+      state.syncCalls++
+      return state.inlineSync
     },
   }
 })
@@ -60,8 +64,10 @@ beforeEach(() => {
   }
   state.reconcileQueued = 0
   state.rebuildQueued = 0
-  state.inlineReconcile = null
+  state.inlineSources = 12
+  state.inlineSync = { completed: true, added: 7 }
   state.inlineCalls = 0
+  state.syncCalls = 0
 })
 
 async function patch(body: unknown) {
@@ -130,28 +136,21 @@ describe("/api/timeline", () => {
     expect(state.rebuildQueued).toBe(1)
   })
 
-  it("POST /refresh?wait=1：本请求内跑完一轮聚合并带上确切条数（手动同步要一个确定答案）", async () => {
-    state.inlineReconcile = { addedEntries: 7, sources: 12 }
+  it("POST /refresh?wait=1：本请求内对齐拓扑并等复制器送到，带上确切条数", async () => {
     const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ accepted: true, completed: true, added: 7, sources: 12 })
-    // 直连跑完了，就不该再入队（同一份工作不该跑两遍）
+    // 直连处理了，就不该再入队（同一份工作不该跑两遍）
     expect(state.reconcileQueued).toBe(0)
+    expect(state.inlineCalls).toBe(1)
+    expect(state.syncCalls).toBe(1)
   })
 
-  it("POST /refresh?wait=1 超时：202 报 completed=false，聚合仍在后台跑（不重复入队）", async () => {
-    vi.useFakeTimers()
-    try {
-      const pending = app.request("/api/timeline/refresh?wait=1", { method: "POST" })
-      // 让等待计时器到期（服务端等待上限见 routes/timeline.ts 的 TIMELINE_REFRESH_WAIT_MS）
-      await vi.advanceTimersByTimeAsync(60_000)
-      const res = await pending
-      expect(res.status).toBe(202)
-      expect(await res.json()).toMatchObject({ accepted: true, completed: false })
-      expect(state.inlineCalls).toBe(1)
-      expect(state.reconcileQueued).toBe(0)
-    } finally {
-      vi.useRealTimers()
-    }
+  it("POST /refresh?wait=1 超时：200 报 completed=false（复制仍在后台跑，不入队重跑）", async () => {
+    state.inlineSync = { completed: false, added: 2 }
+    const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ accepted: true, completed: false, added: 2, sources: 12 })
+    expect(state.reconcileQueued).toBe(0)
   })
 })
