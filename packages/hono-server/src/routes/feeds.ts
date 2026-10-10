@@ -11,6 +11,7 @@ import {
   ensureFeedRegistered,
   addSubscriptionIfAbsent,
   listSubscriptionsForUser,
+  requeueAfterUrlChange,
 } from "../services/feeds"
 import { auth } from "../auth"
 import { requireAdmin } from "../middleware/require-admin"
@@ -289,12 +290,17 @@ feedsRouter.put("/:feedId", requireAdmin, async (c) => {
   if (!Object.keys(patch).length) {
     return c.json({ error: "no fields to update" }, 400)
   }
+  // URL 是否真的变了要拿改之前的值比：updated 的 returning 只会给新值
+  const [before] = await db.select({ url: feeds.url }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
+  if (!before) return c.json({ error: "feed not found" }, 404)
   const updated = await db.update(feeds)
     .set(patch)
     .where(eq(feeds.id, feedId))
     .returning({ id: feeds.id })
   if (!updated.length) return c.json({ error: "feed not found" }, 404)
-  return c.json({ feedId, updated: true })
+  // 改了 URL 就顺手清错 + 按新地址重建抓取任务，否则队列里压着的旧 URL job 会一直跑旧地址
+  const requeued = await requeueAfterUrlChange(feedId, before.url, typeof patch.url === "string" ? patch.url : undefined)
+  return c.json({ feedId, updated: true, requeued })
 })
 
 /** 立即重新抓取订阅源（仅管理员）：清空错误并加入抓取队列 */

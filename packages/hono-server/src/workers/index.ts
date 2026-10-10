@@ -2,17 +2,37 @@ import { Worker, Queue } from "bullmq"
 import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
 import { ensureFeedDatabase, ensureBotDatabase, createCouchDb } from "../couchdb/client"
+import { feedDocId } from "../couchdb/doc-ids"
 import { parseFeedUrl, formatFeedError, type ParsedFeed, type ParsedItem } from "../rss/parser"
 import { cacheEntryImages, cacheSingleImage, FEED_ICON_CACHE_VERSION, type EntryImageOptions } from "../rss/entry-images"
 import { db, feeds, botFeeds, bots as botsTable, type EntryDoc } from "../db"
 import { connection, createWorkerConnection } from "./connection"
+import { enqueueFetchJob } from "./enqueue"
+import { buildFeedRegistryUpdate } from "./feed-registry"
 import { notifyTimelineStale, shutdownTimelineWorkers } from "./timeline"
 
 export const fetchQueue = new Queue("rss-fetch", { connection })
 
 type FeedDb = ReturnType<typeof createCouchDb>
 
-export const worker = new Worker("rss-fetch", async (job) => {
+/**
+ * 抓取并发度：单个源最慢要拖满 10s（没有代理时直连被墙站点必然超时），串行跑 700+ 个源
+ * 会让队列永远追不上 15 分钟的调度间隔（2026-10-10 实测积压 600+，一条 refetch 要排十几分钟）。
+ * 默认 4，可用 FETCH_CONCURRENCY 调整。
+ */
+const FETCH_CONCURRENCY = Math.max(1, parseInt(process.env.FETCH_CONCURRENCY ?? "4") || 4)
+
+/**
+ * 测试进程里不启动 worker。
+ *
+ * mcp.test.ts / health.test.ts 会 `import "../app"`，把本模块整个拉进测试进程；模块顶层的
+ * `new Worker(...)` 会让测试跑起来就去消费**真实 Redis 队列**——抢走线上待抓任务，而且测试
+ * 进程没有加载 .env：RSSHUB_BASE_URL 为空（跳过本地 RSSHub 改写，直接打 rsshub.app 超时）、
+ * PG 用默认 DSN 连不上（markFeedError 写库失败）。2026-10-10 跑一次全量测试就吃掉 2 个刚入队的 job。
+ */
+const isTestProcess = process.env.VITEST === "true" || process.env.NODE_ENV === "test"
+
+export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job) => {
   const { feedId, url } = job.data
 
   try {
@@ -45,7 +65,7 @@ export const worker = new Worker("rss-fetch", async (job) => {
     await markFeedError(feedId, url, err)
     throw err
   }
-}, { connection: createWorkerConnection() })
+}, { connection: createWorkerConnection(), concurrency: FETCH_CONCURRENCY })
 
 /** 更新（或首次创建）CouchDB 中的 FeedDoc 元数据；返回是否首次缓存了图标（用于触发前端同步） */
 async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed: ParsedFeed): Promise<boolean> {
@@ -339,22 +359,20 @@ async function removeFinishedJob(feedId: string) {
   }
 }
 
-/** 入队一次抓取（单 feed 场景）：先清理旧 job 再入队，与调度器逻辑一致 */
+/** 入队一次抓取（单 feed 场景）：先清掉队列里的旧 job 再入队，语义见 enqueue.ts */
 export async function enqueueFetch(feedId: string, url: string) {
-  await removeFinishedJob(feedId)
-  await fetchQueue.add(`fetch:${feedId}`, { feedId, url }, {
-    jobId: feedId,
-    removeOnComplete: { count: 200 },
-    removeOnFail: { count: 50 },
-  })
+  await enqueueFetchJob(fetchQueue, feedId, url)
 }
 
 const FETCH_INTERVAL = parseInt(process.env.FETCH_INTERVAL ?? "900000")
-const fetchInterval = setInterval(scheduleFeedFetches, FETCH_INTERVAL)
+// 测试进程里也不挂调度定时器：`vitest --watch` 一挂几小时的话，它会按 FETCH_INTERVAL
+// 往真实队列里灌 700+ 个任务（同样见 isTestProcess 注释）
+const fetchInterval = isTestProcess ? null : setInterval(scheduleFeedFetches, FETCH_INTERVAL)
 
 export async function shutdownWorkers() {
-  clearInterval(fetchInterval)
-  await worker.close()
+  if (fetchInterval) clearInterval(fetchInterval)
+  // 测试进程里 worker 为 null（见 isTestProcess 注释）
+  await worker?.close()
   await fetchQueue.close()
   // 时间线聚合队列与本队列共用同一个 Redis 连接，必须在 quit 之前关掉
   await shutdownTimelineWorkers()

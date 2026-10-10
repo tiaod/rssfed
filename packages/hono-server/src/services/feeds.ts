@@ -194,11 +194,37 @@ export async function updateSubscriptionMeta(
     if (v !== undefined) clean[key] = v
   }
   if (!Object.keys(clean).length) return false
+  const [before] = await db.select({ url: feeds.url }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
   const updated = await db.update(feeds)
     .set(clean)
     .where(eq(feeds.id, feedId))
     .returning({ id: feeds.id })
-  return updated.length > 0
+  if (!updated.length) return false
+  await requeueAfterUrlChange(feedId, before?.url, clean.url)
+  return true
+}
+
+/** 清掉错误状态并按当前 URL 重建抓取任务（enqueueFetch 会替换掉队列里旧 URL 的 job） */
+async function resetAndEnqueue(feedId: string, url: string): Promise<void> {
+  await db.update(feeds).set({ errorMessage: null }).where(eq(feeds.id, feedId))
+  await enqueueFetch(feedId, url)
+}
+
+/**
+ * URL 变更后的收尾：清错 + 按新地址重建抓取任务。
+ *
+ * 这一步不能省：enqueueFetch 按 jobId 去重，队列里若还压着一个旧 URL 的 job，
+ * 不先清掉的话新地址根本进不了队列（静默无效），表现就是「改了 URL、点了立即抓取，
+ * 源还是没数据，也不报错」。返回是否真的触发了重建。
+ */
+export async function requeueAfterUrlChange(
+  feedId: string,
+  oldUrl: string | undefined,
+  newUrl: string | undefined,
+): Promise<boolean> {
+  if (!newUrl || newUrl === oldUrl) return false
+  await resetAndEnqueue(feedId, newUrl)
+  return true
 }
 
 /** 触发某 feed 立即重新抓取（清空错误），**仅当属于当前用户订阅时** */
@@ -207,8 +233,7 @@ export async function refetchFeed(userId: string, feedId: string): Promise<boole
   if (!subscribed.has(feedId)) return false
   const [feed] = await db.select().from(feeds).where(eq(feeds.id, feedId)).limit(1)
   if (!feed) return false
-  await db.update(feeds).set({ errorMessage: null }).where(eq(feeds.id, feedId))
-  await enqueueFetch(feedId, feed.url)
+  await resetAndEnqueue(feedId, feed.url)
   return true
 }
 
