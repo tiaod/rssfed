@@ -333,6 +333,31 @@ async function deleteDocsByIds(scope: DocumentScope<unknown>, ids: string[]): Pr
   return results.filter(r => !r.error).length
 }
 
+// ── 同一用户串行化 ──
+//
+// API 与 worker 同进程（见 docker-deployment 的「单副本」），但同一个用户完全可能有两轮聚合同时在跑：
+// 客户端催一次（`POST /api/timeline/refresh`）时，队列里那个定时任务可能正好也在处理同一个用户。
+// 两轮并发没有共享状态上的正确性问题（写都是幂等的），但**重建 / v1→v2 升级**这类"整体换库"的动作不行：
+// 两边都会读到 `version: 1`、各自换一个空库出来，最后只有一份名字生效，另一个库就成了没人指得着、
+// 也不会有复制任务的孤儿（表现为"重建后内容一直不回来"）。所以这里按用户串行，跨用户仍然并行。
+
+/** userId → 该用户当前那条任务链的尾巴 */
+const userTimelineLocks = new Map<string, Promise<void>>()
+
+/** 把一个动作排到该用户任务链的末尾（前一个失败也继续排，失败由各自的调用方处理） */
+async function withUserLock<T>(userId: string, action: () => Promise<T>): Promise<T> {
+  const previous = userTimelineLocks.get(userId) ?? Promise.resolve()
+  const run = previous.then(action, action)
+  const tail = run.then(() => {}, () => {})
+  userTimelineLocks.set(userId, tail)
+  try {
+    return await run
+  } finally {
+    // 只有自己还是链尾时才清掉，否则会把后来者的链尾一起删了
+    if (userTimelineLocks.get(userId) === tail) userTimelineLocks.delete(userId)
+  }
+}
+
 export interface TimelineReconcileResult {
   userId: string
   /** 订阅源总数 */
@@ -359,6 +384,14 @@ export interface TimelineReconcileResult {
  * 单个源失败只记进 failures：一个源的库抖动不该让剩下几百个源都不同步。
  */
 export async function reconcileUserTimeline(
+  userId: string,
+  options: { backfill?: boolean } = {},
+): Promise<TimelineReconcileResult> {
+  return await withUserLock(userId, () => reconcileUserTimelineUnlocked(userId, options))
+}
+
+/** reconcile 本体（调用方必须已经持有该用户的锁） */
+async function reconcileUserTimelineUnlocked(
   userId: string,
   options: { backfill?: boolean } = {},
 ): Promise<TimelineReconcileResult> {
@@ -610,10 +643,15 @@ export async function waitForSync(
  * 触发入口：设置页的「重建时间线」与 `POST /api/timeline/rebuild`。
  */
 export async function rebuildUserTimeline(userId: string): Promise<TimelineReconcileResult> {
+  return await withUserLock(userId, () => rebuildUserTimelineUnlocked(userId))
+}
+
+/** 重建本体（调用方必须已经持有该用户的锁） */
+async function rebuildUserTimelineUnlocked(userId: string): Promise<TimelineReconcileResult> {
   const oldDbName = await ensureTimelineDatabase(userId)
   const existing = await listUserReplications(userId)
   await rederiveUserTimeline(userId, oldDbName)
-  const result = await reconcileUserTimeline(userId, { backfill: true })
+  const result = await reconcileUserTimelineUnlocked(userId, { backfill: true })
   return {
     ...result,
     removedReplications: result.removedReplications + existing.length,

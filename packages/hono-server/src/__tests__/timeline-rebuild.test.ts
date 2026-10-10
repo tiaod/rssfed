@@ -285,3 +285,20 @@ describe("reconcileUserTimeline：升级与稳态", () => {
     expect("entry:feed1:001" >= "entry:" && "entry:feed1:001" <= "entry:\uffff").toBe(true)
   })
 })
+
+describe("同一用户串行化：并发重建 / 升级只能有一个赢家", () => {
+  it("两轮并发聚合落在同一条队列上：第二轮的 reconcile 看到新库的状态（version 2），不再换库", async () => {
+    // 第一个 reconcile 会走「老库 version 1 → 换库重搬」，第二个必须等它跑完再开始
+    mocks.stateByDb["user-timeline_old"] = { version: 1, windowDays: 3 }
+
+    const [first, second] = await Promise.all([
+      reconcileUserTimeline("u1"),
+      reconcileUserTimeline("u1"),
+    ])
+
+    // 只换了一次库（第二个 reconcile 看到的是新库的 version 2，直接对齐拓扑）
+    expect(mocks.createdTimelines).toBe(1)
+    expect(mocks.destroyedDbs).toEqual(["user-timeline_old"])
+    expect(first.createdReplications + second.createdReplications).toBe(1)
+  })
+})
