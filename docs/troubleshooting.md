@@ -87,18 +87,18 @@
 - **原因**：代理只接受真实库名，旧版前端仍按业务 id 拼地址（`/api/couchdb/proxy/feed/<feedId>`）；旧页面还跑着旧 JS（新版 SW 先待命，等用户点更新才激活，见 [offline-and-pwa.md](offline-and-pwa.md)）。
 - **解法**：刷新页面即可，错误响应里的 `hint` 也写了这条。
 
-### 时间线一直空、提示条停在「已同步 0 条」：服务端聚合还没跑完
+### 时间线一直空、提示条停在「已同步 0 条」：复制器还没把内容搬过来
 
 - **现象**：登录正常、订阅列表有内容、`GET /api/couchdb/sync-targets` 也下发了 `user-timeline_xxx`，但时间线始终空白（或只出现几条），`POST /api/timeline/refresh?wait=1` 返回 `{"accepted":true,"completed":false}`。
-- **原因**：聚合是**服务端**按用户跑的一轮长任务（首次要把窗口内所有源的历史条目逐条搬过来，还要重新压缩图片），`wait=1` 有 15s 上限，超时就返回 `completed:false` 让它在后台继续。客户端那条 live 复制会随着写入逐步收到条目，不需要等整轮结束。
+- **原因**：真正的搬运交给 **CouchDB 复制器**（每个 (用户 × 订阅源) 一条常驻复制），我们那一轮只对齐拓扑（建/删任务）与剪枝，很快就返回；`wait=1` 的判据是"派生库安静"（`minWaitMs` 4s + 连续 5 轮没有新条目），所以它可能在复制器刚拉起、首批数据还没到端时就报 `completed:true`。附件也不再重压，是源库成品原样搬。
 - **排查**：
   ```bash
-  docker exec <redis> redis-cli zcard bull:rss-timeline:completed   # 队列在看板 /admin/queues
-  docker logs <server 容器> | grep '\[Timeline\]'                  # 一行「源=… 新增=… 剪枝=…」
+  docker logs <server 容器> | grep '\[Timeline\]'                     # 一行「源=… 新建复制=… 删除复制=… 剪枝=…」
+  curl -s -u admin:admin "http://localhost:5984/_scheduler/docs/_replicator" | head -c 2000
   curl -s -u admin:admin "http://localhost:5984/<user-timeline 库名>" | grep doc_count
   ```
-  派生库的 `_local/state` 文档存着每个源的游标：它存在说明至少跑完过一轮，之后就是增量（很快）。
-- **解法**：等它跑完，或 `POST /api/timeline/rebuild` 强制重算派生内容（就地删 `entry:`/`feed:` 再全量回填）。**每源完成即落盘游标**，所以中途重启不会让进度归零、下一轮接着做。
+  调度器里那条任务应当是 `running`（`crashing` / `error` 会带上原因）。任务清单本身就是「哪些源在搬」的真相；库里的 `_local/state` 只存版本标记与设置快照，**不再有每源游标**。
+- **解法**：等它搬（Steady state 下复制器自己长轮询，不需要我们催）。整库搬不动时再 `POST /api/timeline/rebuild`：它是**换一个空聚合库重搬**（换库才会清掉复制 checkpoint），用户自己写的订阅/已读收藏会跟着搬过去，客户端会丢掉本地缓存重新全量拉一遍。
 
 ### 图片接口返回 502 `image_unavailable`
 
@@ -118,11 +118,28 @@
   ```
   feed / bot 库同理（`feeds` / `bots` 表的 `couch_db_name`）；**用户库**置空 `user.timeline_db_name` 后下次聚合会重建。重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次（用户状态文档要从客户端再推上来，见下面那条）。库级 `_security` 只在建库时设置一次，改坏了同样用置空库名的方式重建。
 
-### 重建后订阅被清空 / 状态文档消失
+### 重建之后内容回来了，但浏览器里看不见
 
-- **现象**：`POST /api/timeline/rebuild`（或设置页的「重建时间线」）之后，订阅列表变空，或已读/收藏全丢。
-- **原因**：`rebuildUserTimeline` 只能重算**服务端独占写**的内容。合并成单库之前用户状态在另一个库里，删掉聚合库不影响它；合并之后两者同库，重建若还用「删库重建」就会把 `subscription:` / `entry-state:` 一起抹掉（客户端那份还会因为远端库名变化变成孤儿）。
-- **现状**：重建已改成**就地删 `entry:` / `feed:` 两个前缀范围**再全量回填，库名不变、状态文档不动（回归用例 `timeline-rebuild.test.ts`）。手工清理时同样别 `DELETE /<用户库>`：用 `_all_docs?startkey="entry:"&endkey="entry:\uffff"` 找出文档再 `_bulk_docs` 标记删除。
+- **现象**：`POST /api/timeline/rebuild`（或设置页的「重建时间线」）之后，服务端新库里有条目，但页面上的时间线还是空的（或比预期的少）。
+- **原因**：重建是**换一个空聚合库**（复制是变更投递不是投影，就地清空搬不回来），于是 ① 库名变了、客户端缓存的寻址信息还指着被删掉的旧库；② 本地为「被剪掉的条目」留着删除记录（tombstone，修订号更高），重建搬回来的内容在本地会被判成冲突、看不见。
+- **现状**：设置页的「重建时间线」会在请求成功后**等库名变过来**（最多 60s）再丢掉本地缓存重新全量拉一遍（[useTimelineSettings.ts](../packages/nuxt-client/app/composables/useTimelineSettings.ts)）。手工 `curl` 触发重建时没有这一步，浏览器要手动重开页面或清掉该站点的 IndexedDB。
+- **别手工 `DELETE /<用户库>`**：那会连用户写的订阅/已读收藏一起删。要收缩数据用窗口设置（剪枝），要整体重来用重建接口。
+
+### 升级后每个账号都"重建"了一次：v1 → v2 换库重搬
+
+- **现象**：升级到复制器版之后，日志出现一行 `[Timeline] 用户=… 换库重搬：user-timeline_old → user-timeline_new（搬走用户状态 N 条，作废复制任务 M 条）`，每个已有账号一次，用户库名变了。
+- **原因**：v1 的聚合库是**我们自己按窗口写进去的**（文档带我们的修订谱系），复制器按源库谱系落库会在同一个 `_id` 上撞出两条互不相干的修订 → 冲突；而"就地清空 + 重建任务"搬不回来（目标端删过的 rev 复制器不会再送）。所以 v1 → v2 走的是**换库重搬**：另建空库、把用户写的状态文档搬过去、旧库删掉，复制器从 0 扫源库。
+- **注意**：这是**一次性**的（新库的状态文档写 `version: 2`），代价是每个账号的窗口内容重搬一遍、客户端重新全量拉一次；内容与订阅/已读收藏都不丢。旧库名变新库名后，客户端若还指着旧库，参照上一条处理。
+
+### 某个订阅源一直不搬东西（复制任务 crashing / error）
+
+- **现象**：`GET /_scheduler/docs/_replicator` 里某条任务 `state` 是 `crashing` / `error`，或 `_replicator` 文档在但目标库里始终没有该源的内容。
+- **原因**（按出现频率）：
+  1. **源/目标写的是裸库名**：复制器把它当远端 URL 解析，报 `replication_auth_error`（我们写的是带凭据的 URL，见 [replicator.ts](../packages/hono-server/src/couchdb/replicator.ts)）；
+  2. 源库设计文档里没有 `filters.timeline`（新装的过滤器没生效，或库是手工建的）；
+  3. **过滤器的 `query_params` 里出现了叫 `since` 的参数**：它与 CouchDB 自己的 `since` 撞名，过滤器读到的是序号字符串，窗口会静默失效（可能反而多搬）；
+  4. 目标库被手工删了 / `_security` 改坏 → 任务反复重试。
+- **解法**：先看调度器给的 `error` 原文；1、2、4 都可以通过"让代码重新对齐"恢复 —— 退订再订阅该源（删任务 + 删该源条目 + 删 FeedDoc 副本），或直接 `POST /api/timeline/rebuild`（换库重搬）。任务文档**不要手工改**：改参数等于换复制哈希，会触发一次全量重扫。
 
 ## 反向代理与网络
 
