@@ -5,21 +5,37 @@ import { HttpProxyAgent } from "http-proxy-agent"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import { rewriteRssHubUrl } from "./rsshub"
 
-// 代理配置来自环境变量（与 curl/node 惯例一致），兼容大小写两种写法
-const PROXY_HTTP = process.env.HTTP_PROXY || process.env.http_proxy
-const PROXY_HTTPS = process.env.HTTPS_PROXY || process.env.https_proxy
-const NO_PROXY = (process.env.NO_PROXY || process.env.no_proxy || "")
-  .split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)
+/**
+ * 抓取专用代理（只作用于订阅抓取与图片缓存）。
+ *
+ * 故意**不读 HTTP_PROXY / HTTPS_PROXY**：那两个是进程级惯例变量，axios（nano 访问 CouchDB）、
+ * AWS SDK、undici 等库都会自动认，一设就把 CouchDB / S3 / ActivityPub 的请求也一起拖进代理，
+ * 排查起来非常隐蔽。所以这里用独立变量，影响范围只到本模块导出的 agent 使用者：
+ * 本文件的 fetchUrl 与 `images/fetch.ts`。
+ *
+ * RSS_FETCH_NO_PROXY 默认绕过本机（localhost/127.0.0.1/::1）——RSSHUB_BASE_URL 指向本地实例，
+ * 不绕过的话本地请求会被丢给代理。
+ *
+ * 代理是**按域名**好坏不一的：先试代理，网络级失败再回退直连（见 fetchUrl 注释）。
+ */
+const PROXY = process.env.RSS_FETCH_PROXY || process.env.rss_fetch_proxy
+const NO_PROXY = (process.env.RSS_FETCH_NO_PROXY || process.env.rss_fetch_no_proxy || "localhost,127.0.0.1,::1")
+  .split(",").map((s) => s.trim().toLowerCase().replace(/^\[|\]$/g, "")).filter(Boolean)
 
 // 连接级代理可复用，创建一次即可（内部有连接池）
-export const httpAgent = PROXY_HTTP ? new HttpProxyAgent(PROXY_HTTP) : undefined
-export const httpsAgent = PROXY_HTTPS ? new HttpsProxyAgent(PROXY_HTTPS) : undefined
+export const httpAgent = PROXY ? new HttpProxyAgent(PROXY) : undefined
+export const httpsAgent = PROXY ? new HttpsProxyAgent(PROXY) : undefined
 
-/** 按 NO_PROXY 规则判断该 URL 是否应走代理（支持 *.example.com / .example.com / host 写法） */
+/**
+ * 该 URL 是否应走抓取代理：未配置代理时恒为 false；
+ * 配置了则按 RSS_FETCH_NO_PROXY（支持 *.example.com / .example.com / host 写法）判断。
+ */
 export function shouldProxy(url: string): boolean {
+  if (!PROXY) return false
   let host: string
   try {
-    host = new URL(url).hostname.toLowerCase()
+    // IPv6 字面量在 URL.hostname 里带方括号，归一化掉再去比 NO_PROXY
+    host = new URL(url).hostname.toLowerCase().replace(/^\[|\]$/g, "")
   } catch {
     return false
   }
@@ -220,16 +236,47 @@ function stripHtml(html: string): string {
 // ── HTTP 抓取 ──
 
 /**
- * 抓取 URL 返回文本内容，支持代理和重定向。
- * 超时 10 秒，最多跟随 5 次重定向。
+ * 是否属于「换一条链路还有救」的网络级失败：连不上 / 超时 / 被重置 / DNS 失败。
+ *
+ * 只有这类才值得回退重试。HTTP 4xx/5xx 是对方服务器的答复，换代理也一样，不要重试
+ * （否则 404 的源每次抓取都要多花一轮时间）。
  */
-function fetchUrl(url: string, redirects = 0): Promise<string> {
-  if (redirects > 5) return Promise.reject(new Error("Too many redirects"))
+export function isNetworkError(err: unknown): boolean {
+  const NETWORK_CODES = new Set([
+    "ETIMEDOUT", "ECONNRESET", "ECONNREFUSED", "ENETUNREACH", "EHOSTUNREACH",
+    "EPIPE", "ENOTFOUND", "EAI_AGAIN", "ECONNABORTED", "ERR_SOCKET_CONNECTION_TIMEOUT",
+  ])
+  const isNetwork = (e: unknown) => {
+    const code = (e as NodeJS.ErrnoException | undefined)?.code
+    if (typeof code === "string" && NETWORK_CODES.has(code)) return true
+    return e instanceof Error && /timeout|socket hang up|network socket disconnected/i.test(e.message)
+  }
+  // happy-eyeballs 下多 IP 全失败抛的是没有 message 的 AggregateError，要摊开看
+  if (err instanceof AggregateError && err.errors?.length) return err.errors.some(isNetwork)
+  return isNetwork(err)
+}
 
+/** 把错误压成一行可读信息（AggregateError 摊开，带 errno code） */
+function describeError(err: unknown): string {
+  const one = (e: unknown) => {
+    const code = (e as NodeJS.ErrnoException | undefined)?.code
+    const msg = e instanceof Error ? e.message : String(e)
+    return code ? `${msg} (${code})` : msg
+  }
+  if (err instanceof AggregateError && err.errors?.length) {
+    const detail = err.errors.filter((e): e is Error => e instanceof Error).map(one).join("; ")
+    if (detail) return detail
+  }
+  return one(err)
+}
+
+/**
+ * 单次取数、不重试：useProxy 决定这次走不走代理。
+ * 3xx 交给外层 fetchUrl 继续跟（每跳重新判断该不该走代理）。
+ */
+function requestOnce(url: string, useProxy: boolean, redirects: number): Promise<string> {
   const isHttps = url.startsWith("https")
-  const agent = shouldProxy(url)
-    ? (isHttps ? httpsAgent : httpAgent)
-    : undefined
+  const agent = useProxy ? (isHttps ? httpsAgent : httpAgent) : undefined
 
   return new Promise((resolve, reject) => {
     const mod = isHttps ? https : http
@@ -263,6 +310,31 @@ function fetchUrl(url: string, redirects = 0): Promise<string> {
     req.on("error", reject)
     req.on("timeout", () => req.destroy(new Error("Request timeout")))
   })
+}
+
+/**
+ * 抓取 URL 返回文本内容，支持代理、代理失败回退直连、重定向。
+ * 超时 10 秒，最多跟随 5 次重定向。
+ *
+ * 为什么要回退：代理链路好坏是**按域名**的。2026-10-10 实测（Clash 节点）：
+ * openai.com / wired.com / naturecanada.ca 直连 0.5-0.7s 就通、走代理直接挂死到超时；
+ * 而 news.ycombinator.com / discord.com 直连必然超时、走代理 0.4-0.9s。一刀切代理会把
+ * 前一类源弄挂，所以先试代理（被墙站点快），网络级失败再回退直连。
+ */
+async function fetchUrl(url: string, redirects = 0): Promise<string> {
+  if (redirects > 5) throw new Error("Too many redirects")
+  if (!shouldProxy(url)) return requestOnce(url, false, redirects)
+
+  try {
+    return await requestOnce(url, true, redirects)
+  } catch (err) {
+    if (!isNetworkError(err)) throw err
+    try {
+      return await requestOnce(url, false, redirects)
+    } catch (directErr) {
+      throw new Error(`代理失败（${describeError(err)}）；直连也失败（${describeError(directErr)}）`)
+    }
+  }
 }
 
 /**

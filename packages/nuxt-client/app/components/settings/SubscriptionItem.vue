@@ -41,7 +41,7 @@ function timeAgo(iso?: string): string {
 function suggestion(msg?: string): string {
   if (!msg) return '抓取失败，请稍后重试'
   if (/ETIMEDOUT|ENETUNREACH|EAI_AGAIN|ECONNREFUSED|timeout|timed out/i.test(msg)) {
-    return '目标站点网络不可达（可能是被墙或服务异常）。请检查服务器网络或抓取代理（HTTPS_PROXY）配置，或稍后重试。'
+    return '目标站点网络不可达（可能是被墙或服务异常）。请检查服务器网络或抓取代理（RSS_FETCH_PROXY）配置，或稍后重试。'
   }
   if (/ENOTFOUND/i.test(msg)) return '域名无法解析，请检查订阅地址是否正确。'
   if (/404|410/i.test(msg)) return '订阅源已失效（404/410），请确认地址或寻找替代源。'
