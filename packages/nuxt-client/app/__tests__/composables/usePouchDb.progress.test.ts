@@ -19,7 +19,12 @@ import { usePouchDb } from '~/composables/usePouchDb'
 interface FakeTask {
   url: string
   cancelled: boolean
-  emitChange: (info: { docs_written?: number, pending?: number }) => void
+  emitChange: (info: {
+    /** 本批写入成功的文档（PouchDB 复制 change 事件真实会带的字段）：按源记账靠它 */
+    docs?: Array<{ type?: string, feedId?: string }>
+    docs_written?: number
+    pending?: number
+  }) => void
   emitPaused: () => void
   emitError: (err: unknown) => void
   listenerCount: (event: string) => number
@@ -133,6 +138,9 @@ testGlobals.useNuxtApp = () => sharedApp
 const TIMELINE_ID = '__timeline__'
 let pouch: ReturnType<typeof usePouchDb>
 
+/** 一条复制写入的文档（只写断言关心的字段） */
+const doc = (type: string, feedId?: string) => ({ type, feedId })
+
 /** 触发一次「自动同步」，把 live 复制挂上 */
 async function startLive() {
   await pouch.syncFeedsIfChanged([{ feedId: 'feed-a' }])
@@ -234,7 +242,64 @@ describe('时间线 live 复制：进度与状态', () => {
   })
 })
 
+/**
+ * 「已同步 N 条」的记账口径：全库一个数字回答不了「当前这个列表多了几条」——
+ * 在单源页点一次全局同步，别的源的新条目会一起算进去。所以按 entry 文档自带的 feedId 分摊，
+ * 页面再按自己的源求和（`syncedEntryCount`）。
+ */
+describe('按源分摊的条目记账', () => {
+  it('只算 entry 文档，并按 feedId 分到各源', async () => {
+    await startLive()
+    H.tasks[0]!.emitChange({
+      docs: [
+        doc('entry', 'feed-a'),
+        doc('entry', 'feed-a'),
+        doc('entry', 'feed-b'),
+        // 同一个批次里还有源文档（不是条目）与用户状态文档：都不该计入
+        doc('feed', 'feed-a'),
+        doc('entry-state')
+      ],
+      docs_written: 5,
+      pending: 0
+    })
+
+    expect(pouch.syncedEntryCount()).toBe(3)
+    expect(pouch.syncedEntryCount(['feed-a'])).toBe(2)
+    expect(pouch.syncedEntryCount(['feed-b'])).toBe(1)
+    expect(pouch.syncedEntryCount(['feed-a', 'feed-b'])).toBe(3)
+    // 本列表一条都没多：单源页的提示条不该因为别的源有更新而涨
+    expect(pouch.syncedEntryCount(['feed-c'])).toBe(0)
+  })
+
+  it('没有 feedId 的 entry 文档不计入任何源（只进不了分摊表，不影响同步本身）', async () => {
+    await startLive()
+    H.tasks[0]!.emitChange({ docs: [doc('entry')], docs_written: 1, pending: 0 })
+    expect(pouch.syncedEntryCount()).toBe(0)
+  })
+})
+
 describe('syncNow 的新增条数', () => {
+  it('syncNow 把本轮真正落到本地的条目按源拆出来（服务端只说总数，分不出源）', async () => {
+    let release!: (value: { accepted: boolean, completed?: boolean, added?: number }) => void
+    H.refresh = () => new Promise((resolve) => {
+      release = resolve
+    })
+    const pending = pouch.syncNow()
+    await vi.waitFor(() => expect(H.tasks).toHaveLength(1))
+    await vi.waitFor(() => expect(H.tasks[0]!.listenerCount('change')).toBeGreaterThan(0))
+
+    // 服务端还没回应，内容先落到了本地
+    H.tasks[0]!.emitChange({
+      docs: [doc('entry', 'feed-a'), doc('entry', 'feed-b'), doc('entry', 'feed-b')],
+      docs_written: 3,
+      pending: 0
+    })
+    release({ accepted: true, completed: true, added: 0 })
+
+    const result = await pending
+    expect(result.addedByFeed).toEqual({ 'feed-a': 1, 'feed-b': 2 })
+  })
+
   it('服务端报新增 N 条：等 live 复制把 N 条落地后 added=N', async () => {
     H.refresh = async () => ({ accepted: true, completed: true, added: 5 })
     const pending = pouch.syncNow()

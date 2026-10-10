@@ -47,8 +47,8 @@ const STUBS = {
   }
 }
 
-function mountButton() {
-  return mount(SyncButton, { global: { stubs: STUBS } })
+function mountButton(props: Record<string, unknown> = {}) {
+  return mount(SyncButton, { props, global: { stubs: STUBS } })
 }
 
 const OUTCOME = { added: 0, skipped: 2, failed: 0, cancelled: 0, storageBroken: false }
@@ -80,5 +80,18 @@ describe('SyncButton（工具栏同步按钮）', () => {
 
     expect(H.sync).toHaveBeenCalledTimes(1)
     expect(wrapper.emitted('synced')).toBeUndefined()
+  })
+
+  /** syncScope 只决定反馈口径（toast 条数 / outcome.added 已由 useManualSync 按它算过） */
+  it('syncScope 原样传给同步（不传 = 全库口径）', async () => {
+    H.sync.mockResolvedValue(OUTCOME)
+
+    await mountButton({ syncScope: ['feed-a'] }).find('button').trigger('click')
+    await flushPromises()
+    expect(H.sync).toHaveBeenCalledWith(['feed-a'])
+
+    await mountButton().find('button').trigger('click')
+    await flushPromises()
+    expect(H.sync).toHaveBeenLastCalledWith(undefined)
   })
 })

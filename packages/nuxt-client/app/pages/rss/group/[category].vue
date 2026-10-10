@@ -25,6 +25,9 @@ const feedTitleMap = computed(() =>
   Object.fromEntries(groupFeeds.value.map(feed => [feed.id, feed.title]))
 )
 
+/** 组内源 id：既用来把同步计数限定在本分组，也作为同步的反馈口径传给动作区 */
+const groupFeedIds = computed(() => groupFeeds.value.map(feed => feed.id))
+
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
 const {
@@ -33,13 +36,15 @@ const {
 } = useSyncedEntryList({
   // 从集中库查询该分组所有订阅源的条目，并补充分组内 feed 标题便于列表展示来源
   query: async (limit) => {
-    const result = await pouch.queryGroupEntries(groupFeeds.value.map(feed => feed.id), limit)
+    const result = await pouch.queryGroupEntries(groupFeedIds.value, limit)
     return result.map(entry => ({
       ...entry,
       feed: { ...entry.feed, title: feedTitleMap.value[entry.feedId] ?? '' }
     }))
   },
-  syncedDocs: pouch.timelineSyncedDocs
+  // 计数限定在组内这些源：同步是全局的，但提示条要回答「本分组多了几条」
+  // （见 usePouchDb.syncedEntryCount）—— 别的分组/单源的新条目不该让它涨
+  syncedDocs: () => pouch.syncedEntryCount(groupFeedIds.value)
 })
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
@@ -58,7 +63,7 @@ const {
   entries,
   hasMore: () => hasMore.value,
   grow: () => grow(),
-  scan: (cursor, limit) => pouch.scanGroupPage(groupFeeds.value.map(feed => feed.id), cursor, limit),
+  scan: (cursor, limit) => pouch.scanGroupPage(groupFeedIds.value, cursor, limit),
   enrich: async (list) => {
     // 与列表查询同口径：分组页的源名以订阅列表里的自定义名为准
     const enriched = await pouch.enrichEntries(list)
@@ -128,6 +133,7 @@ watch(pouch.timelineVersion, () => refreshFromSync())
             @reset="resetView"
           />
           <ListActionsBar
+            :sync-scope="groupFeedIds"
             :entry-count="visibleEntries.length"
             :unread-only="unreadOnly"
             @toggle-unread-only="toggleUnreadOnly"

@@ -57,12 +57,23 @@ export interface SyncStatus {
  * added 是本轮新增的条目数（服务端写入派生库的条数，与本地实际收到的条数取较大值）。
  * 它是「这次同步有没有带来新内容」的唯一判据：为 0 时列表页可以放心把攒着的新条目上屏
  * （同步什么都没带来，不会把用户正在读的内容推走）。
+ *
+ * 但 added 是**全库**口径（一次同步聚合的是这个账号的全部订阅），单源 / 分组页问的是
+ * 「这个列表多了几条」，所以要把 addedByFeed 一并带出去，让调用方按自己的范围求和
+ * （见 useManualSync.sync 的 scope 参数）。
  */
 export interface SyncNowResult {
   ok: string[]
   failed: Array<{ id: string, error: string }>
   skipped: number
   added: number
+  /**
+   * 本轮新增条目按 feedId 拆分（本地实测：复制真正写进本地的 entry 文档数）。
+   *
+   * 只有本地计数，不含「服务端已写入但还没复制到端」的部分：页面的同步范围就是本列表，
+   * 而列表能不能多出条目只取决于本地收到了什么。
+   */
+  addedByFeed: Record<string, number>
   /** 服务端是否在本轮请求内跑完了聚合（false = 还在后台跑，结果随后由 live 复制到达） */
   serverPending: boolean
 }
@@ -245,10 +256,21 @@ interface PouchDbState {
    * 条目列表页据此显示「已同步 N 条」：同步只负责拉数据并报数，列表什么时候换成最新
    * 由用户点提示条决定（见 composables/useSyncedEntryList）。
    *
-   * 时间线是唯一目标，所以计数是**全库**口径而不是按源口径：任何源的新条目都会让它上涨，
-   * 提示条显示的是「本地时间线里多了 N 条还没看」。
+   * 时间线是唯一目标，所以计数是**全库**口径而不是按源口径：任何源的新条目都会让它上涨。
+   * 它只用来判断「本轮复制到底动没动过」（等首批内容到端、决定要不要递增版本号），
+   * UI 上的「已同步 N 条」走下面的 syncedEntryDocsByFeed（要按列表口径分摊）。
    */
   syncedDocsByTarget: Record<string, number>
+  /**
+   * 本次会话各源**真正写进本地的条目数**（只增不减，按文档自带的 feedId 分摊）。
+   *
+   * 列表页的「已同步 N 条」要回答的是「**这个列表**多了几条」，全库一个数字会把别的源的新条目
+   * 也算进去（在单源页点一次全局同步，提示条会报出所有源的新增）。所以记账时按 entry 文档的
+   * feedId 分到各源，页面按自己的订阅源求和（见 usePouchDb.syncedEntryCount）。
+   *
+   * 只算 `type === 'entry'`：同一个复制批次里还有 FeedDoc、状态文档、设计文档，它们不是条目。
+   */
+  syncedEntryDocsByFeed: Record<string, number>
   /**
    * 本地存储故障（IndexedDB 配额耗尽 / 库进入 global failure）的说明文案。
    *
@@ -398,6 +420,7 @@ function createPouchState(): PouchDbState {
     dbUserId: null,
     userWatchReady: false,
     syncedDocsByTarget: reactive<Record<string, number>>({}),
+    syncedEntryDocsByFeed: reactive<Record<string, number>>({}),
     storageBroken: ref<string | null>(null)
   }
 }
@@ -507,6 +530,9 @@ export function usePouchDb() {
     }
     for (const key of Object.keys(pouchState.syncedDocsByTarget)) {
       Reflect.deleteProperty(pouchState.syncedDocsByTarget, key)
+    }
+    for (const key of Object.keys(pouchState.syncedEntryDocsByFeed)) {
+      Reflect.deleteProperty(pouchState.syncedEntryDocsByFeed, key)
     }
     pouchState.dbUserId = uid
     // 换账号后重新开始同步，不继承上一个账号的暂停状态；
@@ -873,7 +899,19 @@ export function usePouchDb() {
       }
 
       const onChange = (info: unknown) => {
-        const i = info as { docs_written?: number, pending?: number }
+        const i = info as {
+          docs?: Array<{ type?: string, feedId?: string }>
+          docs_written?: number
+          pending?: number
+        }
+        // 按源分摊这一批真正写进本地的条目：列表页的「已同步 N 条」是**本列表**的口径，
+        // 全库一个数字会把别的源的新条目也算进来（见 syncedEntryDocsByFeed）。
+        // `docs` 是 PouchDB 复制 change 事件里本批写入成功的文档（`docs_written` 只是累计计数，
+        // 拆不出源），批次之外还有 FeedDoc / 状态文档，所以只认 entry。
+        for (const doc of i.docs ?? []) {
+          if (doc?.type !== 'entry' || typeof doc.feedId !== 'string' || !doc.feedId) continue
+          pouchState.syncedEntryDocsByFeed[doc.feedId] = (pouchState.syncedEntryDocsByFeed[doc.feedId] ?? 0) + 1
+        }
         markSyncing({
           progress: computeReplicateProgress(i, syncStatuses[TIMELINE_ID]?.progress ?? 0),
           ...(typeof i.docs_written === 'number' ? { docsWritten: i.docs_written } : {}),
@@ -1066,6 +1104,8 @@ export function usePouchDb() {
     beginManualSync()
     try {
       const before = pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0
+      // 本地按源记账的基准：收尾时做差就是「本轮各源各多了几条」（见 addedByFeed）
+      const beforeByFeed = { ...pouchState.syncedEntryDocsByFeed }
       const res = await requestTimelineRefresh(true)
       if (!res) {
         // 催促没成功（离线/登录过期）：如实报到指示器上。否则收尾会把它归位成 idle，
@@ -1081,6 +1121,7 @@ export function usePouchDb() {
           failed: [{ id: TIMELINE_ID, error: '无法联系服务端触发聚合（离线或登录已过期）' }],
           skipped: 0,
           added: 0,
+          addedByFeed: {},
           serverPending: false
         }
       }
@@ -1096,11 +1137,22 @@ export function usePouchDb() {
         // 让 toast 说清「已是最新 / 仍在服务端聚合」，而不是含糊的「同步完成」
         skipped: added > 0 ? 0 : 1,
         added,
+        addedByFeed: diffEntryDocsByFeed(beforeByFeed),
         serverPending: res.completed === false
       }
     } finally {
       finishManualSync()
     }
+  }
+
+  /** 把 syncedEntryDocsByFeed 相对某个基准的增量整理成 `{ feedId: 条数 }`（只留正增量） */
+  function diffEntryDocsByFeed(before: Record<string, number>): Record<string, number> {
+    const added: Record<string, number> = {}
+    for (const [feedId, count] of Object.entries(pouchState.syncedEntryDocsByFeed)) {
+      const delta = count - (before[feedId] ?? 0)
+      if (delta > 0) added[feedId] = delta
+    }
+    return added
   }
 
   /**
@@ -1425,6 +1477,9 @@ export function usePouchDb() {
     }
     for (const key of Object.keys(pouchState.syncedDocsByTarget)) {
       Reflect.deleteProperty(pouchState.syncedDocsByTarget, key)
+    }
+    for (const key of Object.keys(pouchState.syncedEntryDocsByFeed)) {
+      Reflect.deleteProperty(pouchState.syncedEntryDocsByFeed, key)
     }
     // 代理寻址信息一并失效：服务端库重建后库名可能已变
     invalidateTargets()
@@ -2026,10 +2081,10 @@ export function usePouchDb() {
      */
     syncPriority,
     /**
-     * 「本地时间线本次会话已写入的文档数」的响应式计数。
+     * 本地时间线库「本次会话已写入的文档数」的响应式计数（含 FeedDoc 等非条目文档）。
      *
-     * 列表页据此显示「已同步 N 条」提示条：**全库口径**（时间线是唯一同步目标），
-     * 所以任何源的新条目都会让它上涨 —— 提示条表达的是「本地时间线里多了 N 条还没看」。
+     * **不是** UI 上的「已同步 N 条」：它只表示复制通道动过没有，供内部等待首批内容到端用
+     * （见 waitForTimelineActivity / waitForTimelineCatchup）。
      */
     syncedDocsByTarget: pouchState.syncedDocsByTarget,
     /**
@@ -2037,8 +2092,19 @@ export function usePouchDb() {
      * 列表页 watch 它来累计「已同步 N 条」（见 useSyncedEntryList 的 refreshFromSync）。
      */
     timelineVersion: computed(() => syncStatuses[TIMELINE_ID]?.version ?? 0),
-    /** 本地时间线本次会话已写入的文档数（响应式读取，列表页作为 syncedDocs 回调） */
-    timelineSyncedDocs: () => pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0,
+    /**
+     * 「已同步 N 条」的响应式计数源：本次会话已写入本地的**条目**数。
+     *
+     * 不传 feedIds 是全库合计（时间线页就是它）；传了就只算这些源 —— 单源 / 分组 / bot 页
+     * 据此报「**本列表**多了几条」，别的源同步不会让本页提示条涨（见 syncedEntryDocsByFeed）。
+     */
+    syncedEntryCount: (feedIds?: readonly string[]) => {
+      const counts = pouchState.syncedEntryDocsByFeed
+      if (!feedIds) return Object.values(counts).reduce((sum, n) => sum + n, 0)
+      let sum = 0
+      for (const feedId of feedIds) sum += counts[feedId] ?? 0
+      return sum
+    },
     /** 暂停同步（左下角指示器在同步中点击） */
     pauseSync,
     /** 恢复同步（暂停后点击指示器，或调用 syncNow） */

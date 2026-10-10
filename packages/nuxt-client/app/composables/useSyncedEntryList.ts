@@ -9,10 +9,14 @@ export interface UseSyncedEntryListOptions {
   /** 查询窗口上限，达到后不再加载 */
   maxEntries?: number
   /**
-   * 本列表范围内「已同步写入的文档数」的当前值（单调递增，来自复制任务的 change 事件）。
+   * 本列表范围内「已同步写入的**条目**数」的当前值（单调递增，来自复制任务按源分摊的记账）。
    *
-   * 页面从 usePouchDb 的 syncedDocsByFeed 按自己的订阅源求和传进来；比上次查看时多出来的
-   * 部分就是待查看的新条目数，显示成「已同步 N 条」提示条。不传则不显示提示条。
+   * 页面从 usePouchDb 的 syncedEntryCount 传进来：时间线页不传范围（全库），单源 / 分组 /
+   * bot 页传自己那些 feedId —— 比上次查看时多出来的部分就是本列表待查看的新条目数，
+   * 显示成「已同步 N 条」提示条。不传则不显示提示条。
+   *
+   * 必须按列表口径：同步是全局的（一次聚合全部订阅），拿全库数字会让「在单源页点同步」
+   * 报出别的源的新增。
    */
   syncedDocs?: () => number
 }
@@ -24,7 +28,7 @@ export interface UseSyncedEntryListOptions {
  * 「本轮有没有写入新条目」以及「同步有没有正常收尾」。
  */
 export interface SyncOutcomeLike {
-  /** 本轮真正写入本地的文档数（0 = 这次同步没有带来新条目） */
+  /** 本轮真正写入本列表的条目数（0 = 这次同步没有给本列表带来新条目） */
   added: number
   /** 复制失败的目标数 */
   failed: number
@@ -150,7 +154,8 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
    *
    *   1. 本轮同步正常收尾（无失败、未触发存储熔断）——
    *      异常状态下不替用户改列表，先让 toast 把问题说清楚；
-   *   2. 本轮没有新条目写入（added = 0，即「同步马上就结束了」这一情形）；
+   *   2. 本轮没有新条目写入本列表（added = 0，即「同步马上就结束了」这一情形）——
+   *      调用方传的同步范围就是本列表，别的源有新增不算「有新条目」；
    *   3. 列表里确实还折叠着待查看条目（newCount > 0），否则无事可做。
    *
    * 返回是否真的展开了，便于调用方与测试判断。

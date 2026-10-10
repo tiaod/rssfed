@@ -158,6 +158,22 @@ describe('ListActionsBar 动作', () => {
     await flushPromises()
     expect(H.sync).toHaveBeenCalledTimes(2)
   })
+
+  /**
+   * syncScope 只决定反馈口径（toast 条数、抛出去的 outcome.added 已经按它算过）：
+   * 页面传了自己列表的源，同步才不会报出别的源的新增。
+   */
+  it('syncScope 原样传给同步（不传 = 全库口径）', async () => {
+    H.sync.mockResolvedValue(OUTCOME)
+
+    itemOf(mountBar({ syncScope: ['feed-a', 'feed-b'] }), '同步订阅').onSelect?.(new Event('select'))
+    await flushPromises()
+    expect(H.sync).toHaveBeenCalledWith(['feed-a', 'feed-b'])
+
+    itemOf(mountBar(), '同步订阅').onSelect?.(new Event('select'))
+    await flushPromises()
+    expect(H.sync).toHaveBeenLastCalledWith(undefined)
+  })
 })
 
 describe('ListActionsBar 的「全部标记为已读」确认步骤', () => {

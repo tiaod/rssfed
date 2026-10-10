@@ -26,7 +26,9 @@ const {
 } = useSyncedEntryList({
   // bot 产出以虚拟 feedId `bot:{id}` 入库
   query: limit => pouch.queryFeedEntries(virtualFeedId, limit),
-  syncedDocs: pouch.timelineSyncedDocs
+  // 计数限定在这个虚拟源：同步是全局的，但提示条要回答「这个 bot 多了几条」
+  // （见 usePouchDb.syncedEntryCount）
+  syncedDocs: () => pouch.syncedEntryCount([virtualFeedId])
 })
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
@@ -143,6 +145,7 @@ async function toggleSubscribe() {
           <ListActionsBar
             sync-label="刷新订阅"
             :feed-id="virtualFeedId"
+            :sync-scope="[virtualFeedId]"
             :subscribed="subscribed"
             :entry-count="visibleEntries.length"
             :unread-only="unreadOnly"

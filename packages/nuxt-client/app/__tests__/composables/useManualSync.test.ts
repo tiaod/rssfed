@@ -9,6 +9,10 @@ import { useManualSync } from '../../composables/useManualSync'
  *
  * 服务端聚合之后还要区分一种新情况：服务端在本轮请求里超时（completed=false，仍在后台聚合），
  * 这时既不能说「已是最新」，也不能说「失败」。
+ *
+ * 还有范围口径：一次同步聚合的是全部订阅，单源 / 分组页传 scope 后，toast 与 outcome.added
+ * 只报**这个列表**多了几条 —— 别的源有更新不该被算进来（否则在单源页点同步会显示
+ * 「新增 N 条」而列表一条都没多）。
  */
 
 const H = vi.hoisted(() => ({
@@ -38,9 +42,10 @@ function syncResult(over: Partial<{
   failed: Array<{ id: string, error: string }>
   skipped: number
   added: number
+  addedByFeed: Record<string, number>
   serverPending: boolean
 }> = {}) {
-  return { ok: [], failed: [], skipped: 0, added: 0, serverPending: false, ...over }
+  return { ok: [], failed: [], skipped: 0, added: 0, addedByFeed: {}, serverPending: false, ...over }
 }
 
 beforeEach(() => {
@@ -120,5 +125,50 @@ describe('useManualSync（手动同步）', () => {
 
     release(syncResult({ added: 1 }))
     await expect(first).resolves.toMatchObject({ added: 1 })
+  })
+
+  it('带 scope 时只报这个列表的条数（别的源的新增不算进来）', async () => {
+    H.syncNow.mockResolvedValue(syncResult({
+      ok: ['__timeline__'],
+      added: 13,
+      addedByFeed: { 'feed-a': 3, 'feed-b': 10 }
+    }))
+
+    const outcome = await useManualSync().sync(['feed-a'])
+
+    expect(outcome).toMatchObject({ added: 3 })
+    expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({
+      title: '同步完成',
+      description: '新增 3 条'
+    }))
+  })
+
+  it('带 scope 但本轮新条目都在别的源：added=0，toast 说清「本列表没有新条目」', async () => {
+    H.syncNow.mockResolvedValue(syncResult({
+      ok: ['__timeline__'],
+      added: 10,
+      addedByFeed: { 'feed-b': 10 }
+    }))
+
+    const outcome = await useManualSync().sync(['feed-a'])
+
+    expect(outcome).toMatchObject({ added: 0 })
+    expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({
+      title: '同步完成',
+      description: '本列表没有新条目'
+    }))
+  })
+
+  it('不带 scope 仍是全库口径（toast 条数取 syncNow 的 added）', async () => {
+    H.syncNow.mockResolvedValue(syncResult({
+      ok: ['__timeline__'],
+      added: 13,
+      addedByFeed: { 'feed-a': 3, 'feed-b': 10 }
+    }))
+
+    const outcome = await useManualSync().sync()
+
+    expect(outcome).toMatchObject({ added: 13 })
+    expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({ description: '新增 13 条' }))
   })
 })

@@ -63,9 +63,14 @@ export function useSyncAction() {
 
   const tooltipText = computed(() => statusText.value ?? '同步')
 
-  /** 触发同步；重入（上一轮还在跑）时返回 null，调用方据此知道本轮没真的执行 */
-  async function runSync(): Promise<ManualSyncOutcome | null> {
-    return await sync()
+  /**
+   * 触发同步；重入（上一轮还在跑）时返回 null，调用方据此知道本轮没真的执行。
+   *
+   * `scope` 是**反馈口径**：列表页传自己列表的 feedId，toast 与 outcome.added 就报这个列表
+   * 多了几条；不传（侧边栏那种全局同步）报全库。聚合范围与此无关，永远是全部订阅。
+   */
+  async function runSync(scope?: readonly string[]): Promise<ManualSyncOutcome | null> {
+    return await sync(scope)
   }
 
   return { syncing, hasError, errorDetail, statusText, tooltipText, sync: runSync }

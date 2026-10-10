@@ -17,13 +17,14 @@ const error = ref<string | null>(null)
 
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部——同步因此永远不会把正在
-// 读的内容推走。syncedDocs 把计数限定在本页订阅源的范围内，别的源同步不该惊动这个列表。
+// 读的内容推走。时间线页就是全部订阅源，所以计数用全库口径（不传 feedIds）；
+// 单源 / 分组 / bot 页要把范围限定成自己那些源（见 usePouchDb.syncedEntryCount）。
 const {
   entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew,
   applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   query: limit => pouch.queryTimeline(limit),
-  syncedDocs: pouch.timelineSyncedDocs
+  syncedDocs: () => pouch.syncedEntryCount()
 })
 
 // 首屏要等本地库重查一次

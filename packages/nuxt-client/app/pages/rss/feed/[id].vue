@@ -36,7 +36,9 @@ const {
   applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   query: limit => pouch.queryFeedEntries(feedId, limit),
-  syncedDocs: pouch.timelineSyncedDocs
+  // 计数限定在这个源：同步是全局的（服务端一次聚合全部订阅），但提示条要回答的是
+  // 「本订阅源多了几条」—— 别的源的新条目不该出现在这个页面上（见 usePouchDb.syncedEntryCount）
+  syncedDocs: () => pouch.syncedEntryCount([feedId])
 })
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
@@ -194,6 +196,7 @@ async function unsubscribe() {
           <ListActionsBar
             sync-label="刷新订阅"
             :feed-id="feedId"
+            :sync-scope="[feedId]"
             :entry-count="visibleEntries.length"
             :unread-only="unreadOnly"
             @toggle-unread-only="toggleUnreadOnly"

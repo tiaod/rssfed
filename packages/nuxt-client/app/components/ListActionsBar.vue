@@ -20,6 +20,9 @@
  *   时间线 / 分组页   同步订阅
  *   单源页           刷新订阅 + 编辑订阅 ｜ 取消订阅
  *   bot 产出页       刷新订阅 + 编辑订阅 ｜ 订阅 / 取消订阅
+ *
+ * `syncScope` 只决定**反馈口径**（toast 条数、抛给页面的 outcome.added）：页面传自己列表的
+ * feedId，同步完就报这个列表多了几条。聚合范围永远是全部订阅，与此无关。
  */
 import { computed, ref } from 'vue'
 import type { DropdownMenuItem } from '@nuxt/ui'
@@ -37,12 +40,15 @@ const props = withDefaults(defineProps<{
   subscribed?: boolean
   /** 「只看未读」是否开启（状态由页面持有，这里只渲染开关） */
   unreadOnly?: boolean
+  /** 反馈口径：只报这些源的同步条数（见文件头）；不传 = 全库（时间线页） */
+  syncScope?: readonly string[]
 }>(), {
   syncLabel: '同步订阅',
   feedId: undefined,
   entryCount: 0,
   subscribed: true,
-  unreadOnly: false
+  unreadOnly: false,
+  syncScope: undefined
 })
 
 const emit = defineEmits<{
@@ -57,7 +63,7 @@ const emit = defineEmits<{
 const { syncing, hasError, errorDetail, statusText, sync } = useSyncAction()
 
 async function handleSync() {
-  const outcome = await sync()
+  const outcome = await sync(props.syncScope)
   // 空转（上一轮还在跑）不发事件，与 SyncButton 一致
   if (outcome) emit('synced', outcome)
 }
