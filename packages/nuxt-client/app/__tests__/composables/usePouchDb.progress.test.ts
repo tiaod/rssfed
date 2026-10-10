@@ -337,7 +337,9 @@ describe('syncNow 的新增条数', () => {
    */
   it('一发起就报「同步中」、不带上一轮的进度；空转收尾回 idle', async () => {
     let release!: (value: { accepted: boolean, completed?: boolean, added?: number }) => void
-    H.refresh = () => new Promise((resolve) => { release = resolve })
+    H.refresh = () => new Promise((resolve) => {
+      release = resolve
+    })
     const pending = pouch.syncNow()
 
     // 还没等服务端返回（也没等 live 复制挂上）就该是 syncing

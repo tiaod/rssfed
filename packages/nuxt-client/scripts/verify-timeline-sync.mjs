@@ -284,9 +284,9 @@ async function findFeedDb(feedId) {
  */
 async function replicationDocs(userId) {
   const prefix = `rssfed-${userId}:`
-  const res = await couch(`/_replicator/_all_docs?include_docs=true` +
-    `&startkey=${encodeURIComponent(JSON.stringify(prefix))}` +
-    `&endkey=${encodeURIComponent(JSON.stringify(`${prefix}\uffff`))}`)
+  const res = await couch(`/_replicator/_all_docs?include_docs=true`
+    + `&startkey=${encodeURIComponent(JSON.stringify(prefix))}`
+    + `&endkey=${encodeURIComponent(JSON.stringify(`${prefix}\uffff`))}`)
   return (res?.rows ?? []).map(row => ({ id: row.id, rev: row.value?.rev, doc: row.doc }))
 }
 
@@ -401,8 +401,8 @@ async function main() {
   const sourceDdoc = await couch(`/${feedDbName}/_design/main`)
   check('源库设计文档里装上了聚合复制过滤器，且删除放行',
     typeof sourceDdoc?.filters?.timeline === 'string'
-      && sourceDdoc.filters.timeline.includes('doc._deleted')
-      && Object.keys(sourceDdoc?.views ?? {}).length > 0,
+    && sourceDdoc.filters.timeline.includes('doc._deleted')
+    && Object.keys(sourceDdoc?.views ?? {}).length > 0,
     `filters=${Object.keys(sourceDdoc?.filters ?? {})} views=${Object.keys(sourceDdoc?.views ?? {})}`)
 
   // ── 4.2 窗口 selector 真的在过滤：窗口外的老条目不会被搬进来 ──
@@ -693,7 +693,7 @@ async function main() {
   const jobsAfterRebuild = await replicationDocs(userId)
   check('重建后复制任务按新库重建',
     jobsAfterRebuild.length === jobsBeforeRebuild.length
-      && jobsAfterRebuild.every(j => String(j.doc?.target ?? '').endsWith(`/${dbAfterRebuild}`)),
+    && jobsAfterRebuild.every(j => String(j.doc?.target ?? '').endsWith(`/${dbAfterRebuild}`)),
     JSON.stringify(jobsAfterRebuild.map(j => j.doc?.target)))
   // 换库重搬是异步的：库名先切过去，之后才搬用户状态、删旧库，所以这里要等一等
   let oldDbGone = false
