@@ -76,6 +76,14 @@ services:
       # 复制器调参（max_jobs / max_churn）：聚合搬运是「每 (用户 × 订阅源) 一条常驻复制」，
       # 默认 max_jobs=500 在「几个账号 × 几百个源」时会被顶住。理由与取值见该文件头注释。
       - ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-replicator.ini:/opt/couchdb/etc/local.d/01-replicator.ini
+    # 容器默认 nofile=1024，对「几百个 feed 库 + 每个 (用户 × 源) 一条常驻复制」的拓扑太紧。
+    # CouchDB 的 JS 查询服务（couchjs）是 open_port 现起的，顶到 fd 天花板后
+    # couch_proc_manager 会卡死：所有设计文档写不进去（500）、视图查询 timeout、复制过滤器
+    # 也跑不动 —— 表现出来是「聚合搬不动、客户端一条内容都同步不到」。改完要重建容器生效。
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:5984/"]
       interval: 10s

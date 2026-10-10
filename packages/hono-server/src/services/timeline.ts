@@ -443,8 +443,23 @@ async function reconcileUserTimelineUnlocked(
 
   // ③ 剪枝：窗口的权威在这里。复制器的过滤下界是创建时固定的（见 replicator.ts），
   //    会越来越松，所以只要有窗口就每轮都剪一遍（视图查询，没东西可删时是空结果）。
+  //
+  //    剪枝失败**不能**拦住 ④：它是清理动作，而复制的拓扑才是关键路径。最典型的失败是
+  //    用户库的设计文档没装上（CouchDB 的 JS 查询服务一忙，写设计文档就 500，见 client.ts 的
+  //    ensureTimelineDesignDoc）→ 视图查询 404。原实现让这个 404 冒泡出去，整轮 reconcile
+  //    直接中断：一条复制任务都不建、`_local/state` 也不写，客户端拿到 500、一条内容都同步
+  //    不到，而日志里只有一句 `missing`。这里降级成一行告警，让内容照常搬（等设计文档补上
+  //    之后下一轮再剪）。
   const windowStart = windowStartIso(settings.windowDays)
-  if (windowStart) result.prunedEntries += await pruneOlderThan(scope, windowStart)
+  if (windowStart) {
+    try {
+      result.prunedEntries += await pruneOlderThan(scope, windowStart)
+    } catch (err) {
+      console.warn(
+        `[Timeline] 用户=${userId} 剪枝失败（本轮跳过，复制任务照常补建）：${(err as Error)?.message ?? err}`,
+      )
+    }
+  }
 
   // ④ 补建任务：复制器接手初始回填（从 0 扫源库）与后续增量。
   //    走到这里说明该源没有"当前窗口"的任务，也就是复制哈希是新的

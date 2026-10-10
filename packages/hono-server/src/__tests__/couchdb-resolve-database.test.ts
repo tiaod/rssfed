@@ -253,3 +253,61 @@ describe("存量用户库补装写方向闸门", () => {
     expect(mocks.insert).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * 设计文档写失败（CouchDB 的 JS 查询服务忙/卡死时是 500）**不能**被当成"已就位"缓存下来。
+ *
+ * 缓存下来就等于这个进程往后每一轮 reconcile 都不再补装：用户库缺 `by_published_at` 视图 →
+ * 剪枝每轮 404；源库缺 `filters.timeline` → 复制任务一直 crashing。两种都表现为
+ * 「客户端一条内容都同步不到」，且没有任何日志信号（原实现把错误吞在内层 catch 里）。
+ */
+describe("设计文档写失败不进缓存", () => {
+  const internalServerError = () => Object.assign(new Error("internal_server_error"), { statusCode: 500 })
+
+  it("用户库设计文档写失败：告警、返回 false，下一次调用会重试", async () => {
+    const { ensureTimelineDesignDoc } = await import("../couchdb/client")
+    const dbName = `user-timeline_${"a".repeat(23)}1`
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    mocks.dbGet.mockRejectedValue(new Error("not_found"))
+    mocks.insert.mockRejectedValueOnce(internalServerError())
+
+    expect(await ensureTimelineDesignDoc(dbName)).toBe(false)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(dbName))
+
+    // 没进缓存：下一次 ensure 会再写一次（这次成功）
+    mocks.insert.mockResolvedValue({ ok: true })
+    expect(await ensureTimelineDesignDoc(dbName)).toBe(true)
+    expect(mocks.insert).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
+  })
+
+  it("源库复制过滤器写失败：告警、返回 false；成功之前不会被当成已装", async () => {
+    const { ensureReplicationFilter } = await import("../couchdb/client")
+    const dbName = `feed_${"g".repeat(24)}`
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    mocks.dbGet.mockResolvedValue({ _id: "_design/main", _rev: "2-old", filters: {} })
+    mocks.insert.mockRejectedValueOnce(internalServerError())
+
+    expect(await ensureReplicationFilter(dbName)).toBe(false)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(dbName))
+
+    mocks.insert.mockResolvedValue({ ok: true })
+    expect(await ensureReplicationFilter(dbName)).toBe(true)
+    expect(mocks.insert).toHaveBeenCalledTimes(2)
+    // 装好之后才进缓存：第三次不再写
+    expect(await ensureReplicationFilter(dbName)).toBe(true)
+    expect(mocks.insert).toHaveBeenCalledTimes(2)
+    warn.mockRestore()
+  })
+
+  it("并发 ensure 撞出的 409 视为到位（进缓存，不再重写）", async () => {
+    const { ensureReplicationFilter } = await import("../couchdb/client")
+    const dbName = `feed_${"h".repeat(24)}`
+    mocks.dbGet.mockRejectedValue(new Error("not_found"))
+    mocks.insert.mockRejectedValueOnce(Object.assign(new Error("conflict"), { statusCode: 409 }))
+
+    expect(await ensureReplicationFilter(dbName)).toBe(true)
+    expect(await ensureReplicationFilter(dbName)).toBe(true)
+    expect(mocks.insert).toHaveBeenCalledTimes(1)
+  })
+})

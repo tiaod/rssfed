@@ -100,6 +100,22 @@
   调度器里那条任务应当是 `running`（`crashing` / `error` 会带上原因）。任务清单本身就是「哪些源在搬」的真相；库里的 `_local/state` 只存版本标记与设置快照，**不再有每源游标**。
 - **解法**：等它搬（Steady state 下复制器自己长轮询，不需要我们催）。整库搬不动时再 `POST /api/timeline/rebuild`：它是**换一个空聚合库重搬**（换库才会清掉复制 checkpoint），用户自己写的订阅/已读收藏会跟着搬过去，客户端会丢掉本地缓存重新全量拉一遍。
 
+### `POST /api/timeline/refresh` 直接 500 且一条复制任务都没有：CouchDB 的 JS 查询服务卡死了
+
+- **现象**：客户端一条内容都同步不到（订阅列表还在，因为那是客户端推上去的），`POST /api/timeline/refresh?wait=1` 返回 500；`_replicator` 里**一条**本服务的任务都没有，用户库里的 `_design/timeline-maintain` 与 `_local/state` 也不存在。
+- **原因**：聚合这条链路处处要用 CouchDB 的 **JS 查询服务**（写设计文档要编译 JS、剪枝查 `by_published_at` 视图、复制过滤器在源端执行）。`couch_proc_manager` 一旦卡死，这些操作全部超时：日志里是
+  `rexi_server: ... mfa: fabric_rpc:update_docs/3 exit:{timeout,{gen_server,call,[couch_proc_manager,{get_proc,{client,undefined,undefined,<<"javascript">>,...}},5000]}}`，
+  请求侧是 `POST /<库名> 500`（写设计文档）或 `GET .../_view/... timeout`。
+  于是 `ensureTimelineDesignDoc` 装不上设计文档（旧实现还把这次失败吞掉并缓存成"已就位"），剪枝那步查一个不存在的视图抛 404 —— 整轮 reconcile 中断，**复制任务一条都不建**，客户端自然拉不到东西。
+- **怎么确认**（dev 实测）：
+  ```bash
+  curl -s -u admin:admin "http://localhost:5984/_node/_local/_system" | head -c 200   # beam 本身健康
+  curl -s -u admin:admin "http://localhost:5984/<任意 feed 库>/_design/main/_view/entries-by-date?limit=1"  # {"error":"timeout"} = JS 查询服务卡死
+  curl -s -u admin:admin "http://localhost:5984/<库名>/_design/timeline-maintain"     # 404 = 没装上
+  docker logs <couchdb 容器> --tail 2000 2>&1 | grep couch_proc_manager
+  ```
+- **解法**：重启 couchdb（`docker restart <couchdb 容器>`；不能只 `up -d` 别的服务）。**根因通常是 fd 不够**：容器默认 `nofile=1024`，实测 beam 在几十条复制下就占到 900+，调度器里开始报 `{conn_failed,{error,emfile}}` / `sel_conn_closed` / `req_timedout`，`open_port` 起 couchjs 失败后 `couch_proc_manager` 就永久卡住了。两个 compose 的 couchdb 服务已加 `ulimits.nofile: 65536`（配合 `deploy/couchdb-replicator.ini` 的 `max_dbs_open`），改完要**重建**容器（`docker compose up -d couchdb`）才生效，`docker restart` 不会应用新的 ulimit。重启后服务端会自己补装设计文档与过滤器并建任务（`ensure*` 失败不再进缓存），不需要手工修库。
+
 ### 图片接口返回 502 `image_unavailable`
 
 - **现象**：`GET /api/images/cached?url=…&w=…&q=…` 返回 502，响应体 `{"error":"image_unavailable","reason":…}`。

@@ -98,30 +98,43 @@ const ensuredReplicationFilters = new Set<string>()
  * 只在新库安装是不够的：存量 feed 库（几百个）里没有 `filters.timeline`，
  * 而复制文档引用一个不存在的过滤器会直接失败（任务进 crashing）。所以这里比对源码，
  * 不一致才带 `_rev` 覆盖；进程内缓存避免每次 ensure 都打一次 GET。
+ *
+ * **失败不进缓存**：写设计文档要让 CouchDB 起一次 JS 查询服务，它一忙 / 卡死就会 500
+ * （真机上见过整台 CouchDB 的 JS 查询服务卡住后，所有设计文档都写不进去）。把这种失败
+ * 也当成"已就位"缓存起来，等于这个进程往后每一轮 reconcile 都不再补装，而复制任务引用
+ * 一个不存在的过滤器只会一直 crashing —— 用户看到的是"这个源永远不搬东西"，且没有任何信号。
+ * 所以失败时打一行可定位的告警并返回 false，让下一次 ensure 重试。
+ *
+ * @returns 设计文档是否确实带着过滤器
  */
-export async function ensureReplicationFilter(dbName: string): Promise<void> {
-  if (ensuredReplicationFilters.has(dbName)) return
+export async function ensureReplicationFilter(dbName: string): Promise<boolean> {
+  if (ensuredReplicationFilters.has(dbName)) return true
   const db = nanoServer.use(dbName)
+  // 读不到（404 = 还没装）就按"没有"处理，交给下面的写去暴露真实失败原因
+  let existing: { _rev?: string, filters?: Record<string, string> } | null = null
   try {
-    const existing = await db.get(FEED_DESIGN_DOC._id) as {
-      _rev?: string
-      filters?: Record<string, string>
-    }
-    if (existing.filters?.timeline !== TIMELINE_REPLICATION_FILTER) {
-      await db.insert({
-        ...existing,
-        _rev: existing._rev,
-        filters: { ...(existing.filters ?? {}), timeline: TIMELINE_REPLICATION_FILTER },
-      } as never)
-    }
+    existing = await db.get(FEED_DESIGN_DOC._id) as { _rev?: string, filters?: Record<string, string> }
   } catch {
-    try {
-      await db.insert(FEED_DESIGN_DOC as never)
-    } catch {
-      // 并发创建时另一个请求已写入：视为已到位（缓存兜底）
+    existing = null
+  }
+  try {
+    if (existing?.filters?.timeline !== TIMELINE_REPLICATION_FILTER) {
+      await db.insert(existing
+        ? {
+            ...existing,
+            filters: { ...(existing.filters ?? {}), timeline: TIMELINE_REPLICATION_FILTER },
+          } as never
+        : FEED_DESIGN_DOC as never)
+    }
+  } catch (err) {
+    // 409 = 并发 ensure 时另一个请求已写入，等价于到位
+    if ((err as { statusCode?: number })?.statusCode !== 409) {
+      console.warn(`[CouchDB] 源库 ${dbName} 的复制过滤器未装好（下次重试）：${(err as Error)?.message ?? err}`)
+      return false
     }
   }
   ensuredReplicationFilters.add(dbName)
+  return true
 }
 
 /**
@@ -441,32 +454,45 @@ export async function createTimelineDatabase(userId: string): Promise<string> {
 }
 
 /**
- * 确保用户库的设计文档到位（视图 + 写方向闸门），已到位则直接返回。
+ * 确保用户库的设计文档到位（视图 + 写方向闸门），已到位则返回。
  *
  * 与 feed 设计文档的区别：这里必须能**升级存量库** —— 闸门是后加的，老库（200+ 个）里没有它，
  * 而「只在新库安装」会让所有老库永久裸奔。做法是比对函数源码，不一致才带 _rev 覆盖；
  * 进程内按库名缓存，避免每次 ensure 都打一次 GET。
+ *
+ * **失败不进缓存**（同 ensureReplicationFilter）：写设计文档要过 CouchDB 的 JS 查询服务，
+ * 它一忙就 500。若把失败也缓存成"已就位"，这个进程以后每轮 reconcile 都会在剪枝那步
+ * 查一个不存在的视图（404），整轮聚合直接挂掉 —— 用户看到的就是"客户端一条都同步不到"，
+ * 而日志里没有任何信号。失败时告警 + 返回 false，让下一次 ensure 重试。
+ *
+ * @returns 设计文档是否确实在位
  */
 const ensuredTimelineDesignDocs = new Set<string>()
 
-export async function ensureTimelineDesignDoc(dbName: string) {
-  if (ensuredTimelineDesignDocs.has(dbName)) return
+export async function ensureTimelineDesignDoc(dbName: string): Promise<boolean> {
+  if (ensuredTimelineDesignDocs.has(dbName)) return true
   const db = nanoServer.use(dbName)
+  let existing: { _rev?: string, validate_doc_update?: string } | null = null
   try {
-    const existing = await db.get(TIMELINE_DESIGN_DOC._id) as { _rev?: string, validate_doc_update?: string }
-    if (existing.validate_doc_update === TIMELINE_DESIGN_DOC.validate_doc_update) {
-      ensuredTimelineDesignDocs.add(dbName)
-      return
-    }
-    await db.insert({ ...TIMELINE_DESIGN_DOC, _rev: existing._rev })
+    existing = await db.get(TIMELINE_DESIGN_DOC._id) as { _rev?: string, validate_doc_update?: string }
   } catch {
-    try {
-      await db.insert(TIMELINE_DESIGN_DOC)
-    } catch {
-      // 并发 ensure 时另一个请求已写入：视为已到位（下次进程内缓存命中）
+    existing = null
+  }
+  if (existing?.validate_doc_update === TIMELINE_DESIGN_DOC.validate_doc_update) {
+    ensuredTimelineDesignDocs.add(dbName)
+    return true
+  }
+  try {
+    await db.insert(existing?._rev ? { ...TIMELINE_DESIGN_DOC, _rev: existing._rev } : TIMELINE_DESIGN_DOC)
+  } catch (err) {
+    // 409 = 并发 ensure 时另一个请求已写入，等价于到位
+    if ((err as { statusCode?: number })?.statusCode !== 409) {
+      console.warn(`[CouchDB] 用户库 ${dbName} 的设计文档未装好（下次重试）：${(err as Error)?.message ?? err}`)
+      return false
     }
   }
   ensuredTimelineDesignDocs.add(dbName)
+  return true
 }
 
 // ── Bot 产出库 ──

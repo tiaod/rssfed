@@ -38,6 +38,8 @@ const mocks = vi.hoisted(() => ({
   createdTimelines: 0,
   destroyedDbs: [] as string[],
   viewCalls: [] as Array<Record<string, unknown>>,
+  /** 剪枝视图不可用（设计文档没装上 / JS 查询服务卡死）：view() 直接抛 */
+  viewThrows: false,
 }))
 
 vi.mock("nano", () => ({
@@ -113,6 +115,7 @@ vi.mock("../couchdb/client", () => ({
     },
     view: async (_ddoc: string, _name: string, opts: Record<string, unknown>) => {
       mocks.viewCalls.push(opts)
+      if (mocks.viewThrows) throw Object.assign(new Error("missing"), { statusCode: 404 })
       return { rows: [] }
     },
     info: async () => ({ update_seq: 0 }),
@@ -169,6 +172,7 @@ beforeEach(() => {
   mocks.createdTimelines = 0
   mocks.destroyedDbs = []
   mocks.viewCalls = []
+  mocks.viewThrows = false
 })
 
 const copiedIds = () => (mocks.bulkByDb["user-timeline_new"] ?? []).map(d => String(d._id))
@@ -283,6 +287,26 @@ describe("reconcileUserTimeline：升级与稳态", () => {
   it("换库重搬只搬用户意图：entry-state: 与 entry: 只差一个字符，靠字典序分开", () => {
     expect("entry-state:abc" < "entry:").toBe(true)
     expect("entry:feed1:001" >= "entry:" && "entry:feed1:001" <= "entry:\uffff").toBe(true)
+  })
+
+  /**
+   * 剪枝视图不可用（用户库的设计文档没装上 / CouchDB 的 JS 查询服务卡死）时，
+   * 剪枝抛 404。它**不能**把整轮 reconcile 带走：复制任务的补建才是关键路径，
+   * 原实现让 404 冒泡出去，结果是一条任务都不建、状态也不写，客户端拿到 500、
+   * 一条内容都同步不到（真机上就是这么表现的）。
+   */
+  it("剪枝失败只跳过剪枝：复制任务照建、状态照写", async () => {
+    mocks.viewThrows = true
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+
+    const result = await reconcileUserTimeline("u1")
+
+    expect(result.prunedEntries).toBe(0)
+    expect(mocks.ensureReplicationCalls).toHaveLength(1)
+    expect(mocks.ensureReplicationCalls[0]).toMatchObject({ userId: "u1", sourceId: "feed1" })
+    expect(mocks.stateByDb["user-timeline_old"]).toMatchObject({ version: 2, windowDays: 3 })
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining("剪枝失败"))
+    warn.mockRestore()
   })
 })
 

@@ -35,6 +35,15 @@ services:
       # 复制器调参（max_jobs / max_churn）见文件头注释；用 01- 前缀排在代理认证之后、
       # config API 的 docker.ini 之前（docker.ini 必须是 local.d 里最后加载的那个）
       - ../../deploy/couchdb-replicator.ini:/opt/couchdb/etc/local.d/01-replicator.ini
+    # 容器默认 nofile=1024，对「700+ 个 feed 库 + 每个 (用户 × 源) 一条常驻复制」的拓扑太紧：
+    # 实测 beam 已占 698 个 fd。CouchDB 的 JS 查询服务（couchjs）是 open_port 现起的，
+    # 顶到天花板后 couch_proc_manager 会卡死 —— 之后所有设计文档写不进去（500）、
+    # 视图查询 timeout、复制过滤器也跑不动，表现为「聚合搬不动、客户端一条内容都同步不到」。
+    # 改完要**重建**容器才生效：docker compose up -d couchdb
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:5984/"]
       interval: 10s
