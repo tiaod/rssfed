@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm"
 import { parseFeedUrl, formatFeedError, type ParsedFeed } from "../rss/parser"
 import { parseOpml, type OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
+import { feedDocId } from "../couchdb/doc-ids"
 import { db, feeds } from "../db"
 import { enqueueFetch } from "../workers"
 import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
@@ -222,10 +223,10 @@ async function seedFeedDoc(feedId: string, url: string, parsed: ParsedFeed) {
 
   // FeedDoc 已存在则跳过
   try {
-    await feedDb.get(feedId)
+    await feedDb.get(feedDocId(feedId))
   } catch {
     await feedDb.insert({
-      _id: feedId,
+      _id: feedDocId(feedId),
       type: "feed",
       url,
       title: parsed.title ?? url,
@@ -322,7 +323,7 @@ feedsRouter.get("/:feedId", async (c) => {
   const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
 
   try {
-    const feed = await feedDb.get(feedId)
+    const feed = await feedDb.get(feedDocId(feedId))
     return c.json(feed)
   } catch {
     return c.json({ error: "feed not found" }, 404)

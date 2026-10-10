@@ -3,6 +3,7 @@ import { eq, inArray } from "drizzle-orm"
 import { parseFeedUrl, formatFeedError, type ParsedFeed } from "../rss/parser"
 import type { OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
+import { feedDocId } from "../couchdb/doc-ids"
 import { db, feeds, bots } from "../db"
 import { enqueueFetch } from "../workers"
 
@@ -71,10 +72,10 @@ export async function ensureFeedRegistered(item: OpmlFeed): Promise<FeedMeta> {
 
   const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
   try {
-    await feedDb.get(feedId)
+    await feedDb.get(feedDocId(feedId))
   } catch {
     await feedDb.insert({
-      _id: feedId,
+      _id: feedDocId(feedId),
       type: "feed",
       url: item.url,
       title,

@@ -70,8 +70,12 @@ export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job)
 /** 更新（或首次创建）CouchDB 中的 FeedDoc 元数据；返回是否首次缓存了图标（用于触发前端同步） */
 async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed: ParsedFeed): Promise<boolean> {
   const imageUrl = parsed.image?.url
+  // 这个函数里所有 CouchDB 文档名（get / insert / multipart 附件）都必须用 docId：
+  // 下划线开头的 feedId 直接当文档 id 会被 CouchDB 拒（见 couchdb/doc-ids.ts），
+  // 带图标的源会因为图标附件那条 multipart 写入而整轮抓取失败。
+  const docId = feedDocId(feedId)
   try {
-    const existing = await feedDb.get(feedId) as any
+    const existing = await feedDb.get(docId) as any
     const doc = {
       ...existing,
       title: parsed.title ?? existing.title,
@@ -79,6 +83,8 @@ async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed
       siteUrl: parsed.link ?? existing.siteUrl,
       image: imageUrl ?? existing.image,
       lastFetchedAt: new Date().toISOString(),
+      // CouchDB 文档这里用 undefined 是对的：nano 会 JSON.stringify，undefined 的键直接被丢掉，
+      // 新 revision 里不再有 errorMessage，等效于清空。（SQL 那边不能这么写，见 feed-registry.ts）
       errorMessage: undefined,
     }
     // feed 图标缓存：URL 变化、或压缩参数版本升级（见 FEED_ICON_CACHE_VERSION）时
@@ -92,7 +98,7 @@ async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed
       if (cached) {
         await feedDb.multipart.insert({ ...doc, imageCached: cached.image } as any,
           [{ name: cached.image.attachment, data: cached.data, content_type: "image/avif" }],
-          { docName: feedId, rev: existing._rev })
+          { docName: docId, rev: existing._rev })
         return true // 图标首次缓存：touch lastNewEntryAt，触发前端同步拉取附件
       }
     }
@@ -100,7 +106,7 @@ async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed
   } catch {
     // FeedDoc 不存在，首次插入
     const doc: any = {
-      _id: feedId,
+      _id: docId,
       type: "feed",
       url,
       title: parsed.title ?? url,
@@ -115,7 +121,7 @@ async function updateFeedDoc(feedDb: FeedDb, feedId: string, url: string, parsed
       if (cached) {
         doc.image = imageUrl
         doc.imageCached = cached.image
-        await feedDb.multipart.insert(doc, [{ name: cached.image.attachment, data: cached.data, content_type: "image/avif" }], { docName: feedId })
+        await feedDb.multipart.insert(doc, [{ name: cached.image.attachment, data: cached.data, content_type: "image/avif" }], { docName: docId })
         return true
       }
     }

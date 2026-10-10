@@ -1,4 +1,5 @@
 import { createCouchDb, ensureFeedDatabase } from "../couchdb/client"
+import { feedDocId } from "../couchdb/doc-ids"
 import { getSubscribedFeedIds } from "./feeds"
 
 /**
@@ -22,7 +23,7 @@ export async function getFeed(userId: string, feedId: string) {
   if (!(await assertSubscribed(userId, feedId))) return null
   const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
   try {
-    const feed = await feedDb.get(feedId)
+    const feed = await feedDb.get(feedDocId(feedId))
     return feed
   } catch {
     return null

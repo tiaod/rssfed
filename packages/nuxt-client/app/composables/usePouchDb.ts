@@ -7,6 +7,7 @@ import { useCouchTargets, TIMELINE_ID } from '~/composables/useCouchTargets'
 import { useApi, type TimelineRefreshResult } from '~/composables/useApi'
 import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
+import { feedDocId } from '~/utils/feedDocId'
 import { isStorageFailure } from '~/utils/storageFailure'
 import {
   lastTimelineUrlKey,
@@ -1392,7 +1393,8 @@ export function usePouchDb() {
     const feedIds = [...new Set(entries.map(e => e.feedId))]
     let docs: FeedDoc[] = []
     try {
-      const res = await getEntriesDb().allDocs({ include_docs: true, keys: feedIds })
+      // FeedDoc 的 id 规则见 utils/feedDocId（下划线开头的 feedId 后端加了前缀）
+      const res = await getEntriesDb().allDocs({ include_docs: true, keys: feedIds.map(feedDocId) })
       docs = (res.rows as Array<{ doc?: FeedDoc }>)
         .map(r => r.doc)
         .filter((d): d is FeedDoc => Boolean(d))
@@ -1421,7 +1423,7 @@ export function usePouchDb() {
           }
         }
       }
-      const doc = byId.get(entry.feedId)
+      const doc = byId.get(feedDocId(entry.feedId))
       if (doc) {
         entry.feed = {
           id: doc._id,
@@ -1494,7 +1496,7 @@ export function usePouchDb() {
    */
   async function getFeedImageUrl(feedId: string, fallback?: string): Promise<string | null> {
     try {
-      const doc = await getEntriesDb().get(feedId) as unknown as FeedDoc
+      const doc = await getEntriesDb().get(feedDocId(feedId)) as unknown as FeedDoc
       if (doc?.type === 'feed') {
         const url = await resolveFeedImage(doc)
         if (url) return url
