@@ -1011,6 +1011,42 @@ export function usePouchDb() {
   }
 
   /**
+   * 手动同步开始：把时间线目标标成「同步中」。
+   *
+   * 拉取通道是一条常驻 live 复制，它**只在真的写入时**才发 change/paused 事件；客户端已经
+   * 跟上服务端时，一次手动同步（等服务端聚合 + 等本地落库）全程一个事件都没有 —— 指示器
+   * 纹丝不动、顶部进度条也不出现，看着像「点了没反应」。旧实现是逐源入队，入队那一刻就写
+   * queued/syncing，这条状态迁移在「一个用户一个库」改造时丢了，这里补回来。
+   *
+   * 不写 progress / docsWritten：此刻还不知道这一轮有没有内容，带着上一轮的百分比会让
+   * 弹层显示一个不动的「已同步 80%」（没有该字段时文案是「正在拉取…」）。
+   */
+  function beginManualSync() {
+    syncStatuses[TIMELINE_ID] = {
+      feedId: TIMELINE_ID,
+      status: 'syncing',
+      version: syncStatuses[TIMELINE_ID]?.version ?? 0
+    }
+  }
+
+  /**
+   * 手动同步收尾：这一轮结束还停在「同步中」就归位成 idle（复制通道自己收过尾就不动它）。
+   *
+   * 不能直接丢掉 progress / docsWritten：`onPaused` 靠当前状态里的 `docsWritten` 算本批增量
+   * （它可能在本函数之后才到），抹掉就等于这一轮写入不计入「已同步 N 条」、也不 +1 version，
+   * 列表不会刷新。所以是「改状态、保留字段」而不是重建一个干净对象。
+   */
+  function finishManualSync() {
+    const current = syncStatuses[TIMELINE_ID]
+    if (current?.status !== 'syncing') return
+    syncStatuses[TIMELINE_ID] = {
+      ...current,
+      status: 'idle',
+      lastSyncedAt: new Date().toISOString()
+    }
+  }
+
+  /**
    * 手动同步（工具栏按钮 / 侧边栏指示器）。
    *
    * 与旧实现的区别：不再由客户端逐源增量复制，而是
@@ -1019,34 +1055,51 @@ export function usePouchDb() {
    *
    * `added` 取「服务端写入派生库的条数」与「本地实际收到的条数」的较大值：服务端聚合很快
    * 时前者准，服务端超时后（后台继续跑完）后者准。
+   *
+   * 全程亮着「同步中」（见 beginManualSync/finishManualSync）：等待最长十几秒且常驻复制
+   * 一个事件都不发，没有这个状态迁移，点按钮看着就像没反应。
    */
   async function syncNow(): Promise<SyncNowResult> {
     // 点同步即视为恢复：暂停由用户显式点停，点同步就是要它重新开始
     resumeSync()
-    const before = pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0
-    const res = await requestTimelineRefresh(true)
-    if (!res) {
-      return {
-        ok: [],
-        failed: [{ id: TIMELINE_ID, error: '无法联系服务端触发聚合（离线或登录已过期）' }],
-        skipped: 0,
-        added: 0,
-        serverPending: false
+    // 先亮起「同步中」再等服务端：等待（服务端聚合 + 本地落库）最长十几秒，期间必须有反馈
+    beginManualSync()
+    try {
+      const before = pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0
+      const res = await requestTimelineRefresh(true)
+      if (!res) {
+        // 催促没成功（离线/登录过期）：如实报到指示器上。否则收尾会把它归位成 idle，
+        // 图标看起来像「同步成功」，而真正的失败只出现在一闪而过的 toast 里
+        syncStatuses[TIMELINE_ID] = {
+          feedId: TIMELINE_ID,
+          status: 'error',
+          version: syncStatuses[TIMELINE_ID]?.version ?? 0,
+          error: '无法联系服务端触发聚合（离线或登录已过期）'
+        }
+        return {
+          ok: [],
+          failed: [{ id: TIMELINE_ID, error: '无法联系服务端触发聚合（离线或登录已过期）' }],
+          skipped: 0,
+          added: 0,
+          serverPending: false
+        }
       }
-    }
-    const serverAdded = typeof res.added === 'number' ? res.added : 0
-    await ensureTimelineLiveSync()
-    await waitForTimelineCatchup(serverAdded, TIMELINE_CATCHUP_WAIT_MS)
-    const clientAdded = Math.max(0, (pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0) - before)
-    const added = Math.max(serverAdded, clientAdded)
-    return {
-      ok: [TIMELINE_ID],
-      failed: [],
-      // 服务端本轮没有新内容、或它仍在后台聚合：报「跳过」，
-      // 让 toast 说清「已是最新 / 仍在服务端聚合」，而不是含糊的「同步完成」
-      skipped: added > 0 ? 0 : 1,
-      added,
-      serverPending: res.completed === false
+      const serverAdded = typeof res.added === 'number' ? res.added : 0
+      await ensureTimelineLiveSync()
+      await waitForTimelineCatchup(serverAdded, TIMELINE_CATCHUP_WAIT_MS)
+      const clientAdded = Math.max(0, (pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0) - before)
+      const added = Math.max(serverAdded, clientAdded)
+      return {
+        ok: [TIMELINE_ID],
+        failed: [],
+        // 服务端本轮没有新内容、或它仍在后台聚合：报「跳过」，
+        // 让 toast 说清「已是最新 / 仍在服务端聚合」，而不是含糊的「同步完成」
+        skipped: added > 0 ? 0 : 1,
+        added,
+        serverPending: res.completed === false
+      }
+    } finally {
+      finishManualSync()
     }
   }
 

@@ -21,6 +21,8 @@ interface FakeTask {
   cancelled: boolean
   emitChange: (info: { docs_written?: number, pending?: number }) => void
   emitPaused: () => void
+  /** 某个事件已挂上几个监听器：用来等「挂载末尾注册处理器」这一步完成 */
+  listenerCount: (event: string) => number
 }
 
 const H = vi.hoisted(() => ({
@@ -66,7 +68,8 @@ vi.mock('pouchdb', () => {
         return cancelled
       },
       emitChange: info => emit('change', info),
-      emitPaused: () => emit('paused')
+      emitPaused: () => emit('paused'),
+      listenerCount: event => listeners.get(event)?.size ?? 0
     })
     return task
   }
@@ -214,11 +217,12 @@ describe('暂停同步（usePouchDb）', () => {
     const pending = pouch.syncNow()
     await vi.waitFor(() => expect(tasksOf('pull').length).toBeGreaterThan(mountsBefore))
     const pull = pullTask()
-    // 等挂载整段跑完（状态落到 idle）再发事件：处理器是在挂载末尾注册的
-    await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.status).toBe('idle'))
+    // 处理器在挂载末尾注册；不能再用「状态落到 idle」当信号 —— 手动同步一开始就置成
+    // syncing（见 usePouchDb 的 beginManualSync），所以直接等监听器挂上
+    await vi.waitFor(() => expect(pull.listenerCount('change')).toBeGreaterThan(0))
     // 先发 change 确认通道活着，再发 paused —— 避免「事件先于 catchup 基准值」的顺序竞争
     pull.emitChange({ docs_written: 3, pending: 0 })
-    await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.status).toBe('syncing'))
+    await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.docsWritten).toBe(3))
     pull.emitPaused()
     const result = await pending
 

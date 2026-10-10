@@ -239,15 +239,15 @@ describe('syncNow 的新增条数', () => {
     H.refresh = async () => ({ accepted: true, completed: true, added: 5 })
     const pending = pouch.syncNow()
     // 等 live 复制挂上（resumeSync 会先挂，syncNow 再等它）。
-    // 挂载函数在挂完两条通道后才注册事件处理器：等状态落到 idle 再发事件，
-    // 否则事件发在注册之前会被假任务丢掉，用例只能白等到超时
     await vi.waitFor(() => expect(H.tasks).toHaveLength(1))
-    // 挂载函数挂完两条通道后才注册事件处理器：等 idle 出现再发事件，否则会被假任务丢掉
-    await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.status).toBe('idle'))
+    // 处理器是在挂载末尾注册的，注册前发事件会被假任务丢掉。不能再用「状态落到 idle」当这个
+    // 信号：手动同步一开始就把状态置成 syncing 了（见 usePouchDb 的 beginManualSync），
+    // 所以直接等监听器挂上
+    await vi.waitFor(() => expect(H.tasks[0]!.listenerCount('change')).toBeGreaterThan(0))
     // 先只发 change（不动「已同步条数」），等它被 handler 收到再发 paused。
     // 这样 syncNow 内部 catchup 的基准值必定是 0：不会出现「事件先落地、基准后取值」的顺序竞争
     H.tasks[0]!.emitChange({ docs_written: 5, pending: 0 })
-    await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.status).toBe('syncing'))
+    await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.docsWritten).toBe(5))
     H.tasks[0]!.emitPaused()
     const result = await pending
     expect(result.ok).toEqual([TIMELINE_ID])
@@ -265,6 +265,30 @@ describe('syncNow 的新增条数', () => {
     expect(result.failed).toHaveLength(0)
   })
 
+  /**
+   * 手动同步的状态反馈：常驻 live 复制在「客户端已跟上服务端」时一个事件都不发，只等服务端
+   * 的那几秒里状态必须自己亮起来 —— 否则点按钮看着像没反应（旧实现逐源入队时有 queued/syncing，
+   * 单库改造后这条迁移丢了）。
+   */
+  it('一发起就报「同步中」、不带上一轮的进度；空转收尾回 idle', async () => {
+    let release!: (value: { accepted: boolean, completed?: boolean, added?: number }) => void
+    H.refresh = () => new Promise((resolve) => { release = resolve })
+    const pending = pouch.syncNow()
+
+    // 还没等服务端返回（也没等 live 复制挂上）就该是 syncing
+    expect(pouch.syncStatuses[TIMELINE_ID]!.status).toBe('syncing')
+    // 上一轮的百分比/条数不能带进来：否则弹层会显示一个不动的「已同步 80%」
+    expect(pouch.syncStatuses[TIMELINE_ID]!.progress).toBeUndefined()
+    expect(pouch.syncStatuses[TIMELINE_ID]!.docsWritten).toBeUndefined()
+
+    release({ accepted: true, completed: true, added: 0 })
+    await pending
+
+    // 空转（服务端 0 条、live 复制没写任何东西）也要收干净，不能一直转
+    expect(pouch.syncStatuses[TIMELINE_ID]!.status).toBe('idle')
+    expect(pouch.syncStatuses[TIMELINE_ID]!.lastSyncedAt).toBeTruthy()
+  })
+
   it('服务端超时（completed=false）→ serverPending=true，不算失败', async () => {
     H.refresh = async () => ({ accepted: true, completed: false })
     const result = await pouch.syncNow()
@@ -273,7 +297,7 @@ describe('syncNow 的新增条数', () => {
     expect(result.added).toBe(0)
   })
 
-  it('催促请求本身失败（离线）→ 如实报失败', async () => {
+  it('催促请求本身失败（离线）→ 如实报失败，指示器落到 error 而不是悄悄回 idle', async () => {
     H.refresh = async () => {
       throw new Error('offline')
     }
@@ -281,5 +305,7 @@ describe('syncNow 的新增条数', () => {
     expect(result.failed).toHaveLength(1)
     expect(result.failed[0]!.id).toBe(TIMELINE_ID)
     expect(result.ok).toHaveLength(0)
+    expect(pouch.syncStatuses[TIMELINE_ID]!.status).toBe('error')
+    expect(pouch.syncStatuses[TIMELINE_ID]!.error).toContain('无法联系服务端')
   })
 })
