@@ -21,7 +21,8 @@
 - **纯 UI 细节不写单元测试**：间距、圆角、配色、渐隐这类改动用当前 harness 提供的浏览器工具打开页面
   看实际效果即可——会话里有什么浏览器工具就用什么，它自己会探测本机可用的浏览器，不要为此另写
   脚本或自造截图工具。只有交互、状态流转、边界逻辑才补 vitest；这类已有端到端验证见
-  `packages/nuxt-client/scripts/verify-*.mjs`（`pnpm verify:lightbox` / `pnpm verify:entry-route`）。
+  `packages/nuxt-client/scripts/verify-*.mjs`（`pnpm verify:lightbox` / `pnpm verify:entry-route` /
+  `pnpm verify:entry-reveal`）。
 
 ## 文档规范（重要）
 

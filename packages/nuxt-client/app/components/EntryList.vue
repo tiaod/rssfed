@@ -196,8 +196,28 @@ const gap = computed(() => VIEW_GAP[view.value])
 const IMAGE_LANE_WIDTH_FALLBACK = 160
 const contentWidth = ref(0)
 
-/** ScrollArea 根节点：既用来量内容宽度，也挂 ResizeObserver 跟随容器变化 */
-const scrollAreaRef = ref<{ $el?: unknown } | null>(null)
+/** 虚拟化实例里本组件用到的最小面（见 revealEntry 的定位说明） */
+interface EntryVirtualizer {
+  scrollToIndex: (
+    index: number,
+    options?: { align?: 'start' | 'center' | 'end', behavior?: ScrollBehavior }
+  ) => void
+}
+
+/** ScrollArea 对外暴露的东西：根节点（量宽度 / 当滚动容器）与虚拟化实例 */
+interface ScrollAreaExposed {
+  $el?: unknown
+  virtualizer?: EntryVirtualizer | null
+}
+
+/**
+ * ScrollArea 根节点：既用来量内容宽度，也挂 ResizeObserver 跟随容器变化；
+ * 关闭详情后的「拉回视野」还用它暴露的虚拟化实例按 index 定位（见 revealEntry）。
+ */
+const scrollAreaRef = ref<ScrollAreaExposed | null>(null)
+
+/** 表格分支的根节点：UTable 自己就是滚动容器，关闭详情后同样要能滚到那一条 */
+const tableRef = ref<{ $el?: unknown } | null>(null)
 let resizeObserver: ResizeObserver | null = null
 
 function measureContentWidth() {
@@ -440,6 +460,247 @@ function handleOpen(entry: RssEntry) {
   )
 }
 
+// ── 关闭详情后把「刚刚在读的那一条」拉回视野 ──────────────────────────────
+
+/**
+ * 「闪一下」的时长（毫秒）。
+ *
+ * 与 main.css 里 entry-flash 动画（1.4s）配一对：动画自己会淡出，这个定时器只负责把触发标记
+ * 摘掉 —— 标记留着的话动画早跑完了、元素却还挂着那份高亮，看上去就像多出来一个选中态，
+ * 而且同一条下次也触发不了（属性值没变，Vue 不会重贴，动画自然不重放）。
+ */
+const REVEAL_FLASH_MS = 1500
+
+/**
+ * 定位用平滑滚动，而不是一步跳过去。
+ *
+ * 翻了很多篇之后列表和正文已经隔了很远：瞬时跳过去，用户只看见内容「换了一屏」，
+ * 找不回「刚才读的和这里是同一份列表」的连续感；滚过去则看得见中间那些条目从眼前掠过。
+ * 距离不用自己管 —— 浏览器按距离控制时长；虚拟化实例在中途会重算目标
+ * （@tanstack/virtual-core 的 reconcileScroll 期间会对变化太大的目标重新发起平滑滚动，
+ * 收尾再给一次瞬时校正落准），所以滚动区这条路上「滚过去」和「停在对的位置」都能拿到。
+ */
+const REVEAL_SCROLL_BEHAVIOR: ScrollBehavior = 'smooth'
+
+/** 正在闪的那一条；滚动区的条目看 data-flash 属性，表格的行看 entry-flash 类（见 tableMeta） */
+const flashId = ref<string | null>(null)
+let flashTimer: ReturnType<typeof setTimeout> | undefined
+
+function flashEntry(id: string) {
+  clearTimeout(flashTimer)
+  flashId.value = id
+  flashTimer = setTimeout(() => {
+    flashId.value = null
+  }, REVEAL_FLASH_MS)
+}
+
+/** 等「滚到停稳」的小循环：重开一次定位、或者定位变成不需要滚动时，要把它停掉 */
+let stopSettling: (() => void) | null = null
+
+onBeforeUnmount(() => {
+  clearTimeout(flashTimer)
+  stopSettling?.()
+})
+
+/**
+ * 连续多少帧位置不变就算停稳了（60fps 下约 130ms）。
+ * 不能用「等一个固定时长」：距离远近、浏览器、虚拟化中途重算都会改变滚动时长。
+ * 也不能只等一帧：虚拟化重算目标后可能紧接着再发一次平滑滚动（reconcileScroll），
+ * 那一小段间隙里位置也是不动的。
+ */
+const REVEAL_SETTLE_STILL_FRAMES = 8
+
+/**
+ * 平滑滚动的起步最多等这么久。
+ *
+ * 起步前那几帧位置同样是不动的，不能当成「滚完了」；等过了这个宽限期还没动过，才认为这次
+ * 定位根本不会动（目标就在原地 / 已经贴着列表头尾滚不动），照闪。
+ * 取值偏大：宁可在「本来就不会动」的情况下晚闪半秒，也不要抢在滚动起步前闪出去 ——
+ * 那正是这条提示要避免的「闪了等于没闪」。
+ */
+const REVEAL_SETTLE_GRACE_MS = 400
+
+/** 兜底上限：怎么都等不到停稳（用户自己一直在滚）就照闪，不能让提示一直不来 */
+const REVEAL_SETTLE_TIMEOUT_MS = 1500
+
+/**
+ * 等滚动停下来再做事。
+ *
+ * 「滚完再闪」是这条提示的重点：滚动途中条目还在飞，这时闪一下等于没闪 —— 动画（1.4s）
+ * 比滚动（约 1s）长不了多少，等它到位时高亮已经淡得看不见了。
+ *
+ * 逐帧看位置，而不是用 scrollend：虚拟化实例在中途会重算目标、可能再发起一次平滑滚动
+ * （@tanstack/virtual-core 的 reconcileScroll），scrollend 会在半路就触发一次。
+ */
+function afterScrollSettles(scroller: HTMLElement, done: () => void) {
+  stopSettling?.()
+  const initial = scroller.scrollTop
+  const startedAt = performance.now()
+  let last = initial
+  let still = 0
+  let moved = false
+  let frame = 0
+
+  const stop = () => {
+    cancelAnimationFrame(frame)
+    stopSettling = null
+  }
+
+  const tick = () => {
+    const current = scroller.scrollTop
+    if (current !== initial) moved = true
+    // 严格相等（不是「差得少」）：浏览器平滑滚动收尾是逐帧减量的，差一点点也还叫在动
+    still = current === last ? still + 1 : 0
+    last = current
+    const elapsed = performance.now() - startedAt
+    if (
+      (moved || elapsed > REVEAL_SETTLE_GRACE_MS)
+      && (still >= REVEAL_SETTLE_STILL_FRAMES || elapsed > REVEAL_SETTLE_TIMEOUT_MS)
+    ) {
+      stop()
+      done()
+      return
+    }
+    frame = requestAnimationFrame(tick)
+  }
+
+  stopSettling = stop
+  frame = requestAnimationFrame(tick)
+}
+
+/** 当前列表的滚动容器根节点：表格分支是 UTable 自己的根，其余视图是 ScrollArea 的根 */
+function revealRoot(): HTMLElement | null {
+  const exposed = view.value === 'table' ? tableRef.value : scrollAreaRef.value
+  const el = exposed?.$el
+  return el instanceof HTMLElement ? el : null
+}
+
+/**
+ * 列表真正的滚动容器。
+ *
+ * 表格视图里 UTable 的根就是滚动容器；滚动区（Reka UI）的根只是外框，真正滚的是它内部的
+ * viewport —— 从条目往上找一个内容溢出的祖先即可，不必依赖它的内部属性名。
+ */
+function revealScroller(root: HTMLElement, el: HTMLElement | null): HTMLElement | null {
+  if (root.scrollHeight > root.clientHeight + 1) return root
+  let node: HTMLElement | null = el ?? root.querySelector<HTMLElement>('[data-entry-id]')
+  while (node && node !== root) {
+    if (node.scrollHeight > node.clientHeight + 1) return node
+    node = node.parentElement
+  }
+  return null
+}
+
+/**
+ * 找条目的 DOM 元素：按属性逐个比对，而不是拼选择器 —— 条目 id 里带 `:`（`entry:<feedId>:<hash>`），
+ * 塞进选择器得先转义，遍历已渲染的这十几个节点反而更省心。
+ * 表格的行由 UTable 生成、标记只能挂在来源格里（见 tableMeta），所以往上找它所在的 tr。
+ */
+function revealElement(root: HTMLElement, id: string): HTMLElement | null {
+  for (const el of root.querySelectorAll<HTMLElement>('[data-entry-id]')) {
+    if (el.dataset.entryId !== id) continue
+    return el.closest('tr') ?? el
+  }
+  return null
+}
+
+/**
+ * 条目是否完整落在滚动视口里。
+ *
+ * 用矩形判定而不是「滚动量 vs 估算高度」：条目高度随视图不同（图片瀑布流按封面比例算），
+ * 用估算值算偏移并不可靠；没渲染出来的条目（虚拟化把它摘掉了）本就在视口外，查不到即不可见。
+ */
+function isFullyVisible(el: HTMLElement, root: HTMLElement): boolean {
+  const item = el.getBoundingClientRect()
+  const box = root.getBoundingClientRect()
+  return item.top >= box.top && item.bottom <= box.bottom
+}
+
+/**
+ * 表格分支的定位：UTable 不暴露虚拟化实例，只能靠「已渲染的行 + 固定行高」外推。
+ *
+ * 行高是常数（见 TABLE_ROW_HEIGHT），渲染出来的行又都在同一份滚动内容里，所以
+ * 「目标行位置 = 锚点行位置 + 行数差 × 行高」成立，不必去量表头 / 页头占掉多少高度。
+ */
+function scrollTableRowIntoView(root: HTMLElement, index: number, el: HTMLElement | null): void {
+  let anchor: { index: number, top: number } | null = null
+  for (const cell of root.querySelectorAll<HTMLElement>('[data-entry-id]')) {
+    const row = cell.closest('tr')
+    const rowIndex = props.entries.findIndex(entry => entry.id === cell.dataset.entryId)
+    if (!row || rowIndex < 0) continue
+    anchor = { index: rowIndex, top: row.getBoundingClientRect().top }
+    break
+  }
+  if (!anchor) {
+    el?.scrollIntoView({ block: 'center', behavior: REVEAL_SCROLL_BEHAVIOR })
+    return
+  }
+  const box = root.getBoundingClientRect()
+  const centered = root.scrollTop
+    + (anchor.top - box.top) // 锚点行此刻在视口里的位置
+    + (index - anchor.index) * TABLE_ROW_HEIGHT
+    - (root.clientHeight - TABLE_ROW_HEIGHT) / 2 // 目标行摆到视口正中
+  const max = Math.max(0, root.scrollHeight - root.clientHeight)
+  root.scrollTo({ top: Math.min(Math.max(centered, 0), max), behavior: REVEAL_SCROLL_BEHAVIOR })
+}
+
+/**
+ * 把「刚刚在读的那一条」拉回视野并闪一下；条目不在当前列表里时什么都不做。
+ *
+ * 场景：连点多次「下一篇」翻了很多篇再关掉详情，列表还停在最初点开的那一条上 —— 不自动滚回去，
+ * 用户得往下翻很久才找得到自己刚读到哪儿（宽屏阅读栏同理：选中高亮跑到了视口外）。
+ * 已经看得见的那条只闪不滚：用户当前的滚动位置是有意停留的，不该被一次定位推走。
+ * 要滚的那条是滚过去的（见 REVEAL_SCROLL_BEHAVIOR），并且**等滚到了才闪**（见 afterScrollSettles）。
+ */
+function revealEntry(id: string): void {
+  const index = props.entries.findIndex(entry => entry.id === id)
+  if (index < 0) return // 换源、被「只看未读」筛掉、列表被整体替换过：没有可定位的目标
+
+  const root = revealRoot()
+  const el = root ? revealElement(root, id) : null
+  if (!root || (el && isFullyVisible(el, root))) {
+    // 不用滚：上一次定位若还悬着，它的闪不该带到这一条上
+    stopSettling?.()
+    flashEntry(id)
+    return
+  }
+
+  if (view.value === 'table') {
+    scrollTableRowIntoView(root, index, el)
+  } else {
+    const virtualizer = scrollAreaRef.value?.virtualizer
+    // 视口外的条目在 DOM 里根本不存在，只有虚拟化实例能按 index 定位（页头也占一项，要加偏移）
+    if (virtualizer) {
+      virtualizer.scrollToIndex(headerItems.value.length + index, {
+        align: 'center',
+        behavior: REVEAL_SCROLL_BEHAVIOR
+      })
+    } else {
+      el?.scrollIntoView({ block: 'center', behavior: REVEAL_SCROLL_BEHAVIOR })
+    }
+  }
+
+  const scroller = revealScroller(root, el)
+  if (!scroller) {
+    flashEntry(id)
+    return
+  }
+  afterScrollSettles(scroller, () => flashEntry(id))
+}
+
+/**
+ * 触发点：详情从「打开」变「关闭」。
+ *
+ * 认 isOpen 这一个状态，而不是各展示面的关闭动作：弹窗的关闭按钮 / Esc / 遮罩、阅读栏的 X / Esc、
+ * 浏览器返回键、useEntryRoute 的地址回退，全都落在这里。currentEntry 在关闭后仍留着刚才那篇
+ * （见 useEntryModal），正好就是「刚刚在读的那一条」。
+ */
+watch([isOpen, () => currentEntry.value?.id], ([open]) => {
+  if (open) return
+  const id = currentEntry.value?.id
+  if (id) revealEntry(id)
+})
+
 // ── 表格视图 ──────────────────────────────────────────────────────────────
 
 /**
@@ -479,12 +740,17 @@ const tableColumns = computed<TableColumn<RssEntry>[]>(() => [
  * 行级样式：已读整行淡显，与其它视图同一口径。
  *
  * 表格的行由 UTable 生成，挂不上 `data-entry-id` 这类属性，所以只能走它的 meta（class 允许
- * 是以行为参数的函数）。选中高亮不做：表格视图不参与宽屏阅读栏（见 useReaderPaneMode），
- * 打开的是弹窗，没有「左边哪一行对应右边正文」要指。
+ * 是以行为参数的函数；读 flashId 是响应式的：函数在本组件的渲染里被调用，flashId 一变就重渲）。
+ * 选中高亮不做：表格视图不参与宽屏阅读栏（见 useReaderPaneMode），打开的是弹窗，
+ * 没有「左边哪一行对应右边正文」要指。
  */
 const tableMeta = {
   class: {
-    tr: (row: { original: RssEntry }) => (row.original.read ? 'opacity-60' : '')
+    tr: (row: { original: RssEntry }) => [
+      row.original.read ? 'opacity-60' : '',
+      // 「刚刚在读的那一条」闪一下（见 revealEntry）：行挂不上 data-*，只能走 class
+      row.original.id === flashId.value ? 'entry-flash' : ''
+    ].filter(Boolean).join(' ')
   }
 }
 
@@ -532,6 +798,7 @@ function handleTableKeydown(event: KeyboardEvent) {
   -->
   <UTable
     v-if="view === 'table'"
+    ref="tableRef"
     v-bind="$attrs"
     :data="entries"
     :columns="tableColumns"
@@ -717,6 +984,7 @@ function handleTableKeydown(event: KeyboardEvent) {
         v-else-if="isEntry(item) && view === 'social'"
         :key="item.id"
         :entry="item"
+        :data-flash="item.id === flashId ? 'true' : undefined"
         :selected="item.id === selectedId"
         :show-feed="showFeed"
         @open="handleOpen"
@@ -726,6 +994,7 @@ function handleTableKeydown(event: KeyboardEvent) {
         v-else-if="isEntry(item) && view === 'blog'"
         :key="item.id"
         :entry="item"
+        :data-flash="item.id === flashId ? 'true' : undefined"
         :selected="item.id === selectedId"
         :show-feed="showFeed"
         :lanes="laneCount"
@@ -736,6 +1005,7 @@ function handleTableKeydown(event: KeyboardEvent) {
         v-else-if="isEntry(item) && view === 'list'"
         :key="item.id"
         :entry="item"
+        :data-flash="item.id === flashId ? 'true' : undefined"
         :selected="item.id === selectedId"
         :show-feed="showFeed"
         @open="handleOpen"
@@ -745,6 +1015,7 @@ function handleTableKeydown(event: KeyboardEvent) {
         v-else-if="isEntry(item) && view === 'image'"
         :key="item.id"
         :entry="item"
+        :data-flash="item.id === flashId ? 'true' : undefined"
         :selected="item.id === selectedId"
         @open="handleOpen"
       />
@@ -753,6 +1024,7 @@ function handleTableKeydown(event: KeyboardEvent) {
         v-else-if="isEntry(item)"
         :key="item.id"
         :entry="item"
+        :data-flash="item.id === flashId ? 'true' : undefined"
         :selected="item.id === selectedId"
         :show-feed="showFeed"
         @open="handleOpen"

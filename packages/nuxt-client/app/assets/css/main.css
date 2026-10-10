@@ -157,3 +157,36 @@
   opacity: 0.85;
   text-shadow: 0 1px 6px rgb(0 0 0 / 0.6);
 }
+
+/* ============================================================
+ * 「刚刚在读的那一条」闪一下（EntryList 关闭详情后自动定位的那条）
+ *
+ * 用动画而不是静态类：高亮得自己退场 —— 一直亮着就成了第二个「选中态」，用户不知道它什么时候消失。
+ * 底色与描边一起上：列表行、社交动态只有一块底色就够，卡片与图片图块被封面占满，
+ * 得靠描边才看得见。两条选择器对应两种触发方式：滚动区的条目挂 data-flash（子组件根节点透传），
+ * 表格的行由 UTable 生成、挂不上自定义属性，走它的 meta.class（见 EntryList 的 revealEntry）。
+ * ============================================================ */
+@keyframes entry-flash {
+  0% {
+    outline: 2px solid var(--ui-primary);
+    background-color: color-mix(in oklab, var(--ui-primary) 22%, transparent);
+  }
+
+  60% {
+    outline-color: color-mix(in oklab, var(--ui-primary) 45%, transparent);
+    background-color: color-mix(in oklab, var(--ui-primary) 10%, transparent);
+  }
+
+  100% {
+    outline-color: transparent;
+    background-color: transparent;
+  }
+}
+
+[data-flash='true'],
+.entry-flash {
+  /* 描边画在元素内侧，不改变布局尺寸（虚拟化按测量过的高度摆位） */
+  outline-offset: -2px;
+  /* 1.4s 与 EntryList 的 REVEAL_FLASH_MS(1.5s) 配一对：动画先跑完，标记随后摘掉 */
+  animation: entry-flash 1.4s ease-out;
+}

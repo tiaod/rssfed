@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { nextTick, ref, h, defineComponent, type PropType } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import EntryList from '../../components/EntryList.vue'
@@ -79,11 +79,16 @@ const UTableStub = {
   `
 }
 
+/** 关闭详情后的「滚回刚才那条」：EntryList 用 ScrollArea 暴露的虚拟化实例按 index 定位 */
+const revealScrollToIndex = vi.fn()
+
 const STUBS = {
-  // ScrollArea（虚拟化）在单测里退化成「把 items 全渲染出来」
+  // ScrollArea（虚拟化）在单测里退化成「把 items 全渲染出来」，但仍按真实组件的样子
+  // 暴露 $el 与 virtualizer（关闭详情后的定位要用后者，见 EntryList 的 revealEntry）
   UScrollArea: {
     name: 'ScrollArea',
     props: ['items', 'virtualize', 'ui'],
+    data: () => ({ virtualizer: { scrollToIndex: revealScrollToIndex } }),
     template: '<div class="scroll-area"><div v-for="(item, index) in items" :key="item.id ?? index" class="cell"><slot :item="item" :index="index" /></div></div>'
   },
   USkeleton: { template: '<div class="skeleton" />' },
@@ -761,6 +766,231 @@ describe('EntryList 选中态高亮', () => {
     const wrapper = mountList([entry, other])
     expect(wrapper.get('[data-entry-id="entry-1"]').classes()).toContain('ring-primary')
     expect(wrapper.get('[data-entry-id="entry-2"]').classes()).not.toContain('ring-primary')
+  })
+})
+
+describe('EntryList 关闭详情后回到刚才读的那条', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  /** 详情「打开某一篇 → 关掉」：EntryList 只认 isOpen 的这次变化（弹窗关闭 / 阅读栏 X / 返回键都是它） */
+  async function openThenClose(entry: RssEntry) {
+    modalState.currentEntry.value = entry
+    modalState.isOpen.value = true
+    await nextTick()
+    modalState.isOpen.value = false
+    await nextTick()
+  }
+
+  /** 给单个元素塞一份固定几何：happy-dom 不做布局，矩形全零，可见性判定得自己给 */
+  function stubRect(el: Element, top: number, height: number) {
+    el.getBoundingClientRect = () => ({
+      top,
+      bottom: top + height,
+      left: 0,
+      right: 0,
+      width: 0,
+      height,
+      x: 0,
+      y: top,
+      toJSON: () => ({})
+    }) as DOMRect
+  }
+
+  /** 让 happy-dom 的元素「内容溢出」：真实滚动容器的判据就是这一个（见 EntryList 的 revealScroller） */
+  function stubScrollable(el: HTMLElement, clientHeight: number, scrollHeight: number) {
+    Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true })
+    Object.defineProperty(el, 'scrollHeight', { value: scrollHeight, configurable: true })
+  }
+
+  /**
+   * 接管 requestAnimationFrame：「等滚动停稳」是自己逐帧数出来的，测试里得一帧一帧推。
+   *
+   * 每帧可以顺手挪一下滚动位置 —— 位置还在变就是「还在滚」，连着几帧不动才叫停稳。
+   */
+  function controlFrames() {
+    const queue: FrameRequestCallback[] = []
+    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
+      queue.push(cb)
+      return queue.length
+    })
+    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    return {
+      /** 推一帧；给了 scroller + scrollTop 就顺便把位置挪过去 */
+      step(scroller?: HTMLElement, scrollTop?: number) {
+        if (scroller && scrollTop !== undefined) scroller.scrollTop = scrollTop
+        queue.shift()?.(0)
+      }
+    }
+  }
+
+  it('关掉详情后，刚刚在读的那条闪过一下，其余条目不受影响', async () => {
+    const first = makeEntry({ id: 'entry-1' })
+    // 真实 id 形如 entry:<feedId>:<hash>，定位不能靠拼选择器（这里顺带覆盖带 `:` 的 id）
+    const second = makeEntry({ id: 'entry:feed-1:bbb' })
+    const wrapper = mountList([first, second], undefined, 'list')
+
+    await openThenClose(second)
+
+    expect(wrapper.get('[data-entry-id="entry:feed-1:bbb"]').attributes('data-flash')).toBe('true')
+    expect(wrapper.get('[data-entry-id="entry-1"]').attributes('data-flash')).toBeUndefined()
+  })
+
+  it('已经看得见的那条只闪不滚：不推走用户当前的滚动位置', async () => {
+    const entry = makeEntry({ id: 'entry-1' })
+    const wrapper = mountList([entry], undefined, 'list')
+    stubRect(wrapper.get('.scroll-area').element, 0, 600)
+    stubRect(wrapper.get('[data-entry-id="entry-1"]').element, 200, 96)
+
+    await openThenClose(entry)
+
+    expect(revealScrollToIndex).not.toHaveBeenCalled()
+    expect(wrapper.get('[data-entry-id="entry-1"]').attributes('data-flash')).toBe('true')
+  })
+
+  it('条目在视口外时按虚拟化的 index 滚过去（第 3 条 → index 2）', async () => {
+    const entries = ['entry-1', 'entry-2', 'entry-3'].map(id => makeEntry({ id }))
+    const wrapper = mountList(entries, undefined, 'list')
+    stubRect(wrapper.get('.scroll-area').element, 0, 600)
+    stubRect(wrapper.get('[data-entry-id="entry-3"]').element, 900, 96)
+
+    await openThenClose(entries[2]!)
+
+    expect(revealScrollToIndex).toHaveBeenCalledWith(2, { align: 'center', behavior: 'smooth' })
+  })
+
+  it('要滚过去的条目：滚到位了才闪，滚动途中不闪', async () => {
+    const entries = ['entry-1', 'entry-2'].map(id => makeEntry({ id }))
+    const wrapper = mountList(entries, undefined, 'list')
+    const scroller = wrapper.get('.scroll-area').element as HTMLElement
+    stubRect(scroller, 0, 600)
+    stubScrollable(scroller, 600, 2_000)
+    // 第二条在视口外：走「滚过去」那条路
+    stubRect(wrapper.get('[data-entry-id="entry-2"]').element, 900, 96)
+    const frames = controlFrames()
+    const flashed = () => wrapper.get('[data-entry-id="entry-2"]').attributes('data-flash')
+
+    await openThenClose(entries[1]!)
+    // 定位已经发起，但还在滚：这时候闪一下会被滚动盖掉，动画还没到位就淡完了
+    expect(flashed()).toBeUndefined()
+
+    frames.step(scroller, 300) // 一路滚下去
+    frames.step(scroller, 900)
+    expect(flashed()).toBeUndefined()
+
+    frames.step(scroller, 1_200) // 到位
+    for (let i = 0; i < 8; i++) frames.step() // 连着若干帧不动 = 停稳
+    await nextTick() // rAF 回调在 Vue 的调度之外，等它把标记渲染上去
+    expect(flashed()).toBe('true')
+  })
+
+  it('要滚的条目：位置压根没动（滚不动 / 已经贴着目标）时也不会一直不闪', async () => {
+    const entries = ['entry-1', 'entry-2'].map(id => makeEntry({ id }))
+    const wrapper = mountList(entries, undefined, 'list')
+    const scroller = wrapper.get('.scroll-area').element as HTMLElement
+    stubRect(scroller, 0, 600)
+    stubScrollable(scroller, 600, 2_000)
+    stubRect(wrapper.get('[data-entry-id="entry-2"]').element, 900, 96)
+    const frames = controlFrames()
+
+    await openThenClose(entries[1]!)
+    // 起步宽限期内位置没动也不闪：平滑滚动可能只是还没起步
+    for (let i = 0; i < 8; i++) frames.step()
+    expect(wrapper.get('[data-entry-id="entry-2"]').attributes('data-flash')).toBeUndefined()
+
+    await new Promise(resolve => setTimeout(resolve, 450)) // 过了宽限期，位置始终没动
+    for (let i = 0; i < 8; i++) frames.step()
+    await nextTick()
+    expect(wrapper.get('[data-entry-id="entry-2"]').attributes('data-flash')).toBe('true')
+  })
+
+  it('页头也算一项：滚到第 N 条时 index 要加上页头占的项', async () => {
+    const entries = ['entry-1', 'entry-2', 'entry-3'].map(id => makeEntry({ id }))
+    const wrapper = mount(EntryList, {
+      props: { entries, view: 'list' as ListView, header: true },
+      global: { stubs: STUBS },
+      slots: { header: '<p class="feed-header">订阅源描述</p>' }
+    })
+    stubRect(wrapper.get('.scroll-area').element, 0, 600)
+    stubRect(wrapper.get('[data-entry-id="entry-3"]').element, 900, 96)
+
+    await openThenClose(entries[2]!)
+
+    // 列表视图恒为单列 → 页头 1 项，条目从第 2 项（index 1）开始
+    expect(revealScrollToIndex).toHaveBeenCalledWith(3, { align: 'center', behavior: 'smooth' })
+  })
+
+  it('条目不在当前列表里（换源 / 被「只看未读」筛掉）时什么都不做', async () => {
+    const wrapper = mountList([makeEntry({ id: 'entry-1' })], undefined, 'list')
+
+    await openThenClose(makeEntry({ id: 'entry-999' }))
+
+    expect(revealScrollToIndex).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-flash="true"]').exists()).toBe(false)
+  })
+
+  it('闪一下是临时的：到点后标记自己摘掉，不会变成第二个「选中态」', async () => {
+    vi.useFakeTimers()
+    try {
+      const entry = makeEntry({ id: 'entry-1' })
+      const wrapper = mountList([entry], undefined, 'list')
+
+      await openThenClose(entry)
+      expect(wrapper.get('[data-entry-id="entry-1"]').attributes('data-flash')).toBe('true')
+
+      vi.advanceTimersByTime(2000)
+      await nextTick()
+      expect(wrapper.get('[data-entry-id="entry-1"]').attributes('data-flash')).toBeUndefined()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('表格视图：行挂不上 data-* 属性，改用 entry-flash 类闪一下', async () => {
+    const first = makeEntry({ id: 'entry-1' })
+    const second = makeEntry({ id: 'entry-2' })
+    const wrapper = mountList([first, second], undefined, 'table')
+
+    await openThenClose(second)
+
+    const rows = wrapper.findAll('.table-row')
+    expect(rows[1]!.classes()).toContain('entry-flash')
+    expect(rows[0]!.classes()).not.toContain('entry-flash')
+  })
+
+  it('表格视图：条目在视口外时靠「已渲染行 + 固定行高」外推滚动位置，且是滚过去的', async () => {
+    const entries = ['entry-1', 'entry-2', 'entry-3'].map(id => makeEntry({ id }))
+    const wrapper = mountList(entries, undefined, 'table')
+    // UTable 不暴露虚拟化实例，只能量：happy-dom 不做布局，容器高度要自己给
+    const root = wrapper.get('.table').element as HTMLElement
+    Object.defineProperty(root, 'clientHeight', { value: 600, configurable: true })
+    Object.defineProperty(root, 'scrollHeight', { value: 2_000, configurable: true })
+    root.scrollTop = 300
+    stubRect(root, 0, 600)
+    // happy-dom 不做滚动动画，这里接住 scrollTo 只断言参数，位置变化由下面逐帧模拟
+    const scrollTo = vi.fn()
+    root.scrollTo = scrollTo as typeof root.scrollTo
+    const rowWrappers = wrapper.findAll('.table-row')
+    const rows = rowWrappers.map(row => row.element)
+    stubRect(rows[0]!, 0, 53) // 锚点行（entry-1）：此刻正好在视口顶部
+    stubRect(rows[2]!, 900, 53) // 目标行（entry-3）在视口外
+
+    const frames = controlFrames()
+    await openThenClose(entries[2]!)
+
+    // 300 + (0 − 0) + (2 − 0) × 53 − (600 − 53) / 2 = 132.5
+    expect(scrollTo).toHaveBeenCalledWith({ top: 132.5, behavior: 'smooth' })
+    // 行高亮同样是滚到位之后才挂上：先推一帧模拟滚动，再推若干帧模拟停稳
+    frames.step(root, 132.5)
+    for (let i = 0; i < 8; i++) frames.step()
+    await nextTick()
+    expect(rowWrappers[2]!.classes()).toContain('entry-flash')
   })
 })
 
