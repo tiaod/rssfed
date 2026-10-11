@@ -283,6 +283,8 @@ export async function listSubscriptionsForUser(userId: string) {
         errorMessage: reg?.errorMessage ?? undefined,
         lastFetchedAt: reg?.lastFetchedAt?.toISOString() ?? undefined,
         lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
+        // 抓取地址：编辑订阅弹窗只读展示（前端离线时回退本地 FeedDoc）
+        feedUrl: reg?.url ?? undefined,
       }
     }),
     ...botDocs.map((d: any) => {
@@ -299,6 +301,8 @@ export async function listSubscriptionsForUser(userId: string) {
         createdAt: d.createdAt,
         status: reg?.isActive === false ? "paused" : "active",
         lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
+        // bot 没有 RSS 地址：前端用它在编辑订阅弹窗里拼联邦地址 `@用户名@域名`
+        preferredUsername: reg?.preferredUsername ?? undefined,
       }
     }),
   ]
