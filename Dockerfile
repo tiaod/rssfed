@@ -55,7 +55,14 @@ WORKDIR /app/packages/hono-server
 # --force：自动接受数据丢失语句。CI/编排里没有 TTY，不加会卡在交互确认。
 # 注意：该参数语义是"自动批准"，可能 truncate 表；首次部署表为空无风险，
 #       后续变更请先本地 `pnpm --filter @rssfed/hono-server exec drizzle-kit push --verbose` 复核。
-CMD ["pnpm", "exec", "drizzle-kit", "push", "--force"]
+#
+# push 之后必须再跑 verify-schema：push **可能报错但仍然退出 0**，而 compose 的
+# `service_completed_successfully` 只看退出码。真实事故（2026-10-11）：它撞上"要不要
+# 重命名列"的交互提示后打印 Error 却退出 0，迁移"成功"、server 带着缺列的 schema 启动，
+# 之后登录全 500（`column "timeline_db_name" does not exist`），排查成本极高。
+# verify-schema 直接对着数据库断言代码声明的表/列都在，缺了就非 0 退出 → 部署被拦住。
+# 两个命令都必须带 `pnpm exec`：migrate 阶段的 WORKDIR 是 packages/hono-server。
+CMD ["sh", "-c", "pnpm exec drizzle-kit push --force && pnpm exec tsx scripts/verify-schema.ts"]
 
 # ── 后端运行时依赖：仅 production，且只装 hono-server 一个包 ────────────────
 FROM base AS prod-deps

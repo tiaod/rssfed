@@ -376,6 +376,63 @@ JS
 - **现象**：容器内 `nuxt build` 被 OOM killer 干掉（机器约 2G 内存）。
 - **解法**：镜像一律在 CI（或本地）构建后推送/传输，服务器只 `pull` 与运行。见 [docker-deployment.md](docker-deployment.md) 第 10 节。
 
+### migrate 容器退出码 0，但表/列根本没建出来（登录 500、`42703`）
+
+- **现象**：部署"成功"、容器全绿，但登录报 500，日志里是
+  `PostgresError: column "timeline_db_name" does not exist`（`code: '42703'`）；
+  或者某个功能报字段不存在。`docker ps -a` 里 `migrate` 是 `Exited (0)`。
+- **原因**：`drizzle-kit push` 遇到"这是重命名吗"这类**需要确认**的差异时走交互提示，而容器里没有 TTY：
+  ```
+  Error: Interactive prompts require a TTY terminal ... at promptColumnsConflicts
+  ```
+  它**打印了错误却仍然以 0 退出**。compose 的 `depends_on: migrate: service_completed_successfully`
+  只看退出码，于是判定迁移成功、`server` 照常启动，而库结构停在上一个版本。
+  真实事故（2026-10-11）：`user` 表要从 `couch_db_name` 改名成 `timeline_db_name`，
+  这个提示从 10-09 起就把**所有**待应用的变更一起卡住 —— 连新增的
+  `user_timeline_settings` 表也没建出来，而 `user.timeline_db_name` 的缺失让
+  聚合链路（用户库解析）根本跑不起来，表现为"用户库里一条条目都没有"。
+- **排查**：
+  ```bash
+  docker logs $(docker ps -aq -f name=rssfed-prod-migrate) | tail -20   # 看有没有 promptColumnsConflicts
+  docker exec rssfed-prod-postgres-1 psql -U rssfed -d rssfed -c '\d "user"'   # 与 src/db/*.ts 对照
+  # 或直接让下面的校验脚本点名：
+  docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate \
+    pnpm exec tsx scripts/verify-schema.ts
+  ```
+- **解法**：把结构手工对齐到代码声明的样子（先在本地 `drizzle-kit push --verbose` 看清它想做什么），
+  然后确认 `push` 能干净跑完：
+  ```sql
+  -- 例：把遗留列换成代码要的列（值需要另作迁移，见下一条）
+  BEGIN;
+  ALTER TABLE "user" DROP CONSTRAINT IF EXISTS "user_couch_db_name_unique";
+  ALTER TABLE "user" RENAME COLUMN couch_db_name TO timeline_db_name;
+  UPDATE "user" SET timeline_db_name = NULL;
+  COMMIT;
+  ```
+- **防复发**：migrate 镜像的 CMD 现在是
+  `drizzle-kit push --force && tsx scripts/verify-schema.ts`。后者直接对着数据库断言
+  「代码声明的表/列都在」，缺任何一项就**非 0 退出**，`server` 因此不会被启动 ——
+  这个哨兵覆盖的不只是 TTY 提示，而是"push 没真正生效"的整类问题。
+
+### 合并单库后订阅/已读收藏"消失"了：老 `user-state_` 库没搬
+
+- **现象**：升级到合并单库（`user-timeline_`）的版本后，账号能登录，但订阅列表是空的、已读收藏也没了；
+  CouchDB 里还躺着一个 `user-state_<随机>` 库，里面 `subscription:` / `entry-state:` 文档都在。
+- **原因**：合并后服务端只读写 `user-timeline_<随机>`（`user.timeline_db_name`），
+  而老用户的状态文档留在 `user-state_<随机>` 里；代理白名单也已不再放行 `user-state_` 前缀，
+  客户端连读都读不到。**订阅关系不在 PostgreSQL 里，服务端重建不出来** ——
+  一旦客户端升级把本地 `rssfed-user-state-<uid>` 清掉，这些数据就永久没了。
+- **解法**：跑仓库自带的一次性搬运脚本（幂等，可反复执行；先 dry-run，再 `--apply`，确认稳定后才删源库）：
+  ```bash
+  docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate \
+    pnpm exec tsx scripts/merge-user-state-into-timeline.ts            # dry-run：列出要搬什么
+  docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate \
+    pnpm exec tsx scripts/merge-user-state-into-timeline.ts --apply    # 真搬，保留源库做回滚
+  ```
+  脚本按库级 `_security.members.names[0]` 认领主，所以即使 `user.couch_db_name` 已经不存在也能对上。
+  搬完确认新库里 `subscription:` / `entry-state:` 数量与老库一致，再等复制器把条目聚合进来
+  （窗口内的条目由复制器按 `user.timeline_db_name` 搬，不在这份脚本里）。
+
 ### 整站 502：CouchDB 反复重启，日志报 `{error,eisdir}`
 
 - **现象**：反代返回 502（Caddy 没有上游）。`docker ps -a` 里 `couchdb` 是 `Restarting`，而 `server` / `web` 停在 `Created`（**从未启动过**）；doco-cd 每轮都是 `dependency failed to start: container rssfed-prod-couchdb-1 is unhealthy`，重试永远失败。
