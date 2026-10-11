@@ -72,10 +72,32 @@ services:
       # bind mount 源每次部署都漂移，couchdb 会被反复重建。
       # 注意这里的路径是交给 Docker daemon 解析的，要用**宿主机**路径 ——
       # 与上面 env_file（由 Doco CD 进程自己读，用容器内路径）不是一回事。
-      - ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-proxy-auth.ini:/opt/couchdb/etc/local.d/00-proxy-auth.ini
+      #
+      # 两个 ini 都用**长语法** + `create_host_path: false`，不用 `源:目标` 短语法：
+      # 短语法下源路径缺失时 Docker 会**默默建一个空目录**，于是 local.d 里出现一个
+      # 目录，CouchDB 启动读配置报 `{error,eisdir}` 直接 crash loop —— couchdb 永远
+      # healthy 不了，depends_on 它的 server/web 停在 Created，Caddy 没有上游，整站 502。
+      # （2026-10-11 线上真实事故：宿主机 RSSFED_DEPLOY_DIR 里少了 couchdb-replicator.ini，
+      # 被自动建成空目录，整站 502 了 6 小时 44 分，doco-cd 每 3 分钟重试都失败。）
+      # 加上这个开关后，「源不存在」在部署时就硬失败
+      # （`invalid mount config ... bind source path does not exist`），
+      # 老版本容器继续跑，而不是把一个健康的 stack 换成一个崩溃的 stack。
+      #
+      # ⚠️ 代价是宿主机那一份必须**手工**维护：RSSFED_DEPLOY_DIR（见 .doco-cd.yml）下的
+      # 这两个文件不在 doco-cd 的 clone 目录里，容器也永远不会替我们创建它们。
+      # 新增 / 改动 deploy/*.ini 之后要先同步到宿主机再部署，否则部署会明确报错。
+      - type: bind
+        source: ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-proxy-auth.ini
+        target: /opt/couchdb/etc/local.d/00-proxy-auth.ini
+        bind:
+          create_host_path: false
       # 复制器调参（max_jobs / max_churn）：聚合搬运是「每 (用户 × 订阅源) 一条常驻复制」，
       # 默认 max_jobs=500 在「几个账号 × 几百个源」时会被顶住。理由与取值见该文件头注释。
-      - ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-replicator.ini:/opt/couchdb/etc/local.d/01-replicator.ini
+      - type: bind
+        source: ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-replicator.ini
+        target: /opt/couchdb/etc/local.d/01-replicator.ini
+        bind:
+          create_host_path: false
     # 容器默认 nofile=1024，对「几百个 feed 库 + 每个 (用户 × 源) 一条常驻复制」的拓扑太紧。
     # CouchDB 的 JS 查询服务（couchjs）是 open_port 现起的，顶到 fd 天花板后
     # couch_proc_manager 会卡死：所有设计文档写不进去（500）、视图查询 timeout、复制过滤器

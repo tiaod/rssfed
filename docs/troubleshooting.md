@@ -375,3 +375,35 @@ JS
 
 - **现象**：容器内 `nuxt build` 被 OOM killer 干掉（机器约 2G 内存）。
 - **解法**：镜像一律在 CI（或本地）构建后推送/传输，服务器只 `pull` 与运行。见 [docker-deployment.md](docker-deployment.md) 第 10 节。
+
+### 整站 502：CouchDB 反复重启，日志报 `{error,eisdir}`
+
+- **现象**：反代返回 502（Caddy 没有上游）。`docker ps -a` 里 `couchdb` 是 `Restarting`，而 `server` / `web` 停在 `Created`（**从未启动过**）；doco-cd 每轮都是 `dependency failed to start: container rssfed-prod-couchdb-1 is unhealthy`，重试永远失败。
+- **原因**：CouchDB 启动时遍历 `local.d/` 读配置，撞上一个**目录** —— `config:read_ini_file` 返回 `{error,eisdir}`，Erlang 直接 `application_start_failure` 崩掉。
+  这个目录是 Docker 建的：bind 挂载源缺失时，短语法 `源:目标` 会**自动把源创建成一个空目录**。而 compose 里的源是宿主机路径 `${RSSFED_DEPLOY_DIR}/couchdb-replicator.ini`，那份拷贝在 doco-cd 的 clone 目录之外、**靠手工维护**，没人同步就缺文件。
+  链路是：源缺失 → Docker 建出空目录 → CouchDB crash loop → 永远不 healthy → `depends_on: service_healthy` 的 server/web 不启动 → 整站 502。
+  **2026-10-11 的线上事故**就是这条：仓库新增 `deploy/couchdb-replicator.ini` 后，宿主机 `/home/ubuntu/rssfed/deploy/` 里没有这个文件，被建成了空目录。**11:55:16** 第一次报 `couchdb-1 is unhealthy`，此后 doco-cd 每 3 分钟重试、失败 200+ 次，整站 502 一直到 **18:39** 恢复 —— 共 6 小时 44 分。
+- **排查**：
+  ```bash
+  docker ps -a --filter name=rssfed-prod        # couchdb Restarting、server/web Created
+  docker logs --tail 40 rssfed-prod-couchdb-1   # case_clause,{error,eisdir} + config:read_ini_file
+  ls -ld /home/ubuntu/rssfed/deploy/*.ini       # 看哪一项是 drwx 而不是 -rw
+  ```
+- **解法**：把宿主机上的那个目录换成仓库里的真实文件，然后重建 couchdb。**不用手工介入重建**：doco-cd 下一轮（≤3 分钟）会重试上一次失败的部署，文件补齐后自然成功。
+  ```bash
+  # 在服务器上
+  ls -ld /home/ubuntu/rssfed/deploy/couchdb-replicator.ini   # drwx 即中招
+  sudo rmdir /home/ubuntu/rssfed/deploy/couchdb-replicator.ini
+  # 文件从本地仓库传（scp deploy/couchdb-replicator.ini ubuntu@<服务器>:/tmp/）之后：
+  sudo cp /tmp/couchdb-replicator.ini /home/ubuntu/rssfed/deploy/
+  md5sum /home/ubuntu/rssfed/deploy/couchdb-replicator.ini   # 与仓库里的对齐
+  ```
+  手工兜底重建：`docker compose --env-file .env.production -f docker-compose.prod.yml up -d`。
+- **防复发**：compose 里这两条 bind 已改用**长语法 + `create_host_path: false`**，源缺失时部署直接**硬失败**（`invalid mount config ... bind source path does not exist`），既不会悄悄建目录，也不会把一个健康的 stack 换成崩溃的 stack。代价是宿主机那份 `RSSFED_DEPLOY_DIR` 必须与 `deploy/` 同步 —— 改动 `deploy/*.ini` 后要先传再部署，见 [docker-deployment.md](docker-deployment.md) 第 10 节。
+- **排查完顺手确认配置真生效**（挂上了不等于读到了）：
+  ```bash
+  docker exec <couchdb 容器> cat /opt/couchdb/etc/local.d/01-replicator.ini
+  # 变量要在容器内展开，所以套一层 sh -c（直接写在 exec 后面会被宿主 shell 展开成空）
+  docker exec <couchdb 容器> sh -c 'curl -s -u "$COUCHDB_USER:$COUCHDB_PASSWORD" \
+    http://localhost:5984/_node/_local/_config/replicator'   # 期望 max_jobs=1000、max_churn=100
+  ```

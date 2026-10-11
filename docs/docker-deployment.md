@@ -362,6 +362,24 @@ t0+4min   CI 构建完成
 
 失败的是「部署成功但内容旧」，日志完全正常。所以 `build-images.yml` 里加了 `record-release` job：构建**成功后**才把 sha 写进 `deploy/release.env` 并提交（带 `[skip ci]` 防循环）。这样触发信号天然落在镜像就绪之后，顺带拿到不可变版本号与精确回滚能力。**这个顺序不能倒过来。**
 
+### 宿主机 deploy 目录要手工同步（改了 `deploy/*.ini` 必做）
+
+`RSSFED_DEPLOY_DIR`（宿主机的 `~/rssfed/deploy`）是 doco-cd **clone 目录之外**的一份拷贝 —— 它解决的是「bind 源必须稳定」（见上面 ②），代价是**没有任何东西替我们维护它**：容器不会创建它，CI 也不会传它。
+
+而 `server` / `web` 都 `depends_on: couchdb: service_healthy`，所以 CouchDB 起不来 = **整站 502**。2026-10-11 的事故就是这么来的：仓库新增 `deploy/couchdb-replicator.ini`，宿主机没同步，Docker 把缺失的 bind 源**建成了空目录**，CouchDB 读 `local.d` 报 `{error,eisdir}` 崩溃 —— doco-cd 每 3 分钟重试都失败，整站 502 了 6 小时 44 分（详见 [troubleshooting](troubleshooting.md) 的「整站 502」）。
+
+所以：**改动或新增 `deploy/*.ini` 之后，先同步到宿主机，再让它部署。**
+
+```bash
+# 在本地仓库根目录：先传到 /tmp（目标文件属主是 couchdb(5984)，ubuntu 不能直接覆盖）
+scp deploy/couchdb-proxy-auth.ini deploy/couchdb-replicator.ini ubuntu@<服务器>:/tmp/
+ssh ubuntu@<服务器> 'sudo cp /tmp/couchdb-*.ini /home/ubuntu/rssfed/deploy/ && \
+  ls -l /home/ubuntu/rssfed/deploy/ && md5sum /home/ubuntu/rssfed/deploy/*.ini'
+# 两个都必须是 -rw；出现 drwx 就是已经出故障了。md5 与本地 deploy/ 下同名文件对齐。
+```
+
+compose 里这两条 bind 现在是长语法 + `create_host_path: false`：源不存在时部署**硬失败**（`bind source path does not exist`），不会再悄悄建目录。看到这条报错就是上面这步没做。
+
 ### 首次接管现有 stack
 
 现有 stack 是用 `docker compose` CLI 手工创建的，交给 Doco CD 时：
