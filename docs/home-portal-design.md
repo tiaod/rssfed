@@ -76,7 +76,7 @@ export const homeHighlights = pgTable("home_highlights", {
 3. 批次可回滚、可审计（能回答「今天首页为什么是这几条」）；
 4. 顺带解决「N 源扇出」：扇出只发生在作业里，失败重试不影响用户。
 
-> 关于扇出规模：626 订阅规模下，近 1 小时有更新的源只有 26 个、近 1 天 208 个（`report/sync-diagnosis/RESULTS.md:53-56`）。所以候选集最多约 200 个源 × 每源 1 次视图查询（用 `include_docs=true` 一次拿到文档），并发 5~8（照 `feeds.ts:101` 的 `mapWithConcurrency` 先例），一次作业是几百次 CouchDB 请求、跑的间隔是分钟级 —— 完全可以接受。
+> 关于扇出规模：626 订阅规模下，近 1 小时有更新的源只有 26 个、近 1 天 208 个（`docs/notes/sync/sync-watermark-diagnosis.md:60-62`）。所以候选集最多约 200 个源 × 每源 1 次视图查询（用 `include_docs=true` 一次拿到文档），并发 5~8（照 `feeds.ts:101` 的 `mapWithConcurrency` 先例），一次作业是几百次 CouchDB 请求、跑的间隔是分钟级 —— 完全可以接受。
 
 ---
 

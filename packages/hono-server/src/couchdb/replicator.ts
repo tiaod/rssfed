@@ -16,7 +16,7 @@ import {
  * 进程、不吃内存、没有 base64 往返；写入按源库修订谱系落库（`new_edits: false`），天然幂等；
  * 增量由复制器自己的 `_changes` 长轮询驱动，稳态下比"每轮对每个源发一次请求"还便宜。
  *
- * 四条必须知道的边界（都实测过，见 report/aggregation-replication/）：
+ * 四条必须知道的边界（都实测过，见 docs/notes/aggregation/couchdb-replicator-aggregation.md）：
  *   ① **过滤器只能用 JS filter**：Mango selector 不搬删除（删除后的文档没有字段可匹配），
  *      而「源端删除跟随」是必须成立的性质。
  *   ② **query_params 里不能有叫 `since` 的参数**：它会和 `_changes` 自己的 since 撞名，

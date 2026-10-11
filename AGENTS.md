@@ -35,12 +35,16 @@
 | Service Worker、PWA、图标 | `docs/offline-and-pwa.md` |
 | 部署步骤、镜像、反代 | `docs/docker-deployment.md` |
 | 现象 → 原因 → 解法 | `docs/troubleshooting.md` |
+| 某次调研的实测结论与取舍（留档，非现行规范） | `docs/notes/` |
 | 尚未落地的事项 | `docs/cloud-deployment-todo.md` |
 
 写作纪律：
 
 - 架构文档**只写不变量与取舍**，不写实现细节、操作步骤、压测数据、以及"曾经试过 X 不行"——
   那些属于代码注释、`report/` 或 commit message。
+- `docs/notes/` 是**调研留档**：实测数字、对比方法、以及当时为什么选 A 不选 B。它记录的是"当时量到
+  什么"，**不是现行规范**——现行行为以代码和 `ARCHITECTURE.md` 为准。原始证据（探针输出、SQL、
+  诊断报告）仍在未纳入版本控制的 `report/`，需要重跑时再生产。
 - **功能提交不默认附带文档改动**。只有不变量本身变了（新增存储层、改变同步方向、换传输协议）
   才更新 `ARCHITECTURE.md`；每做一个功能就补一段做法会让它单调膨胀。
 - 实现细节的归宿是**代码注释**（就近、随文件读入、成本低），文档写取舍与边界。

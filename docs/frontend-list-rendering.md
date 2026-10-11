@@ -315,6 +315,16 @@ N 个等高的骨架必然一列落一个，滚到底部时每列都有东西，
 换成滚动容器才有效，但真实布局里到底哪个元素在滚并不好判断。骨架可见这个信号本身就在容器
 可视区内，绕开了这一整类问题。实现里只留 200px 的 `rootMargin` 当缓冲，不是提前几屏预加载。
 
-## 复现用的压测数据
+## 为什么不用 CSS `columns-*` 排多列
 
-瀑布流滚动与虚拟化的实测数据保存在 [report/masonry-scroll](../report/masonry-scroll/README.md)。
+早期多列用 CSS 多列实现（`UPageColumns` + `xl:columns-4 2xl:columns-5 3xl:columns-6 4xl:columns-8`，
+断点在 `main.css` 定义）。放弃它与虚拟化**不兼容**：CSS 多列要把**全部**条目留在文档流里参与布局，
+而虚拟化只挂载视口附近的条目；两者叠加等于把 tanstack 已经算好的泳道分配再交给浏览器排一遍。
+列数由 CSS 决定时 JS 也无从感知，`EntryList` 就没法按列数决定「页尾骨架摆几个」。
+
+所以改用虚拟化时（提交 `0cb4d05`）一并删掉了 `UPageColumns` 与手写的 `MasonryColumns` /
+`masonryRebalance`：列数改由断点表在 JS 里算，条目落哪一列交给 tanstack 的「最矮泳道」。外层再套
+一层列容器会变成双重布局。
+
+> 本节原先链向 `report/masonry-scroll/README.md` 的对照脚本与截图。该目录未纳入版本控制，已在
+> `report/` 清理时删除，因此这里只保留结论，不再有可直接重跑的压测产物。
