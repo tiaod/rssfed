@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import VueEasyLightbox from 'vue-easy-lightbox/external-css'
 import type { RssEntry } from '~/types/rss'
 import { useEntryContent } from '~/composables/useEntryContent'
 import { useImageLightbox } from '~/composables/useImageLightbox'
 import { useSafeHtml } from '~/composables/useSafeHtml'
 import { useSiteSettings } from '~/composables/useSiteSettings'
+import { buildPlaceholderMap } from '~/utils/entryImagePlaceholders'
 
 const props = defineProps<{
   entry: RssEntry
@@ -13,10 +14,23 @@ const props = defineProps<{
 
 const { settings } = useSiteSettings()
 
+/**
+ * 已缓存到本地附件的正文图片（绝对 URL → 占位图 + 附件名）。
+ *
+ * 在**注入 DOM 之前**用它把 `<img src>` 换成本地占位：图片一进 DOM 浏览器就会抓原始 URL，
+ * 之后换 src 只能取消那批请求（DevTools 里表现为"每次都重新下载"）。详见
+ * utils/entryImagePlaceholders.ts 的文件头。
+ */
+const imagePlaceholders = computed(() => ({
+  baseUrl: props.entry.url,
+  map: buildPlaceholderMap(props.entry.images)
+}))
+
 // 订阅源正文是任意 HTML，注入前必须过白名单：剥掉 <script>/on* 事件/javascript: 协议，
 // 并给外链补 target=_blank + rel=noopener（见 useSafeHtml）。
 // iframe 额外走一条策略：与订阅源同源的嵌入保留，第三方嵌入只放行管理员维护的地址前缀
 // 白名单（见 utils/iframePolicy.ts）。settings 变化会自动重算正文。
+// 图片占位也在这里完成（同一个 config 传给 DOMPurify 的 hook），顺序上早于 v-html。
 const safeContent = useSafeHtml(
   () => props.entry.content,
   () => ({
@@ -24,7 +38,8 @@ const safeContent = useSafeHtml(
     feedUrl: props.entry.feed?.feedUrl,
     entryUrl: props.entry.url,
     urlPrefixes: settings.value.iframeWhitelist
-  })
+  }),
+  imagePlaceholders
 )
 
 // 图片点击放大：滚轮/双指/双击缩放、拖拽平移、旋转、多图切换（见 useImageLightbox）。

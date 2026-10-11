@@ -103,6 +103,25 @@ describe('useImageLightbox', () => {
     expect(index.value).toBe(0)
   })
 
+  it('跳过还在占位的图（带 data-orig-src，附件还没换成 blob）', () => {
+    // 占位图的内在尺寸可能很大（按原图尺寸解码），只靠 1x1 判定挡不住，必须看占位标记
+    const placeholder = makeImg('data:image/png;base64,PLACEHOLDER', { width: 640, height: 360 })
+    placeholder.setAttribute('data-orig-src', 'https://example.com/a.png')
+    const swapped = makeImg('blob:http://localhost/1')
+    const { images, visible, index, attach } = setup([placeholder, swapped])
+
+    attach()
+
+    expect(images.value.map(i => i.src)).toEqual(['blob:http://localhost/1'])
+
+    placeholder.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(visible.value).toBe(false)
+
+    swapped.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }))
+    expect(visible.value).toBe(true)
+    expect(index.value).toBe(0)
+  })
+
   it('还没加载完的图片（complete=false）不会被误判成追踪像素', () => {
     // naturalWidth 在加载完成前恒为 0，只按尺寸判定会把正常图片全部误杀
     const loading = makeImg('https://example.com/slow.jpg', { complete: false, width: 0, height: 0 })

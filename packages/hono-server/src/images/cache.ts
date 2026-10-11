@@ -9,6 +9,7 @@ import {
   DEFAULT_MAX_SOURCE_IMAGE_BYTES,
   type ImageFailReason,
 } from "./fetch"
+import { blurhashFromImage } from "./blurhash"
 
 /**
  * 图片缓存服务：把「远程图片 URL + 压缩参数」映射成一份**内容寻址**的 AVIF 缓存对象。
@@ -59,6 +60,14 @@ export interface CompressedImage {
   sourceUrl: string
   /** 是否命中已有缓存（false = 这次真的下载并压缩了） */
   hit: boolean
+  /**
+   * 占位图用的 BlurHash（见 images/blurhash.ts）。
+   *
+   * 跟着**压缩参数**一起缓存在 sidecar 里：同一张图 + 同一组参数只算一次，
+   * 之后不管被多少个 feed 库、多少个用户库取用，直接读 sidecar。
+   * 算不出来（sidecar 缺失且解码失败）时为 undefined —— 前端退化为透明占位。
+   */
+  blurhash?: string
 }
 
 export type CompressedImageResult =
@@ -71,6 +80,19 @@ export interface ImageCacheDeps {
   download?: typeof downloadImage
   compress?: typeof compressToAvif
   size?: typeof probeImageSize
+  blurhash?: typeof blurhashFromImage
+}
+
+/** sidecar（`<key>.json`）里记录的元数据。字段都可选：老对象可能只有一部分 */
+interface CachedImageMeta {
+  sourceUrl?: string
+  width?: number
+  height?: number
+  blurhash?: string
+  /** 压缩参数（仅供排查，读路径不用） */
+  maxWidth?: number
+  quality?: number
+  createdAt?: string
 }
 
 /** 同进程内同一 key 的并发合并：同一批条目里重复出现的图片不必压两遍 */
@@ -176,6 +198,7 @@ export async function getCompressedImage(
   const download = deps.download ?? downloadImage
   const compress = deps.compress ?? compressToAvif
   const probeSize = deps.size ?? probeImageSize
+  const makeBlurhash = deps.blurhash ?? blurhashFromImage
 
   const task = (async (): Promise<CompressedImageResult> => {
     // ① 命中：本体在就行，尺寸元数据缺失时现算（老对象 / 元数据写失败）
@@ -183,6 +206,21 @@ export async function getCompressedImage(
     if (cached) {
       const meta = await readCachedMeta(key, store)
       const size = meta ?? await probeSize(cached.content)
+      // blurhash 是后加的字段：老对象的 sidecar 里没有。现算一次并回写 sidecar ——
+      // 代价是命中路径多一次 32px 解码，换来的是不必为了占位图重新下载源图。
+      // 算不出来就当作没有（前端退化 1×1 透明），不影响取图本身。
+      let blurhash = meta?.blurhash
+      if (!blurhash) {
+        blurhash = (await makeBlurhash(cached.content)) ?? undefined
+        if (blurhash) {
+          await writeCachedMeta(key, store, {
+            ...(meta ?? {}),
+            width: size?.width,
+            height: size?.height,
+            blurhash,
+          })
+        }
+      }
       return {
         ok: true,
         key,
@@ -192,6 +230,7 @@ export async function getCompressedImage(
         height: size?.height ?? 0,
         sourceUrl: meta?.sourceUrl ?? url,
         hit: true,
+        blurhash,
       }
     }
 
@@ -200,18 +239,20 @@ export async function getCompressedImage(
     if (!outcome.buffer) return { ok: false, reason: outcome.reason ?? "network" }
     const compressed = await compress(outcome.buffer, { maxWidth, quality })
     if (!compressed) return { ok: false, reason: "decode" }
+    // 占位图字符串与压缩字节一起落 sidecar：同一张图 + 同一组参数只算这一次
+    const blurhash = (await makeBlurhash(compressed.buffer)) ?? undefined
     // 落盘失败只降级为「这次没缓存」：缓存是加速手段，不该让它把可用性拖下水
     //（对象存储抖动 / 本地盘满 / 测试里没配 Storage 都走这里）
     await store.write(compressed.buffer, key, "image/avif").catch(() => {})
-    await store
-      .write(
-        Buffer.from(JSON.stringify({ sourceUrl: url, width: compressed.width, height: compressed.height, maxWidth, quality, createdAt: new Date().toISOString() })),
-        `${key}.json`,
-        "application/json",
-      )
-      .catch(() => {
-        // 元数据写失败不影响使用（下次读本体现算尺寸）
-      })
+    await writeCachedMeta(key, store, {
+      sourceUrl: url,
+      width: compressed.width,
+      height: compressed.height,
+      blurhash,
+      maxWidth,
+      quality,
+      createdAt: new Date().toISOString(),
+    })
     return {
       ok: true,
       key,
@@ -221,6 +262,7 @@ export async function getCompressedImage(
       height: compressed.height,
       sourceUrl: url,
       hit: false,
+      blurhash,
     }
   })()
 
@@ -232,11 +274,25 @@ export async function getCompressedImage(
   }
 }
 
-/** 读尺寸元数据 sidecar；不存在或损坏返回 null */
-async function readCachedMeta(key: string, store: Storage): Promise<{ sourceUrl?: string, width?: number, height?: number } | null> {
+/**
+ * 写 sidecar（尺寸 / 来源 / blurhash）。
+ *
+ * 失败只丢元数据，不影响本次取图：下次读本体会用 probeImageSize 现算尺寸、
+ * blurhash 也会重新算一遍（见命中路径）。
+ */
+async function writeCachedMeta(key: string, store: Storage, meta: CachedImageMeta): Promise<void> {
+  await store
+    .write(Buffer.from(JSON.stringify(meta)), `${key}.json`, "application/json")
+    .catch(() => {
+      // 元数据写失败不影响使用（下次读本体现算）
+    })
+}
+
+/** 读 sidecar 元数据；不存在或损坏返回 null */
+async function readCachedMeta(key: string, store: Storage): Promise<CachedImageMeta | null> {
   try {
     const raw = await store.read(`${key}.json`)
-    const parsed = JSON.parse(raw.toString("utf8")) as { sourceUrl?: string, width?: number, height?: number }
+    const parsed = JSON.parse(raw.toString("utf8")) as CachedImageMeta
     return parsed
   } catch {
     return null

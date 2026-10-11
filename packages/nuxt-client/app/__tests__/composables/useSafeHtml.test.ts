@@ -4,6 +4,7 @@
 import { describe, it, expect } from 'vitest'
 import { sanitizeEntryHtml, useSafeHtml } from '../../composables/useSafeHtml'
 import { ref } from 'vue'
+import { buildPlaceholderMap } from '../../utils/entryImagePlaceholders'
 
 describe('sanitizeEntryHtml', () => {
   it('剥离 <script> 但保留正常正文', () => {
@@ -165,5 +166,59 @@ describe('useSafeHtml', () => {
 
     prefixes.value = ['https://v.example/embed/']
     expect(safe.value).toContain('iframe')
+  })
+})
+
+describe('sanitizeEntryHtml：正文图片的本地占位', () => {
+  /** 与 entry.images 里的元数据同形（这里刻意不带 blurhash：jsdom 没有 canvas，
+   *  带 blurhash 的分支在 utils/blurhash.test.ts 与浏览器实测里覆盖） */
+  const images = [
+    { url: 'https://cdn.example/a.jpg', attachment: 'img-0.avif', width: 1080, height: 608 }
+  ]
+
+  it('命中本地附件：输出的 src 已经是占位，原始地址在 data-orig-src（注入后浏览器不会去抓原图）', () => {
+    const out = sanitizeEntryHtml(
+      '<p>正文</p><img src="https://cdn.example/a.jpg">',
+      { entryUrl: 'https://blog.example/post/1' },
+      { baseUrl: 'https://blog.example/post/1', map: buildPlaceholderMap(images) }
+    )
+
+    // 逐属性断言（字符串包含判断会把 data-orig-src 的值也算进 src 的匹配里）
+    const img = new DOMParser().parseFromString(out, 'text/html').querySelector('img')!
+    expect(img.getAttribute('src')).toMatch(/^data:image\/png;base64,/)
+    expect(img.getAttribute('data-orig-src')).toBe('https://cdn.example/a.jpg')
+    // 顺带占住版面，等真图到位不跳
+    expect(img.getAttribute('width')).toBe('1080')
+    expect(img.getAttribute('height')).toBe('608')
+  })
+
+  it('不在缓存里的图保持原样（该走网络就走网络）', () => {
+    const out = sanitizeEntryHtml(
+      '<img src="https://other.example/x.png">',
+      { entryUrl: 'https://blog.example/post/1' },
+      { baseUrl: 'https://blog.example/post/1', map: buildPlaceholderMap(images) }
+    )
+    expect(out).toContain('src="https://other.example/x.png"')
+    expect(out).not.toContain('data-orig-src')
+  })
+
+  it('不传占位表时行为与原来完全一致', () => {
+    const out = sanitizeEntryHtml('<img src="https://cdn.example/a.jpg">')
+    const img = new DOMParser().parseFromString(out, 'text/html').querySelector('img')!
+    expect(img.getAttribute('src')).toBe('https://cdn.example/a.jpg')
+    expect(img.hasAttribute('data-orig-src')).toBe(false)
+    expect(img.getAttribute('loading')).toBe('lazy')
+  })
+
+  it('useSafeHtml：images 到位后自动重算（占位与"先出字"顺序无关，都是注入前算好）', () => {
+    const content = ref('<img src="https://cdn.example/a.jpg">')
+    const map = ref(buildPlaceholderMap(undefined))
+    const safe = useSafeHtml(content, undefined, () => ({ baseUrl: 'https://blog.example/1', map: map.value }))
+
+    expect(safe.value).toContain('src="https://cdn.example/a.jpg"')
+    expect(safe.value).not.toContain('data-orig-src')
+
+    map.value = buildPlaceholderMap(images)
+    expect(safe.value).toContain('data-orig-src="https://cdn.example/a.jpg"')
   })
 })

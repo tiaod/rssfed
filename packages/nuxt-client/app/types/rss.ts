@@ -43,6 +43,13 @@ export interface RssCachedImage {
   /** 压缩后尺寸 */
   width?: number
   height?: number
+  /**
+   * 占位图 BlurHash（服务端抓取时算好，见 hono-server 的 images/blurhash.ts）。
+   *
+   * 正文注入 DOM **之前**先用它当占位：那时附件字节还没读出来（异步），手里只有这个字符串。
+   * 缺字段（老条目 / 编码失败）时退化为 1×1 透明占位。
+   */
+  blurhash?: string
   /** 是否为封面图（正文中面积最大的一张） */
   cover?: boolean
 }

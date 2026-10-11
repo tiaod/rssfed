@@ -148,7 +148,7 @@ export function extractImageUrls(content: string | undefined, baseUrl: string, l
 
 /** 取图结果（策略层内部用）：成功带压缩字节与尺寸，失败带可聚合的原因 */
 type FetchedImage =
-  | { ok: true, buffer: Buffer, width: number, height: number }
+  | { ok: true, buffer: Buffer, width: number, height: number, blurhash?: string }
   | { ok: false, reason: ImageFailReason }
 
 /**
@@ -156,6 +156,8 @@ type FetchedImage =
  *
  * 把 `CompressedImageResult` 收敛成策略层关心的形状：缓存命中与否不影响它在
  * 预算/封面上的判断，这里只回答「拿到字节没有、没拿到是什么原因」。
+ *
+ * blurhash 一并带出（缓存里算好的）：它是客户端插入 DOM 前的占位图，跟着 images 元数据走。
  */
 async function fetchCompressed(url: string, options: EntryImageOptions): Promise<FetchedImage> {
   const result: CompressedImageResult = await getCompressedImage({
@@ -165,7 +167,13 @@ async function fetchCompressed(url: string, options: EntryImageOptions): Promise
     maxSourceBytes: options.maxSourceImageBytes,
   })
   if (!result.ok) return { ok: false, reason: result.reason }
-  return { ok: true, buffer: result.buffer, width: result.width, height: result.height }
+  return {
+    ok: true,
+    buffer: result.buffer,
+    width: result.width,
+    height: result.height,
+    blurhash: result.blurhash,
+  }
 }
 
 /**
@@ -265,6 +273,7 @@ export async function cacheEntryImages(
       images.push({
         url: protocolCoverUrl, attachment: name,
         width: fetched.width, height: fetched.height,
+        blurhash: fetched.blurhash,
         cover: true,
       })
       budgetUsed += fetched.buffer.length
@@ -277,7 +286,7 @@ export async function cacheEntryImages(
   // 下一批还要不要下。批大小取 DOWNLOAD_CONCURRENCY，最坏浪费一批的带宽/CPU。
   // 结果按正文出现顺序收集（并发完成顺序不定，封面选择依赖稳定顺序）。
   type BatchOutcome = FetchedImage & { url: string }
-  const results: Array<{ url: string, result: { buffer: Buffer, width: number, height: number } } | null> =
+  const results: Array<{ url: string, result: { buffer: Buffer, width: number, height: number, blurhash?: string } } | null> =
     new Array(urls.length).fill(null)
   let budgetExhausted = false
   for (let start = 0; start < urls.length && !budgetExhausted; start += DOWNLOAD_CONCURRENCY) {
@@ -302,14 +311,18 @@ export async function cacheEntryImages(
         break
       }
       budgetUsed += size
-      results[start + k] = { url: o.url, result: { buffer: o.buffer, width: o.width, height: o.height } }
+      results[start + k] = { url: o.url, result: { buffer: o.buffer, width: o.width, height: o.height, blurhash: o.blurhash } }
     }
   }
   for (const r of results) {
     if (!r) continue
     const name = `img-${images.length}.avif`
     attachments.push({ name, data: r.result.buffer, content_type: "image/avif" })
-    images.push({ url: r.url, attachment: name, width: r.result.width, height: r.result.height })
+    images.push({
+      url: r.url, attachment: name,
+      width: r.result.width, height: r.result.height,
+      blurhash: r.result.blurhash,
+    })
   }
 
   // 无协议封面时，从正文图中选第一张合格图（过滤小 logo/图标）作为封面

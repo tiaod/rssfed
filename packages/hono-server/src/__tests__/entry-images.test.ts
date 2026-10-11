@@ -168,6 +168,33 @@ describe("cacheSingleImage", () => {
   })
 })
 
+describe("cacheEntryImages 的占位图元数据", () => {
+  it("落库的正文图带上 blurhash（下载 → 压缩 → 编码全链路，走默认依赖）", async () => {
+    const png = await sharp({
+      create: { width: 640, height: 360, channels: 3, background: { r: 32, g: 128, b: 160 } },
+    }).png().toBuffer()
+    const server = http.createServer((_req, res) => {
+      res.setHeader("Content-Type", "image/png")
+      res.end(png)
+    })
+    await new Promise<void>((r) => server.listen(0, r))
+    const port = (server.address() as { port: number }).port
+
+    const { images } = await cacheEntryImages(
+      `<img src="http://127.0.0.1:${port}/a.png">`,
+      `http://127.0.0.1:${port}/post`,
+    )
+    server.close()
+
+    // 4×3 分量的 blurhash 固定 28 字符；客户端拿它解码出占位图（见 nuxt-client 的 utils/blurhash.ts）。
+    // 期望值由**官方 blurhash@2.0.5 编码器**对「同一份压缩产物、同样的 32px 缩略预处理」算出 ——
+    // 它同时钉住了 sharp/AVIF 这一段的实际输出。若某天 AVIF 编码器升级导致不一致，重跑一次
+    // .scratch 里的对比脚本更新这个字符串即可（算法本身另有互通用例覆盖）。
+    expect(images).toHaveLength(1)
+    expect(images[0]!.blurhash).toBe("L53ov2k@fQk@pyflfQflfQfQfQfQ")
+  })
+})
+
 describe("cacheEntryImages 封面选择", () => {
   it("无协议封面时选正文第一张合格图（过滤小图）", async () => {
     // 三张图：小图标(100x100) / 中图(400x300) / 大图(800x600)

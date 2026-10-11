@@ -1,4 +1,5 @@
 import { nextTick, onScopeDispose, ref, watch, type Ref } from 'vue'
+import { ORIGINAL_SRC_ATTR } from '~/utils/entryImagePlaceholders'
 
 /** lightbox 里展示的一张图 */
 export interface LightboxImage {
@@ -72,11 +73,16 @@ export function useImageLightbox(containerRef: Ref<HTMLElement | null | undefine
 
   /**
    * 只收集「值得放大」的图。
-   * RSS 正文里 1x1 追踪像素很常见，点开只会看到一个点，直接排除。
+   *
+   * 两类排除：
+   *   - 还在占位状态的图（带 `data-orig-src`，附件还没换成 blob）：放大出来只是一张
+   *     模糊/透明的占位图，等换好了再点；
+   *   - 1x1 追踪像素：RSS 正文里很常见，点开只会看到一个点。
    */
   function pickZoomableImages(el: HTMLElement): HTMLImageElement[] {
     return Array.from(el.querySelectorAll('img')).filter((img) => {
       if (!img.getAttribute('src')) return false
+      if (img.hasAttribute(ORIGINAL_SRC_ATTR)) return false
       // complete 为真说明已加载完，这时 naturalWidth 才是真实尺寸；0 表示还没加载，保留
       const isTrackingPixel = img.complete && img.naturalWidth <= 1 && img.naturalHeight <= 1
       return !isTrackingPixel

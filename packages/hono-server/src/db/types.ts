@@ -47,6 +47,15 @@ export interface CachedImage {
   /** 压缩后尺寸（前端可作占位） */
   width?: number
   height?: number
+  /**
+   * 占位图的 BlurHash（极低频缩略，几十字节）。
+   *
+   * 前端在正文图换成本地附件 blob **之前**先用它当占位（见 nuxt-client 的
+   * utils/blurhash.ts 与 composables/useEntryContent.ts）：换 src 必须发生在 HTML 注入之前，
+   * 而附件字节只能异步读，所以插入时手里能有的只有这个字符串。
+   * 没有该字段（老条目 / 编码失败）时前端退化为 1×1 透明占位。
+   */
+  blurhash?: string
   /** 是否为封面图（正文中面积最大的一张，列表缩略图用） */
   cover?: boolean
   /**

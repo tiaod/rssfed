@@ -7,6 +7,7 @@ import {
   type IframeEmbedPolicy,
   type IframeSourceContext
 } from '~/utils/iframePolicy'
+import { applyImagePlaceholder, type PlaceholderMap } from '~/utils/entryImagePlaceholders'
 
 /**
  * RSS 正文的净化（XSS 防御）。
@@ -51,7 +52,17 @@ const SANITIZE_CONFIG: Config = {
  * 本轮 sanitize 的 iframe 策略：DOMPurify 会把调用方传入的 config 作为第三个参数
  * 交给 hook，于是策略随调用走，模块级的 hook 不需要可变状态。
  */
-type IframeAwareConfig = Config & { iframePolicy?: IframeEmbedPolicy }
+type IframeAwareConfig = Config & {
+  iframePolicy?: IframeEmbedPolicy
+  /**
+   * 正文图片的本地占位策略（见 utils/entryImagePlaceholders.ts）。
+   *
+   * 必须在**注入 DOM 之前**把命中本地附件的 `<img src>` 换掉：图片元素一进 DOM，
+   * 浏览器就开始抓原始 URL 了，之后再换只能取消它（DevTools 里那批 `ERR_ABORTED`）。
+   * 净化这一步的输出正是要交给 v-html 的字符串，所以改写放在这里。
+   */
+  imagePlaceholders?: ImagePlaceholderPolicy
+}
 
 /** DOMPurify 的 hook 是全局且会累加，模块级只装一次，避免回调重复叠加 */
 let hooksInstalled = false
@@ -87,7 +98,7 @@ function installHooks() {
     el.setAttribute('src', resolved)
   })
 
-  DOMPurify.addHook('afterSanitizeAttributes', (node) => {
+  DOMPurify.addHook('afterSanitizeAttributes', (node, _data, config) => {
     const el = node as Element
     if (el.tagName === 'A') {
       el.setAttribute('target', '_blank')
@@ -96,10 +107,22 @@ function installHooks() {
       el.setAttribute('loading', 'lazy')
       el.setAttribute('decoding', 'async')
       el.setAttribute('referrerpolicy', 'no-referrer')
+      // 命中本地缓存就换成本地占位（原始地址留在 data-orig-src），见 entryImagePlaceholders
+      const placeholders = (config as IframeAwareConfig).imagePlaceholders
+      if (placeholders) applyImagePlaceholder(el, placeholders.baseUrl, placeholders.map)
     } else if (el.tagName === 'IFRAME') {
       el.setAttribute('loading', 'lazy')
     }
   })
+}
+
+/**
+ * 正文图片的本地占位策略：命中表里的图在注入前被换成占位 data URL。
+ * `baseUrl` 是相对地址的解析基准（entry.url），与抓取端解析图片地址的口径一致。
+ */
+export interface ImagePlaceholderPolicy {
+  baseUrl?: string
+  map: PlaceholderMap
 }
 
 /**
@@ -108,11 +131,16 @@ function installHooks() {
  * `iframeContext` 给出来源条目与其订阅源的地址（同源判定 + 相对地址解析）以及管理员
  * 维护的地址前缀白名单。**不传 = 不放行任何 iframe**，与历史行为一致。
  *
+ * `imagePlaceholders` 是「已缓存到本地附件的图片」表：**在输出字符串里**就把这些图的
+ * `src` 换成占位（blurhash / 透明像素），原始地址存进 `data-orig-src`，由 useEntryContent
+ * 注入后再异步换成 blob URL —— 顺序不能反，见 utils/entryImagePlaceholders.ts 的文件头。
+ *
  * 只在浏览器里真正工作；服务端返回空串（正文不参与 SSR，见文件头注释）。
  */
 export function sanitizeEntryHtml(
   raw: string | null | undefined,
-  iframeContext?: IframeSourceContext
+  iframeContext?: IframeSourceContext,
+  imagePlaceholders?: ImagePlaceholderPolicy
 ): string {
   if (!raw) return ''
   // 服务端没有 DOM：DOMPurify 在 Node 下是工厂函数，直接调 sanitize 会抛 TypeError。
@@ -123,23 +151,27 @@ export function sanitizeEntryHtml(
   const policy = iframeContext
     ? buildIframePolicy(iframeContext, window.location.origin)
     : undefined
-  const config: IframeAwareConfig = policy
-    ? { ...SANITIZE_CONFIG, iframePolicy: policy }
-    : SANITIZE_CONFIG
+  const config: IframeAwareConfig = {
+    ...SANITIZE_CONFIG,
+    ...(policy ? { iframePolicy: policy } : {}),
+    ...(imagePlaceholders && imagePlaceholders.map.size > 0 ? { imagePlaceholders } : {})
+  }
 
   return DOMPurify.sanitize(raw, config)
 }
 
 /**
- * 响应式版本的净化：entry.content（以及订阅源上下文、白名单）变化时自动重算。
+ * 响应式版本的净化：entry.content（以及订阅源上下文、白名单、已缓存图片表）变化时自动重算。
  * 返回值直接交给 v-html（已在 sanitizeEntryHtml 里过完白名单）。
  */
 export function useSafeHtml(
   source: MaybeRefOrGetter<string | null | undefined>,
-  iframeContext?: MaybeRefOrGetter<IframeSourceContext | undefined>
+  iframeContext?: MaybeRefOrGetter<IframeSourceContext | undefined>,
+  imagePlaceholders?: MaybeRefOrGetter<ImagePlaceholderPolicy | undefined>
 ) {
   return computed(() => sanitizeEntryHtml(
     toValue(source),
-    iframeContext ? toValue(iframeContext) : undefined
+    iframeContext ? toValue(iframeContext) : undefined,
+    imagePlaceholders ? toValue(imagePlaceholders) : undefined
   ))
 }

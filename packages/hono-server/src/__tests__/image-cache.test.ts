@@ -233,4 +233,75 @@ describe("getCompressedImage", () => {
     expect(result.width).toBe(320)
     expect(size).toHaveBeenCalledTimes(1)
   })
+
+  it("未命中：blurhash 与压缩字节一起落 sidecar 并随结果返回", async () => {
+    const storage = memoryStorage()
+    const makeBlurhash = vi.fn(async () => "L43yGppefQpepyflfQflfQfQfQfQ")
+    const result = await getCompressedImage(
+      { url: "https://cdn.test/a.png" },
+      { storage, download: fakeCodec().download, compress: fakeCodec().compress, blurhash: makeBlurhash },
+    )
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
+    const sidecar = JSON.parse(storage.files.get(`${result.key}.json`)!.toString("utf8"))
+    expect(sidecar.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
+    expect(makeBlurhash).toHaveBeenCalledTimes(1)
+  })
+
+  it("命中：blurhash 直接读 sidecar，不重新解码", async () => {
+    const storage = memoryStorage()
+    const makeBlurhash = vi.fn(async () => "L43yGppefQpepyflfQflfQfQfQfQ")
+    const deps = { storage, download: fakeCodec().download, compress: fakeCodec().compress, blurhash: makeBlurhash }
+    await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
+    const second = await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
+
+    expect(second.ok).toBe(true)
+    if (!second.ok) return
+    expect(second.hit).toBe(true)
+    expect(second.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
+    expect(makeBlurhash).toHaveBeenCalledTimes(1) // 只有未命中那一次
+  })
+
+  it("老对象的 sidecar 没有 blurhash：命中时现算并回写（下次直接读）", async () => {
+    const storage = memoryStorage()
+    const key = imageCacheKey({ url: "https://cdn.test/a.png" })
+    storage.files.set(key, AVIF_STUB)
+    // 先前的版本写下的 sidecar：只有来源与尺寸
+    storage.files.set(
+      `${key}.json`,
+      Buffer.from(JSON.stringify({ sourceUrl: "https://cdn.test/a.png", width: 800, height: 600 })),
+    )
+    const makeBlurhash = vi.fn(async () => "L43yGppefQpepyflfQflfQfQfQfQ")
+    const deps = { storage, download: fakeCodec().download, compress: fakeCodec().compress, blurhash: makeBlurhash }
+
+    const first = await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
+    expect(first.ok && first.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
+    // 回写保留了原有字段
+    const rewritten = JSON.parse(storage.files.get(`${key}.json`)!.toString("utf8"))
+    expect(rewritten).toMatchObject({ sourceUrl: "https://cdn.test/a.png", width: 800, height: 600 })
+
+    const second = await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
+    expect(second.ok && second.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
+    expect(makeBlurhash).toHaveBeenCalledTimes(1) // 第二次读回写好的 sidecar
+  })
+
+  it("算不出 blurhash 时结果与 sidecar 都不带该字段（前端退化为透明占位）", async () => {
+    const storage = memoryStorage()
+    const result = await getCompressedImage(
+      { url: "https://cdn.test/a.png" },
+      {
+        storage,
+        download: fakeCodec().download,
+        compress: fakeCodec().compress,
+        blurhash: async () => null,
+      },
+    )
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.blurhash).toBeUndefined()
+    const sidecar = JSON.parse(storage.files.get(`${result.key}.json`)!.toString("utf8"))
+    expect(sidecar.blurhash).toBeUndefined()
+  })
 })
