@@ -127,18 +127,23 @@ onMounted(async () => {
 watch(pouch.timelineVersion, () => refreshFromSync())
 
 /**
- * 编辑订阅：弹窗只用到名字 / 分类 / 默认视图，所以从本地订阅文档拼一个最小集，
+ * 编辑订阅：弹窗只用到名字 / 分类 / 默认视图 / 订阅源地址，所以从本地订阅文档拼一个最小集，
  * 不必等接口把注册表那份完整对象拿回来（离线也能改）。
+ *
+ * 地址优先用注册表抓来的 feedUrl（feed 信息已经加载好了），离线取不到时回退本地 FeedDoc ——
+ * 它随拉取通道同步到本地库，断网也还在（见 usePouchDb.getFeedUrl）。
  */
 const editingItem = ref<EditableSubscription | null>(null)
 
 async function openEdit() {
   const prefs = await pouch.getSubscriptionViewPrefs(feedId).catch(() => null)
+  const feedUrl = feed.value?.feedUrl || await pouch.getFeedUrl(feedId)
   editingItem.value = {
     feedId,
     title: feedDisplayName.value,
     category: prefs?.category ?? undefined,
-    view: prefs?.view ?? undefined
+    view: prefs?.view ?? undefined,
+    feedUrl: feedUrl || undefined
   }
 }
 
@@ -286,7 +291,7 @@ async function unsubscribe() {
         </template>
       </div>
 
-      <!-- 编辑订阅（名字 / 分类 / 默认视图） -->
+      <!-- 编辑订阅（名字 / 分类 / 默认视图 / 只读的订阅源地址） -->
       <EditSubscriptionModal
         :subscription="editingItem"
         @close="editingItem = null"

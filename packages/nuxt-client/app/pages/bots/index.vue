@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { BotInfo } from '~/types/bot'
+import { botHandle } from '~/utils/botHandle'
 
 definePageMeta({
   layout: 'default'
@@ -11,8 +12,8 @@ const bots = ref<BotInfo[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
 
-// 从 API 地址推导 Bot 的联邦宇宙域名（仅用于展示 handle）
-const apiHost = (useRuntimeConfig().public.apiBaseUrl ?? 'http://localhost:3001').replace(/^https?:\/\//, '')
+// 联邦地址（@用户名@域名）的域名取自 API 基址，见 utils/botHandle
+const { public: { apiBaseUrl } } = useRuntimeConfig()
 
 // ── 创建机器人 ──
 const createOpen = ref(false)
@@ -76,10 +77,6 @@ async function createBot() {
 }
 
 onMounted(loadBots)
-
-function botHandle(bot: BotInfo): string {
-  return `@${bot.preferredUsername}@${apiHost}`
-}
 </script>
 
 <template>
@@ -167,7 +164,7 @@ function botHandle(bot: BotInfo): string {
                   {{ bot.name }}
                 </h2>
                 <p class="text-xs text-muted truncate">
-                  {{ botHandle(bot) }}
+                  {{ botHandle(bot.preferredUsername, apiBaseUrl) }}
                 </p>
               </div>
             </div>

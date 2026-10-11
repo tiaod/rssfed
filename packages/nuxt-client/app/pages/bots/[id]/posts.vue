@@ -4,6 +4,7 @@ import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 import ListActionsBar from '~/components/ListActionsBar.vue'
 import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.vue'
 import type { EditableSubscription } from '~/components/settings/EditSubscriptionModal.vue'
+import { botHandle } from '~/utils/botHandle'
 
 definePageMeta({
   layout: 'default'
@@ -14,6 +15,7 @@ const botId = route.params.id as string
 const virtualFeedId = `bot:${botId}`
 
 const pouch = usePouchDb()
+const api = useApi()
 const toast = useToast()
 const bot = ref<{ id: string, name: string, description?: string, avatarUrl?: string } | null>(null)
 const subscribed = ref(false)
@@ -64,17 +66,40 @@ const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnch
 // 分页加载：查询窗口逐步增大；页尾骨架进入视口就加载下一批（与其它列表页一致）
 const { loadMore } = useInfiniteList(loadMoreVisible)
 
-/** bot 订阅文档与普通订阅同形，编辑弹窗直接复用（名字 / 分类 / 默认视图） */
+/** bot 订阅文档与普通订阅同形，编辑弹窗直接复用（名字 / 分类 / 默认视图 / 只读地址） */
 const editingItem = ref<EditableSubscription | null>(null)
+
+const { public: { apiBaseUrl } } = useRuntimeConfig()
+
+/**
+ * bot 订阅没有 RSS 地址，只读那一行显示它的联邦地址 `@用户名@域名`。
+ *
+ * 用户名只在服务端订阅列表里（本地订阅文档不存它），要在打开弹窗时问一次接口；
+ * 离线或还没订阅时取不到 —— 那一行不渲染，不影响改名字 / 分类 / 视图。
+ */
+async function botAddress(): Promise<string | undefined> {
+  try {
+    const subs = await api.feeds.subscriptions()
+    const preferredUsername = subs.find(s => s.feedId === virtualFeedId)?.preferredUsername
+    return preferredUsername ? botHandle(preferredUsername, apiBaseUrl) : undefined
+  } catch {
+    return undefined
+  }
+}
 
 async function openEdit() {
   const prefs = await pouch.getSubscriptionViewPrefs(virtualFeedId).catch(() => null)
-  editingItem.value = {
+  const item: EditableSubscription = {
     feedId: virtualFeedId,
     title: bot.value?.name ?? '',
     category: prefs?.category ?? undefined,
     view: prefs?.view ?? undefined
   }
+  editingItem.value = item
+  // 地址晚一步补：接口再快也不该挡在弹窗前面。补的是同一个对象（弹窗只 watch 对象本身，
+  // 不重建对象就不会把用户刚输入的内容重置掉）；期间用户关掉弹窗就作罢。
+  const feedUrl = await botAddress()
+  if (feedUrl && editingItem.value?.feedId === virtualFeedId) editingItem.value.feedUrl = feedUrl
 }
 
 async function onEdited() {
@@ -231,7 +256,7 @@ async function toggleSubscribe() {
         />
       </div>
 
-      <!-- 编辑订阅（名字 / 分类 / 默认视图）。必须留在 #body 里：
+      <!-- 编辑订阅（名字 / 分类 / 默认视图 / 只读的联邦地址）。必须留在 #body 里：
            UDashboardPanel 的默认插槽会整块替换 header+body，放到外面会把导航栏和列表顶掉。 -->
       <EditSubscriptionModal
         :subscription="editingItem"

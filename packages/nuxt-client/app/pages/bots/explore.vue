@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { PublicBot } from '~/types/bot'
+import { botHandle } from '~/utils/botHandle'
 
 definePageMeta({
   layout: 'default'
@@ -13,8 +14,8 @@ const subscribed = ref<Set<string>>(new Set())
 const loading = ref(true)
 const error = ref<string | null>(null)
 
-// 从 API 地址推导 Bot 的联邦宇宙域名（仅用于展示 handle）
-const apiHost = (useRuntimeConfig().public.apiBaseUrl ?? 'http://localhost:3001').replace(/^https?:\/\//, '')
+// 联邦地址（@用户名@域名）的域名取自 API 基址，见 utils/botHandle
+const { public: { apiBaseUrl } } = useRuntimeConfig()
 
 function errorMessage(e: unknown): string {
   const err = e as { data?: { error?: string }, message?: string }
@@ -62,10 +63,6 @@ async function toggleSubscribe(bot: PublicBot) {
   } catch (e) {
     toast.add({ title: '操作失败', description: errorMessage(e), color: 'error' })
   }
-}
-
-function botHandle(bot: PublicBot): string {
-  return `@${bot.preferredUsername}@${apiHost}`
 }
 
 onMounted(load)
@@ -155,7 +152,7 @@ onMounted(load)
                   {{ bot.name }}
                 </h2>
                 <p class="text-xs text-muted truncate">
-                  {{ botHandle(bot) }}
+                  {{ botHandle(bot.preferredUsername, apiBaseUrl) }}
                 </p>
               </div>
             </div>

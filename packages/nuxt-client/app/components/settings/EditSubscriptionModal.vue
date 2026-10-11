@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { computed, ref, watch } from 'vue'
+import { useClipboard } from '@vueuse/core'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 
 /**
@@ -11,6 +13,12 @@ export interface EditableSubscription {
   category?: string
   /** 该订阅源的默认视图（未设置为 undefined = 跟随分组 / 全局） */
   view?: ListView
+  /**
+   * 订阅源地址，**只读展示**：RSS/Atom 订阅是抓取地址（FeedDoc / 注册表），
+   * bot 订阅没有 RSS 地址，这里放它的联邦地址 `@用户名@域名`（见 utils/botHandle）。
+   * 取不到时（离线且本地没有 FeedDoc）不渲染这一行。
+   */
+  feedUrl?: string
 }
 
 const props = defineProps<{ subscription: EditableSubscription | null }>()
@@ -21,6 +29,22 @@ const emit = defineEmits<{
 
 const pouch = usePouchDb()
 const toast = useToast()
+
+/**
+ * 地址是禁用输入框（改地址只能取消订阅后重新添加），复制按钮嵌在输入框内部 —— 单行框装不下
+ * 长地址，手选又选不中，复制按钮是唯一的复制入口（Nuxt UI 的 #trailing 用法，
+ * 见 https://ui.nuxt.com/docs/components/input#with-copy-button）。
+ *
+ * 复制成功的反馈做在按钮自己身上：图标换成 √ 并转成 success 色，两秒后收回
+ * （useClipboard 的 copied 自带计时），不弹右下角通知 —— 只是顺手复制一下，
+ * 弹通知比操作本身还重。
+ */
+const { copy, copied } = useClipboard({ legacy: true, copiedDuring: 2000 })
+
+async function copyFeedUrl() {
+  const url = props.subscription?.feedUrl
+  if (url) await copy(url)
+}
 
 const open = computed({
   get: () => props.subscription !== null,
@@ -102,6 +126,43 @@ async function save() {
             placeholder="订阅显示名称"
             class="w-full"
           />
+        </UFormField>
+
+        <!--
+          订阅源地址：禁用输入框（灰底灰字，一看就不能改），地址本身由订阅时确定 ——
+          改地址只能取消订阅后重新添加（后端是按地址建抓取任务的）。
+          复制按钮走 Nuxt UI 官方的 #trailing 用法；trailing 让输入框右侧留出按钮的位置，
+          输入框自身再挂 title，长地址被截断时悬停仍能看全。
+        -->
+        <UFormField
+          v-if="subscription?.feedUrl"
+          label="订阅源地址"
+          description="由订阅时确定，不可修改"
+        >
+          <UInput
+            :model-value="subscription.feedUrl"
+            disabled
+            trailing
+            class="w-full"
+            :title="subscription.feedUrl"
+            :ui="{ trailing: 'pe-0.5' }"
+          >
+            <template #trailing>
+              <UTooltip
+                text="复制订阅源地址"
+                :content="{ side: 'right' }"
+              >
+                <UButton
+                  :color="copied ? 'success' : 'neutral'"
+                  variant="link"
+                  size="sm"
+                  :icon="copied ? 'i-lucide-copy-check' : 'i-lucide-copy'"
+                  :aria-label="copied ? '已复制订阅源地址' : '复制订阅源地址'"
+                  @click="copyFeedUrl"
+                />
+              </UTooltip>
+            </template>
+          </UInput>
         </UFormField>
 
         <UFormField label="分类">

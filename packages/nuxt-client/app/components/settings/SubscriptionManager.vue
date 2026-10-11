@@ -5,10 +5,13 @@ import SubscriptionItem from '~/components/settings/SubscriptionItem.vue'
 import EditSubscriptionModal from '~/components/settings/EditSubscriptionModal.vue'
 import OpmlImportModal from '~/components/settings/OpmlImportModal.vue'
 import { LIST_VIEWS, LIST_VIEW_META, type ListView } from '~/utils/listViews'
+import { botHandle } from '~/utils/botHandle'
 
 const api = useApi()
 const toast = useToast()
 const pouch = usePouchDb()
+// bot 订阅的联邦地址要拼域名（见 botHandle）
+const { public: { apiBaseUrl } } = useRuntimeConfig()
 
 const subscriptions = ref<FeedSubscriptionItem[]>([])
 const loading = ref(true)
@@ -83,6 +86,17 @@ const importOpen = ref(false)
 // ── 编辑弹窗 ──
 const editingItem = ref<FeedSubscriptionItem | null>(null)
 
+/**
+ * 打开编辑弹窗：地址列在服务端订阅列表里（feedUrl / bot 的联邦地址），随列表一起读走了；
+ * 离线取不到时回退本地 FeedDoc（bot 订阅没有 FeedDoc，保持「不显示地址」）。
+ */
+async function openEdit(sub: FeedSubscriptionItem) {
+  editingItem.value = {
+    ...sub,
+    feedUrl: sub.feedUrl ?? (await pouch.getFeedUrl(sub.feedId)) ?? undefined
+  }
+}
+
 const confirmOpen = computed({
   get: () => pendingRemove.value !== null,
   set: (v: boolean) => { if (!v) pendingRemove.value = null }
@@ -137,15 +151,17 @@ async function load() {
     // 1. 从本地 PouchDB 读取订阅（离线可用）
     const localSubs = await pouch.listSubscriptions()
 
-    // 2. 在线时从服务端获取抓取状态（active/paused/error），合并到本地数据
-    const statusMap = new Map<string, { status: FeedStatus, errorMessage?: string, lastFetchedAt?: string }>()
+    // 2. 在线时从服务端获取抓取状态（active/paused/error）与订阅源地址，合并到本地数据
+    const statusMap = new Map<string, { status: FeedStatus, errorMessage?: string, lastFetchedAt?: string, feedUrl?: string }>()
     try {
       const remote = await api.feeds.subscriptions()
       for (const r of remote) {
         statusMap.set(r.feedId, {
           status: r.status,
           errorMessage: r.errorMessage,
-          lastFetchedAt: r.lastFetchedAt
+          lastFetchedAt: r.lastFetchedAt,
+          // 订阅源地址：feed 是抓取地址；bot 没有 RSS 地址，显示联邦地址 @用户名@域名
+          feedUrl: r.feedUrl ?? (r.preferredUsername ? botHandle(r.preferredUsername, apiBaseUrl) : undefined)
         })
       }
     } catch {
@@ -166,7 +182,8 @@ async function load() {
         status: st?.status ?? 'active',
         errorMessage: st?.errorMessage,
         lastFetchedAt: st?.lastFetchedAt,
-        view: sub.view
+        view: sub.view,
+        feedUrl: st?.feedUrl
       } as FeedSubscriptionItem
     })
 
@@ -374,7 +391,7 @@ onMounted(load)
               :key="sub.feedId"
               :subscription="sub"
               @remove="pendingRemove = sub"
-              @edit="editingItem = sub"
+              @edit="openEdit(sub)"
             />
           </TransitionGroup>
         </div>
@@ -392,7 +409,7 @@ onMounted(load)
           :key="sub.feedId"
           :subscription="sub"
           @remove="pendingRemove = sub"
-          @edit="editingItem = sub"
+          @edit="openEdit(sub)"
         />
       </TransitionGroup>
     </template>

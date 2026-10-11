@@ -98,6 +98,10 @@ export interface FeedSubscriptionItem {
   lastNewEntryAt?: string
   /** 该订阅源配置的默认列表视图（未配置 = 跟随分组 / 全局） */
   view?: ListView
+  /** 抓取地址（RSS/Atom）；bot 订阅没有 RSS 地址，用 preferredUsername 拼联邦地址展示 */
+  feedUrl?: string
+  /** bot 订阅的联邦用户名：前端据此拼 `@用户名@域名`（见 utils/botHandle） */
+  preferredUsername?: string
 }
 
 /**

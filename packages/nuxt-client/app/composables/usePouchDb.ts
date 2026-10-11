@@ -1507,6 +1507,22 @@ export function usePouchDb() {
     return fallback ?? null
   }
 
+  /**
+   * 取某个源的抓取地址（FeedDoc.url）。
+   *
+   * FeedDoc 随拉取通道同步到本地库，所以断网也有；编辑订阅弹窗用它显示只读的订阅源地址。
+   * bot 产出是虚拟源（`bot:{id}`），本地没有对应 FeedDoc，返回 null —— 调用方按「没有地址」处理。
+   */
+  async function getFeedUrl(feedId: string): Promise<string | null> {
+    try {
+      const doc = await getEntriesDb().get(feedDocId(feedId)) as unknown as FeedDoc
+      return doc?.type === 'feed' ? doc.url?.trim() || null : null
+    } catch {
+      // FeedDoc 尚未同步 / 源不存在：不阻塞弹窗打开
+      return null
+    }
+  }
+
   /** 将本地库文档映射为 RssEntry（列表展示用，feed 元信息由 enrichEntries 补全） */
   function docToEntry(doc: EntryDoc): RssEntry {
     return {
@@ -2149,6 +2165,7 @@ export function usePouchDb() {
     syncStatuses: syncStatuses as Readonly<Record<string, SyncStatus>>,
     listSubscriptions,
     getSubscriptionTitle,
+    getFeedUrl,
     addSubscription,
     addBotSubscription,
     removeSubscription,
