@@ -196,12 +196,17 @@ const gap = computed(() => VIEW_GAP[view.value])
 const IMAGE_LANE_WIDTH_FALLBACK = 160
 const contentWidth = ref(0)
 
-/** 虚拟化实例里本组件用到的最小面（见 revealEntry 的定位说明） */
+/**
+ * 虚拟化实例里本组件用到的最小面（见 revealEntry 的定位说明）。
+ *
+ * 只借它**算**目标位置，不用它的 scrollToIndex：那条路（见 glideScroll 的说明）实测一卡一卡。
+ * `getOffsetForIndex(index, align)` 返回 `[偏移, align]`，偏移已按视口居中并夹在可滚范围内。
+ */
 interface EntryVirtualizer {
-  scrollToIndex: (
+  getOffsetForIndex?: (
     index: number,
-    options?: { align?: 'start' | 'center' | 'end', behavior?: ScrollBehavior }
-  ) => void
+    align?: 'start' | 'center' | 'end' | 'auto'
+  ) => [number, string] | undefined
 }
 
 /** ScrollArea 对外暴露的东西：根节点（量宽度 / 当滚动容器）与虚拟化实例 */
@@ -212,7 +217,7 @@ interface ScrollAreaExposed {
 
 /**
  * ScrollArea 根节点：既用来量内容宽度，也挂 ResizeObserver 跟随容器变化；
- * 关闭详情后的「拉回视野」还用它暴露的虚拟化实例按 index 定位（见 revealEntry）。
+ * 关闭详情后的「拉回视野」还用它暴露的虚拟化实例估算目标位置（见 revealEntry）。
  */
 const scrollAreaRef = ref<ScrollAreaExposed | null>(null)
 
@@ -472,15 +477,111 @@ function handleOpen(entry: RssEntry) {
 const REVEAL_FLASH_MS = 1500
 
 /**
- * 定位用平滑滚动，而不是一步跳过去。
+ * 定位动画的时间常数（毫秒）与兜底上限。
  *
- * 翻了很多篇之后列表和正文已经隔了很远：瞬时跳过去，用户只看见内容「换了一屏」，
- * 找不回「刚才读的和这里是同一份列表」的连续感；滚过去则看得见中间那些条目从眼前掠过。
- * 距离不用自己管 —— 浏览器按距离控制时长；虚拟化实例在中途会重算目标
- * （@tanstack/virtual-core 的 reconcileScroll 期间会对变化太大的目标重新发起平滑滚动，
- * 收尾再给一次瞬时校正落准），所以滚动区这条路上「滚过去」和「停在对的位置」都能拿到。
+ * 每帧走掉剩余距离的 dt/TAU：速度自带「起步快、末段缓」，帧率变了只影响步长，不会变成跳。
+ * 120ms 下第一帧约走 14%（按下面的瞬移上限折算，单帧约 120px，也就是 7 千像素/秒上下），
+ * 可见的那一段约 0.4s，末段是亚像素级的收敛（看不出来）。1.6s 都没收敛就交出去 ——
+ * 落点对不对由 revealEntry 再看一眼，它宁可再滑一轮也不在这里硬凑。
  */
-const REVEAL_SCROLL_BEHAVIOR: ScrollBehavior = 'smooth'
+const REVEAL_GLIDE_TAU_MS = 120
+const REVEAL_GLIDE_TIMEOUT_MS = 1600
+
+/** 剩余距离小于它就算到了（指数收敛永远差一点点，别为半个像素一直转） */
+const REVEAL_GLIDE_MIN_STEP_PX = 1.5
+
+/**
+ * 超过「这么多屏」就先瞬移掉大部分，只留最后一屏多给动画。
+ *
+ * **这是实测确认过、要保留的取舍**：几万像素要么慢得要走一分钟，要么快得整屏糊成一片 —— 两种都
+ * 不是「滑过去」，只是把等待摊长了。用户复测后的原话是「这样的速度反而更快，就现在这个效果就可以，
+ * 不用全程飞过去」。所以：瞬移一帧（这一帧和关闭详情同一瞬间，眼睛还在详情上）+ 最后一屏多的连续
+ * 滑行（约 0.4s），最后这一屏多才是唯一看得清「从哪来、到哪去」的一段。
+ * 以后要动这段，请连这条决定一起改，别顺手换成全程动画。
+ *
+ * 1.2 屏是按下面的时间常数反推的：第一帧走剩余距离的 dt/TAU ≈ 14%，乘一屏多 ≈ 120px/帧
+ * （约 7 千像素/秒）；再拉长，第一帧就成「一下子糊过去」了。
+ */
+const REVEAL_TELEPORT_VIEWPORTS = 1.2
+const REVEAL_TELEPORT_MIN_PX = 320
+
+/** 正在跑的定位动画；重开一次定位、或者定位变成不需要滚动时要把它停掉 */
+let stopGliding: (() => void) | null = null
+
+onBeforeUnmount(() => {
+  clearTimeout(flashTimer)
+  stopGliding?.()
+})
+
+/**
+ * 朝目标滑过去 —— 自己逐帧推，**不走虚拟化实例的 scrollToIndex({ behavior: 'smooth' })**。
+ *
+ * 那条路实测是一卡一卡的：@tanstack/virtual-core 的 reconcileScroll 每帧按最新测量值重算目标、
+ * 距离掉到一屏以内就把 behavior 改成 'auto' 一步跳到位，itemSize 变化时的 applyScrollAdjustment
+ * 也是瞬时校正。一段 1.6 万像素的定位里 362 帧只有 114 帧在动，单帧最大位移 766px（整整一屏）。
+ * 自己推就只有一条连续曲线：目标每帧重算（虚拟化边滚边量，落点会变），但每帧只走剩余距离的一小步，
+ * 读的是**实时位置**而不是「旧起点」—— 这样中间那次瞬时校正（内容不动的位移）也能跟着走，
+ * 不会被下一帧顶回去。
+ */
+function glideScroll(scroller: HTMLElement, readTarget: () => number | null, done: () => void) {
+  stopGliding?.()
+
+  const max = Math.max(0, scroller.scrollHeight - scroller.clientHeight)
+  const clamp = (value: number) => Math.min(Math.max(value, 0), max)
+  const first = readTarget()
+  if (first === null) {
+    done()
+    return
+  }
+
+  // 远距离先瞬移，只留最后一屏多给动画（为什么这么取舍，见 REVEAL_TELEPORT_VIEWPORTS 的说明）
+  const target = clamp(first)
+  const keep = Math.max(scroller.clientHeight * REVEAL_TELEPORT_VIEWPORTS, REVEAL_TELEPORT_MIN_PX)
+  if (Math.abs(target - scroller.scrollTop) > keep) {
+    scroller.scrollTop = clamp(target - Math.sign(target - scroller.scrollTop) * keep)
+  }
+
+  const startedAt = performance.now()
+  let last = startedAt
+  let frame = 0
+  // 位置连着两帧没往前走（剩下不足半像素，被设备像素取整吃掉）：收尾对齐，别耗到超时
+  let stalled = 0
+  let ticks = 0
+
+  const stop = () => {
+    cancelAnimationFrame(frame)
+    if (stopGliding === stop) stopGliding = null
+  }
+
+  const tick = () => {
+    const now = performance.now()
+    const dt = Math.min(now - last, 64) // 掉帧时别一步跨太远
+    last = now
+    ticks += 1
+    const to = clamp(readTarget() ?? target)
+    const current = scroller.scrollTop
+    const delta = to - current
+    if (Math.abs(delta) <= REVEAL_GLIDE_MIN_STEP_PX || now - startedAt > REVEAL_GLIDE_TIMEOUT_MS) {
+      if (Math.abs(delta) <= REVEAL_GLIDE_MIN_STEP_PX) scroller.scrollTop = to
+      stop()
+      done()
+      return
+    }
+    scroller.scrollTop = current + delta * Math.min(1, dt / REVEAL_GLIDE_TAU_MS)
+    // 位置没往前走（剩下不足半像素，被设备像素取整吃掉）：别再耗着，收尾对齐到目标
+    stalled = Math.abs(scroller.scrollTop - current) < 0.5 ? stalled + 1 : 0
+    if (ticks > 2 && stalled >= 2) {
+      scroller.scrollTop = to
+      stop()
+      done()
+      return
+    }
+    frame = requestAnimationFrame(tick)
+  }
+
+  stopGliding = stop
+  frame = requestAnimationFrame(tick)
+}
 
 /** 正在闪的那一条；滚动区的条目看 data-flash 属性，表格的行看 entry-flash 类（见 tableMeta） */
 const flashId = ref<string | null>(null)
@@ -492,81 +593,6 @@ function flashEntry(id: string) {
   flashTimer = setTimeout(() => {
     flashId.value = null
   }, REVEAL_FLASH_MS)
-}
-
-/** 等「滚到停稳」的小循环：重开一次定位、或者定位变成不需要滚动时，要把它停掉 */
-let stopSettling: (() => void) | null = null
-
-onBeforeUnmount(() => {
-  clearTimeout(flashTimer)
-  stopSettling?.()
-})
-
-/**
- * 连续多少帧位置不变就算停稳了（60fps 下约 130ms）。
- * 不能用「等一个固定时长」：距离远近、浏览器、虚拟化中途重算都会改变滚动时长。
- * 也不能只等一帧：虚拟化重算目标后可能紧接着再发一次平滑滚动（reconcileScroll），
- * 那一小段间隙里位置也是不动的。
- */
-const REVEAL_SETTLE_STILL_FRAMES = 8
-
-/**
- * 一次「定位之后什么动静都没有」等多久才认为这次定位不会动了（目标就在原地 / 已经滚到头）。
- *
- * 起步前那几帧位置同样不动，不能当成「滚完了」；但也不能等太久 —— 真滚不动时用户还得等它闪。
- * 取值偏大：窄屏弹窗关闭时列表要等弹窗退场动画走完（实测约 400ms）才开始滚，判定早了会白白
- * 再定位一次，那一次是「半路重来」，看起来就是一段生硬的跳变。
- */
-const REVEAL_SETTLE_IDLE_MS = 1200
-
-/** 兜底上限：怎么都等不到停稳就先按「到了」处理 —— 到位与否由 revealEntry 再看一眼，
- * 没到位会再定位一轮，所以这里判早了也不会闪在看不见的地方。
- * 实测一段 5.7 万像素的长滚动（连翻 120 篇）用时约 2.4s，留到这里够用。 */
-const REVEAL_SETTLE_TIMEOUT_MS = 3000
-
-/**
- * 等滚动停下来再做事。
- *
- * 「滚完再闪」是这条提示的重点：滚动途中条目还在飞，这时闪一下等于没闪 —— 动画（1.4s）
- * 比滚动（约 1s）长不了多少，等它到位时高亮已经淡得看不见了。
- *
- * 逐帧看位置，而不是用 scrollend：虚拟化实例在中途会重算目标、可能再发起一次平滑滚动
- * （@tanstack/virtual-core 的 reconcileScroll），scrollend 会在半路就触发一次。
- */
-function afterScrollSettles(scroller: HTMLElement, done: () => void) {
-  stopSettling?.()
-  const initial = scroller.scrollTop
-  const startedAt = performance.now()
-  let last = initial
-  let still = 0
-  let moved = false
-  let frame = 0
-
-  const stop = () => {
-    cancelAnimationFrame(frame)
-    stopSettling = null
-  }
-
-  const tick = () => {
-    const current = scroller.scrollTop
-    if (current !== initial) moved = true
-    // 严格相等（不是「差得少」）：浏览器平滑滚动收尾是逐帧减量的，差一点点也还叫在动
-    still = current === last ? still + 1 : 0
-    last = current
-    const elapsed = performance.now() - startedAt
-    if (
-      (still >= REVEAL_SETTLE_STILL_FRAMES && (moved || elapsed > REVEAL_SETTLE_IDLE_MS))
-      || elapsed > REVEAL_SETTLE_TIMEOUT_MS
-    ) {
-      stop()
-      done()
-      return
-    }
-    frame = requestAnimationFrame(tick)
-  }
-
-  stopSettling = stop
-  frame = requestAnimationFrame(tick)
 }
 
 /** 当前列表的滚动容器根节点：表格分支是 UTable 自己的根，其余视图是 ScrollArea 的根 */
@@ -631,61 +657,58 @@ function isMostlyVisible(el: HTMLElement, root: HTMLElement): boolean {
 }
 
 /**
- * 表格分支的定位：UTable 不暴露虚拟化实例，只能靠「已渲染的行 + 固定行高」外推。
+ * 表格分支的目标位置：UTable 不暴露虚拟化实例，靠「已渲染的行 + 固定行高」外推。
  *
  * 行高是常数（见 TABLE_ROW_HEIGHT），渲染出来的行又都在同一份滚动内容里，所以
  * 「目标行位置 = 锚点行位置 + 行数差 × 行高」成立，不必去量表头 / 页头占掉多少高度。
+ * 只在目标行还没渲染出来时才用得上 —— 它一旦进了 DOM，就用它的真实矩形（更准）。
  */
-function scrollTableRowIntoView(root: HTMLElement, index: number, el: HTMLElement | null): void {
-  let anchor: { index: number, top: number } | null = null
+function tableTargetOffset(root: HTMLElement, index: number): number | null {
   for (const cell of root.querySelectorAll<HTMLElement>('[data-entry-id]')) {
     const row = cell.closest('tr')
     const rowIndex = props.entries.findIndex(entry => entry.id === cell.dataset.entryId)
     if (!row || rowIndex < 0) continue
-    anchor = { index: rowIndex, top: row.getBoundingClientRect().top }
-    break
+    const box = root.getBoundingClientRect()
+    return root.scrollTop
+      + (row.getBoundingClientRect().top - box.top) // 锚点行此刻在视口里的位置
+      + (index - rowIndex) * TABLE_ROW_HEIGHT
+      - (root.clientHeight - TABLE_ROW_HEIGHT) / 2 // 目标行摆到视口正中
   }
-  if (!anchor) {
-    el?.scrollIntoView({ block: 'center', behavior: REVEAL_SCROLL_BEHAVIOR })
-    return
-  }
-  const box = root.getBoundingClientRect()
-  const centered = root.scrollTop
-    + (anchor.top - box.top) // 锚点行此刻在视口里的位置
-    + (index - anchor.index) * TABLE_ROW_HEIGHT
-    - (root.clientHeight - TABLE_ROW_HEIGHT) / 2 // 目标行摆到视口正中
-  const max = Math.max(0, root.scrollHeight - root.clientHeight)
-  root.scrollTo({ top: Math.min(Math.max(centered, 0), max), behavior: REVEAL_SCROLL_BEHAVIOR })
+  return null
 }
 
-/** 发起一次定位（表格与滚动区两条路径），不改动任何状态，纠正时可以直接再调一次 */
-function scrollEntryIntoList(root: HTMLElement, index: number, el: HTMLElement | null): void {
-  if (view.value === 'table') {
-    scrollTableRowIntoView(root, index, el)
-    return
+/**
+ * 定位目标（scrollTop 坐标系），**每帧重算** —— 这是「滚得顺」的关键：
+ * 虚拟化边滚边量，落点会随测量值变，用固定终点插值的话中途会被拽回去。
+ *
+ * 优先用条目自己的实时矩形（真值：瀑布流条目高度是估的，只有量到的才准）；
+ * 还没渲染出来（虚拟化把它摘了）才退回虚拟化实例按 index 的估算（页头也占一项，要加偏移）；
+ * 表格没有虚拟化实例可用，走行高外推。
+ */
+function revealTargetOffset(root: HTMLElement, scroller: HTMLElement, index: number, id: string): number | null {
+  const el = revealElement(root, id)
+  if (el) {
+    const item = el.getBoundingClientRect()
+    const box = scroller.getBoundingClientRect()
+    // 摆到视口正中：当前位置 + 它此刻相对视口的位置 - 居中的差值
+    return scroller.scrollTop + (item.top - box.top) - (scroller.clientHeight - item.height) / 2
   }
-  const virtualizer = scrollAreaRef.value?.virtualizer
-  // 视口外的条目在 DOM 里根本不存在，只有虚拟化实例能按 index 定位（页头也占一项，要加偏移）
-  if (virtualizer) {
-    virtualizer.scrollToIndex(headerItems.value.length + index, {
-      align: 'center',
-      behavior: REVEAL_SCROLL_BEHAVIOR
-    })
-  } else {
-    el?.scrollIntoView({ block: 'center', behavior: REVEAL_SCROLL_BEHAVIOR })
-  }
+  if (view.value === 'table') return tableTargetOffset(root, index)
+  // 页头在列表里也占一项（见 headerItems）
+  const info = scrollAreaRef.value?.virtualizer?.getOffsetForIndex?.(headerItems.value.length + index, 'center')
+  return info?.[0] ?? null
 }
 
 /**
  * 一次定位 + 最多两次纠正。
  *
- * 虚拟化的条目高度是估的（瀑布流按封面比例、图片要等加载），落点常常差一截：滚完发现那一条还在
- * 视口外就再定位一次 —— 第二次时它已经渲染并量过，偏移就准了。纠正次数封顶，怎么都到不了也照闪，
+ * 虚拟化的条目高度是估的（瀑布流按封面比例、图片要等加载），落点常常差一截：滑完发现那一条还在
+ * 视口外就再滑一轮 —— 第二轮时它已经渲染并量过，偏移就准了。纠正次数封顶，怎么都到不了也照闪，
  * 不能让提示一直不来。**没到位就不闪**：闪在看不见的地方等于没闪。
  */
 const REVEAL_MAX_CORRECTIONS = 2
 
-/** 定位的代次：新一次定位开始后，旧的等待循环不能再闪（否则会闪在上一轮的目标上） */
+/** 定位的代次：新一次定位开始后，旧的那一轮不能再闪（否则会闪在上一轮的目标上） */
 let revealToken = 0
 
 /**
@@ -694,7 +717,8 @@ let revealToken = 0
  * 场景：连点多次「下一篇」翻了很多篇再关掉详情，列表还停在最初点开的那一条上 —— 不自动滚回去，
  * 用户得往下翻很久才找得到自己刚读到哪儿（宽屏阅读栏同理：选中高亮跑到了视口外）。
  * 已经看得见的那条只闪不滚：用户当前的滚动位置是有意停留的，不该被一次定位推走。
- * 要滚的那条是滚过去的（见 REVEAL_SCROLL_BEHAVIOR），并且**滚到了才闪**（见 afterScrollSettles）。
+ * 要滚的那条是**滑过去的**（见 glideScroll），并且**滑到了才闪** —— glideScroll 结束就是滑到了，
+ * 不再靠「位置连续多少帧不变」去猜（那是上一版的做法，猜早了就会闪在还在飞的列表上）。
  */
 function revealEntry(id: string): void {
   const index = props.entries.findIndex(entry => entry.id === id)
@@ -704,13 +728,18 @@ function revealEntry(id: string): void {
   const el = root ? revealElement(root, id) : null
   if (!root || (el && isFullyVisible(el, root))) {
     // 不用滚：上一次定位若还悬着，它的闪不该带到这一条上
-    stopSettling?.()
+    stopGliding?.()
     revealToken += 1
     flashEntry(id)
     return
   }
 
   const scroller = revealScroller(root, el)
+  if (!scroller) {
+    flashEntry(id)
+    return
+  }
+
   const token = (revealToken += 1)
   let corrections = 0
 
@@ -726,14 +755,10 @@ function revealEntry(id: string): void {
       return
     }
     corrections += 1
-    scrollEntryIntoList(root, index, current)
-    if (scroller) afterScrollSettles(scroller, settle)
-    else flashEntry(id)
+    glideScroll(scroller, () => revealTargetOffset(root, scroller, index, id), settle)
   }
 
-  scrollEntryIntoList(root, index, el)
-  if (scroller) afterScrollSettles(scroller, settle)
-  else flashEntry(id)
+  glideScroll(scroller, () => revealTargetOffset(root, scroller, index, id), settle)
 }
 
 /**

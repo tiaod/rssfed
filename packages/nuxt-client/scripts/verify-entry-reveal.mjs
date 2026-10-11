@@ -296,11 +296,28 @@ async function stopScrollSampler(budgetMs = 3_000) {
     // 最后一次位移发生在第几帧：闪的标记必须出现在它之后（滚完再闪）
     let lastMove = 0
     for (let i = 1; i < tops.length; i++) if (tops[i] !== tops[i - 1]) lastMove = i
+    const firstMove = tops.findIndex((top, i) => i > 0 && top !== tops[i - 1])
     const flashAt = samples.findIndex(s => s.flash)
-    // 采样结束时（列表已停稳）还亮着吗 + 闪过的那一帧是否已经在收尾附近：
-    // 这两条合起来才是「闪的时候看得见」—— 滚动收尾还会补一帧瞬时微调，不能要求严格在它之后
-    const flashStillOn = samples.at(-1)?.flash === true
-    return { start: first, end, between, frames: samples.length, lastMove, flashAt, flashStillOn }
+    // 闪过之后还亮着的帧数：采样尾巴可能比 1.5s 的标记还长（标记到点自己摘掉是正常的），
+    // 所以不能拿「最后一帧还亮着」当判据 —— 要的是它亮够了（动画 1.4s，看得见）
+    const flashLitFrames = samples.slice(Math.max(flashAt, 0), Math.max(flashAt, 0) + 20)
+      .filter(s => s.flash).length
+    // 动起来之后有没有「卡住不动」的空档：一卡一卡正是这么来的（滚动途中位置连着很多帧不变）
+    let stillDuringMotion = 0
+    for (let i = Math.max(firstMove, 1); i <= lastMove; i++) {
+      if (samples[i].top === samples[i - 1].top) stillDuringMotion += 1
+    }
+    return {
+      start: first,
+      end,
+      between,
+      frames: samples.length,
+      firstMove,
+      lastMove,
+      stillDuringMotion,
+      flashAt,
+      flashLitFrames
+    }
   })()`)
 }
 
@@ -408,9 +425,14 @@ async function verifyReveal(label, closeDetail, flashSelector = '[data-flash="tr
     `${scroll.frames} 帧里经过 ${scroll.between.length} 个中间位置：${scroll.between.slice(0, 6).join(' → ')}`
   )
   check(
-    `${label}：等滚到位了才闪（停稳时它还亮着）`,
-    scroll.flashStillOn && scroll.flashAt >= scroll.lastMove - 3,
-    `最后一次位移在第 ${scroll.lastMove} 帧，闪现在第 ${scroll.flashAt} 帧，停稳时仍亮着（共 ${scroll.frames} 帧）`
+    `${label}：滚起来之后是连续的，没有长时间卡住`,
+    scroll.stillDuringMotion <= 6,
+    `第 ${scroll.firstMove} 帧动到第 ${scroll.lastMove} 帧，中间有 ${scroll.stillDuringMotion} 帧位置没变`
+  )
+  check(
+    `${label}：等滚到位了才闪（闪过之后亮得够久）`,
+    scroll.flashLitFrames >= 12 && scroll.flashAt >= scroll.lastMove - 3,
+    `最后一次位移在第 ${scroll.lastMove} 帧，闪现在第 ${scroll.flashAt} 帧，之后 20 帧里亮了 ${scroll.flashLitFrames} 帧（共 ${scroll.frames} 帧）`
   )
   check(`${label}：闪烁动画真的挂上了`, state.animation === 'entry-flash', state.animation)
 
