@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, beforeAll, vi } from 'vitest'
 import { ref, computed, type Ref } from 'vue'
 import { mount, flushPromises } from '@vue/test-utils'
 import EntryDetailModal from '../../components/EntryDetailModal.vue'
@@ -152,6 +152,30 @@ const STUBS = {
   }
 }
 
+// 组件里的 Swiper / SwiperSlide 是 defineAsyncComponent：首次解析要走一次真实动态 import
+// （含 mock 工厂的求值），在慢 runner 上可能拖过断言窗口。这里先预热，把它装进模块缓存，
+// 让各用例只需等一个微任务，而不是等模块图。
+beforeAll(async () => {
+  await import('swiper/vue')
+})
+
+/**
+ * 全屏分支的 Swiper 走 defineAsyncComponent 懒加载：`import('swiper/vue')` 落地前
+ * 只挂到一个空壳，子槽要等模块解析完才渲染。这里等到槽位真的出现再断言——
+ * 原先用固定的 `setTimeout(20)` 赌时序，CI runner 一慢就赶不上，发布流水线的
+ * test 门禁就曾挂在这条用例上（AssertionError: expected [] to have a length of 3）。
+ *
+ * 槽位由模板里单个 v-for 一次性铺出，不存在「渲染到一半」，所以只需等到非空；
+ * 具体条数仍由各用例自己的 toHaveLength 断言，不放松任何检查。
+ */
+async function mountFullscreenModal() {
+  const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+  await vi.waitFor(() => {
+    expect(wrapper.findAll('.swiper-slide-stub').length).toBeGreaterThan(0)
+  })
+  return wrapper
+}
+
 describe('EntryDetailModal', () => {
   it('顶栏标题显示订阅源名字，而不是文章标题', async () => {
     g.isOpen.value = true
@@ -180,10 +204,7 @@ describe('EntryDetailModal', () => {
     modalSize = 'fullscreen'
     fixedBars = true
 
-    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
-    await flushPromises()
-    await new Promise(r => setTimeout(r, 20))
-    await flushPromises()
+    const wrapper = await mountFullscreenModal()
 
     const slides = wrapper.findAll('.swiper-slide-stub')
     expect(slides).toHaveLength(3)
@@ -239,10 +260,7 @@ describe('EntryDetailModal', () => {
     modalSize = 'fullscreen'
     fixedBars = true
 
-    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
-    await flushPromises()
-    await new Promise(r => setTimeout(r, 20))
-    await flushPromises()
+    const wrapper = await mountFullscreenModal()
 
     const slides = wrapper.findAll('.swiper-slide-stub')
     expect(slides).toHaveLength(2)
@@ -258,10 +276,7 @@ describe('EntryDetailModal', () => {
     modalSize = 'fullscreen'
     fixedBars = true
 
-    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
-    await flushPromises()
-    await new Promise(r => setTimeout(r, 20))
-    await flushPromises()
+    const wrapper = await mountFullscreenModal()
 
     const slides = wrapper.findAll('.swiper-slide-stub')
     expect(slides).toHaveLength(2)
@@ -277,10 +292,7 @@ describe('EntryDetailModal', () => {
     modalSize = 'fullscreen'
     fixedBars = true
 
-    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
-    await flushPromises()
-    await new Promise(r => setTimeout(r, 20))
-    await flushPromises()
+    const wrapper = await mountFullscreenModal()
 
     const slides = wrapper.findAll('.swiper-slide-stub')
     expect(slides).toHaveLength(1)
@@ -307,32 +319,40 @@ describe('EntryDetailModal', () => {
       const q = pendingRaf.splice(0)
       for (const cb of q) cb(0)
     }
+    // 本用例断言的是「这一次挂载」产生的实例，而 __swiperFake 是全局单槽：
+    // 先清掉上一次挂载留下的引用，免得读到别人的实例与 history
+    testGlobals.__swiperFake = undefined
     try {
       mount(EntryDetailModal, { global: { stubs: STUBS } })
-      await flushPromises()
-      pumpRaf() // 让 emit('swiper') 的微任务先落地，再推一帧
-      await flushPromises()
+
+      // Swiper 走 defineAsyncComponent，实例要等模块解析完才由 mock 抛出来。
+      // 等它真的出现再往下走 —— 原来靠固定次数的 flushPromises 赌它到了没有，会偶发落空
+      await vi.waitFor(() => {
+        expect(testGlobals.__swiperFake).toBeTruthy()
+      })
 
       const fake = testGlobals.__swiperFake as {
         inst: { slides: unknown[], __fill: (n: number) => void }
         history: [string, { slidesLen: number }][]
       }
-      expect(fake.inst).toBeTruthy()
       expect(fake.inst.slides.length).toBe(0) // 复现冷启动首帧：实例就绪但子槽未挂载
 
-      fake.inst.__fill(2) // 子槽异步补上
-      // 逐帧推进到对齐发生：并发跑测试时微任务与帧的落地时机有抖动，
-      // 固定只推一帧会偶发看不到「槽位就绪后的对齐」（断言本身不变）
-      for (let i = 0; i < 5; i++) {
-        pumpRaf()
-        await flushPromises()
-      }
-
-      const slideToMeta = fake.history
+      const slideToMeta = () => fake.history
         .filter((h: [string, unknown]) => h[0] === 'slideTo')
         .map((h: [string, { slidesLen: number }]) => h[1].slidesLen)
-      expect(slideToMeta.length).toBeGreaterThan(0)
-      expect(Math.max(...slideToMeta)).toBeGreaterThan(0) // 对齐发生在槽位就绪之后，空几何不得定格
+
+      fake.inst.__fill(2) // 子槽异步补上
+      // 逐帧推进直到看见「槽位就绪后的对齐」：帧数在这里是上限，不是约定 ——
+      // 并发跑测试时微任务与帧的落地时机有抖动，写死推 5 帧会偶发推不到（本用例曾随机失败）
+      for (let i = 0; i < 40; i++) {
+        pumpRaf()
+        await flushPromises()
+        if (slideToMeta().some(n => n > 0)) break
+      }
+
+      const meta = slideToMeta()
+      expect(meta.length).toBeGreaterThan(0)
+      expect(Math.max(...meta)).toBeGreaterThan(0) // 对齐发生在槽位就绪之后，空几何不得定格
     } finally {
       testGlobals.requestAnimationFrame = realRaf
     }
