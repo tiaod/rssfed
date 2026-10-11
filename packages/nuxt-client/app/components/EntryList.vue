@@ -439,7 +439,7 @@ useIntersectionObserver(
   { rootMargin: '0px 0px 200px 0px' }
 )
 
-const { openEntry, isOpen, currentEntry } = useEntryModal()
+const { openEntry, isOpen, currentEntry, navigatedInDetail } = useEntryModal()
 
 /**
  * 详情正在展示的那条，列表里给它一圈高亮。
@@ -719,6 +719,9 @@ let revealToken = 0
  * 已经看得见的那条只闪不滚：用户当前的滚动位置是有意停留的，不该被一次定位推走。
  * 要滚的那条是**滑过去的**（见 glideScroll），并且**滑到了才闪** —— glideScroll 结束就是滑到了，
  * 不再靠「位置连续多少帧不变」去猜（那是上一版的做法，猜早了就会闪在还在飞的列表上）。
+ *
+ * **没翻过篇就不进这里**（见下面的触发点）：点开读完直接返回时列表还停在点开的那条上，
+ * 没有「读到哪儿了」要找回来，滚动闪烁纯属打扰。
  */
 function revealEntry(id: string): void {
   const index = props.entries.findIndex(entry => entry.id === id)
@@ -767,11 +770,14 @@ function revealEntry(id: string): void {
  * 认 isOpen 这一个状态，而不是各展示面的关闭动作：弹窗的关闭按钮 / Esc / 遮罩、阅读栏的 X / Esc、
  * 浏览器返回键、useEntryRoute 的地址回退，全都落在这里。currentEntry 在关闭后仍留着刚才那篇
  * （见 useEntryModal），正好就是「刚刚在读的那一条」。
+ *
+ * 只在详情里翻过篇（上一篇 / 下一篇）才定位 + 闪一下：没翻过就说明用户点开读完直接返回了，
+ * 列表根本还停在点开的那条上，再滚再闪只是平白打扰（判据见 useEntryModal 的 navigatedInDetail）。
  */
 watch([isOpen, () => currentEntry.value?.id], ([open]) => {
   if (open) return
   const id = currentEntry.value?.id
-  if (id) revealEntry(id)
+  if (id && navigatedInDetail.value) revealEntry(id)
 })
 
 // ── 表格视图 ──────────────────────────────────────────────────────────────

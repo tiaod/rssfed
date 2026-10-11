@@ -100,6 +100,35 @@ describe('useEntryModal', () => {
     expect(currentEntry.value?.id).toBe('entry-3')
   })
 
+  it('navigatedInDetail：翻篇置真、关闭时保留（列表要读它）、下次打开归零', () => {
+    const list = [makeEntry(1), makeEntry(2), makeEntry(3)]
+    const { openEntry, closeEntry, goNext, navigatedInDetail } = useEntryModal()
+
+    openEntry(list[1]!, () => list)
+    expect(navigatedInDetail.value).toBe(false) // 刚点开，还没翻
+
+    goNext()
+    expect(navigatedInDetail.value).toBe(true)
+
+    closeEntry()
+    expect(navigatedInDetail.value).toBe(true) // 关闭那一刻列表读的正是它
+
+    openEntry(list[0]!, () => list)
+    expect(navigatedInDetail.value).toBe(false) // 新一次打开重新计
+  })
+
+  it('navigatedInDetail：翻到两端翻不动（越界）不算翻过篇', () => {
+    const list = [makeEntry(1), makeEntry(2)]
+    const { openEntry, goPrev, goNext, navigatedInDetail } = useEntryModal()
+
+    openEntry(list[0]!, () => list)
+    expect(goPrev()).toBeNull()
+    expect(navigatedInDetail.value).toBe(false)
+
+    goNext() // 翻到最后一条
+    expect(navigatedInDetail.value).toBe(true)
+  })
+
   it('当前条目不在列表中时前后翻页均不可用', () => {
     const { openEntry, goPrev, goNext, canGoPrev, canGoNext, closeEntry } = useEntryModal()
 

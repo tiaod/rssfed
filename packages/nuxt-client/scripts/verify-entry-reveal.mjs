@@ -10,13 +10,18 @@
  *   2. 已经看得见的那条只闪不滚（不推走用户当前的滚动位置）；
  *   3. 闪一下的动画自己退场（约 1.5s），不留成第二个「选中态」；
  *   4. 条目不在当前列表里（换源 / 被「只看未读」筛掉）时什么都不做 —— 这条由 vitest 覆盖
- *      （单测能构造当前列表里没有的那一篇，浏览器里不好摆）。
+ *      （单测能构造当前列表里没有的那一篇，浏览器里不好摆）；
+ *   5. **没点过上一篇 / 下一篇就关掉（读完直接返回）时，既不滚也不闪** —— 列表还停在点开的那条上，
+ *      再定位再闪只是打扰（见 useEntryModal 的 navigatedInDetail）。这条同样由 vitest 覆盖，
+ *      浏览器里跑的是它最不容易造假的那一面：详情开着时把列表滚走让刚读的那条落到视口外，
+ *      关掉之后位置必须一丝不动（旧行为会滑回去并闪一下）。
  *
  * 两个展示面互斥挂载，都要走一遍：
  *   A. 宽屏（1440×900）+ 列表视图：右侧常驻阅读栏，点 X 关闭后定位；
  *   B. 窄屏（390×844）+ 列表视图：全屏弹窗，按「关闭」后定位；
  *   C. 宽屏（1440×900）+ 表格视图：行由 UTable 生成，标记只能挂 entry-flash 类，
- *      定位走根节点的 scrollTo —— 与 A/B 是两条不同的代码路径，都要走一遍。
+ *      定位走根节点的 scrollTo —— 与 A/B 是两条不同的代码路径，都要走一遍；
+ *   D. 宽屏 + 列表视图：点开一篇、不翻篇、关掉 —— 口径 5 的端到端复核（接在 A 后面跑，仍是宽屏阅读栏）。
  *
  * 前置：后端 :3001、前端 :3000 均已在跑；admin 账号可登录（登录态 + 本地 PouchDB 存在
  * 持久化 profile 里，第二次之后很快；profile 被清空时要重等一次首屏全量同步）。
@@ -444,6 +449,48 @@ async function verifyReveal(label, closeDetail, flashSelector = '[data-flash="tr
   check(`${label}：闪烁到点自己退场，不留成第二个「选中态」`, gone)
 }
 
+/**
+ * 「没翻篇就关掉」的端到端复核：不滚也不闪。
+ *
+ * 要让这条断言有分量，前置条件必须是「旧行为会滚会闪」：详情开着的时候把列表滚走一段，
+ * 让刚读的那条落到视口外 —— 若判据还是老的（关掉就定位），它必然滑回去并闪一下。
+ * 新判据（useEntryModal 的 navigatedInDetail）下，位置必须停在用户自己滚到的地方。
+ */
+async function verifyNoNavOnClose(label, closeDetail, flashSelector, shot) {
+  await scrollListToTop()
+  const opened = await clickFirstItem()
+  check(`${label}：点开了一篇`, opened)
+  await page.waitForTimeout(1_500)
+  const read = await readItemState()
+  check(`${label}：前置条件——关掉前刚读的那条在列表里看得见`, read.found && read.visible, read.detail)
+  // 前置条件不成立就别往下走了：详情没开时关闭按钮是 disabled，点它会白等 30s 再抛异常
+  if (!opened || !read.found) return
+
+  // 详情开着时把列表滚走：不翻篇，只是让刚读的那条离开视口
+  await page.evaluate(`(() => { const el = ${SCROLLER}; if (el) el.scrollTop += 600 })()`)
+  await page.waitForTimeout(800)
+  const outOfView = await readItemState()
+  check(`${label}：前置条件——刚读的那条已被滚出视口（否则证明不了「不滚」）`, !outOfView.visible, outOfView.detail)
+  const moved = (await listState()).scrollTop
+
+  await startScrollSampler(flashSelector)
+  await closeDetail()
+  const flashed = await page
+    .waitForSelector(flashSelector, { state: 'attached', timeout: 2_500 })
+    .then(() => true)
+    .catch(() => false)
+  // 标记只挂 1.5s，等不到就等于没闪；再收一遍滚动采样确认位置没动
+  const scroll = await stopScrollSampler(1_500)
+  check(`${label}：没翻篇直接返回，不再闪一下`, !flashed, flashed ? '仍然闪了' : '')
+  check(
+    `${label}：列表停在用户自己滚到的位置（没有被拉回去）`,
+    Math.abs(scroll.end - moved) <= 4,
+    `scrollTop ${moved} → ${scroll.end}（采样 ${scroll.frames} 帧）`
+  )
+  // 截图留档：详情已退场、列表没动，此刻画面上没有任何闪烁标记
+  await page.screenshot({ path: `${OUT}/${shot}-no-nav.png` })
+}
+
 await ensureLoggedIn()
 await page.goto(`${BASE}/timeline`, { waitUntil: 'domcontentloaded' })
 check('时间线加载出条目', await waitForList(SYNC_WAIT_MS))
@@ -471,6 +518,11 @@ check('宽屏阅读栏：连点「下一篇」翻到了别的篇目', !!movedA &
 await verifyReveal('宽屏阅读栏', async () => {
   await page.locator('[aria-label="关闭阅读栏"]').first().click()
 })
+
+// ── D. 没翻篇就关掉：不滚也不闪（仍是宽屏阅读栏，接在 A 后面跑）──
+await verifyNoNavOnClose('宽屏阅读栏（没翻篇）', async () => {
+  await page.locator('[aria-label="关闭阅读栏"]').first().click()
+}, '[data-flash="true"]', 'D')
 
 // ── B. 窄屏弹窗（同一会话，切到手机视口；视图仍是「列表」）──
 await page.setViewportSize({ width: 390, height: 844 })

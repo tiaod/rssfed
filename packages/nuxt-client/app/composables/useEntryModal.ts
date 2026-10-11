@@ -36,6 +36,15 @@ export function useEntryModal() {
   const listGetter = useState<(() => RssEntry[]) | null>('entry-modal-list', () => null)
   /** 列表的无限加载上下文（最近一次打开时注入）；不注入时不做预加载与尽头提示 */
   const loader = useState<EntryListLoader | null>('entry-modal-loader', () => null)
+  /**
+   * 本次详情打开期间有没有用「上一篇 / 下一篇」翻过篇。
+   *
+   * 关掉详情后列表要不要把「刚刚读的那条」滚回视野并闪一下，判据就是它：只点开读完就返回时
+   * 列表还停在点开的那条上，滚动闪烁只是打扰（见 EntryList 的 revealEntry）。
+   * 只记录「翻过」这件事，回到原来那条也算翻过 —— 翻页本身是用户主动的动作。
+   * 关闭时不清（列表要在关闭那一刻读它），下一次 openEntry 归零。
+   */
+  const navigatedInDetail = useState<boolean>('entry-modal-navigated', () => false)
 
   /** 所属列表的响应式视图（取值时触达实际列表，随无限滚动 grow）；无列表上下文时为空数组 */
   const entries = computed(() => listGetter.value?.() ?? [])
@@ -45,6 +54,7 @@ export function useEntryModal() {
     listGetter.value = getList ?? null
     loader.value = listLoader ?? null
     firedAtLength.value = -1
+    navigatedInDetail.value = false
     isOpen.value = true
   }
 
@@ -81,6 +91,7 @@ export function useEntryModal() {
     const next = idx + dir
     if (idx === -1 || next < 0 || next >= list.length) return null
     currentEntry.value = list[next]!
+    navigatedInDetail.value = true
     return currentEntry.value
   }
 
@@ -125,6 +136,7 @@ export function useEntryModal() {
     openEntry,
     closeEntry,
     setListContext,
+    navigatedInDetail,
     goPrev: () => navEntry(-1),
     goNext: () => navEntry(1),
     canGoPrev,

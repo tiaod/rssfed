@@ -15,7 +15,12 @@ import type { ListView } from '../../utils/listViews'
  */
 
 /** 详情状态（宽屏阅读栏 / 窄屏弹窗共用）：列表据此给当前那篇高亮 */
-const modalState = { isOpen: ref(false), currentEntry: ref<RssEntry | null>(null) }
+const modalState = {
+  isOpen: ref(false),
+  currentEntry: ref<RssEntry | null>(null),
+  /** 详情里有没有翻过篇（上一篇 / 下一篇）；没翻篇就关掉不该再定位、闪一下 */
+  navigated: ref(false)
+}
 /** 打开详情：表格视图的行点击 / Enter 也要走到这里 */
 const openEntryMock = vi.fn()
 
@@ -23,7 +28,8 @@ const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useEntryModal = () => ({
   openEntry: openEntryMock,
   isOpen: modalState.isOpen,
-  currentEntry: modalState.currentEntry
+  currentEntry: modalState.currentEntry,
+  navigatedInDetail: modalState.navigated
 })
 // EntryList 用 IntersectionObserver 观察页尾骨架（骨架可见即触底加载）
 testGlobals.useIntersectionObserver = vi.fn(() => ({ pause: vi.fn(), resume: vi.fn(), stop: vi.fn() }))
@@ -201,6 +207,7 @@ function mountList(entries: RssEntry[], showFeed?: boolean, view?: ListView) {
 beforeEach(() => {
   modalState.isOpen.value = false
   modalState.currentEntry.value = null
+  modalState.navigated.value = false
 })
 
 /** 单测里 ScrollArea 退化成把 items 全渲染，虚拟化参数仍从 props 里读得到 */
@@ -783,11 +790,19 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
     vi.restoreAllMocks()
   })
 
-  /** 详情「打开某一篇 → 关掉」：EntryList 只认 isOpen 的这次变化（弹窗关闭 / 阅读栏 X / 返回键都是它） */
-  async function openThenClose(entry: RssEntry) {
+  /**
+   * 详情「打开某一篇 → 关掉」：EntryList 只认 isOpen 的这次变化（弹窗关闭 / 阅读栏 X / 返回键都是它）。
+   *
+   * `navigated` 对应真实世界里用户有没有在详情里点过「上一篇 / 下一篇」（见 useEntryModal 的
+   * navigatedInDetail）：默认 true，即「翻过篇才关掉」，走定位 + 闪一下那条路径；传 false 是
+   * 「点开读完直接返回」，这时列表还停在点开的那条上，不该有任何动作。
+   */
+  async function openThenClose(entry: RssEntry, navigated = true) {
+    modalState.navigated.value = false
     modalState.currentEntry.value = entry
     modalState.isOpen.value = true
     await nextTick()
+    modalState.navigated.value = navigated
     modalState.isOpen.value = false
     await nextTick()
   }
@@ -878,6 +893,29 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
 
     expect(wrapper.get('[data-entry-id="entry:feed-1:bbb"]').attributes('data-flash')).toBe('true')
     expect(wrapper.get('[data-entry-id="entry-1"]').attributes('data-flash')).toBeUndefined()
+  })
+
+  it('没翻过篇、读完直接返回：既不滚也不闪，列表停在用户自己停的位置', async () => {
+    // id 故意选别的用例不用的：本文件的 wrappers 不卸载，共享的 modalState 会把「关闭」这一下
+    // 广播给所有还挂着的 EntryList —— 撞上同名条目就会多起一轮定位动画，把后面的帧断言搅乱
+    const entries = ['entry-no-nav-1', 'entry-no-nav-2'].map(id => makeEntry({ id }))
+    const wrapper = mountList(entries, undefined, 'list')
+    const scroller = wrapper.get('.scroll-area').element as HTMLElement
+    stubRect(scroller, 0, 600)
+    stubScrollable(scroller, 600, 2_000)
+    // 故意摆成「在视口外」：没翻过篇时它也只是一个普通条目，不该有任何定位动作
+    stubMovingRect(wrapper.get('[data-entry-id="entry-no-nav-2"]').element, scroller, 900, 96)
+
+    try {
+      await openThenClose(entries[1]!, false)
+      await nextTick()
+
+      expect(scroller.scrollTop).toBe(0)
+      expect(revealOffsetForIndex).not.toHaveBeenCalled()
+      expect(wrapper.find('[data-flash="true"]').exists()).toBe(false)
+    } finally {
+      wrapper.unmount()
+    }
   })
 
   it('已经看得见的那条只闪不滚：不推走用户当前的滚动位置', async () => {
