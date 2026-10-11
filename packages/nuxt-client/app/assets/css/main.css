@@ -165,6 +165,11 @@
  * 底色与描边一起上：列表行、社交动态只有一块底色就够，卡片与图片图块被封面占满，
  * 得靠描边才看得见。两条选择器对应两种触发方式：滚动区的条目挂 data-flash（子组件根节点透传），
  * 表格的行由 UTable 生成、挂不上自定义属性，走它的 meta.class（见 EntryList 的 revealEntry）。
+ *
+ * 卡片类视图（瀑布流 / 博客 / 图片）的根节点自己**没有背景**，能看见的卡片是它里头那层
+ * `data-slot=root`（Nuxt UI 那层不透明 bg-default 的卡片），根节点上的描边与底色全被它盖住 ——
+ * 所以那一层也要一起闪：它自己的底色被动画接管，就看得见了。
+ * 表格行是 `<tr>`，不能带子元素选择器，单独一条。
  * ============================================================ */
 @keyframes entry-flash {
   0% {
@@ -184,9 +189,21 @@
 }
 
 [data-flash='true'],
+[data-flash='true'] > [data-slot='root'],
 .entry-flash {
   /* 描边画在元素内侧，不改变布局尺寸（虚拟化按测量过的高度摆位） */
   outline-offset: -2px;
   /* 1.4s 与 EntryList 的 REVEAL_FLASH_MS(1.5s) 配一对：动画先跑完，标记随后摘掉 */
   animation: entry-flash 1.4s ease-out;
+}
+
+/* 卡片那一层（瀑布流 / 博客）的封面图会盖住内侧描边，把它画到卡片外侧才看得见 */
+[data-flash='true'] > [data-slot='root'] {
+  outline-offset: 0;
+}
+
+/* 图片视图的图块自己就是 <button>，封面图铺满整块（size-full object-cover）：既没有可染色的底，
+   内侧描边也被封面盖住 —— 同样画到外侧（图块间距 8px，画出去 2px 压不到邻居） */
+button[data-flash='true'] {
+  outline-offset: 0;
 }
