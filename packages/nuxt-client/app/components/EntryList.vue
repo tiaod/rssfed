@@ -511,17 +511,18 @@ onBeforeUnmount(() => {
 const REVEAL_SETTLE_STILL_FRAMES = 8
 
 /**
- * 平滑滚动的起步最多等这么久。
+ * 一次「定位之后什么动静都没有」等多久才认为这次定位不会动了（目标就在原地 / 已经滚到头）。
  *
- * 起步前那几帧位置同样是不动的，不能当成「滚完了」；等过了这个宽限期还没动过，才认为这次
- * 定位根本不会动（目标就在原地 / 已经贴着列表头尾滚不动），照闪。
- * 取值偏大：宁可在「本来就不会动」的情况下晚闪半秒，也不要抢在滚动起步前闪出去 ——
- * 那正是这条提示要避免的「闪了等于没闪」。
+ * 起步前那几帧位置同样不动，不能当成「滚完了」；但也不能等太久 —— 真滚不动时用户还得等它闪。
+ * 取值偏大：窄屏弹窗关闭时列表要等弹窗退场动画走完（实测约 400ms）才开始滚，判定早了会白白
+ * 再定位一次，那一次是「半路重来」，看起来就是一段生硬的跳变。
  */
-const REVEAL_SETTLE_GRACE_MS = 400
+const REVEAL_SETTLE_IDLE_MS = 1200
 
-/** 兜底上限：怎么都等不到停稳（用户自己一直在滚）就照闪，不能让提示一直不来 */
-const REVEAL_SETTLE_TIMEOUT_MS = 1500
+/** 兜底上限：怎么都等不到停稳就先按「到了」处理 —— 到位与否由 revealEntry 再看一眼，
+ * 没到位会再定位一轮，所以这里判早了也不会闪在看不见的地方。
+ * 实测一段 5.7 万像素的长滚动（连翻 120 篇）用时约 2.4s，留到这里够用。 */
+const REVEAL_SETTLE_TIMEOUT_MS = 3000
 
 /**
  * 等滚动停下来再做事。
@@ -554,8 +555,8 @@ function afterScrollSettles(scroller: HTMLElement, done: () => void) {
     last = current
     const elapsed = performance.now() - startedAt
     if (
-      (moved || elapsed > REVEAL_SETTLE_GRACE_MS)
-      && (still >= REVEAL_SETTLE_STILL_FRAMES || elapsed > REVEAL_SETTLE_TIMEOUT_MS)
+      (still >= REVEAL_SETTLE_STILL_FRAMES && (moved || elapsed > REVEAL_SETTLE_IDLE_MS))
+      || elapsed > REVEAL_SETTLE_TIMEOUT_MS
     ) {
       stop()
       done()
@@ -617,6 +618,19 @@ function isFullyVisible(el: HTMLElement, root: HTMLElement): boolean {
 }
 
 /**
+ * 条目露出多少才算「看得到、闪了有用」。
+ *
+ * 与决定「要不要滚」的 isFullyVisible 不同口径：这里只问用户能不能看见这一条 —— 定位到视口边缘
+ * （只露一条缝）也算看见，不值得为它再滚一轮；决定要不要滚时才要求完整落在视口里。
+ */
+function isMostlyVisible(el: HTMLElement, root: HTMLElement): boolean {
+  const item = el.getBoundingClientRect()
+  const box = root.getBoundingClientRect()
+  const overlap = Math.min(item.bottom, box.bottom) - Math.max(item.top, box.top)
+  return overlap >= Math.min(item.height, box.height) * 0.5
+}
+
+/**
  * 表格分支的定位：UTable 不暴露虚拟化实例，只能靠「已渲染的行 + 固定行高」外推。
  *
  * 行高是常数（见 TABLE_ROW_HEIGHT），渲染出来的行又都在同一份滚动内容里，所以
@@ -644,13 +658,43 @@ function scrollTableRowIntoView(root: HTMLElement, index: number, el: HTMLElemen
   root.scrollTo({ top: Math.min(Math.max(centered, 0), max), behavior: REVEAL_SCROLL_BEHAVIOR })
 }
 
+/** 发起一次定位（表格与滚动区两条路径），不改动任何状态，纠正时可以直接再调一次 */
+function scrollEntryIntoList(root: HTMLElement, index: number, el: HTMLElement | null): void {
+  if (view.value === 'table') {
+    scrollTableRowIntoView(root, index, el)
+    return
+  }
+  const virtualizer = scrollAreaRef.value?.virtualizer
+  // 视口外的条目在 DOM 里根本不存在，只有虚拟化实例能按 index 定位（页头也占一项，要加偏移）
+  if (virtualizer) {
+    virtualizer.scrollToIndex(headerItems.value.length + index, {
+      align: 'center',
+      behavior: REVEAL_SCROLL_BEHAVIOR
+    })
+  } else {
+    el?.scrollIntoView({ block: 'center', behavior: REVEAL_SCROLL_BEHAVIOR })
+  }
+}
+
+/**
+ * 一次定位 + 最多两次纠正。
+ *
+ * 虚拟化的条目高度是估的（瀑布流按封面比例、图片要等加载），落点常常差一截：滚完发现那一条还在
+ * 视口外就再定位一次 —— 第二次时它已经渲染并量过，偏移就准了。纠正次数封顶，怎么都到不了也照闪，
+ * 不能让提示一直不来。**没到位就不闪**：闪在看不见的地方等于没闪。
+ */
+const REVEAL_MAX_CORRECTIONS = 2
+
+/** 定位的代次：新一次定位开始后，旧的等待循环不能再闪（否则会闪在上一轮的目标上） */
+let revealToken = 0
+
 /**
  * 把「刚刚在读的那一条」拉回视野并闪一下；条目不在当前列表里时什么都不做。
  *
  * 场景：连点多次「下一篇」翻了很多篇再关掉详情，列表还停在最初点开的那一条上 —— 不自动滚回去，
  * 用户得往下翻很久才找得到自己刚读到哪儿（宽屏阅读栏同理：选中高亮跑到了视口外）。
  * 已经看得见的那条只闪不滚：用户当前的滚动位置是有意停留的，不该被一次定位推走。
- * 要滚的那条是滚过去的（见 REVEAL_SCROLL_BEHAVIOR），并且**等滚到了才闪**（见 afterScrollSettles）。
+ * 要滚的那条是滚过去的（见 REVEAL_SCROLL_BEHAVIOR），并且**滚到了才闪**（见 afterScrollSettles）。
  */
 function revealEntry(id: string): void {
   const index = props.entries.findIndex(entry => entry.id === id)
@@ -661,31 +705,35 @@ function revealEntry(id: string): void {
   if (!root || (el && isFullyVisible(el, root))) {
     // 不用滚：上一次定位若还悬着，它的闪不该带到这一条上
     stopSettling?.()
+    revealToken += 1
     flashEntry(id)
     return
-  }
-
-  if (view.value === 'table') {
-    scrollTableRowIntoView(root, index, el)
-  } else {
-    const virtualizer = scrollAreaRef.value?.virtualizer
-    // 视口外的条目在 DOM 里根本不存在，只有虚拟化实例能按 index 定位（页头也占一项，要加偏移）
-    if (virtualizer) {
-      virtualizer.scrollToIndex(headerItems.value.length + index, {
-        align: 'center',
-        behavior: REVEAL_SCROLL_BEHAVIOR
-      })
-    } else {
-      el?.scrollIntoView({ block: 'center', behavior: REVEAL_SCROLL_BEHAVIOR })
-    }
   }
 
   const scroller = revealScroller(root, el)
-  if (!scroller) {
-    flashEntry(id)
-    return
+  const token = (revealToken += 1)
+  let corrections = 0
+
+  const settle = () => {
+    if (token !== revealToken) return // 又开了一次定位，这一轮作废
+    const current = revealElement(root, id)
+    if (current && isMostlyVisible(current, root)) {
+      flashEntry(id)
+      return
+    }
+    if (corrections >= REVEAL_MAX_CORRECTIONS) {
+      flashEntry(id) // 到不了了：闪一下总比什么都不做强，用户至少知道刚才读的是这条
+      return
+    }
+    corrections += 1
+    scrollEntryIntoList(root, index, current)
+    if (scroller) afterScrollSettles(scroller, settle)
+    else flashEntry(id)
   }
-  afterScrollSettles(scroller, () => flashEntry(id))
+
+  scrollEntryIntoList(root, index, el)
+  if (scroller) afterScrollSettles(scroller, settle)
+  else flashEntry(id)
 }
 
 /**

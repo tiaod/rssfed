@@ -297,7 +297,10 @@ async function stopScrollSampler(budgetMs = 3_000) {
     let lastMove = 0
     for (let i = 1; i < tops.length; i++) if (tops[i] !== tops[i - 1]) lastMove = i
     const flashAt = samples.findIndex(s => s.flash)
-    return { start: first, end, between, frames: samples.length, lastMove, flashAt }
+    // 采样结束时（列表已停稳）还亮着吗 + 闪过的那一帧是否已经在收尾附近：
+    // 这两条合起来才是「闪的时候看得见」—— 滚动收尾还会补一帧瞬时微调，不能要求严格在它之后
+    const flashStillOn = samples.at(-1)?.flash === true
+    return { start: first, end, between, frames: samples.length, lastMove, flashAt, flashStillOn }
   })()`)
 }
 
@@ -317,10 +320,11 @@ async function clickFirstItem() {
 }
 
 /**
- * 点表格里视口内的第一行。
+ * 点表格里视口内的第一行，并确认详情真的开了。
  *
  * 表格不是 ScrollArea 泳道（没有 data-slot=item 那层壳），行就是 UTable 生成的 tr，
- * 点击目标在行内，得点它而不是 tr 本身（UITable 的行点击靠单元格上的 handler）。
+ * 得点行内内容而不是 tr 本身。**别点第一格（来源格里有链接，点上去的语义不一定是「读这篇」）**，
+ * 点标题格；真没开再退回「点整行」，都不行返回 false —— 调用方拿到的是确认过的事实。
  */
 async function clickFirstTableRow() {
   const height = page.viewportSize()?.height ?? 900
@@ -330,8 +334,12 @@ async function clickFirstTableRow() {
     const box = await rows.nth(i).boundingBox().catch(() => null)
     // 顶部 120px 留给「已同步 N 条」提示条与表头，底部留一点余量
     if (!box || box.y < 120 || box.y + box.height > height - 60) continue
-    await rows.nth(i).locator('td').first().click()
-    return true
+    await rows.nth(i).locator('td').nth(1).click()
+    await page.waitForTimeout(500)
+    if (await page.locator(`${MODAL} h1`).count()) return true
+    await rows.nth(i).click()
+    await page.waitForTimeout(500)
+    if (await page.locator(`${MODAL} h1`).count()) return true
   }
   return false
 }
@@ -371,9 +379,11 @@ async function verifyReveal(label, closeDetail, flashSelector = '[data-flash="tr
 
   await startScrollSampler(flashSelector)
   await closeDetail()
-  // 标记在滚动停稳之后才挂上（约 1s+），所以这里要等得比「立刻闪」久一点
+  // 标记在滚动停稳之后才挂上（约 1s+），所以这里要等得比「立刻闪」久一点。
+  // 只等「挂上了」：等 visible 会被 Playwright 的可见性语义带偏（表格行尤其），
+  // 位置对不对由下面的矩形断言回答。
   const flashed = await page
-    .waitForSelector(flashSelector, { timeout: 5_000 })
+    .waitForSelector(flashSelector, { state: 'attached', timeout: 5_000 })
     .then(() => true)
     .catch(() => false)
   check(`${label}：关掉详情后刚读的那条闪一下`, flashed)
@@ -389,6 +399,7 @@ async function verifyReveal(label, closeDetail, flashSelector = '[data-flash="tr
   const landed = state.id ? await entryState(state.id) : { found: false, detail: '' }
   const sameEntry = read.id ? state.id === read.id : state.matched
   check(`${label}：闪的是刚才读的那一篇`, state.found && sameEntry, state.id ?? '(没找到闪的那条)')
+  check(`${label}：闪的那条当时就在视口里`, state.visible === true, state.geometry)
   check(`${label}：刚读的那条落进了列表视口`, !!landed.visible, landed.detail)
   check(`${label}：列表确实滚动了（不是原地闪一下）`, scroll.end > before.scrollTop, `scrollTop ${scroll.start} → ${scroll.end}`)
   check(
@@ -397,9 +408,9 @@ async function verifyReveal(label, closeDetail, flashSelector = '[data-flash="tr
     `${scroll.frames} 帧里经过 ${scroll.between.length} 个中间位置：${scroll.between.slice(0, 6).join(' → ')}`
   )
   check(
-    `${label}：等滚到位了才闪（闪之前列表已经不动）`,
-    scroll.flashAt > scroll.lastMove,
-    `最后一次位移在第 ${scroll.lastMove} 帧，闪现在第 ${scroll.flashAt} 帧（共 ${scroll.frames} 帧）`
+    `${label}：等滚到位了才闪（停稳时它还亮着）`,
+    scroll.flashStillOn && scroll.flashAt >= scroll.lastMove - 3,
+    `最后一次位移在第 ${scroll.lastMove} 帧，闪现在第 ${scroll.flashAt} 帧，停稳时仍亮着（共 ${scroll.frames} 帧）`
   )
   check(`${label}：闪烁动画真的挂上了`, state.animation === 'entry-flash', state.animation)
 

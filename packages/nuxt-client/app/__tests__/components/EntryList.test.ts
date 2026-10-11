@@ -775,6 +775,7 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
   })
@@ -803,6 +804,24 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
     }) as DOMRect
   }
 
+  /** 矩形随滚动位置上移的条目：happy-dom 不做布局，条目跟列表一起走这件事得自己模拟 */
+  function stubMovingRect(el: Element, scroller: HTMLElement, top: number, height: number) {
+    el.getBoundingClientRect = () => {
+      const moved = top - scroller.scrollTop
+      return {
+        top: moved,
+        bottom: moved + height,
+        left: 0,
+        right: 0,
+        width: 0,
+        height,
+        x: 0,
+        y: moved,
+        toJSON: () => ({})
+      } as DOMRect
+    }
+  }
+
   /** 让 happy-dom 的元素「内容溢出」：真实滚动容器的判据就是这一个（见 EntryList 的 revealScroller） */
   function stubScrollable(el: HTMLElement, clientHeight: number, scrollHeight: number) {
     Object.defineProperty(el, 'clientHeight', { value: clientHeight, configurable: true })
@@ -815,18 +834,28 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
    * 每帧可以顺手挪一下滚动位置 —— 位置还在变就是「还在滚」，连着几帧不动才叫停稳。
    */
   function controlFrames() {
-    const queue: FrameRequestCallback[] = []
+    // 用 id -> 回调 的映射而不是队列：cancelAnimationFrame 必须真的作废那一帧 ——
+    // 新一次定位会取消上一轮的等待循环，作废不掉就会多出一个一直在跑的空循环
+    const pending = new Map<number, FrameRequestCallback>()
+    let next = 1
     vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) => {
-      queue.push(cb)
-      return queue.length
+      pending.set(next, cb)
+      return next++
     })
-    vi.stubGlobal('cancelAnimationFrame', vi.fn())
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+      pending.delete(id)
+    })
     return {
       /** 推一帧；给了 scroller + scrollTop 就顺便把位置挪过去 */
       step(scroller?: HTMLElement, scrollTop?: number) {
         if (scroller && scrollTop !== undefined) scroller.scrollTop = scrollTop
-        queue.shift()?.(0)
-      }
+        const next = pending.entries().next()
+        if (next.done) return
+        const [id, cb] = next.value
+        pending.delete(id)
+        cb(0)
+      },
+      pending: () => pending.size
     }
   }
 
@@ -871,8 +900,8 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
     const scroller = wrapper.get('.scroll-area').element as HTMLElement
     stubRect(scroller, 0, 600)
     stubScrollable(scroller, 600, 2_000)
-    // 第二条在视口外：走「滚过去」那条路
-    stubRect(wrapper.get('[data-entry-id="entry-2"]').element, 900, 96)
+    // 第二条在视口外：走「滚过去」那条路。矩形跟着滚动位置走 —— 条目本来就会随列表上移
+    stubMovingRect(wrapper.get('[data-entry-id="entry-2"]').element, scroller, 900, 96)
     const frames = controlFrames()
     const flashed = () => wrapper.get('[data-entry-id="entry-2"]').attributes('data-flash')
 
@@ -880,14 +909,39 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
     // 定位已经发起，但还在滚：这时候闪一下会被滚动盖掉，动画还没到位就淡完了
     expect(flashed()).toBeUndefined()
 
-    frames.step(scroller, 300) // 一路滚下去
-    frames.step(scroller, 900)
+    frames.step(scroller, 300) // 一路滚下去（条目此刻还在视口下方）
+    frames.step(scroller, 700)
     expect(flashed()).toBeUndefined()
 
-    frames.step(scroller, 1_200) // 到位
+    frames.step(scroller, 800) // 到位：条目挪到视口里（800 + 100 = 视口上方 100px 处）
     for (let i = 0; i < 8; i++) frames.step() // 连着若干帧不动 = 停稳
     await nextTick() // rAF 回调在 Vue 的调度之外，等它把标记渲染上去
     expect(flashed()).toBe('true')
+  })
+
+  it('滚完发现没到位：会再定位一次，到位了才闪（虚拟化的高度是估的）', async () => {
+    const entries = ['entry-1', 'entry-2'].map(id => makeEntry({ id }))
+    const wrapper = mountList(entries, undefined, 'list')
+    const scroller = wrapper.get('.scroll-area').element as HTMLElement
+    stubRect(scroller, 0, 600)
+    stubScrollable(scroller, 600, 2_000)
+    const item = wrapper.get('[data-entry-id="entry-2"]').element
+    stubRect(item, 900, 96) // 第一轮定位后仍在视口外（估算偏了）
+    const frames = controlFrames()
+
+    await openThenClose(entries[1]!)
+    frames.step(scroller, 400)
+    for (let i = 0; i < 8; i++) frames.step() // 第一轮滚完：位置停在 400，条目还在下面
+    await nextTick()
+    expect(revealScrollToIndex).toHaveBeenCalledTimes(2) // 第一次定位 + 没到位后的纠正
+    expect(wrapper.get('[data-entry-id="entry-2"]').attributes('data-flash')).toBeUndefined()
+    // 纠正：第二次定位时条目已经渲染并量过，这次落到了视口里
+    stubRect(item, 200, 96)
+    frames.step(scroller, 700)
+    for (let i = 0; i < 8; i++) frames.step()
+    await nextTick()
+    expect(revealScrollToIndex).toHaveBeenCalledTimes(2)
+    expect(wrapper.get('[data-entry-id="entry-2"]').attributes('data-flash')).toBe('true')
   })
 
   it('要滚的条目：位置压根没动（滚不动 / 已经贴着目标）时也不会一直不闪', async () => {
@@ -896,15 +950,17 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
     const scroller = wrapper.get('.scroll-area').element as HTMLElement
     stubRect(scroller, 0, 600)
     stubScrollable(scroller, 600, 2_000)
-    stubRect(wrapper.get('[data-entry-id="entry-2"]').element, 900, 96)
+    // 露出大半但没完整落进视口：会走定位，而定位之后也够闪了
+    stubRect(wrapper.get('[data-entry-id="entry-2"]').element, 300, 400)
     const frames = controlFrames()
+    vi.useFakeTimers({ toFake: ['performance'] }) // 只借它推「一直没动」的那段等待，rAF 仍是自己推
 
     await openThenClose(entries[1]!)
-    // 起步宽限期内位置没动也不闪：平滑滚动可能只是还没起步
+    // 「一直没动」的观察期内不闪：平滑滚动可能只是还没起步
     for (let i = 0; i < 8; i++) frames.step()
     expect(wrapper.get('[data-entry-id="entry-2"]').attributes('data-flash')).toBeUndefined()
 
-    await new Promise(resolve => setTimeout(resolve, 450)) // 过了宽限期，位置始终没动
+    vi.advanceTimersByTime(1300) // 过了观察期，位置始终没动
     for (let i = 0; i < 8; i++) frames.step()
     await nextTick()
     expect(wrapper.get('[data-entry-id="entry-2"]').attributes('data-flash')).toBe('true')
@@ -986,8 +1042,9 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
 
     // 300 + (0 − 0) + (2 − 0) × 53 − (600 − 53) / 2 = 132.5
     expect(scrollTo).toHaveBeenCalledWith({ top: 132.5, behavior: 'smooth' })
-    // 行高亮同样是滚到位之后才挂上：先推一帧模拟滚动，再推若干帧模拟停稳
+    // 行高亮同样是滚到位之后才挂上：先推一帧模拟滚动（目标行随之上移进视口），再推若干帧模拟停稳
     frames.step(root, 132.5)
+    stubRect(rows[2]!, 100, 53)
     for (let i = 0; i < 8; i++) frames.step()
     await nextTick()
     expect(rowWrappers[2]!.classes()).toContain('entry-flash')
