@@ -13,6 +13,13 @@ const { public: { apiBaseUrl } } = useRuntimeConfig()
  */
 const queueBoardUrl = computed(() => `${resolveApiBase(apiBaseUrl)}/admin/queues`)
 
+/**
+ * CouchDB 后台管理页地址（后端 /admin/couchdb，Fauxton 反代）。
+ * 与队列看板同样：后端路由、没有对应的前端页面，这里只给管理员一个直达入口；
+ * 打开后仍要管理员会话（requireAdmin），且转发身份是 CouchDB 的 `_admin`，别把地址外传。
+ */
+const couchAdminUrl = computed(() => `${resolveApiBase(apiBaseUrl)}/admin/couchdb/_utils/`)
+
 const feeds = ref<AdminFeed[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -241,6 +248,19 @@ onMounted(load)
             class="shrink-0"
           >
             队列看板
+          </UButton>
+          <UButton
+            :to="couchAdminUrl"
+            target="_blank"
+            rel="noopener"
+            icon="i-lucide-database"
+            color="neutral"
+            variant="outline"
+            size="sm"
+            class="shrink-0"
+            title="CouchDB 后台管理页（Fauxton）"
+          >
+            数据库控制台
           </UButton>
         </div>
       </div>

@@ -98,7 +98,7 @@ docker build --target web    -t rssfed-web:latest    .
 | `/ap/*` | server（**BotKit actor / inbox / outbox —— 真实路径是 `/ap/actor/{username}`**） |
 | `/@*` | server（actor 的 profile 页） |
 | `/users/*`、`/inbox` | server（Fedify 默认路由与共享 inbox，当前未启用，实测 404） |
-| `/admin/queues` | 反代直接 404（队列看板不对外） |
+| `/admin/*` | server（管理员控制台：`/admin/queues` 队列看板、`/admin/couchdb` CouchDB 控制台）—— **公网可达，由 `requireAdmin` 强制管理员校验** |
 | 其余 `/` | web（Nuxt SSR） |
 
 **只转 `/api/*` 是最常见的踩坑**：ActivityPub 端点挂在 Hono 的 `app.all("*")` 兜底上，漏了 `/mcp`、`/.well-known/*`、`/ap/*` 会让联邦与 MCP 整体 404。
@@ -194,7 +194,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 
 - [auth.ts](../packages/hono-server/src/auth.ts) 的 `trustedOrigins` 生产环境只认 `CORS_ORIGINS` 白名单，开发环境才放开通配。
 - [config.ts](../packages/hono-server/src/config.ts) 的 `isOriginAllowed` 仅在非生产放行 localhost 与私有网段。
-- `/admin/queues` 由 [require-admin.ts](../packages/hono-server/src/middleware/require-admin.ts) 强制管理员校验，Caddyfile 里另有一层 404 屏蔽。
+- `/admin/*`（队列看板 + CouchDB 控制台）由 [require-admin.ts](../packages/hono-server/src/middleware/require-admin.ts) 强制管理员校验，**反代不再屏蔽、公网可直达**。依据：Better Auth admin 插件的 `role` 是 `input:false`（注册接口无法自封管理员）、会话 cookie 默认 `HttpOnly + Secure + SameSite=Lax`（跨站写操作带不上 cookie）、生产默认开启速率限制。CouchDB 控制台转发时用的是 Proxy Authentication 的 `_admin` 角色（[admin-console.ts](../packages/hono-server/src/couchdb/admin-console.ts)），因此**同源 XSS 等于 CouchDB 全库管理员**；需要第二层防线时按 Caddyfile 里那段注释开 `basic_auth`。
 
 ## 8. 其他部署形态
 

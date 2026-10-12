@@ -60,12 +60,26 @@
 		-Server
 	}
 
-	# ── 队列看板不对公网开放 ────────────────────────────────────────────────
-	# /admin/queues 目前没有鉴权，公网可达 = 公开任务数据、失败堆栈和「重试/清理」按钮。
-	# 临时排障可以走隧道，别为它开公网：
-	#   ssh -L 3001:127.0.0.1:3001 <云主机>   然后访问 http://127.0.0.1:3001/admin/queues
-	@bullboard path /admin/queues /admin/queues/*
-	respond @bullboard 404
+	# ── 管理员控制台：公网可达，靠 requireAdmin 把关 ────────────────────────
+	# /admin/queues（队列看板）与 /admin/couchdb（Fauxton 反代）都要求管理员会话
+	# （Better Auth 会话 + role==='admin'，见 middleware/require-admin.ts）。
+	# 这里**不再**对公网 404：Nuxt 的「队列看板 / 数据库控制台」两个按钮指向的就是它们，
+	# 屏蔽掉等于按钮点了必然 404。注意它们必须进下面 @backend 的路径名单，
+	# 否则请求会落到最后那条 web:3000（Nuxt 没有 /admin 路由，一样是 404）。
+	#
+	# 敢开公网的三条依据：
+	#   1. Better Auth admin 插件里 role 字段是 input:false —— 注册接口无法自封管理员；
+	#   2. 会话 cookie 默认 HttpOnly + Secure + SameSite=Lax —— 跨站 POST 带不上 cookie，
+	#      所以 Fauxton / BullBoard 的写操作挡得住 CSRF；
+	#   3. 生产默认启用 Better Auth 的速率限制（登录接口另有更严的规则）。
+	# ⚠️ 代价要清楚：同源 XSS 一旦发生，攻击者拿到的是 CouchDB 的 `_admin`（能删任意库、
+	#    读 _config），而不再是普通用户的库级权限。想补第二层防线时，取消下面注释即可：
+	#
+	#   caddy hash-password --plaintext '<你的口令>'     # 用输出替换 <哈希>
+	#   @admin_console path /admin/*
+	#   basic_auth @admin_console {
+	#       admin <哈希>
+	#   }
 
 	# ── 后端 Hono：API + MCP + ActivityPub ─────────────────────────────────
 	# 上游地址在 compose 网络里是服务名 server；宿主机自建 Caddy 时改成 127.0.0.1:3001。
@@ -95,7 +109,7 @@
 	@nuxt_icon path /api/_nuxt_icon /api/_nuxt_icon/*
 	reverse_proxy @nuxt_icon web:3000
 
-	@backend path /api/* /mcp /mcp/* /.well-known/* /nodeinfo/* /ap/* /@* /users/* /inbox /inbox/*
+	@backend path /api/* /mcp /mcp/* /.well-known/* /nodeinfo/* /ap/* /@* /users/* /inbox /inbox/* /admin/*
 	reverse_proxy @backend server:3001
 
 	# ── 其余全部交给 Nuxt SSR ───────────────────────────────────────────────

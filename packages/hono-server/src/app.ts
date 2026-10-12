@@ -14,6 +14,7 @@ import { mcpRouter } from "./routes/mcp"
 import { instance } from "./bots"
 import { storage } from "./storage"
 import { bullBoardApp } from "./bullboard"
+import { couchdbAdminApp, COUCHDB_ADMIN_PREFIX } from "./couchdb/admin-console"
 import { requireAdmin } from "./middleware/require-admin"
 
 const app = new Hono()
@@ -65,6 +66,16 @@ app.get("/api/files/*", async (c) => {
 app.use("/admin/queues", requireAdmin)
 app.use("/admin/queues/*", requireAdmin)
 app.route("/admin/queues", bullBoardApp)
+
+// CouchDB 后台管理页（Fauxton）反代：和队列看板同一套管理员网关。
+// 它比队列看板更敏感——转发身份是 CouchDB 的 `_admin`（由路由内的角色头指定，
+// 而角色头不参与签名校验），能读写任意库、系统库与根级接口，
+// 所以 requireAdmin 是它**唯一**的准入条件，别把它摘掉：
+// 这条路由公网可达（Caddyfile 的 @backend 白名单里带着 /admin/*，不再 404 屏蔽）。
+// （同样须在 app.all("*") 兜底之前注册）
+app.use(COUCHDB_ADMIN_PREFIX, requireAdmin)
+app.use(`${COUCHDB_ADMIN_PREFIX}/*`, requireAdmin)
+app.route(COUCHDB_ADMIN_PREFIX, couchdbAdminApp)
 
 // BotKit ActivityPub 端点
 app.all("*", async (c) => instance.fetch(c.req.raw))
