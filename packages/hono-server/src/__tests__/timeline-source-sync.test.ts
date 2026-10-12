@@ -17,8 +17,20 @@ const mocks = vi.hoisted(() => ({
   subscription: { kind: "feed" } as { kind?: string } | null,
   /** 已有水位行 */
   watermarks: [] as Array<Record<string, unknown>>,
-  /** 源库 `entries-by-date` 倒序取 N 行时返回的行（决定保底条数折算出的下界） */
+  /** 源库 `entries-by-date` 倒序取 N 行时返回的行（决定下界 + 必须留住的条目清单） */
   sourceViewRows: [] as Array<{ id: string, key: unknown }>,
+  /** 源库里这些条目的文档（恢复被剪掉的条目时按 id 取回来，附件一并带上） */
+  sourceDocs: {} as Record<string, Record<string, unknown>>,
+  /** 用户库里这些 id 的状态：deleted = true 就是被剪掉的 tombstone */
+  userDocs: {} as Record<string, { rev: string, deleted?: boolean }>,
+  /** target.bulk 收到的写请求（恢复用） */
+  bulkCalls: [] as Array<Array<Record<string, unknown>>>,
+  /** 让 bulk 抛错（验证恢复失败不影响整次同步） */
+  bulkError: null as Error | null,
+  /** bulk(new_edits:false) 的响应：只放"失败"的那些 */
+  bulkFailures: [] as Array<{ id: string, error?: string, reason?: string }>,
+  /** bulk 是不是以 new_edits:false 发的（缺了它复活 tombstone 会被 CouchDB 拒） */
+  bulkNewEdits: [] as Array<boolean | undefined>,
   /** runSourceReplication 的调用参数 */
   replicationCalls: [] as Array<Record<string, unknown>>,
   replicationResult: { docsWritten: 5, sourceLastSeq: "12-abc", elapsedMs: 42 },
@@ -84,12 +96,39 @@ vi.mock("../couchdb/client", () => ({
   nanoServer: { db: { destroy: async () => {} }, request: async () => ({}) },
   createCouchDb: () => ({
     get: async (id: string) => {
+      // 条目文档（恢复路径）与订阅文档走同一个 scope，用前缀区分
+      if (id.startsWith("entry:")) {
+        const doc = mocks.sourceDocs[id]
+        if (!doc) throw Object.assign(new Error("not_found"), { statusCode: 404 })
+        return { _id: id, ...doc }
+      }
       if (!mocks.subscription) throw Object.assign(new Error("not_found"), { statusCode: 404 })
       return { _id: id, ...mocks.subscription }
     },
     info: async () => ({ update_seq: 0 }),
-    // 源库 entries-by-date 视图（倒序取 N 行 → 保底条数折算出的下界）
+    // 源库 entries-by-date 视图（倒序取 N 行 → 下界 + 必须留住的清单）
     view: async () => ({ rows: mocks.sourceViewRows }),
+    // 用户库 `_all_docs?keys=`：活着 / tombstone / 从来没有过
+    fetch: async ({ keys }: { keys: string[] }) => ({
+      rows: keys.map(key => mocks.userDocs[key]
+        ? { id: key, key, value: mocks.userDocs[key] }
+        : { id: key, key, error: "not_found" }),
+    }),
+    bulk: async (
+      { docs, new_edits }: { docs: Array<Record<string, unknown>>, new_edits?: boolean },
+    ) => {
+      if (mocks.bulkError) throw mocks.bulkError
+      mocks.bulkCalls.push(docs)
+      mocks.bulkNewEdits.push(new_edits)
+      // 真机行为一：**只有 new_edits:false 才能把 tombstone 写成活文档**。缺了它 CouchDB
+      // 会拒（3.x 不允许"复活"已删除文档），这里照实模拟，避免哪天被悄悄改回去。
+      if (new_edits !== false) {
+        return docs.map(doc => ({ id: String(doc._id), error: "conflict", reason: "Document update conflict." }))
+      }
+      for (const doc of docs) mocks.userDocs[String(doc._id)] = { rev: String(doc._rev) }
+      // 真机行为二：`new_edits: false` 的响应**只报失败**，全成功时是空数组
+      return mocks.bulkFailures
+    },
   }),
 }))
 
@@ -113,6 +152,12 @@ beforeEach(() => {
   mocks.subscription = { kind: "feed" }
   mocks.watermarks = []
   mocks.sourceViewRows = []
+  mocks.sourceDocs = {}
+  mocks.userDocs = {}
+  mocks.bulkCalls = []
+  mocks.bulkError = null
+  mocks.bulkFailures = []
+  mocks.bulkNewEdits = []
   mocks.replicationCalls = []
   mocks.replicationResult = { docsWritten: 5, sourceLastSeq: "12-abc", elapsedMs: 42 }
   mocks.replicationError = null
@@ -358,5 +403,94 @@ describe("syncSubscriptionSource：单个源的按需同步", () => {
 
     expect(mocks.updates).toEqual([expect.objectContaining({ syncedAt: null, status: "error" })])
     expect(String(mocks.updates[0]!.lastError)).toContain("CouchDB 忙")
+  })
+})
+
+/**
+ * 复制是**变更投递**而不是投影：目标端删过的 rev 还在它的修订树里，`_revs_diff` 会说"我有"，
+ * 复制器于是永远不再送。放宽窗口 / 调高保底条数时，源库里早就被剪掉的那些条目正好卡在这个死角
+ * —— 不自己补一遍，用户看到的就是"设置调了还是没内容"（实测：源里 10 篇，用户库 3 篇
+ * + 7 个 tombstone）。所以保底清单里凡是用户库里是 tombstone 的，都按 tombstone 的 rev 写回。
+ */
+describe("恢复被剪掉的保底条目", () => {
+  const floorRows = [
+    { id: "entry:f1:c", key: "2026-09-27T16:00:00.000Z" },
+    { id: "entry:f1:b", key: "2026-09-22T16:00:00.000Z" },
+    { id: "entry:f1:a", key: "2026-09-13T16:00:00.000Z" },
+  ]
+
+  it("tombstone 的条目按它的 rev 写回去，附件（base64 内联）一并带上", async () => {
+    mocks.settingsMinEntries = 3
+    mocks.sourceViewRows = floorRows
+    mocks.userDocs = {
+      "entry:f1:c": { rev: "1-ccc" }, // 活着 → 不碰
+      "entry:f1:b": { rev: "2-dead", deleted: true }, // 被剪掉的 → 救回来
+      // entry:f1:a 从来没有过 → 交给复制器的重扫，不自己搬
+    }
+    mocks.sourceDocs = {
+      "entry:f1:b": {
+        publishedAt: "2026-09-22T16:00:00.000Z",
+        title: "被剪掉的那篇",
+        _attachments: { "img-0.avif": { content_type: "image/avif", data: "AAAA" } },
+      },
+    }
+
+    const result = await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(mocks.bulkCalls).toHaveLength(1)
+    const written = mocks.bulkCalls[0]![0]!
+    expect(written).toMatchObject({
+      _id: "entry:f1:b",
+      title: "被剪掉的那篇",
+      _attachments: { "img-0.avif": { content_type: "image/avif", data: "AAAA" } },
+      // 新修订的代次 = tombstone 的代次 + 1，谱系接在 tombstone 上（CouchDB 3.x 不接受
+      // 拿 tombstone 的 rev 直接 PUT 复活，只能用 new_edits:false 声明谱系）
+      _revisions: { start: 3, ids: [expect.stringMatching(/^[0-9a-f]{32}$/), "dead"] },
+    })
+    expect(String(written._rev)).toMatch(/^3-[0-9a-f]{32}$/)
+    // 必须用 new_edits:false：否则 CouchDB 3.x 直接 409（本文件上方的注释与 mock 都照实模拟）
+    expect(mocks.bulkNewEdits).toEqual([false])
+    expect(result.restoredEntries).toBe(1)
+  })
+
+  it("没有 tombstone 时一个写请求都不发（绝大多数同步都是这种）", async () => {
+    mocks.settingsMinEntries = 3
+    mocks.sourceViewRows = floorRows
+    mocks.userDocs = {
+      "entry:f1:c": { rev: "1-c" },
+      "entry:f1:b": { rev: "1-b" },
+      // a 没有 → not_found（"从来没有过"），也不该自己搬
+    }
+    mocks.sourceDocs = { "entry:f1:a": { publishedAt: "2026-09-13T16:00:00.000Z" } }
+
+    const result = await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(mocks.bulkCalls).toEqual([])
+    expect(result.restoredEntries).toBe(0)
+  })
+
+  it("保底条数关闭时不查「必须留住」的清单（没有这个要求）", async () => {
+    mocks.settingsMinEntries = 0
+    mocks.sourceViewRows = floorRows
+    mocks.userDocs = { "entry:f1:b": { rev: "2-dead", deleted: true } }
+
+    const result = await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(mocks.bulkCalls).toEqual([])
+    expect(result.restoredEntries).toBe(0)
+  })
+
+  it("恢复失败不让整次同步算失败（内容已由复制搬过，水位照常推进、下轮再试）", async () => {
+    mocks.settingsMinEntries = 3
+    mocks.sourceViewRows = floorRows
+    mocks.userDocs = { "entry:f1:b": { rev: "2-dead", deleted: true } }
+    mocks.sourceDocs = { "entry:f1:b": { publishedAt: "2026-09-22T16:00:00.000Z" } }
+    mocks.bulkError = new Error("CouchDB 忙")
+
+    const result = await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(result.restoredEntries).toBe(0)
+    expect(result.docsWritten).toBe(5)
+    expect(mocks.updates).toEqual([expect.objectContaining({ status: "idle" })])
   })
 })

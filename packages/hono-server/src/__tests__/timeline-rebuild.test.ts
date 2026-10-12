@@ -322,8 +322,8 @@ describe("reconcileUserTimeline：升级与稳态", () => {
    * 稳态 = 源那边没有新内容：**连一次复制请求都不发**。这是把常驻复制换成按需复制之后
    * 每 5 分钟一轮的全部成本（实测单源空转复制也要 ~1.3s，600 个源就是十几分钟机器时间）。
    */
-  it("稳态（水位在手、源没更新、窗口一致）没有脏源，也不碰复制器", async () => {
-    mocks.stateByDb["user-timeline_old"] = { version: 2, windowDays: 3, replicatorsPurged: true }
+  it("稳态（水位在手、源没更新、窗口一致、修复已做过）没有脏源，也不碰复制器", async () => {
+    mocks.stateByDb["user-timeline_old"] = { version: 2, windowDays: 3, replicatorsPurged: true, floorRestored: true }
     mocks.watermarks = [settledWatermark()]
     mocks.feedFreshness = [{ id: "feed1", at: new Date(Date.now() - 2 * HOUR) }]
 
@@ -332,6 +332,26 @@ describe("reconcileUserTimeline：升级与稳态", () => {
     expect(result.dirtySources).toEqual([])
     expect(mocks.purgeCalls).toEqual([]) // 升级清理只做一次（状态文档里已标记）
     expect(deletedIds()).toEqual([])
+  })
+
+  /**
+   * 保底条数上线时的一次性修复：功能之前窗口外的条目早就被剪成 tombstone，而复制器不会再送。
+   * 光靠"换了设置所以是脏源"不够 —— 水位里 `min_entries` 可能已经是当前值（码和库分两次上的
+   * 部署就是这样），那时所有源都不脏，修复永远不发生。所以用一个状态标记强制过一遍。
+   */
+  it("保底条目修复：还没标记时这一轮把所有订阅源都过一遍，并记下标记（只做一次）", async () => {
+    mocks.stateByDb["user-timeline_old"] = { version: 2, windowDays: 3, replicatorsPurged: true }
+    mocks.watermarks = [settledWatermark()] // 水位与当前设置一致 → 本来一个脏源都没有
+    mocks.feedFreshness = [{ id: "feed1", at: new Date(Date.now() - 2 * HOUR) }]
+
+    const first = await reconcileUserTimeline("u1")
+
+    expect(first.dirtySources).toEqual(["feed1"])
+    expect(mocks.stateByDb["user-timeline_old"]).toMatchObject({ floorRestored: true })
+
+    // 第二轮：标记已在 → 又回到"没更新的源不入队"
+    const second = await reconcileUserTimeline("u1")
+    expect(second.dirtySources).toEqual([])
   })
 
   it("源在上次同步之后有新内容 → 判成脏源（水位就是干这个的）", async () => {

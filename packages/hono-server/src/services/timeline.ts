@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto"
 import type { DocumentScope } from "nano"
 import { and, eq, inArray } from "drizzle-orm"
 import {
@@ -190,27 +191,38 @@ export function looserBoundIso(a: string | null, b: string | null): string | nul
   return a <= b ? a : b
 }
 
+/** 该源保底条数对应的"必须留住"的集合 */
+export interface SourceFloor {
+  /**
+   * 折算出的时间下界（第 N 新的那条的发布时间）；源里不足 N 条 → null（整个源全留）。
+   * 交给复制过滤器的就是这个值。
+   */
+  boundIso: string | null
+  /** 该源最新的 min(N, 总数) 条（按发布时间倒序）。用于把已被剪掉的条目直接补回来 */
+  entries: Array<{ id: string, publishedAt: string }>
+}
+
 /**
- * 把「该源最新 N 条」折算成时间下界：第 N 新的那条的 `publishedAt`。
- *
- * 源里不足 N 条时返回 **null = 无下界**（整个源都要留）——这正是低频源想要的效果：
- * 一个只有 10 篇文章的源，在"至少 50 条"下就是"一篇都不许丢"。
+ * 读一个源的"保底条数"要求：既是复制下界的来源，也是"哪些条目必须活着"的清单。
  *
  * 用源库（feed/bot 库）的 `entries-by-date` 视图倒序取 N 行：视图 key 就是 publishedAt，
- * 倒序第 N 行的 key 即下界。每次同步查一次（只对脏源，且 N 最大 1000 行），不是每轮全量。
+ * 倒序第 N 行的 key 即下界，这 N 行的 id 就是必须留住的条目。每次同步查一次（只对脏源，
+ * 且 N 最大 1000 行），不是每轮全量。
  */
-export async function keepFromIsoOfSource(sourceDb: string, minEntries: number): Promise<string | null> {
-  if (minEntries <= 0) return null
+export async function readSourceFloor(sourceDb: string, minEntries: number): Promise<SourceFloor> {
+  if (minEntries <= 0) return { boundIso: null, entries: [] }
   const scope = createCouchDb(sourceDb)
   const res = await scope.view("main", "entries-by-date", {
     descending: true,
     limit: minEntries,
     reduce: false,
   })
+  const entries = res.rows
+    .map(row => ({ id: row.id, publishedAt: typeof row.key === "string" ? row.key : null }))
+    .filter((row): row is { id: string, publishedAt: string } => row.publishedAt !== null)
   // 不够 N 条 = 这个源的全部历史都在保留集合里
-  if (res.rows.length < minEntries) return null
-  const key = res.rows[res.rows.length - 1]?.key
-  return typeof key === "string" ? key : null
+  if (entries.length < minEntries) return { boundIso: null, entries }
+  return { boundIso: entries[entries.length - 1]!.publishedAt, entries }
 }
 
 /**
@@ -296,6 +308,8 @@ interface TimelineState {
   settingsUpdatedAt: string | null
   /** 是否已经清理过历史遗留的**常驻**复制任务（升级一次性动作，见 ④） */
   replicatorsPurged?: boolean
+  /** 是否已经做过一次「保底条目修复」（升级一次性动作，见 ⑥′） */
+  floorRestored?: boolean
 }
 
 function emptyState(): TimelineState {
@@ -305,6 +319,7 @@ function emptyState(): TimelineState {
     minEntries: null,
     settingsUpdatedAt: null,
     replicatorsPurged: false,
+    floorRestored: false,
   }
 }
 
@@ -322,6 +337,7 @@ async function readTimelineState(dbName: string): Promise<TimelineState> {
       minEntries: typeof doc.minEntries === "number" ? doc.minEntries : null,
       settingsUpdatedAt: typeof doc.settingsUpdatedAt === "string" ? doc.settingsUpdatedAt : null,
       replicatorsPurged: doc.replicatorsPurged === true,
+      floorRestored: doc.floorRestored === true,
     }
   } catch {
     return emptyState()
@@ -528,6 +544,80 @@ async function deleteDocsByIds(scope: DocumentScope<unknown>, ids: string[]): Pr
   return results.filter(r => !r.error).length
 }
 
+/**
+ * 把"保底条数要求留住、但在用户库里**已经被删掉**"的条目直接搬回来（含附件）。
+ *
+ * 为什么复制器救不了它们：复制是**变更投递**而不是投影 —— 目标端删过的 rev 仍留在它的修订树里，
+ * `_revs_diff` 会回答"这个修订我有"，于是复制器再也不会送一遍。而放宽窗口 / 调高保底条数时，
+ * 源库里**早就被剪掉**的那些条目正好落在这个死角里：源库有、用户库是 tombstone、复制器看着
+ * 两边"一致"什么都不做。用户看到的现象就是"设置调了，还是没内容"。
+ *
+ * 做法：把源库那一份文档（`attachments: true` 内联 base64 附件）以**新修订**写回目标库，并声明
+ * 它的父修订就是那个 tombstone。这里必须用 `new_edits: false`（复制器写修订也是这么写的）：
+ * **CouchDB 3.x 拒绝"复活"已删除的文档** —— 拿 tombstone 的 `_rev` 直接 PUT 只会得到
+ * `409 Document update conflict`（本机 3.5.2 实测；在干净库上做同样的往返也一样），
+ * 而 `new_edits: false` 允许我们指定修订与其谱系，谱系接在 tombstone 上就不算"复活"，
+ * 而是"这个文档又有了一个更新的活修订"（目标端 `_all_docs` 随即报 `deleted: false`）。
+ *
+ * 修订 id 用 `md5(文档 id + tombstone rev)` 定死：两个进程/两轮同时恢复会写出**同一个修订**，
+ * 幂等，不会造出一堆重复树。
+ *
+ * 只处理 tombstone，"从来没有过"的条目不碰：那些会由复制器的重扫正常送达（重扫只在换参数时
+ * 发生，所以这里省掉的正是最贵的那部分 —— 不需要自己搬全量）。
+ */
+async function restoreTombstonedEntries(opts: {
+  sourceDb: string
+  target: DocumentScope<unknown>
+  entries: Array<{ id: string, publishedAt: string }>
+}): Promise<number> {
+  if (opts.entries.length === 0) return 0
+  const ids = opts.entries.map(entry => entry.id)
+  const existing = await opts.target.fetch({ keys: ids })
+  // `_all_docs` 带 keys 时：还活着的条目带回 rev；被剪掉的是 tombstone（value.deleted = true）；
+  // "从来没有过"的是 error: not_found —— 那种交给复制器的重扫，不在这里处理
+  const tombstoned: Array<{ id: string, rev: string }> = []
+  for (const row of existing.rows) {
+    const value = (row as { value?: { rev?: string, deleted?: boolean } }).value
+    const id = (row as { id?: string }).id
+    if (id && value?.rev && value.deleted === true) tombstoned.push({ id, rev: value.rev })
+  }
+  if (tombstoned.length === 0) return 0
+
+  const source = createCouchDb(opts.sourceDb)
+  const docs: Array<Record<string, unknown>> = []
+  for (const row of tombstoned) {
+    // 附件必须一起搬：内联 base64 写回去（文档字段 + 图片字节与原库一致）
+    const doc = await source.get(row.id, { attachments: true }) as unknown as Record<string, unknown>
+    const [generation, parentRevId] = row.rev.split("-") as [string, string]
+    const revId = createHash("md5").update(`${row.id}\u0000${row.rev}`).digest("hex")
+    docs.push({
+      ...doc,
+      _rev: `${Number(generation) + 1}-${revId}`,
+      // 谱系：新修订的父就是那个 tombstone（`start` = 本修订的代次）
+      _revisions: { start: Number(generation) + 1, ids: [revId, parentRevId] },
+    })
+  }
+  if (docs.length === 0) return 0
+
+  const results = await opts.target.bulk(
+    // nano 11 的类型把 `new_edits` 放在第二个参数上（DocumentInsertParams），但 CouchDB 的
+    // `_bulk_docs` 是从**请求体**里读它的（实机验证：体里给 new_edits:false 才生效），
+    // 所以这里按体发送，只在类型上让 nano 放行。
+    { docs, new_edits: false } as unknown as { docs: Array<Record<string, unknown>> },
+  )
+  // `new_edits: false` 的响应**只报失败**：成功不进数组（实机：全成功时是 `[]`）。
+  // 所以"救回几条" = 送出去几条 - 失败几条。
+  let failed = 0
+  for (const result of results) {
+    if (!result.error) continue
+    // 并发恢复撞上同一个（确定性）修订：等价于已恢复
+    if (result.error === "conflict") continue
+    failed += 1
+    console.warn(`[Timeline] 恢复被剪掉的条目失败 ${result.id}：${result.reason ?? result.error}`)
+  }
+  return docs.length - failed
+}
+
 // ── 同一用户串行化 ──
 //
 // API 与 worker 同进程（见 docker-deployment 的「单副本」），但同一个用户完全可能有两轮聚合同时在跑：
@@ -690,6 +780,11 @@ export interface SourceSyncOutcome {
   skipped?: "unsubscribed"
   /** 本次真正写进目标库的文档数（复制器报的） */
   docsWritten: number
+  /**
+   * 额外"救回来"的条目数：保底条数要求留住、但用户库里是 tombstone 的条目（复制器不会再送，
+   * 见 restoreTombstonedEntries）。正常情况下是 0。
+   */
+  restoredEntries: number
   elapsedMs: number
   /** 本次下界与已存的不同（首次同步 / 换设置 / 稳态下放得更松）→ 复制器会从 0 重扫该源 */
   rebound: boolean
@@ -731,7 +826,7 @@ export async function syncSubscriptionSource(input: {
         + `非 404 会在这里留痕）：${(err as Error)?.message ?? err}`,
       )
     }
-    return { sourceId, skipped: "unsubscribed", docsWritten: 0, elapsedMs: 0, rebound: false }
+    return { sourceId, skipped: "unsubscribed", docsWritten: 0, restoredEntries: 0, elapsedMs: 0, rebound: false }
   }
   const kind: TimelineSource["kind"] = subscription?.kind === "bot" ? "bot" : "feed"
 
@@ -746,27 +841,23 @@ export async function syncSubscriptionSource(input: {
     || existing.windowDays !== settings.windowDays
     || existing.minEntries !== settings.minFeedEntries
 
-  let boundIso: string | null
-  if (existing && !configChanged && existing.boundIso === null) {
-    // 已经是最松（无下界）：不必再去问源库要第 N 新的发布时间
-    boundIso = null
-  } else {
-    const windowStart = windowStartIso(settings.windowDays)
-    // 窗口不限时间 = 该源全留，保底条数没有额外作用 → 不必查源库
-    const keepFromIso = windowStart === null
-      ? null
-      : await keepFromIsoOfSource(sourceDb, settings.minFeedEntries)
-    const retention = retentionBoundIso({
-      windowStart,
-      minEntries: settings.minFeedEntries,
-      keepFromIso,
-    })
-    boundIso = configChanged
-      ? retention
-      // 稳态**只放不收**：保底条数会随新条目把折算下界往前推（更紧），收紧跟"内容已经在库里"
-      // 这件事无关，却会换哈希、丢掉 checkpoint，让整个源库每来一条新内容就重扫一遍。
-      : looserBoundIso(existing.boundIso, retention)
-  }
+  const windowStart = windowStartIso(settings.windowDays)
+  // 窗口不限时间 = 该源全留（保底条数没有额外作用）；没开保底条数 = 没有要保住的清单。
+  // 稳态也照读一遍：这 N 条的 id 就是"必须活着"的清单，恢复被剪掉的条目要靠它（见
+  // restoreTombstonedEntries）；一次倒序视图查询（limit ≤ 1000），只发生在脏源同步时。
+  const floor: SourceFloor = windowStart === null || settings.minFeedEntries <= 0
+    ? { boundIso: null, entries: [] }
+    : await readSourceFloor(sourceDb, settings.minFeedEntries)
+  const retention = retentionBoundIso({
+    windowStart,
+    minEntries: settings.minFeedEntries,
+    keepFromIso: floor.boundIso,
+  })
+  const boundIso = configChanged
+    ? retention
+    // 稳态**只放不收**：保底条数会随新条目把折算下界往前推（更紧），收紧跟"内容已经在库里"
+    // 这件事无关，却会换哈希、丢掉 checkpoint，让整个源库每来一条新内容就重扫一遍。
+    : looserBoundIso(existing!.boundIso, retention)
   const rebound = !existing || boundIso !== existing.boundIso
 
   const startedAt = new Date()
@@ -797,6 +888,17 @@ export async function syncSubscriptionSource(input: {
       targetDb,
       boundIso,
     })
+    // 复制是"变更投递"，救不回目标端已经删掉的条目 → 保底条数要求的条目自己补一遍。
+    // 放在复制之后：复制负责把"从没有过"的条目搬进来，这里只处理 tombstone（见函数注释）。
+    const restored = await restoreTombstonedEntries({
+      sourceDb,
+      target: scope,
+      entries: floor.entries,
+    }).catch((err) => {
+      // 恢复失败不该让整次同步算失败：水位照常推进，下轮再试（内容已经在复制那边搬过了）
+      console.warn(`[Timeline] 用户=${userId} 源=${sourceId} 恢复被剪掉的保底条目失败：${(err as Error)?.message ?? err}`)
+      return 0
+    })
     await db.update(timelineSourceSync).set({
       syncedAt: startedAt,
       status: "idle",
@@ -806,7 +908,7 @@ export async function syncSubscriptionSource(input: {
       eq(timelineSourceSync.userId, userId),
       eq(timelineSourceSync.sourceId, sourceId),
     ))
-    return { sourceId, docsWritten: res.docsWritten, elapsedMs: res.elapsedMs, rebound }
+    return { sourceId, docsWritten: res.docsWritten, restoredEntries: restored, elapsedMs: res.elapsedMs, rebound }
   } catch (err) {
     const message = ((err as Error)?.message ?? String(err)).slice(0, 500)
     await db.update(timelineSourceSync).set({
@@ -960,6 +1062,18 @@ async function reconcileUserTimelineUnlocked(
     })) {
       result.dirtySources.push(source.id)
     }
+  }
+
+  // ⑥′ 一次性的"保底条目修复"：保底条数这个功能上线前，窗口外的条目早就被剪成了 tombstone，
+  //     而复制器不会再送（见 restoreTombstonedEntries）。首次开保底条数时把所有订阅源都过一遍，
+  //     让每个源都有机会把"该留却被剪掉"的条目救回来。只做一次（状态文档记标记）。
+  //     —— 不靠"换了设置所以是脏源"那条路：水位里 min_entries 可能已经是当前值（功能上线前后
+  //     各跑过一次的部署），那时所有源都不脏，修复就永远不会发生（本机实测踩到）。
+  if (settings.minFeedEntries > 0 && !state.floorRestored) {
+    const dirty = new Set(result.dirtySources)
+    for (const source of sources) dirty.add(source.id)
+    result.dirtySources = [...dirty]
+    state.floorRestored = true
   }
 
   // ⑦ 写回状态（含保留区间的设置快照与升级清理标记）
