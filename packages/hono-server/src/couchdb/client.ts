@@ -176,19 +176,67 @@ export const TIMELINE_VALIDATE_DOC_UPDATE = `function(newDoc, oldDoc, userCtx) {
  * 复制时 403、用户看到「同步失败」。真正的风险只有「污染服务端聚合产物」这一类，
  * 禁掉 `entry` / `feed` 就够了。
  */
-const TIMELINE_DESIGN_DOC = {
-  _id: "_design/timeline-maintain",
-  language: "javascript",
-  views: {
-    by_published_at: {
-      map: `function(doc) {
+/**
+ * 用户库设计文档的**视图**定义（导出供升级比对与单测复用）。
+ *
+ * 加视图必须走这里 —— `ensureTimelineDesignDoc` 会按它比对存量库并覆盖升级；
+ * 只在新建库时装的话，几百个老库会一直没有新视图（剪枝 404，窗口与保底条数一起失效）。
+ */
+export const TIMELINE_DESIGN_DOC_VIEWS = {
+  by_published_at: {
+    map: `function(doc) {
         if (doc.type === 'entry' && typeof doc.publishedAt === 'string') {
           emit(doc.publishedAt, null);
         }
       }`,
-    },
   },
+  /**
+   * 按「源 + 发布时间」排序（剪枝用）：保留规则是「窗口内 ∨ 该源最新 N 条」，而"最新 N 条"
+   * 只有按源分组才数得出来 —— 复制过滤器只能看单条文档自己的字段，表达不了它，所以条数
+   * 保底落在剪枝侧（见 services/timeline.ts 的 pruneOutsideRetention）。
+   *
+   * key 第一段取 `doc.feedId`（bot 产出写的是 `bot:{botId}`，与源 id 同构）；没有 feedId 的
+   * 异常文档归到 `null` 那一组，至少不会因此逃过剪枝。`publishedAt` 非字符串的文档收不到 ——
+   * 与老的 `by_published_at` 一样，它们本来也不会被复制进来（过滤器只放行带 publishedAt 的）。
+   */
+  by_feed_published_at: {
+    map: `function(doc) {
+        if (doc.type === 'entry' && typeof doc.publishedAt === 'string') {
+          emit([typeof doc.feedId === 'string' ? doc.feedId : null, doc.publishedAt], null);
+        }
+      }`,
+  },
+}
+
+const TIMELINE_DESIGN_DOC = {
+  _id: "_design/timeline-maintain",
+  language: "javascript",
+  views: TIMELINE_DESIGN_DOC_VIEWS,
   validate_doc_update: TIMELINE_VALIDATE_DOC_UPDATE,
+}
+
+/**
+ * 设计文档是否已经是最新：**校验函数与视图两样都要比**。
+ *
+ * 只比 `validate_doc_update` 曾经是个坑 —— 视图是后加的（`by_feed_published_at` 为条数保底而加），
+ * 而存量库（几百个）的校验函数早就一致，于是"视图还没装"的库会被当成已就位：剪枝查一个不存在的
+ * 视图 → 404 → 整个剪枝步骤每轮都被跳过（窗口与保底条数一起失效、用户库只增不减），
+ * 日志里却只有一行告警。
+ *
+ * 比对用**键序无关**的稳定序列化：CouchDB 存回来的对象键序不保证与写入时一致，
+ * 直接 JSON.stringify 比较可能因为键序不同而每轮都重写一遍设计文档。
+ */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value ?? null)
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`
+  const entries = Object.entries(value as Record<string, unknown>)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`
+}
+
+/** 设计文档的视图部分与代码里的一致？（键序无关比较） */
+export function timelineDesignDocViewsMatch(existingViews: unknown): boolean {
+  return stableStringify(existingViews ?? null) === stableStringify(TIMELINE_DESIGN_DOC.views)
 }
 
 // ── 库名解析与创建 ──
@@ -456,9 +504,9 @@ export async function createTimelineDatabase(userId: string): Promise<string> {
 /**
  * 确保用户库的设计文档到位（视图 + 写方向闸门），已到位则返回。
  *
- * 与 feed 设计文档的区别：这里必须能**升级存量库** —— 闸门是后加的，老库（200+ 个）里没有它，
- * 而「只在新库安装」会让所有老库永久裸奔。做法是比对函数源码，不一致才带 _rev 覆盖；
- * 进程内按库名缓存，避免每次 ensure 都打一次 GET。
+ * 与 feed 设计文档的区别：这里必须能**升级存量库** —— 闸门与视图都是后加的，老库（200+ 个）
+ * 里没有它们，而「只在新库安装」会让所有老库永久裸奔（视图缺失还会让剪枝整步被跳过）。
+ * 做法是比对校验函数与视图源码，不一致才带 _rev 覆盖；进程内按库名缓存，避免每次 ensure 都打一次 GET。
  *
  * **失败不进缓存**（同 ensureReplicationFilter）：写设计文档要过 CouchDB 的 JS 查询服务，
  * 它一忙就 500。若把失败也缓存成"已就位"，这个进程以后每轮 reconcile 都会在剪枝那步
@@ -472,13 +520,16 @@ const ensuredTimelineDesignDocs = new Set<string>()
 export async function ensureTimelineDesignDoc(dbName: string): Promise<boolean> {
   if (ensuredTimelineDesignDocs.has(dbName)) return true
   const db = nanoServer.use(dbName)
-  let existing: { _rev?: string, validate_doc_update?: string } | null = null
+  let existing: { _rev?: string, validate_doc_update?: string, views?: unknown } | null = null
   try {
-    existing = await db.get(TIMELINE_DESIGN_DOC._id) as { _rev?: string, validate_doc_update?: string }
+    existing = await db.get(TIMELINE_DESIGN_DOC._id) as { _rev?: string, validate_doc_update?: string, views?: unknown }
   } catch {
     existing = null
   }
-  if (existing?.validate_doc_update === TIMELINE_DESIGN_DOC.validate_doc_update) {
+  if (
+    existing?.validate_doc_update === TIMELINE_DESIGN_DOC.validate_doc_update
+    && timelineDesignDocViewsMatch(existing.views)
+  ) {
     ensuredTimelineDesignDocs.add(dbName)
     return true
   }

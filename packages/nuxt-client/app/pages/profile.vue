@@ -8,6 +8,7 @@ import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimat
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 import {
+  TIMELINE_MIN_ENTRIES_CHOICES,
   TIMELINE_WINDOW_CHOICES,
   timelineSettingsEqual,
   withCurrentChoice
@@ -104,6 +105,14 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
  * 而「当前值不在 items 里」会让下拉显示空白（看起来像设置丢了）。
  */
 const timelineWindowOptions = computed(() => withCurrentChoice(TIMELINE_WINDOW_CHOICES, draftTimeline.value.windowDays, '当前'))
+
+/**
+ * 「每个源至少保留多少条」的档位（同样经过 withCurrentChoice：服务端默认值可能被改过）。
+ *
+ * 它和窗口是**并集**关系，不是二选一：条目留下只要「在窗口内」**或**「是该源最新 N 条」之一成立。
+ * 所以低频源不会因为窗口而整源空白，高频源也照旧按窗口收窄（窗口内的条数本来就超过 N）。
+ */
+const timelineMinEntriesOptions = computed(() => withCurrentChoice(TIMELINE_MIN_ENTRIES_CHOICES, draftTimeline.value.minFeedEntries, '当前'))
 
 /**
  * 「默认列表视图」里的「跟随内置默认」项：选中它 = 不写设置（view 为 undefined）。
@@ -383,7 +392,7 @@ const confirmReset = async () => {
                   </h3>
 
                   <!--
-                    窗口由**服务端**在聚合时执行（每用户一份，见 useTimelineSettings）：
+                    窗口与保底条数都由**服务端**在聚合时执行（每用户一份，见 useTimelineSettings）：
                     调小真的会删掉窗口外的派生数据（派生库是冗余副本，随时能从源库重算），
                     所以文案必须写明。图片参数不在这里：它是 per-feed 的，管理员在
                     「订阅源管理」里按源调，抓取时就压好了（见 AdminFeedManager）。
@@ -397,6 +406,24 @@ const confirmReset = async () => {
                     <USelect
                       v-model="draftTimeline.windowDays"
                       :items="timelineWindowOptions"
+                      value-key="value"
+                      class="w-48"
+                    />
+                  </UFormField>
+
+                  <!--
+                    保底条数是窗口的**并集**（保留 = 窗口内 ∨ 该源最新 N 条），用户最容易误解成
+                    "二选一"，文案写清楚；低频源（几天到几周才发一篇）就靠它不至于整源空白。
+                  -->
+                  <UFormField
+                    label="每源保底条数"
+                    :description="timelineLoaded
+                      ? '每个订阅源至少保留最新的 N 条，即使它们已经超出上面的时间窗口 —— 更新很慢的源因此不会一条都没有。高频源不受影响（窗口内的条数本来就超过 N）。'
+                      : '正在读取服务端设置…'"
+                  >
+                    <USelect
+                      v-model="draftTimeline.minFeedEntries"
+                      :items="timelineMinEntriesOptions"
                       value-key="value"
                       class="w-48"
                     />

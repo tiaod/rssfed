@@ -109,6 +109,15 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
    */
   windowDays: integer("window_days"),
   /**
+   * 每个订阅源的**保底条数**：即使发布时间已经滑出窗口，也把该源最新的 N 条留住。
+   * null = 全局默认（50）；0 = 关闭（纯时间窗口）。
+   *
+   * 为什么需要它：时间窗口对低频源过于粗暴 —— 一个几周才发一篇的源在 3 天窗口下**永远一条
+   * 都没有**，用户看到的是"这个订阅坏了"（而源库里其实有内容）。保底条数把保留规则从
+   * 「按时间」放宽成「按时间 ∨ 按条数」，高频源不受影响（窗口内的条数本来就超过 N）。
+   */
+  minFeedEntries: integer("min_feed_entries"),
+  /**
    * 是否为该用户生成 AI 总结（null/false = 不生成）。
    * 本轮只落存储位与 timeline 文档上的 `aiSummary` 字段，生成链路（LLM provider、
    * 队列、重试）后续接入时不需要再改数据结构。
@@ -136,6 +145,9 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
  * `bound_iso` 是复制过滤器 `query_params.minPublishedAt` 的**固定下界**：复制器的
  * checkpoint 由参数哈希决定，下界一变就是新哈希 → 该源从 0 重扫。所以它必须稳定地存下来，
  * 不能在每次同步时按"现在"重算。换窗口 = 重算下界 = 故意的全量重扫（回填语义靠它）。
+ * 下界取「窗口下界」与「保底条数折算出的下界」里**更松**的那个；稳态下它只放不收
+ * （保底条数会随新条目把折算下界往前推，收紧跟"内容已经在库里"无关，却会丢掉 checkpoint
+ * 让整个源库每来一条新内容就重扫一遍）。
  *
  * `synced_at` 记的是**复制开始**的时刻而不是完成时刻，这是为了堵一个丢数据的竞态：
  * 抓取 worker 在复制进行中写入新条目时，那条变更可能没被本次复制的 `_changes` 读到，
@@ -161,8 +173,15 @@ export const timelineSourceSync = pgTable("timeline_source_sync", {
   sourceId: text("source_id").notNull(),
   /** 本次同步使用的窗口天数（与用户当前设置不一致 = 需要重算下界并重扫） */
   windowDays: integer("window_days").notNull(),
-  /** 复制过滤器的固定下界（见上：必须稳定，否则每次同步都是全量重扫） */
-  boundIso: text("bound_iso").notNull(),
+  /** 本次同步使用的每源保底条数（与当前设置不一致同样要重算下界） */
+  minEntries: integer("min_entries").notNull().default(0),
+  /**
+   * 复制过滤器的固定下界（见上：必须稳定，否则每次同步都是全量重扫）。
+   * **null = 无下界**：窗口不限时间，或该源自己的历史条数还不够保底条数（整个源都要留）。
+   * 历史遗留：`window_days = 0` 的老行里存过一个没有意义的时间戳（当时过滤器不看它），
+   * 读取时按 null 归一 —— 否则"不限时间"会被悄悄收紧成那个时间戳。
+   */
+  boundIso: text("bound_iso"),
   /** 上次同步**开始**的时刻；与 feeds/bots.lastNewEntryAt 比较决定是否还需要再搬 */
   syncedAt: timestamp("synced_at"),
   /** 上次同步结束时源库的 update_seq（诊断用；不参与判定，避免每源一次 info 请求） */

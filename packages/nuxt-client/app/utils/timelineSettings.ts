@@ -16,6 +16,8 @@
 export interface TimelineSettings {
   /** 回填窗口天数；0 = 不限时间 */
   windowDays: number
+  /** 每个订阅源的保底条数：滑出窗口也要留住"该源最新 N 条"；0 = 关闭 */
+  minFeedEntries: number
   /** 是否生成 AI 摘要（本轮只落开关，生成链路后续接入） */
   aiSummaryEnabled: boolean
 }
@@ -23,12 +25,14 @@ export interface TimelineSettings {
 /** 拿到服务端响应前的初值（见服务端 DEFAULT_TIMELINE_SETTINGS） */
 export const DEFAULT_TIMELINE_SETTINGS: TimelineSettings = {
   windowDays: 3,
+  minFeedEntries: 50,
   aiSummaryEnabled: false
 }
 
 /** 合法区间（服务端也会校验一遍：这里是 UI 层的即时反馈，不是唯一防线） */
 export const TIMELINE_SETTING_LIMITS = {
-  windowDays: { min: 0, max: 365 }
+  windowDays: { min: 0, max: 365 },
+  minFeedEntries: { min: 0, max: 1000 }
 } as const
 
 /**
@@ -47,6 +51,21 @@ export const TIMELINE_WINDOW_CHOICES: Array<{ label: string, value: number }> = 
 ]
 
 /**
+ * 「每个源至少保留多少条」的档位。
+ *
+ * 保底条数是给**低频源**兜底的：几周才发一篇的源在纯时间窗口下永远空空如也，
+ * 用户以为订阅坏了。高频源不受影响 —— 窗口内的条数本来就超过这个值。
+ * 关掉（0）就回到纯时间窗口的老行为。
+ */
+export const TIMELINE_MIN_ENTRIES_CHOICES: Array<{ label: string, value: number }> = [
+  { label: '关闭（纯时间窗口）', value: 0 },
+  { label: '20 条', value: 20 },
+  { label: '50 条', value: 50 },
+  { label: '100 条', value: 100 },
+  { label: '200 条', value: 200 }
+]
+
+/**
  * 归一化服务端/缓存返回的设置：缺项与脏值一律回退默认。
  *
  * 不做「静默夹取」到合法区间：设置本身不参与任何寻址（不像旧的窗口锚点会改变复制 id），
@@ -60,6 +79,7 @@ export function normalizeTimelineSettings(raw: unknown): TimelineSettings {
   }
   return {
     windowDays: num('windowDays', DEFAULT_TIMELINE_SETTINGS.windowDays),
+    minFeedEntries: num('minFeedEntries', DEFAULT_TIMELINE_SETTINGS.minFeedEntries),
     aiSummaryEnabled: input.aiSummaryEnabled === true
   }
 }
@@ -83,5 +103,6 @@ export function withCurrentChoice(
 /** 客户端与服务端设置是否有实质差异（决定要不要发 PATCH） */
 export function timelineSettingsEqual(a: TimelineSettings, b: TimelineSettings): boolean {
   return a.windowDays === b.windowDays
+    && a.minFeedEntries === b.minFeedEntries
     && a.aiSummaryEnabled === b.aiSummaryEnabled
 }

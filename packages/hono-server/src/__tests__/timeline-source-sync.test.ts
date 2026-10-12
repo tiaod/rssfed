@@ -12,10 +12,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
  */
 const mocks = vi.hoisted(() => ({
   settingsWindowDays: 3,
+  settingsMinEntries: 0,
   /** `subscription:<sourceId>` 文档（null = 已退订，get 抛 404） */
   subscription: { kind: "feed" } as { kind?: string } | null,
   /** 已有水位行 */
   watermarks: [] as Array<Record<string, unknown>>,
+  /** 源库 `entries-by-date` 倒序取 N 行时返回的行（决定保底条数折算出的下界） */
+  sourceViewRows: [] as Array<{ id: string, key: unknown }>,
   /** runSourceReplication 的调用参数 */
   replicationCalls: [] as Array<Record<string, unknown>>,
   replicationResult: { docsWritten: 5, sourceLastSeq: "12-abc", elapsedMs: 42 },
@@ -32,7 +35,7 @@ vi.mock("../db", () => {
       select: () => ({
         from: (t: { __name?: string }) => {
           const rows = t?.__name === "userTimelineSettings"
-            ? [{ windowDays: mocks.settingsWindowDays, aiSummaryEnabled: false }]
+            ? [{ windowDays: mocks.settingsWindowDays, minFeedEntries: mocks.settingsMinEntries, aiSummaryEnabled: false }]
             : t?.__name === "timelineSourceSync" ? mocks.watermarks : []
           const chain = {
             where: () => chain,
@@ -64,7 +67,8 @@ vi.mock("../db", () => {
     user: table("user"),
     userTimelineSettings: table("userTimelineSettings"),
     timelineSourceSync: table("timelineSourceSync", {
-      userId: "user_id", sourceId: "source_id", windowDays: "window_days", boundIso: "bound_iso",
+      userId: "user_id", sourceId: "source_id", windowDays: "window_days", minEntries: "min_entries",
+      boundIso: "bound_iso",
       syncedAt: "synced_at", status: "status", sourceSeq: "source_seq", lastError: "last_error",
     }),
     feeds: table("feeds"),
@@ -84,12 +88,12 @@ vi.mock("../couchdb/client", () => ({
       return { _id: id, ...mocks.subscription }
     },
     info: async () => ({ update_seq: 0 }),
+    // 源库 entries-by-date 视图（倒序取 N 行 → 保底条数折算出的下界）
+    view: async () => ({ rows: mocks.sourceViewRows }),
   }),
 }))
 
 vi.mock("../couchdb/replicator", () => ({
-  initialWindowBoundIso: (windowDays: number, now: number = Date.now()) =>
-    new Date(now - windowDays * 86_400_000).toISOString(),
   purgeLegacyReplications: async () => 0,
   runSourceReplication: async (spec: Record<string, unknown>) => {
     mocks.replicationCalls.push(spec)
@@ -105,8 +109,10 @@ const ago = (ms: number) => new Date(Date.now() - ms)
 
 beforeEach(() => {
   mocks.settingsWindowDays = 3
+  mocks.settingsMinEntries = 0
   mocks.subscription = { kind: "feed" }
   mocks.watermarks = []
+  mocks.sourceViewRows = []
   mocks.replicationCalls = []
   mocks.replicationResult = { docsWritten: 5, sourceLastSeq: "12-abc", elapsedMs: 42 }
   mocks.replicationError = null
@@ -116,39 +122,57 @@ beforeEach(() => {
 
 describe("sourceNeedsSync：脏源判定", () => {
   it("没有水位行（新订阅 / 第一次同步）→ 要搬", () => {
-    expect(sourceNeedsSync({ watermark: undefined, windowDays: 3, sourceUpdatedAt: null })).toBe(true)
+    expect(sourceNeedsSync({ watermark: undefined, windowDays: 3, minEntries: 0, sourceUpdatedAt: null })).toBe(true)
   })
 
   it("上次同步没成功（syncedAt 为空，失败时我们就是这么写的）→ 要搬", () => {
     expect(sourceNeedsSync({
-      watermark: { windowDays: 3, syncedAt: null },
+      watermark: { windowDays: 3, minEntries: 0, syncedAt: null },
       windowDays: 3,
+      minEntries: 0,
       sourceUpdatedAt: null,
     })).toBe(true)
   })
 
   it("水位记的窗口与当前设置不一致（换窗口）→ 要搬（要重算下界 = 换哈希 = 重扫回填）", () => {
     expect(sourceNeedsSync({
-      watermark: { windowDays: 3, syncedAt: ago(2 * HOUR) },
+      watermark: { windowDays: 3, minEntries: 0, syncedAt: ago(2 * HOUR) },
       windowDays: 7,
+      minEntries: 0,
+      sourceUpdatedAt: null,
+    })).toBe(true)
+  })
+
+  it("水位记的保底条数与当前设置不一致（改「每源至少 N 条」）→ 要搬（否则低频源永远不回填）", () => {
+    expect(sourceNeedsSync({
+      watermark: { windowDays: 3, minEntries: 0, syncedAt: ago(2 * HOUR) },
+      windowDays: 3,
+      minEntries: 50,
+      sourceUpdatedAt: null,
+    })).toBe(true)
+    expect(sourceNeedsSync({
+      watermark: { windowDays: 3, minEntries: 50, syncedAt: ago(2 * HOUR) },
+      windowDays: 3,
+      minEntries: 0,
       sourceUpdatedAt: null,
     })).toBe(true)
   })
 
   it("源在上次同步开始之后有新内容 → 要搬", () => {
     expect(sourceNeedsSync({
-      watermark: { windowDays: 3, syncedAt: ago(2 * HOUR) },
+      watermark: { windowDays: 3, minEntries: 0, syncedAt: ago(2 * HOUR) },
       windowDays: 3,
+      minEntries: 0,
       sourceUpdatedAt: ago(HOUR),
     })).toBe(true)
   })
 
   it("源那边没动静（或从没记过新内容时间）→ 不搬，连一次复制请求都不发", () => {
-    const watermark = { windowDays: 3, syncedAt: ago(2 * HOUR) }
-    expect(sourceNeedsSync({ watermark, windowDays: 3, sourceUpdatedAt: ago(3 * HOUR) })).toBe(false)
-    expect(sourceNeedsSync({ watermark, windowDays: 3, sourceUpdatedAt: null })).toBe(false)
+    const watermark = { windowDays: 3, minEntries: 50, syncedAt: ago(2 * HOUR) }
+    expect(sourceNeedsSync({ watermark, windowDays: 3, minEntries: 50, sourceUpdatedAt: ago(3 * HOUR) })).toBe(false)
+    expect(sourceNeedsSync({ watermark, windowDays: 3, minEntries: 50, sourceUpdatedAt: null })).toBe(false)
     // 恰好相等（同一毫秒落库）也不搬：复制已经把那一刻之前的变更读过了
-    expect(sourceNeedsSync({ watermark, windowDays: 3, sourceUpdatedAt: watermark.syncedAt })).toBe(false)
+    expect(sourceNeedsSync({ watermark, windowDays: 3, minEntries: 50, sourceUpdatedAt: watermark.syncedAt })).toBe(false)
   })
 
   /**
@@ -160,8 +184,9 @@ describe("sourceNeedsSync：脏源判定", () => {
     const replicationStart = ago(HOUR)
     const entryWrittenDuringReplication = ago(HOUR - 1000) // 比开始时刻晚、比结束时刻早
     expect(sourceNeedsSync({
-      watermark: { windowDays: 3, syncedAt: replicationStart },
+      watermark: { windowDays: 3, minEntries: 0, syncedAt: replicationStart },
       windowDays: 3,
+      minEntries: 0,
       sourceUpdatedAt: entryWrittenDuringReplication,
     })).toBe(true)
   })
@@ -175,10 +200,13 @@ describe("syncSubscriptionSource：单个源的按需同步", () => {
     expect(mocks.replicationCalls[0]).toMatchObject({
       sourceDb: "feed_feed1",
       targetDb: "user-timeline_u1",
-      windowDays: 3,
     })
+    // 没开保底条数 → 下界就是窗口下界（一个 ISO 字符串）
+    expect(typeof mocks.replicationCalls[0]!.boundIso).toBe("string")
     // 先写"正在同步"（syncedAt = 开始时刻），再在成功后落 idle
-    expect(mocks.inserts[0]).toMatchObject({ userId: "u1", sourceId: "feed1", windowDays: 3, status: "syncing" })
+    expect(mocks.inserts[0]).toMatchObject({
+      userId: "u1", sourceId: "feed1", windowDays: 3, minEntries: 0, status: "syncing",
+    })
     expect(mocks.updates).toEqual([expect.objectContaining({ status: "idle", sourceSeq: "12-abc", lastError: null })])
     // 水位记的是开始时刻，不是完成时刻
     expect(mocks.updates[0]!.syncedAt).toBe(mocks.inserts[0]!.syncedAt)
@@ -188,7 +216,7 @@ describe("syncSubscriptionSource：单个源的按需同步", () => {
 
   it("同窗口再同步：沿用已存的下界（下界一变就是新哈希 = 每次同步都全量重扫）", async () => {
     mocks.watermarks = [{
-      sourceId: "feed1", windowDays: 3, boundIso: "2025-01-07T00:00:00.000Z",
+      sourceId: "feed1", windowDays: 3, minEntries: 0, boundIso: "2025-01-07T00:00:00.000Z",
       syncedAt: ago(2 * HOUR), status: "idle", sourceSeq: "10-a", lastError: null,
     }]
 
@@ -198,10 +226,10 @@ describe("syncSubscriptionSource：单个源的按需同步", () => {
     expect(result.rebound).toBe(false)
   })
 
-  it("换窗口：重算下界（放大窗口靠它从 0 重扫回填历史）", async () => {
+  it("换窗口：重算下界（下界变松靠它从 0 重扫回填历史）", async () => {
     mocks.settingsWindowDays = 7
     mocks.watermarks = [{
-      sourceId: "feed1", windowDays: 3, boundIso: "2025-01-07T00:00:00.000Z",
+      sourceId: "feed1", windowDays: 3, minEntries: 0, boundIso: "2025-01-07T00:00:00.000Z",
       syncedAt: ago(2 * HOUR), status: "idle", sourceSeq: "10-a", lastError: null,
     }]
 
@@ -209,15 +237,107 @@ describe("syncSubscriptionSource：单个源的按需同步", () => {
 
     expect(result.rebound).toBe(true)
     expect(mocks.replicationCalls[0]!.boundIso).not.toBe("2025-01-07T00:00:00.000Z")
-    expect(mocks.replicationCalls[0]).toMatchObject({ windowDays: 7 })
   })
 
-  it("bot 源走 bot 产出库（`bot:` 前缀只是源 id 的一部分）", async () => {
+  /**
+   * 保底条数的主场景：低频源最新的一条也在窗口之外 → 下界要取「该源第 N 新的那条的发布时间」，
+   * 而不是窗口下界。这正是"这个订阅没有内容"那个 bug 的修法。
+   */
+  it("开了保底条数：下界取该源第 N 新的发布时间（比窗口更松 → 从 0 重扫回填）", async () => {
+    mocks.settingsMinEntries = 3
+    mocks.sourceViewRows = [
+      { id: "entry:f1:c", key: "2026-09-27T16:00:00.000Z" },
+      { id: "entry:f1:b", key: "2026-09-22T16:00:00.000Z" },
+      { id: "entry:f1:a", key: "2026-09-13T16:00:00.000Z" },
+    ]
+
+    const result = await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(mocks.replicationCalls[0]).toMatchObject({ boundIso: "2026-09-13T16:00:00.000Z" })
+    expect(mocks.inserts[0]).toMatchObject({ minEntries: 3, boundIso: "2026-09-13T16:00:00.000Z" })
+    expect(result.rebound).toBe(true)
+  })
+
+  it("开了保底条数但源里不足 N 条：下界为 null = 整个源都留（一篇都不许丢）", async () => {
+    mocks.settingsMinEntries = 50
+    mocks.sourceViewRows = [
+      { id: "entry:f1:b", key: "2026-09-27T16:00:00.000Z" },
+      { id: "entry:f1:a", key: "2026-05-26T16:00:00.000Z" },
+    ]
+
+    const result = await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(mocks.replicationCalls[0]!.boundIso).toBeNull()
+    expect(result.rebound).toBe(true)
+  })
+
+  it("窗口不限时间：下界为 null，且不必去问源库要第 N 新", async () => {
+    mocks.settingsWindowDays = 0
+    mocks.settingsMinEntries = 50
+    mocks.sourceViewRows = [{ id: "entry:f1:a", key: "2026-05-26T16:00:00.000Z" }]
+
+    await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(mocks.replicationCalls[0]!.boundIso).toBeNull()
+  })
+
+  /**
+   * 稳态「只放不收」：保底条数会随新条目把折算下界往前推（下界变紧）。下界变紧对"内容已经在
+   * 库里"没有任何好处，却会换哈希、丢 checkpoint，让整个源库每来一条新内容就重扫一遍 ——
+   * 所以已存的下界更松时必须原样保留。
+   */
+  it("稳态只放不收：候选下界变紧时沿用已存的（否则每来一条新内容就全量重扫）", async () => {
+    mocks.settingsMinEntries = 3
+    mocks.watermarks = [{
+      sourceId: "feed1", windowDays: 3, minEntries: 3, boundIso: "2020-01-01T00:00:00.000Z",
+      syncedAt: ago(2 * HOUR), status: "idle", sourceSeq: "10-a", lastError: null,
+    }]
+    mocks.sourceViewRows = [
+      { id: "entry:f1:c", key: "2026-09-27T16:00:00.000Z" },
+      { id: "entry:f1:b", key: "2026-09-22T16:00:00.000Z" },
+      { id: "entry:f1:a", key: "2026-09-13T16:00:00.000Z" },
+    ]
+
+    const result = await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(mocks.replicationCalls[0]).toMatchObject({ boundIso: "2020-01-01T00:00:00.000Z" })
+    expect(result.rebound).toBe(false)
+  })
+
+  it("改保底条数（0 → 50）：下界重算并重扫（回填低频源的历史）", async () => {
+    mocks.settingsMinEntries = 50
+    mocks.watermarks = [{
+      sourceId: "feed1", windowDays: 3, minEntries: 0, boundIso: "2025-01-07T00:00:00.000Z",
+      syncedAt: ago(2 * HOUR), status: "idle", sourceSeq: "10-a", lastError: null,
+    }]
+    mocks.sourceViewRows = Array.from({ length: 50 }, (_, index) => ({
+      id: `entry:f1:${index}`,
+      // 倒序取 N 行的最后一行 = 第 N 新（这里第 50 新）
+      key: index === 49 ? "2026-05-01T00:00:00.000Z" : "2026-09-30T00:00:00.000Z",
+    }))
+
+    const result = await syncSubscriptionSource({ userId: "u1", sourceId: "feed1" })
+
+    expect(result.rebound).toBe(true)
+    expect(mocks.replicationCalls[0]!.boundIso).toBe("2026-05-01T00:00:00.000Z")
+  })
+
+  it("bot 源走 bot 产出库（`bot:` 前缀只是源 id 的一部分），保底条数同样生效", async () => {
     mocks.subscription = { kind: "bot" }
+    mocks.settingsMinEntries = 3
+    // bot 库与 feed 库装的是同一份设计文档（`entries-by-date` + 复制过滤器），视图名一致
+    mocks.sourceViewRows = [
+      { id: "entry:bot:b9:c", key: "2026-09-27T16:00:00.000Z" },
+      { id: "entry:bot:b9:b", key: "2026-09-22T16:00:00.000Z" },
+      { id: "entry:bot:b9:a", key: "2026-09-13T16:00:00.000Z" },
+    ]
 
     await syncSubscriptionSource({ userId: "u1", sourceId: "bot:b9" })
 
-    expect(mocks.replicationCalls[0]).toMatchObject({ sourceDb: "bot_b9" })
+    expect(mocks.replicationCalls[0]).toMatchObject({
+      sourceDb: "bot_b9",
+      boundIso: "2026-09-13T16:00:00.000Z",
+    })
   })
 
   it("排队期间被退订：跳过，既不复制品也不动水位（否则会把刚清理掉的内容搬回来）", async () => {

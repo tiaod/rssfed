@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest"
 import {
-  initialWindowBoundIso,
   parseReplicationDocId,
   replicationDocId,
   replicationQueryParams,
@@ -53,14 +52,14 @@ describe("replicationDocId / parseReplicationDocId", () => {
 })
 
 describe("replicationQueryParams", () => {
-  it("窗口有下界时给出 minPublishedAt；参数名**不能**叫 since（会和 _changes 的 since 撞车）", () => {
-    const params = replicationQueryParams(3, "2025-01-07T00:00:00.000Z")
+  it("有下界时给出 minPublishedAt；参数名**不能**叫 since（会和 _changes 的 since 撞车）", () => {
+    const params = replicationQueryParams("2025-01-07T00:00:00.000Z")
     expect(params).toEqual({ minPublishedAt: "2025-01-07T00:00:00.000Z" })
     expect(params.since).toBeUndefined()
   })
 
-  it("不限时间时不带下界（过滤器放行全部条目）", () => {
-    expect(replicationQueryParams(0, "2025-01-07T00:00:00.000Z")).toEqual({})
+  it("下界为 null（不限时间 / 该源历史不够保底条数）时不带参数（过滤器放行全部条目）", () => {
+    expect(replicationQueryParams(null)).toEqual({})
   })
 
   it("过滤器挂在源库设计文档上，且删除必须放行（selector 做不到，实测）", () => {
@@ -70,18 +69,12 @@ describe("replicationQueryParams", () => {
   })
 })
 
-describe("initialWindowBoundIso", () => {
-  it("按窗口天数从「现在」往回推一个固定下界（创建任务时算一次，之后不再变）", () => {
+describe("initialWindowBoundIso（已并入 services/timeline.ts 的 windowStartIso）", () => {
+  it("窗口下界由 windowStartIso 负责，且「不限时间」表示为 null 而不是一个时间戳", async () => {
+    const { windowStartIso } = await import("../services/timeline")
     const now = Date.parse("2025-01-10T00:00:00.000Z")
-    expect(initialWindowBoundIso(3, now)).toBe("2025-01-07T00:00:00.000Z")
-    expect(initialWindowBoundIso(0, now)).toBe("2025-01-10T00:00:00.000Z")
-  })
-})
-
-describe("initialWindowBoundIso", () => {
-  it("下界只在创建时算一次，之后固定不变（改 selector 会让复制器丢 checkpoint 重扫）", () => {
-    const now = Date.parse("2025-01-10T00:00:00.000Z")
-    expect(initialWindowBoundIso(3, now)).toBe("2025-01-07T00:00:00.000Z")
-    expect(initialWindowBoundIso(30, now)).toBe("2024-12-11T00:00:00.000Z")
+    expect(windowStartIso(3, now)).toBe("2025-01-07T00:00:00.000Z")
+    expect(windowStartIso(30, now)).toBe("2024-12-11T00:00:00.000Z")
+    expect(windowStartIso(0, now)).toBeNull()
   })
 })

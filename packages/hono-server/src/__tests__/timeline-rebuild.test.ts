@@ -33,6 +33,7 @@ const mocks = vi.hoisted(() => ({
   rowsByRange: {} as Record<string, Array<{ id: string, value: { rev: string } }>>,
   subscriptions: [] as Array<{ feedId: string }>,
   settingsWindowDays: 3,
+  settingsMinEntries: 50,
   /** PG 里的同步水位行（`timeline_source_sync` 的 select 结果） */
   watermarks: [] as Array<Record<string, unknown>>,
   /** `feeds` / `bots` 的 lastNewEntryAt（喂给脏源判定） */
@@ -64,7 +65,7 @@ vi.mock("../db", () => {
   const rowsFor = (name: string): unknown[] => {
     switch (name) {
       case "userTimelineSettings":
-        return [{ windowDays: mocks.settingsWindowDays, aiSummaryEnabled: false }]
+        return [{ windowDays: mocks.settingsWindowDays, minFeedEntries: mocks.settingsMinEntries, aiSummaryEnabled: false }]
       case "timelineSourceSync":
         return mocks.watermarks
       case "feeds":
@@ -220,6 +221,7 @@ beforeEach(() => {
   mocks.rowsByRange = { "entry:feed1:": [] }
   mocks.subscriptions = [{ feedId: "feed1" }]
   mocks.settingsWindowDays = 3
+  mocks.settingsMinEntries = 50
   mocks.watermarks = []
   mocks.feedFreshness = []
   mocks.botFreshness = []
@@ -239,6 +241,7 @@ const deletedIds = (db = "user-timeline_old") => (mocks.bulkByDb[db] ?? []).filt
 const settledWatermark = (overrides: Record<string, unknown> = {}) => ({
   sourceId: "feed1",
   windowDays: 3,
+  minEntries: 50,
   boundIso: "2025-01-07T00:00:00.000Z",
   syncedAt: new Date(Date.now() - HOUR),
   status: "idle",

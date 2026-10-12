@@ -77,23 +77,18 @@ export function parseReplicationDocId(id: string): ParsedReplicationId | null {
  *
  * 下界若随时间推移，每次同步都得改参数，而改参数 = 换哈希 = 丢 checkpoint 从头重扫，
  * 代价不可接受。代价是过滤器会越来越"松"（多放行一些刚滑出窗口的老条目），
- * 但窗口的权威是剪枝（services/timeline.ts 的 pruneOlderThan）——多进来的会被删掉。
+ * 但保留规则的权威是剪枝（services/timeline.ts 的 pruneOutsideRetention）——多进来的会被删掉。
  *
- * 反过来，**窗口变大时下界也会变 → 换哈希 → 复制器从 0 扫源库**，这正是"放大窗口
- * 回填历史"要的行为（`probe-4` 实测 2.4s）；但已经被剪掉的条目回不来（见模块头注释 ④）。
+ * `boundIso` 为 null 时**不带这个参数**（过滤器放行全部条目）：窗口不限时间，或该源的整个
+ * 历史都不够保底条数（这两种情况该源本来就该全留）。
+ *
+ * 反过来，**下界变松时**（窗口放大、或保底条数要求更早的历史）→ 换哈希 → 复制器从 0 扫源库，
+ * 这正是"回填历史"要的行为；但已经被剪掉的条目回不来（见模块头注释 ④）。
  */
-export function replicationQueryParams(
-  windowDays: number,
-  boundIso: string,
-): Record<string, string> {
+export function replicationQueryParams(boundIso: string | null): Record<string, string> {
   const params: Record<string, string> = {}
-  if (windowDays > 0) params[TIMELINE_REPLICATION_FILTER_QUERY_PARAM] = boundIso
+  if (boundIso) params[TIMELINE_REPLICATION_FILTER_QUERY_PARAM] = boundIso
   return params
-}
-
-/** 创建过滤参数时用的固定下界（**只在首次同步 / 换窗口时算一次**，之后从水位表读回） */
-export function initialWindowBoundIso(windowDays: number, now: number = Date.now()): string {
-  return new Date(now - windowDays * 86_400_000).toISOString()
 }
 
 /** 单源一次性复制的超时上限。单源常态是几百毫秒（实测：无更新空转 1.3s、增量 1.7s、
@@ -130,8 +125,8 @@ export interface SourceReplicationResult {
 export async function runSourceReplication(spec: {
   sourceDb: string
   targetDb: string
-  windowDays: number
-  boundIso: string
+  /** 保留集合的下界；null = 无下界（窗口不限时间 / 该源历史不够保底条数） */
+  boundIso: string | null
 }): Promise<SourceReplicationResult> {
   const startedAt = Date.now()
   const timer = { timedOut: false }
@@ -147,7 +142,7 @@ export async function runSourceReplication(spec: {
       continuous: false,
       create_target: false,
       filter: REPLICATION_FILTER_PATH,
-      query_params: replicationQueryParams(spec.windowDays, spec.boundIso),
+      query_params: replicationQueryParams(spec.boundIso),
     },
   }) as Promise<ReplicateResponse>
 
@@ -175,9 +170,8 @@ export async function runSourceReplication(spec: {
     console.log("[Timeline][debug] 复制", JSON.stringify({
       source: spec.sourceDb,
       target: spec.targetDb,
-      windowDays: spec.windowDays,
       boundIso: spec.boundIso,
-      queryParams: replicationQueryParams(spec.windowDays, spec.boundIso),
+      queryParams: replicationQueryParams(spec.boundIso),
       ok: res?.ok,
       error: res?.error,
       reason: res?.reason,

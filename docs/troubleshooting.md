@@ -168,6 +168,18 @@
 - **原因**：v1 的聚合库是**我们自己按窗口写进去的**（文档带我们的修订谱系），复制器按源库谱系落库会在同一个 `_id` 上撞出两条互不相干的修订 → 冲突；而"就地清空 + 重建任务"搬不回来（目标端删过的 rev 复制器不会再送）。所以 v1 → v2 走的是**换库重搬**：另建空库、把用户写的状态文档搬过去、旧库删掉，复制器从 0 扫源库。
 - **注意**：这是**一次性**的（新库的状态文档写 `version: 2`），代价是每个账号的窗口内容重搬一遍、客户端重新全量拉一次；内容与订阅/已读收藏都不丢。**换库同时作废全部同步水位**（新库是空的，还信水位的话"源那边没新内容"的源永远不会被搬），所以换库后所有订阅源会重扫一遍。旧库名变新库名后，客户端若还指着旧库，参照上一条处理。
 
+### 某个订阅源的页面永远是「暂无条目」，但源站明明有文章
+
+- **现象**：`/rss/feed/<feedId>` 一直空。源库（`feed_*`）里有 entry，`feeds.last_fetched_at` 也一直在更新、`error_message` 为空，而用户库（`user-timeline_*`）里这个源只有 FeedDoc 副本与 `subscription:` 文档、`entry:<feedId>:*` **一条都没有**。
+- **原因**：条目都落在**保留区间**之外。保留 = 「发布时间在时间线窗口内 **∨** 属于该源最新 N 条」（N 见下面）。复制过滤器只能按 `publishedAt >= minPublishedAt` 过滤（[client.ts](../packages/hono-server/src/couchdb/client.ts) 的 `main/timeline`），下界存在 `timeline_source_sync.bound_iso`。**低频源**（几周才发一篇）最新的一篇也在 3 天窗口之外时，下界就把整个源挡在外面了。
+- **诊断**（不用起前端）：拿源库名（`select couch_db_name from feeds where id='<feedId>'`）直接问 CouchDB 那个过滤器放行了什么：
+  ```bash
+  curl -s -u "$COUCHDB_USER:$COUCHDB_PASSWORD" \
+    "http://localhost:5984/feed_<...>/_changes?filter=main/timeline&minPublishedAt=<bound_iso>"
+  ```
+  只回 1 行（FeedDoc）就说明条目全被挡了。把 `minPublishedAt` 换成 `now - 30d` 或整个去掉再问一次：能回 N 条就确认是这个原因。
+- **解法**：个人设置里把**时间线窗口**调大（只对窗口外几十天内的有效），或者用**每源保底条数**（`user_timeline_settings.min_feed_entries`，默认 50，0 = 关闭）—— 它按源数"最新 N 条"，对低频源就是"一篇都不丢"，高频源不受影响。两个都是改完由服务端自己回填（换设置 = 水位里的 `bound_iso` 重算 = 复制哈希改变 = 该源从 0 重扫）。**注意**：`refresh?force=1` 与页面上的「刷新订阅」都**不能**救这种情况 —— `force` 只跳过"脏源判定"，下界仍是水位里存着的那个旧值。
+
 ### 某个订阅源一直不搬东西（水位行是 error / 一轮聚合没把它算成脏源）
 
 - **现象**：某个源在用户库里始终没有内容；`timeline_source_sync` 里这一行的 `status` 是 `error`、`last_error` 有原文，或者干脆没有这一行（说明从来没成功同步过）。旧版本里等价的现象是 `_scheduler/docs/_replicator` 里那条常驻任务 `crashing` / `error` —— **新实现不再有这种文档**。

@@ -111,12 +111,13 @@ describe("resolveDatabase：库名已登记", () => {
 
   it("用户库读的是 user.timeline_db_name 这一列，走同一条快路径", async () => {
     mocks.findFirst.mockResolvedValue({ timelineDbName: "user-timeline_cccccccccccccccccccccccc" })
-    // 库里的设计文档已带闸门：快路径只查一次设计文档，一个写请求都不发
-    const { TIMELINE_VALIDATE_DOC_UPDATE } = await import("../couchdb/client")
+    // 库里的设计文档已带闸门与全部视图：快路径只查一次设计文档，一个写请求都不发
+    const { TIMELINE_DESIGN_DOC_VIEWS, TIMELINE_VALIDATE_DOC_UPDATE } = await import("../couchdb/client")
     mocks.dbGet.mockResolvedValue({
       _id: "_design/timeline-maintain",
       _rev: "5-ok",
       validate_doc_update: TIMELINE_VALIDATE_DOC_UPDATE,
+      views: TIMELINE_DESIGN_DOC_VIEWS,
     })
 
     expect(await ensureTimelineDatabase("u1")).toBe("user-timeline_cccccccccccccccccccccccc")
@@ -124,6 +125,30 @@ describe("resolveDatabase：库名已登记", () => {
     expect(mocks.dbCreate).not.toHaveBeenCalled()
     expect(mocks.insert).not.toHaveBeenCalled()
     expect(mocks.securityPut).not.toHaveBeenCalled()
+  })
+
+  /**
+   * 只比校验函数、不比视图是个真实的坑：视图是后加的（`by_feed_published_at` 为条数保底而加），
+   * 而存量库的校验函数早就一致 —— 那样"视图还没装"的库会被当成已就位，剪枝查不到视图 → 404
+   * → 剪枝整步被跳过（窗口与保底条数一起失效，用户库只增不减）。
+   */
+  it("存量库缺新视图：校验函数一致也照样带 _rev 覆盖装一次", async () => {
+    mocks.findFirst.mockResolvedValue({ timelineDbName: `user-timeline_${"8".repeat(24)}` })
+    const { TIMELINE_VALIDATE_DOC_UPDATE } = await import("../couchdb/client")
+    mocks.dbGet.mockResolvedValue({
+      _id: "_design/timeline-maintain",
+      _rev: "3-old",
+      validate_doc_update: TIMELINE_VALIDATE_DOC_UPDATE,
+      // 老库：只有按发布时间排的那个视图
+      views: { by_published_at: { map: "function(doc){ emit(doc.publishedAt, null); }" } },
+    })
+
+    await ensureTimelineDatabase("u1")
+
+    expect(mocks.insert).toHaveBeenCalledTimes(1)
+    const written = mocks.insert.mock.calls[0]![0] as { _rev?: string, views?: Record<string, unknown> }
+    expect(written._rev).toBe("3-old")
+    expect(Object.keys(written.views ?? {}).sort()).toEqual(["by_feed_published_at", "by_published_at"])
   })
 
   it("并发建库：没抢到库名的一方删掉自己刚建的空库，改用赢家的库（否则订阅会写进没人指得着的孤儿库）", async () => {
@@ -241,13 +266,14 @@ describe("存量用户库补装写方向闸门", () => {
     await ensureTimelineDesignDoc(dbName)
     expect(mocks.insert).not.toHaveBeenCalled()
 
-    // 另一个库：设计文档已带同样的闸门 → 读到即返回，不覆盖
-    const { TIMELINE_VALIDATE_DOC_UPDATE } = await import("../couchdb/client")
+    // 另一个库：设计文档已带同样的闸门与视图 → 读到即返回，不覆盖
+    const { TIMELINE_DESIGN_DOC_VIEWS, TIMELINE_VALIDATE_DOC_UPDATE } = await import("../couchdb/client")
     const other = `user-timeline_${"f".repeat(24)}`
     mocks.dbGet.mockResolvedValue({
       _id: "_design/timeline-maintain",
       _rev: "4-ok",
       validate_doc_update: TIMELINE_VALIDATE_DOC_UPDATE,
+      views: TIMELINE_DESIGN_DOC_VIEWS,
     })
     await ensureTimelineDesignDoc(other)
     expect(mocks.insert).not.toHaveBeenCalled()
