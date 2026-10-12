@@ -116,6 +116,21 @@ describe('ListActionsBar 菜单内容', () => {
     ])
   })
 
+  /**
+   * 「访问网站」原来是单源页页头里的一颗按钮，收进这个菜单后由 siteUrl 决定去留：
+   * 没有站点地址的源（或聚合页）不该出现一条点了没反应的菜单项。
+   */
+  it('有站点地址时多一项「访问网站」（新标签页打开），没有就不出现', () => {
+    const withSite = mountBar({ feedId: 'feed-1', syncLabel: '刷新订阅', siteUrl: 'https://example.com/blog' })
+    expect(labels(withSite)).toEqual([
+      ['刷新订阅', '编辑订阅', '访问网站'],
+      ['取消订阅']
+    ])
+    expect(itemOf(withSite, '访问网站')).toMatchObject({ to: 'https://example.com/blog', target: '_blank' })
+
+    expect(labels(mountBar({ feedId: 'feed-1', syncLabel: '刷新订阅' })).flat()).not.toContain('访问网站')
+  })
+
   it('bot 产出页未订阅时第二组是「订阅」', () => {
     expect(labels(mountBar({ feedId: 'bot:1', syncLabel: '刷新订阅', subscribed: false }))[1]).toEqual(['订阅'])
   })

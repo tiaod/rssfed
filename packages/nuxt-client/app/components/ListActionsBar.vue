@@ -18,8 +18,12 @@
  *
  * 菜单内容按页面能力拼：
  *   时间线 / 分组页   同步订阅
- *   单源页           刷新订阅 + 编辑订阅 ｜ 取消订阅
+ *   单源页           刷新订阅 + 编辑订阅 + 访问网站 ｜ 取消订阅
  *   bot 产出页       刷新订阅 + 编辑订阅 ｜ 订阅 / 取消订阅
+ *
+ * 「访问网站」由 `siteUrl` 决定：单源页把源的站点地址传进来，就从导航栏右侧收进这个菜单
+ * （原先它和源描述一起摆在单源页列表顶部）。菜单项走 ULink 的 to/target，
+ * `target: '_blank'` 会让 UDropdownMenu 自带一个外链图标。
  *
  * `syncScope` 只决定**反馈口径**（toast 条数、抛给页面的 outcome.added）：页面传自己列表的
  * feedId，同步完就报这个列表多了几条。聚合范围永远是全部订阅，与此无关。
@@ -34,6 +38,8 @@ const props = withDefaults(defineProps<{
   syncLabel?: string
   /** 传了才显示订阅类动作（编辑订阅 / 取消订阅 / 订阅） */
   feedId?: string
+  /** 订阅源的站点地址：传了菜单里就多一项「访问网站」（新标签页打开） */
+  siteUrl?: string
   /** 当前列表已加载的条目数（= 会被标记的总数）；0 时按钮不可点。开着「只看未读」时传的是可见条数 */
   entryCount?: number
   /** 是否已订阅（bot 产出页在「订阅 / 取消订阅」之间切换）；不传按已订阅处理 */
@@ -45,6 +51,7 @@ const props = withDefaults(defineProps<{
 }>(), {
   syncLabel: '同步订阅',
   feedId: undefined,
+  siteUrl: undefined,
   entryCount: 0,
   subscribed: true,
   unreadOnly: false,
@@ -104,6 +111,16 @@ const items = computed<DropdownMenuItem[][]>(() => {
       label: '编辑订阅',
       icon: 'i-lucide-pencil',
       onSelect: () => emit('edit')
+    })
+  }
+
+  // 站点地址是导航动作，不是订阅动作：留在第一组（与「取消订阅」之间仍有分隔线）
+  if (props.siteUrl) {
+    actions.push({
+      label: '访问网站',
+      icon: 'i-lucide-external-link',
+      to: props.siteUrl,
+      target: '_blank'
     })
   }
 

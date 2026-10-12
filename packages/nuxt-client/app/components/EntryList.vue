@@ -40,8 +40,10 @@ const props = defineProps<{
    */
   showFeed?: boolean
   /**
-   * 是否把 `#header` 插槽当作列表首项渲染：页面级信息块（如单源页的订阅源描述）放进来，
+   * 是否把 `#header` 插槽当作列表首项渲染：页面级信息块放进来，
    * 就会和条目一起滚动，而不是固定占住视图顶部。见下方 HeaderItem 的说明。
+   * 单源页的源描述曾挂在这里，后来并进了导航栏的标题行（见 pages/rss/feed/[id].vue），
+   * 目前没有调用方。
    */
   header?: boolean
   /**

@@ -26,8 +26,12 @@ const feedLoading = ref(true)
 const subscriptionTitle = ref('')
 const feedDisplayName = computed(() => subscriptionTitle.value || feed.value?.title || '')
 
-// 页头（描述 + 访问网站）只在有内容时渲染
-const hasFeedHeader = computed(() => Boolean(feed.value?.description || feed.value?.siteUrl))
+// 订阅源描述并到标题这一行显示（见模板 #title）：源描述可能是整段文字，
+// 灰色小字 + 单行截断，悬停时用 title 给出完整内容
+const feedDescription = computed(() => feed.value?.description?.trim() || '')
+
+// 站点地址：只在加载到源信息后可用，作为 ⋮ 菜单里的「访问网站」
+const feedSiteUrl = computed(() => feed.value?.siteUrl || '')
 
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
@@ -179,7 +183,23 @@ async function unsubscribe() {
 <template>
   <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
-      <UDashboardNavbar :title="feedDisplayName || '订阅源'">
+      <UDashboardNavbar>
+        <template #title>
+          <span class="truncate">{{ feedDisplayName || '订阅源' }}</span>
+          <!--
+            描述并进标题行：灰色小字、单行截断。
+            描述用 flex-1（基准宽 0）而不是默认的 auto：默认两者按内容宽度分摊收缩量，
+            长描述会把标题压成「Dec…」——基准宽 0 后剩余空间全归描述，标题只在实在放不下时才截断。
+          -->
+          <span
+            v-if="feedDescription"
+            class="min-w-0 flex-1 truncate text-sm font-normal text-muted"
+            :title="feedDescription"
+          >
+            {{ feedDescription }}
+          </span>
+        </template>
+
         <template #right>
           <!-- 页面状态排在动作之前（切换视图按钮的左边） -->
           <UButton
@@ -201,6 +221,7 @@ async function unsubscribe() {
           <ListActionsBar
             sync-label="刷新订阅"
             :feed-id="feedId"
+            :site-url="feedSiteUrl"
             :sync-scope="[feedId]"
             :entry-count="visibleEntries.length"
             :unread-only="unreadOnly"
@@ -236,13 +257,6 @@ async function unsubscribe() {
         />
 
         <template v-if="!visibleEntries.length && !loading">
-          <!-- 空列表：没有可滚动的内容，页头固定在空态上方 -->
-          <FeedHeader
-            v-if="feed"
-            :feed="feed"
-            class="mb-2 px-4 sm:px-6"
-          />
-
           <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
           <NoUnreadState
             v-if="unreadOnly"
@@ -275,19 +289,7 @@ async function unsubscribe() {
             :load-more="loadMore"
             :has-more="visibleHasMore"
             :entry-link="entryLink"
-            :header="hasFeedHeader"
-          >
-            <!-- 页头作为列表首项：跟条目一起滚走，读长列表时不再固定占住视图 -->
-            <template
-              v-if="hasFeedHeader && feed"
-              #header
-            >
-              <FeedHeader
-                :feed="feed"
-                class="pb-2"
-              />
-            </template>
-          </EntryList>
+          />
         </template>
       </div>
 
