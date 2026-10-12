@@ -1,6 +1,14 @@
 import type { DocumentScope } from "nano"
-import { eq } from "drizzle-orm"
-import { db, user, userTimelineSettings, type NewUserTimelineSettings } from "../db"
+import { and, eq, inArray } from "drizzle-orm"
+import {
+  bots as botsTable,
+  db,
+  feeds,
+  timelineSourceSync,
+  user,
+  userTimelineSettings,
+  type NewUserTimelineSettings,
+} from "../db"
 import {
   createCouchDb,
   createTimelineDatabase,
@@ -10,24 +18,27 @@ import {
   nanoServer,
 } from "../couchdb/client"
 import {
-  deleteReplications,
-  ensureReplication,
-  listUserReplications,
+  initialWindowBoundIso,
+  purgeLegacyReplications,
+  runSourceReplication,
 } from "../couchdb/replicator"
 
 /**
  * 用户时间线聚合服务：维护「用户聚合库 = 他订阅的源在当前窗口内的子集」这份拓扑。
  *
- * **聚合库由 CouchDB 复制器搬出来**（见 couchdb/replicator.ts）：每个 (用户 × 订阅源) 一条
- * 常驻复制，JS filter 按窗口过滤。所以这一层只管四件事：
- *   ① 拓扑：订阅了谁就该有谁的任务；退订、换窗口就把过期任务删掉（换窗口 = 换复制哈希 = 重扫回填）；
+ * **搬运仍由 CouchDB 复制器完成，但改由我们按需触发**（见 couchdb/replicator.ts）：
+ *   ① 水位：每个 (用户 × 源) 在 PG 里记一行 `timeline_source_sync`（上次同步时刻 + 固定下界）。
+ *      reconcile 只把「上次同步之后源那边有过新内容」的源（`feeds/bots.lastNewEntryAt > syncedAt`）、
+ *      新订阅的源、换了窗口的源交给 `rss-timeline-sync` 队列（限并发跑一次性复制）。
+ *      **没更新的源一个复制请求都不发** —— 这正是把常驻复制换掉的意义：实测单源复制即使
+ *      无内容可搬也要 ~1.3s（建复制会话的固定开销），625 个源每轮空转就是十几分钟机器时间。
  *   ② 剪枝：复制器不会因为过滤变严而删目标端已有的文档，窗口的权威在 pruneOlderThan；
  *   ③ 重建：聚合库是从源库"修剪"出来的，修剪坏了/要按新窗口整体重来时就换一个空库重搬
  *      （见 rederiveUserTimeline —— 复制是变更投递，就地清空是搬不回来的）；
- *   ④ 状态：`_local/state` 只留版本标记与设置快照（任务清单本身就是"哪些源在搬"的真相）。
+ *   ④ 清理：退订的源按前缀删条目 + 删水位行；升级后把遗留的**常驻**复制任务一次性清掉。
  *
- * 稳态下一轮的成本是「一次订阅列表读 + 一次 `_replicator` 列 + 一次剪枝视图查询」，一个写
- * 请求都不发；新订阅 / 窗口变化才建删任务，由复制器自己去扫源库。客户端侧与订阅数无关。
+ * 稳态下一轮的成本是「一次订阅列表读 + 一条水位 SQL + 一次剪枝视图查询」，脏源为空时一个写请求
+ * 都不发。客户端侧与订阅数无关。
  *
  * **客户端不做二次修剪**：浏览器把聚合库整份同步下来（条目只读、状态可写），窗口的裁剪只发生
  * 在服务端 —— 服务端剪掉的条目会作为删除事件复制过去，本地跟着删，前端不需要再判一遍窗口。
@@ -172,12 +183,6 @@ export async function listSubscriptionSources(userId: string): Promise<TimelineS
   return sources
 }
 
-/** 源 id → 源库**名**（bot 订阅读 bot 产出库；复制文档里直接写库名，不需要 DocumentScope） */
-async function resolveSourceDbName(source: TimelineSource): Promise<string> {
-  if (source.kind === "bot") return await ensureBotDatabase(source.id.slice("bot:".length))
-  return await ensureFeedDatabase(source.id)
-}
-
 /** 源 id 对应的条目 `_id` 前缀（退订时按它做范围删除） */
 export function entryIdPrefix(sourceId: string): string {
   return sourceId.startsWith("bot:")
@@ -190,8 +195,8 @@ export function entryIdPrefix(sourceId: string): string {
 // 放 `_local/` 而不是普通文档：`_local` 文档**不参与复制**，所以浏览器不会同步到
 // 「服务端做到哪了」这种纯内部状态；同时它随聚合库一起删除，重建即重来。
 //
-// 内容只剩「版本标记 + 设置快照」：每源游标已经没有用了 —— 增量由复制器自己按 checkpoint
-// 续跑，而"哪些源已经在搬"的真相是 `_replicator` 里属于这个用户的文档（见 listUserReplications）。
+// 内容只剩「版本标记 + 设置快照 + 升级清理标记」：每源进度不在这里 —— 增量由复制器的
+// checkpoint 续跑，而"上次同步到哪"是 PG 里的 `timeline_source_sync`（见上面的水位线一节）。
 
 const STATE_DOC_ID = "_local/state"
 
@@ -210,10 +215,12 @@ interface TimelineState {
   /** 上次 reconcile 生效的窗口天数（诊断用） */
   windowDays: number | null
   settingsUpdatedAt: string | null
+  /** 是否已经清理过历史遗留的**常驻**复制任务（升级一次性动作，见 ④） */
+  replicatorsPurged?: boolean
 }
 
 function emptyState(): TimelineState {
-  return { version: STATE_VERSION, windowDays: null, settingsUpdatedAt: null }
+  return { version: STATE_VERSION, windowDays: null, settingsUpdatedAt: null, replicatorsPurged: false }
 }
 
 /** 读状态文档；不存在（首次/新库）返回空状态 */
@@ -228,9 +235,30 @@ async function readTimelineState(dbName: string): Promise<TimelineState> {
       version: doc.version,
       windowDays: typeof doc.windowDays === "number" ? doc.windowDays : null,
       settingsUpdatedAt: typeof doc.settingsUpdatedAt === "string" ? doc.settingsUpdatedAt : null,
+      replicatorsPurged: doc.replicatorsPurged === true,
     }
   } catch {
     return emptyState()
+  }
+}
+
+/**
+ * 派生库是不是「空的/刚换过的」—— 判据是状态文档不存在（404）。
+ *
+ * 为什么需要：水位行只在「这个库确实已经有内容」时才有意义。库没了/换库了（重建、手工删库），
+ * 内容全空，此时若还信水位，那些"源那边没有新内容"的源就永远不会被搬 → 重建之后聚合库一直是空的。
+ * 所以每次 reconcile 先问一句"这个库还是原来那个吗"，不是就把该用户的水位整份清掉、全量重搬。
+ *
+ * 读失败（非 404：CouchDB 抖动）**不**当成新库 —— 那种情况下清水位会引发一次全量重扫，
+ * 宁可这轮什么都不做，等下一轮。
+ */
+async function isDerivedDbFresh(dbName: string): Promise<boolean> {
+  try {
+    const doc = await nanoServer.request({ db: dbName, doc: STATE_DOC_ID, method: "GET" }) as { version?: unknown }
+    // 文档在但版本号不对（v1 老库）：reconcile 会走换库重搬，等价于"新库"
+    return typeof doc?.version !== "number"
+  } catch (err) {
+    return (err as { statusCode?: number })?.statusCode === 404
   }
 }
 
@@ -358,18 +386,239 @@ async function withUserLock<T>(userId: string, action: () => Promise<T>): Promis
   }
 }
 
+// ── 同步水位（决定"这个源这次要不要搬"） ──
+//
+// 客户端聚合时代，增量判断在浏览器里：localStorage 记每个源的上次同步时间，再拿服务端
+// `feeds.lastNewEntryAt` 逐个比。现在聚合在服务端，这份判断整体搬到服务端 —— 水位落在 PG 的
+// `timeline_source_sync`（每 (用户 × 源) 一行），信号源仍是 `feeds/bots.lastNewEntryAt`。
+//
+// 为什么水位不放用户库的 `subscription:` 文档上：那是客户端也会写的文档（PouchDB 双向同步），
+// 服务端往上写会和用户的订阅编辑撞修订冲突。放 PG 还顺带能按 source_id 反查订阅者。
+
+/** 一行同步水位 */
+export interface SourceSyncWatermark {
+  windowDays: number
+  boundIso: string
+  /** 上次同步**开始**的时刻（不是完成时刻，见 db/schema.ts 里的说明） */
+  syncedAt: Date | null
+  status: string
+  sourceSeq: string | null
+  lastError: string | null
+}
+
+/** 读该用户所有水位行 */
+async function readSourceWatermarks(userId: string): Promise<Map<string, SourceSyncWatermark>> {
+  const rows = await db.select({
+    sourceId: timelineSourceSync.sourceId,
+    windowDays: timelineSourceSync.windowDays,
+    boundIso: timelineSourceSync.boundIso,
+    syncedAt: timelineSourceSync.syncedAt,
+    status: timelineSourceSync.status,
+    sourceSeq: timelineSourceSync.sourceSeq,
+    lastError: timelineSourceSync.lastError,
+  }).from(timelineSourceSync).where(eq(timelineSourceSync.userId, userId))
+  return new Map(rows.map(row => [row.sourceId, {
+    windowDays: row.windowDays,
+    boundIso: row.boundIso,
+    syncedAt: row.syncedAt,
+    status: row.status,
+    sourceSeq: row.sourceSeq,
+    lastError: row.lastError,
+  }]))
+}
+
+/** 读单个源的水位行（单源同步任务用：整份读在 600 个源时会退化成 O(n²) 行传输） */
+async function readSourceWatermark(userId: string, sourceId: string): Promise<SourceSyncWatermark | undefined> {
+  const [row] = await db.select({
+    windowDays: timelineSourceSync.windowDays,
+    boundIso: timelineSourceSync.boundIso,
+    syncedAt: timelineSourceSync.syncedAt,
+    status: timelineSourceSync.status,
+    sourceSeq: timelineSourceSync.sourceSeq,
+    lastError: timelineSourceSync.lastError,
+  }).from(timelineSourceSync).where(and(
+    eq(timelineSourceSync.userId, userId),
+    eq(timelineSourceSync.sourceId, sourceId),
+  )).limit(1)
+  return row
+}
+
+/** 该用户的派生库整个换掉/丢了：水位一律作废，所有源重新搬（见 isDerivedDbFresh） */
+async function clearSourceWatermarks(userId: string): Promise<void> {
+  await db.delete(timelineSourceSync).where(eq(timelineSourceSync.userId, userId))
+}
+
+async function deleteSourceWatermark(userId: string, sourceId: string): Promise<void> {
+  await db.delete(timelineSourceSync).where(and(
+    eq(timelineSourceSync.userId, userId),
+    eq(timelineSourceSync.sourceId, sourceId),
+  ))
+}
+
+/**
+ * 这个源要不要搬一次？（纯函数，单测直接钉）
+ *
+ * 判据按"宁可多搬一次空转，也不能漏"排：
+ *   · 没有水位行 / 上次同步没成功（syncedAt 为空）→ 要搬（新订阅、上次失败）；
+ *   · 水位记的窗口与当前设置不一致 → 要搬（换窗口 = 重算下界 = 换复制哈希 = 该源从 0 重扫）；
+ *   · 源在**上次同步开始之后**又有过新内容（`lastNewEntryAt > syncedAt`）→ 要搬；
+ *   · 其余（源那边没动静）→ 不搬，连一次复制请求都不发。
+ *
+ * 注意比较的是"同步**开始**时刻"：复制进行中写入的条目，其 `lastNewEntryAt` 会大于开始时刻，
+ * 于是这一轮仍判为脏、下一轮补搬 —— 用完成时刻会把它误判成"已同步过"而永久漏掉。
+ */
+export function sourceNeedsSync(input: {
+  watermark: Pick<SourceSyncWatermark, "windowDays" | "syncedAt"> | undefined
+  windowDays: number
+  sourceUpdatedAt: Date | null
+}): boolean {
+  if (!input.watermark) return true
+  if (input.watermark.syncedAt == null) return true
+  if (input.watermark.windowDays !== input.windowDays) return true
+  return input.sourceUpdatedAt != null && input.sourceUpdatedAt > input.watermark.syncedAt
+}
+
+/** 订阅源的"最后一次有新内容"时间（一条 SQL 拿全部：每源一次请求在 600+ 源时不可接受） */
+async function readSourceFreshness(sources: TimelineSource[]): Promise<Map<string, Date | null>> {
+  const out = new Map<string, Date | null>()
+  const feedIds = sources.filter(source => source.kind === "feed").map(source => source.id)
+  const botIds = sources.filter(source => source.kind === "bot").map(source => source.id.slice("bot:".length))
+  if (feedIds.length > 0) {
+    const rows = await db.select({ id: feeds.id, at: feeds.lastNewEntryAt })
+      .from(feeds).where(inArray(feeds.id, feedIds))
+    for (const row of rows) out.set(row.id, row.at)
+  }
+  if (botIds.length > 0) {
+    const rows = await db.select({ id: botsTable.id, at: botsTable.lastNewEntryAt })
+      .from(botsTable).where(inArray(botsTable.id, botIds))
+    for (const row of rows) out.set(`bot:${row.id}`, row.at)
+  }
+  return out
+}
+
+export interface SourceSyncOutcome {
+  sourceId: string
+  /** 跳过（没搬也没推进水位）：订阅在排队期间被退掉了 */
+  skipped?: "unsubscribed"
+  /** 本次真正写进目标库的文档数 */
+  docsWritten: number
+  elapsedMs: number
+  /** 本次重算了下界（首次同步 / 换窗口）→ 复制器会从 0 重扫该源 */
+  rebound: boolean
+}
+
+/**
+ * 同步**单个源**：队列 job 的本体（见 workers/timeline-sync.ts）。
+ *
+ * 只收 (用户, 源 id) 两个参数：源类型与订阅文档 id 都能从 `subscription:<sourceId>` 这一份文档
+ * 读出来（客户端写订阅用的就是这个 id），顺带还校验了"这条 job 排队期间有没有被退订"。
+ *
+ * 一次调用 = 一次一次性复制。顺序上先把水位写成"开始于 now + 正在同步"，再搬；搬成了才把
+ * status 落回 idle 并把源库序号记下来，搬砸了把 syncedAt 清空并记 lastError ——
+ * 清空保证下一轮还会把它判成脏源（BullMQ 同时也会按 attempts 重试）。
+ */
+export async function syncSubscriptionSource(input: {
+  userId: string
+  sourceId: string
+}): Promise<SourceSyncOutcome> {
+  const { userId, sourceId } = input
+  const settings = await getTimelineSettings(userId)
+  const targetDb = await ensureTimelineDatabase(userId)
+  const scope = createCouchDb(targetDb)
+
+  // 退订竞态：这条 job 可能是在退订前入队的，别把刚清理掉的内容又搬回来。
+  // 404 = 订阅确实没了（正常）；**其它错误必须出声** —— 曾经有一次这里吞掉了一个 bad request，
+  // 结果所有源都被静默判成"已退订"，聚合一条内容都不搬而日志里什么都没有。
+  let subscription: { kind?: string } | null = null
+  try {
+    subscription = await scope.get(`subscription:${sourceId}`) as { kind?: string }
+  } catch (err) {
+    const status = (err as { statusCode?: number })?.statusCode
+    if (status !== 404) {
+      console.warn(
+        `[Timeline] 读订阅文档 subscription:${sourceId} 失败（按"已退订"跳过；`
+        + `非 404 会在这里留痕）：${(err as Error)?.message ?? err}`,
+      )
+    }
+    return { sourceId, skipped: "unsubscribed", docsWritten: 0, elapsedMs: 0, rebound: false }
+  }
+  const kind: TimelineSource["kind"] = subscription?.kind === "bot" ? "bot" : "feed"
+
+  const sourceDb = kind === "bot"
+    ? await ensureBotDatabase(sourceId.slice("bot:".length))
+    : await ensureFeedDatabase(sourceId)
+
+  // 下界必须稳定：同窗口沿用已存的值；只有首次同步与换窗口才重算（换哈希 = 该源从 0 重扫，
+  // 这正是"放大窗口回填历史"要的行为）
+  const existing = await readSourceWatermark(userId, sourceId)
+  const rebound = !existing || existing.windowDays !== settings.windowDays
+  const boundIso = rebound ? initialWindowBoundIso(settings.windowDays) : existing!.boundIso
+
+  const startedAt = new Date()
+  await db.insert(timelineSourceSync).values({
+    userId,
+    sourceId,
+    windowDays: settings.windowDays,
+    boundIso,
+    syncedAt: startedAt,
+    status: "syncing",
+    lastError: null,
+  }).onConflictDoUpdate({
+    target: [timelineSourceSync.userId, timelineSourceSync.sourceId],
+    set: {
+      windowDays: settings.windowDays,
+      boundIso,
+      syncedAt: startedAt,
+      status: "syncing",
+      lastError: null,
+    },
+  })
+
+  try {
+    const res = await runSourceReplication({
+      sourceDb,
+      targetDb,
+      windowDays: settings.windowDays,
+      boundIso,
+    })
+    await db.update(timelineSourceSync).set({
+      syncedAt: startedAt,
+      status: "idle",
+      sourceSeq: res.sourceLastSeq,
+      lastError: null,
+    }).where(and(
+      eq(timelineSourceSync.userId, userId),
+      eq(timelineSourceSync.sourceId, sourceId),
+    ))
+    return { sourceId, docsWritten: res.docsWritten, elapsedMs: res.elapsedMs, rebound }
+  } catch (err) {
+    const message = ((err as Error)?.message ?? String(err)).slice(0, 500)
+    await db.update(timelineSourceSync).set({
+      syncedAt: null,
+      status: "error",
+      lastError: message,
+    }).where(and(
+      eq(timelineSourceSync.userId, userId),
+      eq(timelineSourceSync.sourceId, sourceId),
+    )).catch(() => {})
+    throw err
+  }
+}
+
 export interface TimelineReconcileResult {
   userId: string
   /** 订阅源总数 */
   sources: number
-  /** 本轮新建的复制任务数（新订阅、窗口变化、重建 / 换库重搬） */
-  createdReplications: number
-  /** 本轮删掉的复制任务数（退订、窗口变化、重建 / 换库重搬） */
-  removedReplications: number
+  /** 本轮判定需要搬运的源（调用方交给 rss-timeline-sync 队列，限并发跑一次性复制） */
+  dirtySources: string[]
+  /** 因退订清掉的水位行数（= 已不再订阅的源数） */
+  removedSyncs: number
   /** 因退订删除的条目数 */
   removedEntries: number
   /** 因窗口剪枝删除的条目数 */
   prunedEntries: number
+  /** 清理掉的遗留**常驻**复制任务数（升级一次性动作，之后恒为 0） */
+  purgedReplications: number
   /** 逐源失败的原因（不阻塞其余源） */
   failures: Array<{ sourceId: string, error: string }>
 }
@@ -377,15 +626,16 @@ export interface TimelineReconcileResult {
 /**
  * 把一个用户的聚合库对齐到「当前订阅集合 + 当前设置」。
  *
- * 顺序是有意的：① 换库重搬（仅 v1 → v2 升级）→ ② 退订/换窗口清理 → ③ 剪枝 → ④ 补建任务
- * → ⑤ 写状态。先删后建保证「同一轮里先退订再加回同一个源」不会留下孤儿数据；任务补建在剪枝
- * 之后，新任务的 query_params 就是当前窗口（= 新的复制哈希），复制器会从 0 扫一遍源库。
+ * 顺序是有意的：① 换库重搬（仅 v1 → v2 升级）→ ② 水位失效（库是空的/刚换的）→ ③ 退订清理
+ * → ④ 剪枝 → ⑤ 清理遗留常驻任务 → ⑥ 脏源判定 → ⑦ 写状态。**这里不搬数据**：需要搬的源只是
+ * 被列进 `dirtySources`，由调用方入队（见 workers/timeline-sync.ts），搬运本身跑在队列的
+ * 限并发 worker 里 —— 这是"不再一次几百个源同时冲"的关键。
  *
  * 单个源失败只记进 failures：一个源的库抖动不该让剩下几百个源都不同步。
  */
 export async function reconcileUserTimeline(
   userId: string,
-  options: { backfill?: boolean } = {},
+  options: { force?: boolean } = {},
 ): Promise<TimelineReconcileResult> {
   return await withUserLock(userId, () => reconcileUserTimelineUnlocked(userId, options))
 }
@@ -393,7 +643,7 @@ export async function reconcileUserTimeline(
 /** reconcile 本体（调用方必须已经持有该用户的锁） */
 async function reconcileUserTimelineUnlocked(
   userId: string,
-  options: { backfill?: boolean } = {},
+  options: { force?: boolean } = {},
 ): Promise<TimelineReconcileResult> {
   const settings = await getTimelineSettings(userId)
   let dbName = await ensureTimelineDatabase(userId)
@@ -402,8 +652,9 @@ async function reconcileUserTimelineUnlocked(
 
   // ① v1 → v2 一次性升级：老库里服务端独占文档带的是我们自己的修订，留着会和复制器搬来的
   //    修订谱系冲突；而"就地清空再重搬"做不到（目标端删过的 rev 复制器不会再送）。所以换成
-  //    一个空库重搬（用户自己写的状态文档跟着搬过去），后面的 ④ 会按当前窗口重建任务。
-  if (state.version < STATE_VERSION) {
+  //    一个空库重搬（用户自己写的状态文档跟着搬过去），后面的 ⑥ 会把源全判成脏源重搬一遍。
+  const upgraded = state.version < STATE_VERSION
+  if (upgraded) {
     dbName = await rederiveUserTimeline(userId, dbName)
     scope = createCouchDb(dbName)
     state = await readTimelineState(dbName)
@@ -415,73 +666,86 @@ async function reconcileUserTimelineUnlocked(
   const result: TimelineReconcileResult = {
     userId,
     sources: sources.length,
-    createdReplications: 0,
-    removedReplications: 0,
+    dirtySources: [],
+    removedSyncs: 0,
     removedEntries: 0,
     prunedEntries: 0,
+    purgedReplications: 0,
     failures: [],
   }
 
-  // ② 清理：退订的源，以及窗口天数已经变了的源（id 里带着 windowDays）。
-  //    「换窗口」只删任务不删数据：缩小由 ③ 剪枝兜底，放大由 ④ 的新任务重扫回填
-  //    （query_params 变了 = 换了复制哈希 = 从 0 扫源库）。
-  let existing = await listUserReplications(userId)
-  const stale = existing.filter(item =>
-    !subscribed.has(item.sourceId) || item.windowDays !== settings.windowDays)
-  if (stale.length > 0) {
-    await deleteReplications(stale.map(item => ({ docId: item.docId, rev: item.rev })))
-    result.removedReplications += stale.length
-    const staleIds = new Set(stale.map(item => item.docId))
-    existing = existing.filter(item => !staleIds.has(item.docId))
-    for (const item of stale) {
-      if (subscribed.has(item.sourceId)) continue // 只是窗口变了：数据留着，别删
-      const prefix = entryIdPrefix(item.sourceId)
+  // ② 水位只在"这个库确实已经有内容"时才有意义。库是空的/刚换过的（升级、重建、手工删库）就
+  //    整份作废：否则那些"源那边没有新内容"的源永远不会被搬，聚合库会一直空着。
+  let watermarks = await readSourceWatermarks(userId)
+  if (upgraded || await isDerivedDbFresh(dbName)) {
+    if (watermarks.size > 0) await clearSourceWatermarks(userId)
+    watermarks = new Map()
+  }
+
+  // ③ 退订清理：有水位行但已不在订阅集合里 —— 有水位行就说明这个源曾经同步过（同步前会先写行），
+  //    所以它同时也是"该源在库里可能有内容"的凭据。
+  for (const sourceId of [...watermarks.keys()]) {
+    if (subscribed.has(sourceId)) continue
+    try {
+      const prefix = entryIdPrefix(sourceId)
       result.removedEntries += await deleteByPrefix(scope, prefix, `${prefix}\uffff`)
-      await deleteDocIfExists(scope, item.sourceId)
+      await deleteDocIfExists(scope, sourceId)
+      await deleteSourceWatermark(userId, sourceId)
+      result.removedSyncs += 1
+    } catch (err) {
+      result.failures.push({ sourceId, error: (err as Error)?.message ?? String(err) })
     }
   }
 
-  // ③ 剪枝：窗口的权威在这里。复制器的过滤下界是创建时固定的（见 replicator.ts），
-  //    会越来越松，所以只要有窗口就每轮都剪一遍（视图查询，没东西可删时是空结果）。
+  // ④ 剪枝：窗口的权威在这里。复制器的过滤下界是固定的（见 replicator.ts），会越来越松，
+  //    所以只要有窗口就每轮都剪一遍（视图查询，没东西可删时是空结果）。
   //
-  //    剪枝失败**不能**拦住 ④：它是清理动作，而复制的拓扑才是关键路径。最典型的失败是
+  //    剪枝失败**不能**拦住后面的入队：它是清理动作，而搬运才是关键路径。最典型的失败是
   //    用户库的设计文档没装上（CouchDB 的 JS 查询服务一忙，写设计文档就 500，见 client.ts 的
   //    ensureTimelineDesignDoc）→ 视图查询 404。原实现让这个 404 冒泡出去，整轮 reconcile
-  //    直接中断：一条复制任务都不建、`_local/state` 也不写，客户端拿到 500、一条内容都同步
-  //    不到，而日志里只有一句 `missing`。这里降级成一行告警，让内容照常搬（等设计文档补上
-  //    之后下一轮再剪）。
+  //    直接中断：一个源都不搬、`_local/state` 也不写，客户端拿到 500、一条内容都同步不到，
+  //    而日志里只有一句 `missing`。这里降级成一行告警，让内容照常搬（等设计文档补上之后下一轮再剪）。
   const windowStart = windowStartIso(settings.windowDays)
   if (windowStart) {
     try {
       result.prunedEntries += await pruneOlderThan(scope, windowStart)
     } catch (err) {
       console.warn(
-        `[Timeline] 用户=${userId} 剪枝失败（本轮跳过，复制任务照常补建）：${(err as Error)?.message ?? err}`,
+        `[Timeline] 用户=${userId} 剪枝失败（本轮跳过，聚合照常入队）：${(err as Error)?.message ?? err}`,
       )
     }
   }
 
-  // ④ 补建任务：复制器接手初始回填（从 0 扫源库）与后续增量。
-  //    走到这里说明该源没有"当前窗口"的任务，也就是复制哈希是新的
-  const current = new Map(existing.map(item => [item.sourceId, item]))
-  for (const source of sources) {
-    if (current.has(source.id)) continue
+  // ⑤ 升级清理：老版本给每个 (用户 × 源) 建了一条**常驻**复制，它们会继续占槽位与长轮询、
+  //    还会和新的一次性复制抢复制器，所以升级后一次性删干净。靠状态文档里的标记只做一次。
+  if (!state.replicatorsPurged) {
     try {
-      const sourceDb = await resolveSourceDbName(source)
-      const outcome = await ensureReplication({
-        userId,
-        windowDays: settings.windowDays,
-        sourceId: source.id,
-        sourceDb,
-        targetDb: dbName,
-      })
-      if (outcome === "created") result.createdReplications += 1
+      result.purgedReplications = await purgeLegacyReplications(userId)
+      state.replicatorsPurged = true
+      if (result.purgedReplications > 0) {
+        console.log(`[Timeline] 用户=${userId} 清理遗留常驻复制 ${result.purgedReplications} 条`)
+      }
     } catch (err) {
-      result.failures.push({ sourceId: source.id, error: (err as Error)?.message ?? String(err) })
+      // 清不掉不算失败：下一轮再试（标记没写，所以每轮都会重试）
+      console.warn(`[Timeline] 用户=${userId} 清理遗留常驻复制失败（下轮重试）：${(err as Error)?.message ?? err}`)
     }
   }
 
-  // ⑤ 写回状态（含窗口字段）
+  // ⑥ 脏源判定：新订阅 / 上次失败 / 换窗口 / 源那边有新内容。没更新的源**不**入队。
+  //    force = 跳过水位，把当前订阅的源全部重扫一遍（运维/验证逃生口：默认路径下"源库被外部
+  //    直接写过、但 PG 的 lastNewEntryAt 没动"这种情况是判不出来的，此时只能显式重扫）。
+  const freshness = await readSourceFreshness(sources)
+  for (const source of sources) {
+    if (options.force || sourceNeedsSync({
+      watermark: watermarks.get(source.id),
+      windowDays: settings.windowDays,
+      sourceUpdatedAt: freshness.get(source.id) ?? null,
+    })) {
+      result.dirtySources.push(source.id)
+    }
+  }
+
+  // ⑦ 写回状态（含窗口字段与升级清理标记）
   state.version = STATE_VERSION
   state.windowDays = settings.windowDays
   state.settingsUpdatedAt = new Date().toISOString()
@@ -553,18 +817,17 @@ async function rederiveUserTimeline(userId: string, oldDbName: string): Promise<
     return winner
   }
 
-  // 旧库上的复制任务全部作废：目标库换了，任务必须按新库重建
-  const jobs = await listUserReplications(userId)
-  await deleteReplications(jobs.map(item => ({ docId: item.docId, rev: item.rev })))
+  // 旧库上的复制任务全部作废：目标库换了。新实现不再建常驻任务，升级路径上可能还留着老的 ——
+  // 那些由 reconcile 的 ⑤ 统一清（这里不重复清，免得每次换库多跑一轮 `_replicator` 列举）
 
-  // 旧库已经没用了（新库接管 + 任务已删），删掉省空间；删失败不影响正确性
+  // 旧库已经没用了（新库接管），删掉省空间；删失败不影响正确性
   try {
     await nanoServer.db.destroy(oldDbName)
   } catch {
     // 旧库已被删/正被删：忽略
   }
 
-  console.log(`[Timeline] 用户=${userId} 换库重搬：${oldDbName} → ${newDbName}（搬走用户状态 ${copied} 条，作废复制任务 ${jobs.length} 条）`)
+  console.log(`[Timeline] 用户=${userId} 换库重搬：${oldDbName} → ${newDbName}（搬走用户状态 ${copied} 条）`)
   return newDbName
 }
 
@@ -581,16 +844,27 @@ function keepOnRebuild(id: string, sourceIds: Set<string>): boolean {
   return true
 }
 
+/** 读派生库当前的 `update_seq`（手动同步用它锁定"从哪儿开始数新增条目"） */
+export async function readTimelineUpdateSeq(userId: string): Promise<string | number> {
+  const dbName = await ensureTimelineDatabase(userId)
+  const scope = createCouchDb(dbName)
+  return (await scope.info() as { update_seq?: string | number }).update_seq ?? 0
+}
+
 /**
- * 等派生库安静下来（「手动同步」的 `wait=1`）。
+ * 等派生库安静下来（「手动同步」的 `wait=1` 的最后一段）。
  *
- * 复制是异步的，没有「现在同步一次」的触发接口，所以等待的判据是**派生库自己的 `_changes`**：
- * 从开始时的 `update_seq` 往后读增量，连续若干轮没有新条目就认为追平了。
+ * 搬运是异步的（现在由 `rss-timeline-sync` 队列跑），所以等待的判据是**派生库自己的 `_changes`**：
+ * 从给定序号往后读增量，连续若干轮没有新条目就认为追平了。
  *
- * 两个必须的保守设置（都是从真库里量出来的）：
- *   - `minWaitMs`（默认 4s）：任务刚建好时复制器还没开始写，此时派生库就是"安静的"。
- *     不设最短等待就会立刻返回 added=0，而内容其实还在路上（实测首轮搬运 0.5~2.8s）。
- *   - `quietRounds`（默认 5 轮 × 400ms = 2s）：单轮空读可能只是复制器在批量落盘的间隙。
+ * 调用方的正确姿势（见 routes/timeline.ts）：
+ *   ① 入队前先 `readTimelineUpdateSeq` 拿到起始序号；
+ *   ② 等入队的同步任务跑完（`waitForSourceSyncs`）；
+ *   ③ 再调本函数，并传 `sinceSeq` + `quietRounds: 1` / `minWaitMs: 0` —— 任务都跑完了，
+ *      剩下的只是"把这段时间进来的条目数一遍"，不需要再靠保守等待去猜。
+ *
+ * 默认值（`minWaitMs` 4s / `quietRounds` 5）是给上面第 ② 步不可用时的老场景兜底的：
+ * 任务刚建好时复制器还没开始写，派生库就是"安静的"，不设最短等待就会立刻返回 added=0。
  *
  * 为什么不用复制器的状态（`_scheduler/docs` 的 `checkpointed_source_seq` / `changes_pending`）：
  * 实测这两个字段在首次扫描期间是 undefined，checkpoint 又要到批末才落盘 —— 都滞后于文档真正到端，
@@ -601,7 +875,18 @@ function keepOnRebuild(id: string, sourceIds: Set<string>): boolean {
 export async function waitForSync(
   userId: string,
   timeoutMs: number,
-  options: { quietRounds?: number, pollIntervalMs?: number, minWaitMs?: number } = {},
+  options: {
+    quietRounds?: number
+    pollIntervalMs?: number
+    minWaitMs?: number
+    /**
+     * 从这里开始数新增条目（默认取当前 update_seq）。
+     *
+     * 手动同步（`?wait=1`）的用法是：**入队前**先取一次序号传进来，等队列里的同步任务跑完再调本函数，
+     * 于是这一批到底搬进来多少条能被准确数出来；如果在这里才取序号，条目早已写完，会数成 0。
+     */
+    sinceSeq?: string | number
+  } = {},
 ): Promise<{ completed: boolean, added: number }> {
   const quietRounds = options.quietRounds ?? 5
   const pollIntervalMs = options.pollIntervalMs ?? 400
@@ -609,7 +894,9 @@ export async function waitForSync(
   const dbName = await ensureTimelineDatabase(userId)
   const scope = createCouchDb(dbName)
 
-  let since: string | number = (await scope.info() as { update_seq?: string | number }).update_seq ?? 0
+  let since: string | number = options.sinceSeq
+    ?? (await scope.info() as { update_seq?: string | number }).update_seq
+    ?? 0
   let added = 0
   let quiet = 0
   const startedAt = Date.now()
@@ -664,13 +951,10 @@ export async function rebuildUserTimeline(userId: string): Promise<TimelineRecon
 /** 重建本体（调用方必须已经持有该用户的锁） */
 async function rebuildUserTimelineUnlocked(userId: string): Promise<TimelineReconcileResult> {
   const oldDbName = await ensureTimelineDatabase(userId)
-  const existing = await listUserReplications(userId)
   await rederiveUserTimeline(userId, oldDbName)
-  const result = await reconcileUserTimelineUnlocked(userId, { backfill: true })
-  return {
-    ...result,
-    removedReplications: result.removedReplications + existing.length,
-  }
+  // 新库没有状态文档 → reconcile 的 ② 会把水位整份作废、所有源重新入队重搬一遍，
+  // 同时 ⑤ 会把遗留的常驻复制任务清掉（那是升级动作，新库的标记还没写）
+  return await reconcileUserTimelineUnlocked(userId)
 }
 
 /** 所有用户 id（定时 reconcile 用；自建服务用户量小，一次全查没有问题） */

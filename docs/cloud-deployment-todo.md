@@ -41,6 +41,22 @@
 - [ ] **浏览器 IndexedDB 离线读**：断网后仍能读到缓存条目。服务端同步协议侧已验过（`_changes` 长轮询、`_bulk_docs`、`_revs_diff` 均正常）。
 - [ ] **fediverse 实机关注**：在自己的 Mastodon 等账号里搜索并关注 bot，确认能收到推送。技术前提已在公网全部验证通过（webfinger 200 → actor 200 且含 `publicKey` → inbox 可达），只差真实交互。
 
+### 6. 其余「一次冲太多」的并发点（按需改造只动了搬运）⚠️
+
+聚合搬运已从「几百条常驻复制」改成「按需一次性复制 + 水位」（见
+[notes/aggregation/on-demand-replication.md](notes/aggregation/on-demand-replication.md)），但同一次排查里
+记下的其它「按规模线性放大」的点没有动，规模涨上来之前需要逐个收：
+
+| 位置 | 现状 | 风险 |
+| --- | --- | --- |
+| [services/timeline.ts](../packages/hono-server/src/services/timeline.ts) 的 reconcile | 一轮要列订阅、`inArray` 查热度、逐条比水位 | O(订阅数) 的行数与循环；600 源时几百行尚可，上千源应改成一条聚合 SQL |
+| 换窗口 / `POST /api/timeline/rebuild` | 下界一变 = 该源从 0 重扫，全部源一起重扫 | 「窗口 3 天 → 30 天」= 几百次全量复制，只受队列并发限制；建议按源分批排队并暴露进度 |
+| [workers/index.ts](../packages/hono-server/src/workers/index.ts) 的 `scheduleFeedFetches` | `Promise.all(feeds.map(removeFinishedJob + add))` | 每次调度对全部 feed（现 634 条）打一波 Redis 命令，Redis 抖动时会一起超时；应分批限速 |
+| [services/entries.ts](../packages/hono-server/src/services/entries.ts) 逐源取条目 | `Promise.all(rows.map(feedDb.get))` | 无并发上限，应复用 `routes/feeds.ts` 那套并发预算写法 |
+| 图片下载与 AVIF 压缩 | 抓取 worker 4 并发 × 每源 3 张 | CPU 占用第二大户，2 核机上与 API 抢 CPU；应可调并按核数定默认值 |
+| `notifyTimelineStale` / `scheduleTimelineReconciles` | 按用户数逐个入队 | 用户多了就是 O(用户数) 个 job（已节流 30s，但入队本身无上限） |
+| Bot 的 ActivityPub 扇出 | 新条目投递给所有引用该 feed 的 Bot | 未审计并发与重试策略；`bot_feeds` 很宽时可能一次打几百个 inbox |
+
 ## 二、与具体环境无关的部署知识
 
 ### 出网通路：必须逐域名复测

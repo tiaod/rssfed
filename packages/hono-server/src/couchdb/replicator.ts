@@ -6,43 +6,53 @@ import {
 } from "./client"
 
 /**
- * 用户时间线的聚合搬运：交给 **CouchDB 复制器**，我们只维护「谁该复制谁」这份拓扑。
+ * 用户时间线的聚合搬运：交给 **CouchDB 复制器**，但由**我们**决定"什么时候搬哪个源"。
  *
- * 每个 (用户 × 订阅源) 一条**常驻复制**（`_replicator` 里的一个文档）：
- *   source = 源库（`feed_*` / `bot_*`），target = 该用户的聚合库，
- *   JS filter 按窗口过滤（放行 FeedDoc 与删除，见 client.ts 的 TIMELINE_REPLICATION_FILTER）。
+ * 搬运本身仍然是一条 (源库 → 该用户聚合库) 的复制，过滤器挂在源库设计文档上
+ * （`main/timeline` + `query_params.minPublishedAt`），附件走 CouchDB 内部 multipart。
+ * 与早期实现的区别只有一点：**不再创建常驻（continuous）复制**，改成
+ * `POST /_replicate` 的**一次性同步复制**，由 `rss-timeline-sync` 队列限并发地触发。
  *
- * 为什么不用自己读 `_changes` 再写：附件在 CouchDB 内部走 multipart，二进制、不经过我们的
- * 进程、不吃内存、没有 base64 往返；写入按源库修订谱系落库（`new_edits: false`），天然幂等；
- * 增量由复制器自己的 `_changes` 长轮询驱动，稳态下比"每轮对每个源发一次请求"还便宜。
+ * 为什么不留常驻任务（实测）：
+ *   - 每个 (用户 × 源) 一条常驻复制时，625 条一起做首次追赶会把机器压死：
+ *     CouchDB 162% CPU / 988MB、宿主 2 核 load 20.8、swap 1.6G/2G，源库都打不开；
+ *   - 想用 `[replicator] max_jobs` 限流则必然**饿死**：常驻任务永不结束、不释放槽位，
+ *     `max_jobs` 事实上变成"最多多少个源会被搬"（设 50 时 573 个源一条都搬不过来）。
+ *   一次性复制把并发完全交给我们的队列（`TIMELINE_SYNC_CONCURRENCY`），机器压力可控，
+ *   而"要搬哪个源"由 PG 里的水位表（`timeline_source_sync`）按
+ *   `feeds/bots.lastNewEntryAt > synced_at` 判定 —— 没更新的源连一次复制请求都不发。
  *
- * 四条必须知道的边界（都实测过，见 docs/notes/aggregation/couchdb-replicator-aggregation.md）：
+ * 四条必须知道的边界（都实测过，见 docs/notes/aggregation/couchdb-replicator-aggregation.md
+ * 与 report/aggregation-ondemand/ 的按需复制探针）：
  *   ① **过滤器只能用 JS filter**：Mango selector 不搬删除（删除后的文档没有字段可匹配），
  *      而「源端删除跟随」是必须成立的性质。
  *   ② **query_params 里不能有叫 `since` 的参数**：它会和 `_changes` 自己的 since 撞名，
  *      过滤器读到的是序号字符串，窗口会静默失效。
- *   ③ **复制器的 checkpoint 是按「复制参数哈希」存的**：删掉复制文档不会重置它（两端
- *      `_local/<哈希>` 都还在）。所以「同参数重建任务」不会重搬任何东西；而**换了
- *      参数（窗口下界）就是换了哈希**，复制器会从 0 扫一遍源库 —— 窗口放大要的回填正是
- *      靠它自动发生的。
+ *   ③ **复制器的 checkpoint 是按「复制参数哈希」存的**（两端 `_local/<哈希>`），与调用方式
+ *      无关：同参数再调一次会**接着上次的序号继续**（实测增量 1 条只搬 1 条），而**换了参数
+ *      （窗口下界）就是换了哈希 → 从 0 重扫源库** —— 窗口放大要的回填正是靠它自动发生的。
+ *      所以下界必须**稳定存下来**（水位表里的 `bound_iso`），不能每次按"现在"重算。
  *   ④ 复制是"变更投递"不是"投影"：目标端**自己删过**的文档不会再被送回来（目标端已经
  *      认识那个 rev）。所以剪枝（窗口收窄）留在服务端做，且它是**单向**的 —— 剪掉的历史
  *      不会因为之后把窗口放大而回来，要找回历史只能走「重建」（重建聚合库后重搬）。
  */
 
-/** 本服务创建的复制文档一律带这个前缀，便于按用户列举与清理 */
+/** 本服务创建的**历史**常驻复制文档前缀：升级后要把它们清掉（见 purgeLegacyReplications） */
 const REPLICATION_PREFIX = "rssfed-"
 
 /** `_replicator` 是 CouchDB 的系统库，需要 admin 凭据（我们用的就是 admin） */
 const REPLICATOR_DB = "_replicator"
 
 /**
- * 复制文档 id：`rssfed-{userId}:w{windowDays}:{sourceId}`。
+ * 历史遗留的常驻复制文档 id：`rssfed-{userId}:w{windowDays}:{sourceId}`。
  *
- * 为什么把 windowDays 编进 id：复制器的 checkpoint 由**复制参数哈希**决定，它不随文档 id
- * 改变、也不会因为删掉复制文档而消失（实测：同参数重建任务，内容不会重搬）。把窗口编进
- * id，reconcile 就能用「列出现有任务 + 差集」判断哪些任务过期了 —— 窗口一变就是另一条
- * 任务（另一份 query_params = 另一个哈希 = 从 0 重扫），旧任务删掉即可。
+ * **新实现不再创建这种文档**，这里保留构造/解析是为了升级清理：
+ * 老版本给每个 (用户 × 源) 建了一条常驻复制，升级后必须把它们删掉，
+ * 否则那些任务会继续常驻并抢机器。
+ *
+ * 顺带一个仍然成立的性质：checkpoint 由**复制参数哈希**决定，不随文档 id 改变、
+ * 也不会因为删掉复制文档而消失（实测：同参数重建任务，内容不会重搬）。所以清理这些
+ * 遗留文档**不会**影响新的一次性复制 —— 新复制用 `continuous: false`，哈希本来就不同。
  */
 export function replicationDocId(userId: string, windowDays: number, sourceId: string): string {
   return `${REPLICATION_PREFIX}${userId}:w${windowDays}:${sourceId}`
@@ -63,9 +73,9 @@ export function parseReplicationDocId(id: string): ParsedReplicationId | null {
 }
 
 /**
- * 复制任务的过滤参数。`minPublishedAt` 只在**创建时**算一次并保持不变。
+ * 复制任务的过滤参数。`minPublishedAt` 由调用方从水位表里取出并保持**稳定**。
  *
- * 下界若随时间推移，每轮都得改参数，而改参数 = 换哈希 = 丢 checkpoint 从头重扫，
+ * 下界若随时间推移，每次同步都得改参数，而改参数 = 换哈希 = 丢 checkpoint 从头重扫，
  * 代价不可接受。代价是过滤器会越来越"松"（多放行一些刚滑出窗口的老条目），
  * 但窗口的权威是剪枝（services/timeline.ts 的 pruneOlderThan）——多进来的会被删掉。
  *
@@ -81,9 +91,107 @@ export function replicationQueryParams(
   return params
 }
 
-/** 创建过滤参数时用的固定下界 */
+/** 创建过滤参数时用的固定下界（**只在首次同步 / 换窗口时算一次**，之后从水位表读回） */
 export function initialWindowBoundIso(windowDays: number, now: number = Date.now()): string {
   return new Date(now - windowDays * 86_400_000).toISOString()
+}
+
+/** 单源一次性复制的超时上限。单源常态是几百毫秒（实测：无更新空转 1.3s、增量 1.7s、
+ *  168 条 × 20KB 全量 3.5s）；超时说明源库异常大或 CouchDB 卡住，让任务失败重试比挂死好。 */
+const REPLICATION_TIMEOUT_MS = Math.max(5_000, parseInt(process.env.TIMELINE_REPLICATION_TIMEOUT_MS ?? "120000") || 120_000)
+
+/** `POST /_replicate` 的响应：真正关心的计数在 `history[0]` 里 */
+interface ReplicateResponse {
+  ok?: boolean
+  source_last_seq?: string | number
+  history?: Array<{ docs_written?: number, docs_read?: number, doc_write_failures?: number }>
+  error?: string
+  reason?: string
+}
+
+export interface SourceReplicationResult {
+  /** 本次真正写进目标库的文档数（含 FeedDoc 与删除投递，不只是条目） */
+  docsWritten: number
+  /** 本次复制到达的源库序号（诊断用，落进水位表） */
+  sourceLastSeq: string | null
+  elapsedMs: number
+}
+
+/**
+ * 跑一次**一次性**单源复制（同步等待完成），返回本次写了多少文档。
+ *
+ * 用 `POST /_replicate` 而不是往 `_replicator` 库塞文档：后者会经过 CouchDB 的调度器
+ * （`max_jobs` / `max_churn`），于是并发又变成"由 CouchDB 决定"——而那正是常驻方案里
+ * 饿死与过载并存的根源。`_replicate` 是一次同步调用，并发完全由调用方（我们的队列）控制。
+ *
+ * checkpoint 与 `_replicator` 完全一致（两端 `_local/<参数哈希>`）：同参数的下一次调用
+ * 接着上次的序号继续；传了不同的 `boundIso` 就是新哈希，会从 0 重扫（探针实测）。
+ */
+export async function runSourceReplication(spec: {
+  sourceDb: string
+  targetDb: string
+  windowDays: number
+  boundIso: string
+}): Promise<SourceReplicationResult> {
+  const startedAt = Date.now()
+  const timer = { timedOut: false }
+  const request = nanoServer.request({
+    path: "_replicate",
+    method: "POST",
+    body: {
+      // 源/目标必须是**带凭据的完整 URL**：裸库名会被复制器当远端地址解析
+      // （报 `Could not open source database http://any:5984/...`，实测踩过）
+      source: authenticatedDbUrl(spec.sourceDb),
+      target: authenticatedDbUrl(spec.targetDb),
+      // 一次性：不常驻。checkpoint 由参数哈希决定，与 continuous 无关地在下次调用时复用
+      continuous: false,
+      create_target: false,
+      filter: REPLICATION_FILTER_PATH,
+      query_params: replicationQueryParams(spec.windowDays, spec.boundIso),
+    },
+  }) as Promise<ReplicateResponse>
+
+  let res: ReplicateResponse
+  try {
+    res = await Promise.race([
+      request,
+      new Promise<never>((_, reject) => {
+        setTimeout(() => {
+          timer.timedOut = true
+          reject(new Error(`单源复制超过 ${REPLICATION_TIMEOUT_MS}ms 未完成`))
+        }, REPLICATION_TIMEOUT_MS).unref?.()
+      }),
+    ])
+  } catch (err) {
+    // 超时/网络错：复制可能还在 CouchDB 侧继续，但水位不会推进（syncedAt 仍是开始时刻），
+    // 所以下一轮一定会补 —— checkpoint 让重试只搬没搬完的部分，不会重搬。
+    const message = (err as Error)?.message ?? String(err)
+    throw new Error(timer.timedOut ? message : `复制请求失败：${message}`)
+  }
+
+  const history = res?.history?.[0]
+  // 排查开关：单源复制的参数与计数（正常不打印 —— 一次聚合可能有几百个源）
+  if (process.env.TIMELINE_DEBUG_REPLICATION === "1") {
+    console.log("[Timeline][debug] 复制", JSON.stringify({
+      source: spec.sourceDb,
+      target: spec.targetDb,
+      windowDays: spec.windowDays,
+      boundIso: spec.boundIso,
+      queryParams: replicationQueryParams(spec.windowDays, spec.boundIso),
+      ok: res?.ok,
+      error: res?.error,
+      reason: res?.reason,
+      docs_read: history?.docs_read,
+      docs_written: history?.docs_written,
+      doc_write_failures: history?.doc_write_failures,
+      source_last_seq: res?.source_last_seq,
+    }))
+  }
+  return {
+    docsWritten: typeof history?.docs_written === "number" ? history.docs_written : 0,
+    sourceLastSeq: res?.source_last_seq != null ? String(res.source_last_seq) : null,
+    elapsedMs: Date.now() - startedAt,
+  }
 }
 
 // `_replicator` 库默认不存在（CouchDB 用到时才建），进程内只尝试创建一次
@@ -142,56 +250,22 @@ export async function listUserReplications(userId: string): Promise<UserReplicat
   return found
 }
 
-export interface ReplicationSpec {
-  userId: string
-  windowDays: number
-  /** 源 id：feedId 或 `bot:{botId}`（只用于生成文档 id 与排查，不参与复制本身） */
-  sourceId: string
-  /** 源库名（`feed_*` / `bot_*`） */
-  sourceDb: string
-  /** 目标库名（`user-timeline_*`） */
-  targetDb: string
-}
-
 /**
- * 确保一条复制任务存在，返回是否**新建**。
+ * 清理该用户**历史遗留的常驻复制任务**（升级一次性执行，之后 `_replicator` 里不再有我们的文档）。
  *
- * 已存在就原样返回、绝不更新（改参数会丢 checkpoint 重扫，见边界 ③）；
- * 稳态下一轮 reconcile 应该一个写请求都不发。
+ * 不清理的后果：老任务会继续常驻，每条都占一个调度槽 + 一条 `_changes` 长轮询，
+ * 既白占资源，又会和新的按需复制抢 CouchDB 的复制器。
+ *
+ * 只删本服务前缀的文档（`rssfed-{userId}:`），别人的任务不碰。
  */
-export async function ensureReplication(spec: ReplicationSpec): Promise<"created" | "exists"> {
-  await ensureReplicatorDatabase()
-  const id = replicationDocId(spec.userId, spec.windowDays, spec.sourceId)
-  const scope = nanoServer.use(REPLICATOR_DB)
-  try {
-    await scope.get(id)
-    return "exists"
-  } catch {
-    // 不存在：继续创建（真正建不出来的错误会在 insert 里抛出来）
-  }
-
-  const doc: Record<string, unknown> = {
-    _id: id,
-    source: authenticatedDbUrl(spec.sourceDb),
-    target: authenticatedDbUrl(spec.targetDb),
-    continuous: true,
-    create_target: false,
-    // JS filter 而不是 selector：只有它能搬删除（见 client.ts 的 TIMELINE_REPLICATION_FILTER）
-    filter: REPLICATION_FILTER_PATH,
-    query_params: replicationQueryParams(spec.windowDays, initialWindowBoundIso(spec.windowDays)),
-  }
-
-  try {
-    await scope.insert(doc as never)
-    return "created"
-  } catch (err) {
-    // 同一用户的两次 reconcile 撞车（定时轮询 + 手动刷新）时 409，等价于"已经有了"
-    if ((err as { statusCode?: number })?.statusCode === 409) return "exists"
-    throw err
-  }
+export async function purgeLegacyReplications(userId: string): Promise<number> {
+  const existing = await listUserReplications(userId)
+  if (existing.length === 0) return 0
+  await deleteReplications(existing.map(item => ({ docId: item.docId, rev: item.rev })))
+  return existing.length
 }
 
-/** 批量删除复制任务（窗口变化要换掉整个用户的任务集，逐条删会串行很多次往返） */
+/** 批量删除复制任务（升级清理时逐条删会串行很多次往返） */
 export async function deleteReplications(items: Array<{ docId: string, rev: string }>): Promise<void> {
   if (items.length === 0) return
   await ensureReplicatorDatabase()
@@ -199,47 +273,4 @@ export async function deleteReplications(items: Array<{ docId: string, rev: stri
   const docs = items.map(item => ({ _id: item.docId, _rev: item.rev, _deleted: true }))
   // 冲突（并发删除）不算失败：目标是"这条任务没了"
   await scope.bulk({ docs })
-}
-
-/** 删除单条复制任务（不存在则忽略） */
-export async function deleteReplication(docId: string): Promise<void> {
-  const scope = nanoServer.use(REPLICATOR_DB)
-  try {
-    const doc = await scope.get(docId) as { _rev: string }
-    await scope.destroy(docId, doc._rev)
-  } catch {
-    // 已不存在
-  }
-}
-
-export interface ReplicationJobState {
-  docId: string
-  /** 调度状态：running / pending / crashing / completed … */
-  state: string | null
-  changesPending: number | null
-  docsWritten: number | null
-}
-
-/**
- * 读某条复制任务的调度状态（运维排查入口，`GET /_scheduler/docs/_replicator/<文档 id>`）。
- *
- * **不要用它判断"追平了没有"**：`checkpointed_source_seq` 只在复制器按 `worker_batch_size`
- * 批量落 checkpoint 时才更新，明显滞后于文档真正到端。手动同步的等待走派生库 `_changes`
- * （见 services/timeline.ts 的 waitForSync）。
- */
-export async function getReplicationState(docId: string): Promise<ReplicationJobState | null> {
-  try {
-    const res = await nanoServer.request({
-      path: `_scheduler/docs/${REPLICATOR_DB}/${encodeURIComponent(docId)}`,
-      method: "GET",
-    }) as { state?: string, info?: { changes_pending?: number, docs_written?: number } }
-    return {
-      docId,
-      state: res?.state ?? null,
-      changesPending: typeof res?.info?.changes_pending === "number" ? res.info.changes_pending : null,
-      docsWritten: typeof res?.info?.docs_written === "number" ? res.info.docs_written : null,
-    }
-  } catch {
-    return null
-  }
 }

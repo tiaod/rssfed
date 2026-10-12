@@ -20,8 +20,13 @@
  *   ⑧ 未登录访问代理被拒（401）；
  *   ⑨ **附件只在抓取时产生**：探针源库里的附件被原样搬进各用户库，两个用户的字节与源库
  *      完全一致（图片策略是 per-feed 的，聚合不再下载/压缩任何图片）。
- *   ⑩ **搬运由 CouchDB 复制器完成**：该用户订阅的每个源一条常驻复制（selector 按窗口过滤，
- *      窗口外的老条目不会被搬进来）；退订会把任务与内容一起清掉；
+ *   ⑩ **搬运由 CouchDB 复制器按需完成**：该用户订阅的每个源**没有常驻复制任务**
+ *      （老版本是每个源一条 `continuous: true`，600+ 条一起追赶会把 2 核机压死；现在只在
+ *      「源那边上次同步之后有过新内容」时跑一次一次性复制）；没有新内容时 `refresh?wait=1`
+ *      的 `queued` 必须是 0，这是"不再用几百条常驻任务压机器"的核心行为；
+ *      `?force=1` 跳过水位判定重扫全部订阅源（脚本直接往源库写探针条目，不会经过抓取 worker，
+ *      所以 PG 里的 `lastNewEntryAt` 不动 —— 这类"外部写入"只能靠 force 触发）；
+ *      窗口外的老条目不会被搬进来；退订会把水位行与内容一起清掉；
  *   ⑪ **重建 / v1→v2 升级**：伪造一份 version 1 的状态文档，验证「换一个空聚合库重搬」——
  *      老库换掉、用户自己写的状态跟着搬、内容按当前窗口重新搬回来（复制是变更投递不是投影，
  *      就地清空是搬不回来的）。
@@ -37,7 +42,8 @@
  * **清理是必达的**：正常结束与中途抛错都会走 `cleanup()` —— 销毁本地 PouchDB、删掉用户库、
  * （有管理员账号时）删掉临时账号，并清掉写进探针源库的两条探针条目。
  *
- * 探针地址是**固定**的（不带时间戳），所以重复运行复用同一行 `feeds` 记录，不会累积。
+ * 探针地址是**固定**的（不带时间戳），所以重复运行复用同一行 `feeds` 记录，不会累积；
+ * 代价是 dev 里可能留下多个含同 id 文档的历史源库，因此探针条目要**写进所有候选库**（见 findFeedDbs）。
  * **探针源库（`feed_xxx`）特意不删**：`feeds.couch_db_name` 一旦登记就走快路径、
  * 不再校验库是否存在（见 docs/troubleshooting.md），删了库但不改登记名，下一次 OPML 导入会直接
  * 报 `Database does not exist`。所以它连同那一行 feeds 一起留着（只有一条 FeedDoc，可忽略）。
@@ -72,7 +78,8 @@ const localPath = path.join(process.cwd(), `.tmp-verify-timeline-${stamp}`)
 const resources = {
   /** 依次创建的所有临时账号及其用户库（每项 { userId, timelineDb }） */
   accounts: [],
-  feedDbName: null,
+  /** 探针源库候选（dev 里可能有历史遗留的同 id 库，见文件头说明） */
+  feedDbNames: [],
   feedId: null,
   local: null,
   /** 拉取通道 */
@@ -102,15 +109,17 @@ async function cleanup() {
     } catch { ignore() }
   }
   // 探针源库留着（见文件头说明），但把探针条目清掉：下次运行从干净状态开始，图片附件也一并消失
-  if (resources.feedDbName && resources.feedId) {
-    for (const suffix of ['verify1', 'verify2', 'verifyold']) {
-      const id = `entry:${resources.feedId}:${suffix}`
-      try {
-        const doc = await couch(`/${resources.feedDbName}/${encodeURIComponent(id)}`)
-        if (doc?._rev) {
-          await couch(`/${resources.feedDbName}/${encodeURIComponent(id)}?rev=${doc._rev}`, { method: 'DELETE' })
-        }
-      } catch { ignore() }
+  if (resources.feedDbNames.length > 0 && resources.feedId) {
+    for (const db of resources.feedDbNames) {
+      for (const suffix of ['verify1', 'verify2', 'verifyold']) {
+        const id = `entry:${resources.feedId}:${suffix}`
+        try {
+          const doc = await couch(`/${db}/${encodeURIComponent(id)}`)
+          if (doc?._rev) {
+            await couch(`/${db}/${encodeURIComponent(id)}?rev=${doc._rev}`, { method: 'DELETE' })
+          }
+        } catch { ignore() }
+      }
     }
   }
   if (resources.accounts.length === 0) return true
@@ -260,27 +269,48 @@ function probeEntry(id, title, attachmentBase64, publishedAt = new Date().toISOS
 }
 
 /**
- * 反查探针源的 CouchDB 库名。
+ * 反查探针源的 CouchDB 库名 —— **返回全部候选**。
  *
  * 旧版是问 `GET /api/couchdb/targets`（逐源下发库名），那个端点随逐源同步一起删掉了；
  * 库名是随机生成、只存在业务表里的，客户端也不再需要它。脚本要直接写探针条目，
  * 只能按 `_id = feedId` 在 `feed_*` 库里反查（dev 环境约两百个库，本地请求很快）。
+ *
+ * 为什么是"全部"而不是"第一个"：dev 里这个固定探针 URL 的库历史上被换过（早版本的脚本会删库
+ * 收尾），于是留下**多个都含 `_id = feedId` 文档**的库；注册表 `feeds.couch_db_name` 指向哪一个
+ * 只有服务端知道。曾经只取字典序第一个，结果探针条目写进了诱饵库、服务端从登记的那个库搬，
+ * 表现为"服务端没搬任何条目"，白排查了一轮。所以每个候选都写一遍 —— 诱饵库多一份副本无害。
  */
-async function findFeedDb(feedId) {
+async function findFeedDbs(feedId) {
   const dbs = await couch('/_all_dbs')
+  const found = []
   for (const name of dbs) {
     if (!name.startsWith('feed_')) continue
     const doc = await couch(`/${name}/${encodeURIComponent(feedId)}`).catch(() => null)
-    if (doc?._id === feedId) return name
+    if (doc?._id === feedId) found.push(name)
   }
-  return null
+  return found
+}
+
+/** 往所有候选探针源库写同一批文档，返回写入成功的库数 */
+async function writeToFeedDbs(docs) {
+  let ok = 0
+  for (const db of resources.feedDbNames) {
+    try {
+      await couch(`/${db}/_bulk_docs`, { method: 'POST', body: JSON.stringify({ docs }) })
+      ok++
+    } catch {
+      // 单个候选库不可用不该让整轮验证失败：登记的库能写就行（写不进去下面的断言会报）
+    }
+  }
+  return ok
 }
 
 /**
- * 该用户在 `_replicator` 里的复制任务（文档 id 前缀 = `rssfed-{userId}:`）。
+ * 该用户在 `_replicator` 里的**遗留常驻**复制任务（文档 id 前缀 = `rssfed-{userId}:`）。
  *
- * 聚合搬运改成复制器之后，「哪些源正在搬」的真相就在这个系统库里 —— 脚本直接读它，
- * 而不是相信某个接口自述。
+ * 按需复制不往这个系统库写文档了（一次性复制走 `POST /_replicate`，完全不经过复制器调度器），
+ * 所以这里的期望值恒为**空**：脚本用它钉住"升级后没有残留的常驻任务在抢机器"。
+ * 清理临时账号时也顺带删掉它们（老版本、或手工建的账号可能留下）。
  */
 async function replicationDocs(userId) {
   const prefix = `rssfed-${userId}:`
@@ -290,7 +320,21 @@ async function replicationDocs(userId) {
   return (res?.rows ?? []).map(row => ({ id: row.id, rev: row.value?.rev, doc: row.doc }))
 }
 
-/** 删掉某个用户的全部复制任务（清理临时账号时必做：否则复制器会对着已删除的库一直重试） */
+/**
+ * 派生库里的**复制 checkpoint**（`_local/<参数哈希>`）。
+ *
+ * 一次性复制的增量能力全靠它：参数（源库+目标库+过滤器+窗口下界）不变时哈希不变，
+ * 下一次调用就接着上次的序号继续；哈希一变就是全量重扫。排掉我们自己的 `_local/state`。
+ */
+async function timelineCheckpoints(dbName) {
+  const res = await couch(`/${dbName}/_local_docs`)
+  return (res?.rows ?? [])
+    .map(row => row.id)
+    .filter(id => id.startsWith('_local/') && id !== '_local/state' && !id.startsWith('_local/sync'))
+    .sort()
+}
+
+/** 删掉某个用户的全部遗留常驻复制任务（清理临时账号时必做：否则复制器会对着已删除的库一直重试） */
 async function deleteUserReplications(userId) {
   for (const doc of await replicationDocs(userId)) {
     try {
@@ -337,9 +381,11 @@ async function main() {
   check('订阅列表里有这条订阅', !!subscription, subscription ? `feedId=${subscription.feedId}` : '')
 
   // ── 2. 反查该源的库名，直接写一条探针条目（模拟抓取结果） ──
-  const feedDbName = await findFeedDb(subscription.feedId)
-  resources.feedDbName = feedDbName ?? null
-  check('能反查到探针源的 CouchDB 库名', typeof feedDbName === 'string' && feedDbName.length > 0, feedDbName)
+  const feedDbNames = await findFeedDbs(subscription.feedId)
+  resources.feedDbNames = feedDbNames
+  const feedDbName = feedDbNames[0] ?? null
+  check('能反查到探针源的 CouchDB 库名（可能有多份历史库，全部都会写一遍）',
+    feedDbNames.length > 0, feedDbNames.join(', '))
 
   /**
    * 探针条目**自带附件**：这就是抓取路径的产物形状（正文图在抓取时按 per-feed 策略压成 AVIF
@@ -348,15 +394,11 @@ async function main() {
    */
   const PROBE_ATTACHMENT = Buffer.from('rssfed-probe-attachment-bytes-v1').toString('base64')
   const ENTRY_ID = `entry:${subscription.feedId}:verify1`
-  await couch(`/${feedDbName}/_bulk_docs`, {
-    method: 'POST',
-    body: JSON.stringify({
-      docs: [
-        { _id: subscription.feedId, type: 'feed', title: '探针源', url: PROBE_FEED_URL },
-        probeEntry(ENTRY_ID, '探针条目 1', PROBE_ATTACHMENT)
-      ]
-    })
-  })
+  const wroteTo = await writeToFeedDbs([
+    { _id: subscription.feedId, type: 'feed', title: '探针源', url: PROBE_FEED_URL },
+    probeEntry(ENTRY_ID, '探针条目 1', PROBE_ATTACHMENT)
+  ])
+  check('探针条目已写进探针源库', wroteTo > 0, `${wroteTo}/${feedDbNames.length} 个候选库`)
 
   // ── 3. 催一轮聚合（wait=1：本请求内跑完） ──
   const refresh = await session.request('/api/timeline/refresh?wait=1', { method: 'POST' })
@@ -380,25 +422,28 @@ async function main() {
   check('派生库只有本人可读（_security.members.names = [userId]）',
     members.length === 1 && members[0] === userId, JSON.stringify(members))
 
-  // ── 4.1 复制拓扑：每个 (用户 × 订阅源) 一条常驻复制，窗口写成 selector ──
+  // ── 4.1 拓扑：**一条常驻复制任务都不该有** ──
+  //
+  // 老版本给每个 (用户 × 订阅源) 建一条 `continuous: true` 的复制文档：625 条一起追赶实测把
+  // 2 核机压到 load 20.8 / swap 1.6G，而用 `max_jobs` 限流又必然饿死（常驻任务永不结束、
+  // 不释放槽位）。现在搬运走 `POST /_replicate` 的一次性复制，由 `rss-timeline-sync` 队列限并发，
+  // 完全不经过复制器调度器 —— 所以这个系统库里不该再出现我们的文档。
+  //
+  // 过滤参数的正确性（JS filter 才能搬删除、参数名不能叫 since、窗口下界必须稳定）由
+  // 单测（timeline-replication.test.ts）与"窗口外条目不进来"这条行为断言覆盖。
   const jobs = await replicationDocs(userId)
-  check('该用户有一条复制任务（源库 → 用户库）', jobs.length === 1, JSON.stringify(jobs.map(j => j.id)))
-  const jobDoc = jobs[0] ? await couch(`/_replicator/${encodeURIComponent(jobs[0].id)}`) : null
-  check('复制任务指向该用户的派生库、且是常驻复制',
-    jobDoc?.target?.endsWith(`/${timelineDb}`) === true && jobDoc?.continuous === true,
-    `target=${jobDoc?.target} continuous=${jobDoc?.continuous}`)
-  // 为什么是 JS filter 而不是 Mango selector：selector 对「已删除文档」无字段可匹配，
-  // 源端删除永远不会被搬过来（实测）。这是「本地跟随服务端删除」的前提。
-  check('复制任务用 JS filter 按窗口过滤',
-    jobDoc?.filter === 'main/timeline' && typeof jobDoc?.query_params?.minPublishedAt === 'string',
-    `filter=${jobDoc?.filter} query_params=${JSON.stringify(jobDoc?.query_params)}`)
-  check('过滤参数名不叫 since（会和 _changes 自己的 since 撞车，窗口会静默失效）',
-    jobDoc?.query_params?.since === undefined, JSON.stringify(jobDoc?.query_params))
-  check('复制任务的 id 里带窗口天数（换窗口 = 换复制哈希 = 从 0 重扫回填）',
-    /:w\d+:.+$/.test(jobs[0]?.id ?? ''), String(jobs[0]?.id))
+  check('该用户没有遗留的常驻复制任务（按需搬运不经过 _replicator 调度器）',
+    jobs.length === 0, JSON.stringify(jobs.map(j => j.id)))
 
-  // 过滤器装在**源库**的设计文档里（存量库也要补装，否则任务直接 crashing）
-  const sourceDdoc = await couch(`/${feedDbName}/_design/main`)
+  // 过滤器装在**源库**的设计文档里（存量库也要补装，否则复制直接 filter_fetch_error）；
+  // 候选库都查一遍，取装上了的那个
+  let sourceDdoc = null
+  for (const db of feedDbNames) {
+    const ddoc = await couch(`/${db}/_design/main`).catch(() => null)
+    if (!ddoc?.filters?.timeline) continue
+    sourceDdoc = ddoc
+    break
+  }
   check('源库设计文档里装上了聚合复制过滤器，且删除放行',
     typeof sourceDdoc?.filters?.timeline === 'string'
     && sourceDdoc.filters.timeline.includes('doc._deleted')
@@ -407,15 +452,20 @@ async function main() {
 
   // ── 4.2 窗口 selector 真的在过滤：窗口外的老条目不会被搬进来 ──
   const OLD_ENTRY_ID = `entry:${subscription.feedId}:verifyold`
-  await couch(`/${feedDbName}/_bulk_docs`, {
-    method: 'POST',
-    body: JSON.stringify({ docs: [probeEntry(OLD_ENTRY_ID, '窗口外的老条目', null,
-      new Date(Date.now() - 60 * 86_400_000).toISOString())] })
-  })
-  await session.request('/api/timeline/refresh?wait=1', { method: 'POST' })
+  await writeToFeedDbs([probeEntry(OLD_ENTRY_ID, '窗口外的老条目', null,
+    new Date(Date.now() - 60 * 86_400_000).toISOString())])
+  // 脚本是**直接写源库**的（模拟抓取产物），PG 里的 feeds.lastNewEntryAt 不会动，所以默认
+  // 水位判定认为"这个源没有新内容"、不会搬 —— 要验证过滤行为必须显式重扫（force）
+  await session.request('/api/timeline/refresh?wait=1&force=1', { method: 'POST' })
   const oldEntry = await couch(`/${timelineDb}/${encodeURIComponent(OLD_ENTRY_ID)}`).catch(() => null)
-  check('窗口外的条目不会被搬进用户库（selector 生效）', oldEntry === null,
+  check('窗口外的条目不会被搬进用户库（源库 JS filter 按窗口下界过滤）', oldEntry === null,
     oldEntry ? '老条目竟然进来了' : '未搬入')
+
+  // 同一次强制重扫里，窗口内的探针条目必须**真的**搬进来了。这条件直接看用户库、不经过客户端，
+  // 于是"服务端没搬"和"客户端没拉到"两种失败不会混在一起（曾经混过一次，白排查一轮）。
+  const copiedEntry = await couch(`/${timelineDb}/${encodeURIComponent(ENTRY_ID)}`).catch(() => null)
+  check('按需同步把探针条目搬进了用户库（源库 → 用户库的一次性复制）', !!copiedEntry,
+    copiedEntry ? `title=${copiedEntry.title}` : '用户库里没有这条')
 
   // ── 5. 开一条 live 复制，然后**在复制运行期间**再写一条条目 ──
   const proxyUrl = `${API}/api/couchdb/proxy/${encodeURIComponent(timelineDb)}`
@@ -464,13 +514,19 @@ async function main() {
     check('派生条目带源库搬过来的 AVIF 附件', false, '派生条目上没有附件')
   }
 
-  // ── 6. 复制运行中新增条目：服务端写入 → 客户端自动收到（不重启复制） ──
+  // ── 6. 增量：先确认"没有新内容就不搬"，再显式重扫把新条目搬过来 ──
+  //
+  // 这一节同时钉住两件事：① 水位生效时一轮聚合一个复制请求都不发（queued=0）；
+  // ② 同参数的第二次搬运复用同一个 checkpoint（下界稳定 → 不会每次全量重扫源库）。
+  const idleRefresh = await session.request('/api/timeline/refresh?wait=1', { method: 'POST' })
+  const idleBody = idleRefresh.ok ? await idleRefresh.json() : {}
+  check('源没更新时一轮聚合不搬任何源（水位生效：queued=0）',
+    idleRefresh.status === 200 && idleBody.queued === 0, JSON.stringify(idleBody))
+  const checkpointsBefore = await timelineCheckpoints(timelineDb)
+
   const ENTRY_ID_2 = `entry:${subscription.feedId}:verify2`
-  await couch(`/${feedDbName}/_bulk_docs`, {
-    method: 'POST',
-    body: JSON.stringify({ docs: [probeEntry(ENTRY_ID_2, '探针条目 2', null)] })
-  })
-  const secondRefresh = await session.request('/api/timeline/refresh?wait=1', { method: 'POST' })
+  await writeToFeedDbs([probeEntry(ENTRY_ID_2, '探针条目 2', null)])
+  const secondRefresh = await session.request('/api/timeline/refresh?wait=1&force=1', { method: 'POST' })
   check('第二次催促聚合在请求内跑完', secondRefresh.status === 200, `HTTP ${secondRefresh.status}`)
 
   const secondLocal = await waitFor('live 复制在运行中拿到新条目', async () => {
@@ -480,11 +536,19 @@ async function main() {
   check('复制没有重启，新条目自己到达本地', !!secondLocal, secondLocal?.title)
   check('复制过程中没有报错', replicationErrors.length === 0,
     replicationErrors.map(e => e?.message ?? String(e)).join('；'))
+  const checkpointsAfter = await timelineCheckpoints(timelineDb)
+  check('同参数再搬一次复用同一个 checkpoint（固定下界 → 不重扫整个源库）',
+    JSON.stringify(checkpointsAfter) === JSON.stringify(checkpointsBefore),
+    `${JSON.stringify(checkpointsBefore)} → ${JSON.stringify(checkpointsAfter)}`)
 
   // ── 7. 源库删除 → 本地跟随删除 ──
-  const sourceDoc = await couch(`/${feedDbName}/${encodeURIComponent(ENTRY_ID_2)}`)
-  await couch(`/${feedDbName}/${encodeURIComponent(ENTRY_ID_2)}?rev=${sourceDoc._rev}`, { method: 'DELETE' })
-  const thirdRefresh = await session.request('/api/timeline/refresh?wait=1', { method: 'POST' })
+  for (const db of feedDbNames) {
+    const sourceDoc = await couch(`/${db}/${encodeURIComponent(ENTRY_ID_2)}`).catch(() => null)
+    if (sourceDoc?._rev) {
+      await couch(`/${db}/${encodeURIComponent(ENTRY_ID_2)}?rev=${sourceDoc._rev}`, { method: 'DELETE' })
+    }
+  }
+  const thirdRefresh = await session.request('/api/timeline/refresh?wait=1&force=1', { method: 'POST' })
   check('删除源条目后催促聚合成功', thirdRefresh.status === 200, `HTTP ${thirdRefresh.status}`)
 
   const removed = await waitFor('客户端跟随服务端的删除', async () => {
@@ -584,7 +648,14 @@ async function main() {
     method: 'POST',
     body: JSON.stringify({ opml })
   })
-  const imported2Body = imported2.ok ? await imported2.json() : {}
+  // 这个接口是 NDJSON 进度流（第一个账号用 readImportStream 读的就是它）：
+  // 直接 `.json()` 会在第二行炸 `Unexpected non-whitespace character after JSON`
+  let imported2Body = {}
+  try {
+    if (imported2.ok) imported2Body = (await readImportStream(imported2)).final ?? {}
+  } catch {
+    imported2Body = {}
+  }
   check('第二个账号导入 OPML 成功（没被静默吞掉）',
     imported2.ok && ((imported2Body.imported ?? 0) + (imported2Body.skipped ?? 0) === 1),
     `HTTP ${imported2.status} ${JSON.stringify(imported2Body)}`)
@@ -658,7 +729,6 @@ async function main() {
   // 复制是**变更投递不是投影**：目标端自己删过的 rev，复制器不会再送回来，所以"就地清空再重搬"
   // 做不到（实测）。重建走的是**换库**：另建一个空聚合库、把用户自己写的状态文档搬过去、
   // 旧库删掉，复制器就会按当前窗口从 0 扫源库把内容重搬一遍。
-  const jobsBeforeRebuild = await replicationDocs(userId)
   const dbBeforeRebuild = primary.timelineDb
   const rebuilt = await session.request('/api/timeline/rebuild', { method: 'POST' })
   check('重建接口接受请求', rebuilt.status === 202, `HTTP ${rebuilt.status}`)
@@ -690,11 +760,9 @@ async function main() {
   check('重建把用户订阅搬到新库（重建不能等于"订阅全没了"）', !!rebuiltSub, JSON.stringify(rebuiltSub?._id))
   const rebuiltUserState = await couch(`/${primary.timelineDb}/${encodeURIComponent(`entry-state:${ENTRY_ID}`)}`).catch(() => null)
   check('重建把用户写的已读/收藏搬到新库', rebuiltUserState?.saved === true, JSON.stringify(rebuiltUserState?.saved))
-  const jobsAfterRebuild = await replicationDocs(userId)
-  check('重建后复制任务按新库重建',
-    jobsAfterRebuild.length === jobsBeforeRebuild.length
-    && jobsAfterRebuild.every(j => String(j.doc?.target ?? '').endsWith(`/${dbAfterRebuild}`)),
-    JSON.stringify(jobsAfterRebuild.map(j => j.doc?.target)))
+  check('重建后仍然没有常驻复制任务（换库 = 水位失效 = 全部源按需重扫）',
+    (await replicationDocs(userId)).length === 0,
+    JSON.stringify((await replicationDocs(userId)).map(j => j.id)))
   // 换库重搬是异步的：库名先切过去，之后才搬用户状态、删旧库，所以这里要等一等
   let oldDbGone = false
   try {
@@ -715,9 +783,13 @@ async function main() {
     { method: 'DELETE' }
   )
   await session.request('/api/timeline/refresh?wait=1', { method: 'POST' })
-  check('退订后该源的复制任务被删掉（不会再往用户库搬东西）',
+  check('退订后没有常驻任务（本来就按需，这里确认不会为已退订的源建任务）',
     (await replicationDocs(userId)).length === 0, JSON.stringify((await replicationDocs(userId)).map(j => j.id)))
   check('退订后该源的条目被清掉',
+    (await couch(`/${primary.timelineDb}/${encodeURIComponent(ENTRY_ID)}`).catch(() => null)) === null)
+  // 退订会把水位行一起删掉，且"订阅集合"才是权威：即便强制重扫全部源，退订过的源也不该回来
+  await session.request('/api/timeline/refresh?wait=1&force=1', { method: 'POST' })
+  check('退订后再强制重扫也不会把内容搬回来（订阅集合是权威）',
     (await couch(`/${primary.timelineDb}/${encodeURIComponent(ENTRY_ID)}`).catch(() => null)) === null)
   check('退订后 FeedDoc 副本也被清掉',
     (await couch(`/${primary.timelineDb}/${encodeURIComponent(subscription.feedId)}`).catch(() => null)) === null)
@@ -729,7 +801,7 @@ async function main() {
   check('临时账号已清理', accountRemoved, `共 ${resources.accounts.length} 个临时账号`)
 
   console.log(failures.length === 0
-    ? '\n全部通过：单库下发 → 复制器搬运（JS filter + 窗口参数 / 附件二进制）→ 拉取/回写两条通道 → 删除跟随 → 退订清理 / 重建换库 → 写方向闸门，链路行为符合设计。'
+    ? '\n全部通过：单库下发 → 按需一次性搬运（水位判定 / 固定下界 + 同 checkpoint / 窗口过滤 / 附件二进制）→ 拉取/回写两条通道 → 删除跟随 → 退订清理 / 重建换库 → 写方向闸门，链路行为符合设计。'
     : `\n失败 ${failures.length} 项：${failures.join('；')}`)
   process.exit(failures.length === 0 ? 0 : 1)
 }

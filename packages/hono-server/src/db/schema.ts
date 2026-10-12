@@ -7,6 +7,7 @@ import {
   index,
   uniqueIndex,
   jsonb,
+  primaryKey,
 } from "drizzle-orm/pg-core"
 import { relations } from "drizzle-orm"
 import { user } from "./auth-schema"
@@ -115,6 +116,67 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
   aiSummaryEnabled: boolean("ai_summary_enabled"),
   updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
 })
+
+/**
+ * 每个 (用户 × 订阅源) 的**同步水位** —— 决定"这个源现在要不要搬一次"。
+ *
+ * 背景：聚合早期是每个 (用户 × 源) 一条 **常驻** CouchDB 复制（`continuous: true`）。
+ * 常驻任务在这台 2 核机上跑不动：625 条一起追赶会把机器压死（实测 load 20.8、
+ * swap 1.6G/2G），而用 `max_jobs` 限流又会饿死 —— 常驻任务永不结束，`max_jobs`
+ * 事实上是"最多有多少个源会被搬"，设 50 时 573 个源的内容一条都搬不过来。
+ * 现在改成**按需一次性复制**：reconcile 只给"上次同步之后源那边有过新内容"的源入队，
+ * 队列限并发地跑一次性复制。本表就是那个"上次同步"的水位。
+ *
+ * 为什么放 PostgreSQL 而不是用户库里的 `subscription:` 文档：
+ *   - `subscription:` 是**客户端也会写**的文档（PouchDB 双向同步），服务端往上写水位会和
+ *     用户的订阅编辑撞出修订冲突；
+ *   - 放 PG 还能按 `source_id` 反查"谁订阅了这个源"（将来把
+ *     `notifyTimelineStale` 从"给所有用户入队"收窄成"只给订阅了这个源的用户入队"）。
+ *
+ * `bound_iso` 是复制过滤器 `query_params.minPublishedAt` 的**固定下界**：复制器的
+ * checkpoint 由参数哈希决定，下界一变就是新哈希 → 该源从 0 重扫。所以它必须稳定地存下来，
+ * 不能在每次同步时按"现在"重算。换窗口 = 重算下界 = 故意的全量重扫（回填语义靠它）。
+ *
+ * `synced_at` 记的是**复制开始**的时刻而不是完成时刻，这是为了堵一个丢数据的竞态：
+ * 抓取 worker 在复制进行中写入新条目时，那条变更可能没被本次复制的 `_changes` 读到，
+ * 但它的 `lastNewEntryAt` 会比"完成时刻"更早 —— 用完成时刻就会把这条判成"已同步过"，
+ * 于是永远不再搬。用开始时刻则它一定还脏，下一轮补上（代价只是一次空转复制）。
+ *
+ * **行的生命周期**（没有数据库触发器/视图，全部由应用在 reconcile 与同步任务里维护；
+ * 订阅集合的权威始终是用户库里的 `subscription:` 文档 —— 客户端也可以写它，见
+ * `listSubscriptionSources`）：
+ *   - **新增**：reconcile 读到"订阅里有、水位里没有" → 判脏源 → 入队；
+ *     **行是那次同步自己 upsert 的**（先写行再搬），不是"订阅那一刻"建的；
+ *   - **删除**：退订写回用户库后的第一轮 reconcile 发现"水位里有、订阅里没有" →
+ *     删该源条目 + 删行（写回是异步的，点了退订立刻看表里还在是正常的）；
+ *   - **随用户删**：`user_id` 上的 `ON DELETE CASCADE`（这一条是数据库兜的）；
+ *   - **作废**：聚合库整个换掉（重建、v1→v2 升级、手工删库）→ 清掉该用户全部行
+ *     （`isDerivedDbFresh`），否则新库是空的、"源那边没新内容"的源永远不会被搬。
+ * 队列里的同步任务还会先复查 `subscription:<sourceId>`：退订发生在入队之后时直接跳过，
+ * 不会把刚清掉的内容又搬回来。
+ */
+export const timelineSourceSync = pgTable("timeline_source_sync", {
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  /** 源 id：feeds 的 feedId，或 `bot:{botId}` */
+  sourceId: text("source_id").notNull(),
+  /** 本次同步使用的窗口天数（与用户当前设置不一致 = 需要重算下界并重扫） */
+  windowDays: integer("window_days").notNull(),
+  /** 复制过滤器的固定下界（见上：必须稳定，否则每次同步都是全量重扫） */
+  boundIso: text("bound_iso").notNull(),
+  /** 上次同步**开始**的时刻；与 feeds/bots.lastNewEntryAt 比较决定是否还需要再搬 */
+  syncedAt: timestamp("synced_at"),
+  /** 上次同步结束时源库的 update_seq（诊断用；不参与判定，避免每源一次 info 请求） */
+  sourceSeq: text("source_seq"),
+  /** idle（上次同步成功）/ syncing / error */
+  status: text("status").notNull().default("idle"),
+  lastError: text("last_error"),
+  updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
+}, (table) => [
+  // 一个用户对一个源只有一行水位（并发入队时靠它做 upsert）
+  primaryKey({ columns: [table.userId, table.sourceId] }),
+  // 「谁订阅了这个源」的反查索引（将来做定向通知）
+  index("timeline_source_sync_source_idx").on(table.sourceId),
+])
 
 /** Feed 注册表 — 记录所有已知订阅源的元数据，供 Worker 定时抓取 */export const feeds = pgTable("feeds", {
   id: text("id").primaryKey(),

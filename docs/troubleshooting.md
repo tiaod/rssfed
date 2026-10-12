@@ -87,26 +87,47 @@
 - **原因**：代理只接受真实库名，旧版前端仍按业务 id 拼地址（`/api/couchdb/proxy/feed/<feedId>`）；旧页面还跑着旧 JS（新版 SW 先待命，等用户点更新才激活，见 [offline-and-pwa.md](offline-and-pwa.md)）。
 - **解法**：刷新页面即可，错误响应里的 `hint` 也写了这条。
 
-### 时间线一直空、提示条停在「已同步 0 条」：复制器还没把内容搬过来
+### 服务器被打满、站点 502：几百条**常驻**复制一起追赶（已改为按需搬运）
+
+- **现象**：站点间歇 502，`uptime` 显示 2 核负载 20+、swap 用满；CouchDB 日志成片
+  `replication_auth_error ... _session ... sel_conn_closed`、`changes_reader_died`、
+  `filter_fetch_error: Could not open source database`；`GET /_scheduler/docs/_replicator`
+  里 running 几百条、pending 几百条、error/crashing 一片，而目标库 3 分钟只涨十几条。
+- **原因**：当时的拓扑是「每个 (用户 × 订阅源) 一条**常驻**复制」—— 一个 625 个源的账号就是 625 条。
+  同时追赶时每条都要拉起 couchjs 在源端跑 `timeline` 过滤器，2 核机连源库都打不开；而用 `max_jobs`
+  压并发必然**饿死**（常驻任务跑到 running 就永不结束、不释放槽位，实测 running=50 / pending=573 一直不动）。
+  结论：`max_jobs` 怎么调都无解，问题在「常驻」这个形态本身。
+- **解法**（现行实现）：改成**按需的一次性复制** —— 只在「源那边上次同步之后有过新内容」时对该源跑一次
+  `POST /_replicate`（不经过复制器调度器），并发由 `rss-timeline-sync` 队列控制（`TIMELINE_SYNC_CONCURRENCY`，
+  默认 4）。升级后每个账号的第一轮聚合会自动清掉遗留的常驻任务并打标记（`_local/state.replicatorsPurged`）：
+  ```bash
+  curl -s -u admin:admin "http://localhost:5984/_scheduler/docs/_replicator" | head -c 300  # jobs 应为空
+  curl -s -u admin:admin "http://localhost:5984/user-timeline_xxx/_local/state"              # replicatorsPurged: true
+  ```
+- **代价与前提**：单源空转一次也要 ~1.3s（会话建立占大头，实测见
+  [notes/aggregation/on-demand-replication.md](notes/aggregation/on-demand-replication.md)），所以水位判定是
+  **必需**而不是优化：稳态下一轮聚合一个复制请求都不发（`refresh?wait=1` 返回 `queued: 0`）。
+
+### 时间线一直空、提示条停在「已同步 0 条」：这一轮还没把内容搬过来
 
 - **现象**：登录正常、订阅列表有内容、`GET /api/couchdb/sync-targets` 也下发了 `user-timeline_xxx`，但时间线始终空白（或只出现几条），`POST /api/timeline/refresh?wait=1` 返回 `{"accepted":true,"completed":false}`。
-- **原因**：真正的搬运交给 **CouchDB 复制器**（每个 (用户 × 订阅源) 一条常驻复制），我们那一轮只对齐拓扑（建/删任务）与剪枝，很快就返回；`wait=1` 的判据是"派生库安静"（`minWaitMs` 4s + 连续 5 轮没有新条目），所以它可能在复制器刚拉起、首批数据还没到端时就报 `completed:true`。附件也不再重压，是源库成品原样搬。
+- **原因**：搬运是**按需的一次性复制**，一轮聚合只做「判定哪些源脏了 → 把脏源交给单源同步队列 → 剪枝」。`wait=1` 会等这批单源 job 跑完（上限 `TIMELINE_REFRESH_WAIT_MS`，默认 15s）再数「本轮新增 N 条」，超时就返回 `completed:false`，同步仍在后台继续。若返回 `queued: 0`，那是**服务端认为源那边没有新内容**（水位判定的正常结果），不是卡住。
 - **排查**：
   ```bash
-  docker logs <server 容器> | grep '\[Timeline\]'                     # 一行「源=… 新建复制=… 删除复制=… 剪枝=…」
-  curl -s -u admin:admin "http://localhost:5984/_scheduler/docs/_replicator" | head -c 2000
+  docker logs <server 容器> | grep '\[Timeline\]'                      # 「源=… 脏源=…（已入队 N 个单源同步）」
+  docker exec <redis 容器> redis-cli keys 'bull:rss-timeline-sync:*' | head   # 队列里有哪些单源同步
   curl -s -u admin:admin "http://localhost:5984/<user-timeline 库名>" | grep doc_count
   ```
-  调度器里那条任务应当是 `running`（`crashing` / `error` 会带上原因）。任务清单本身就是「哪些源在搬」的真相；库里的 `_local/state` 只存版本标记与设置快照，**不再有每源游标**。
-- **解法**：等它搬（Steady state 下复制器自己长轮询，不需要我们催）。整库搬不动时再 `POST /api/timeline/rebuild`：它是**换一个空聚合库重搬**（换库才会清掉复制 checkpoint），用户自己写的订阅/已读收藏会跟着搬过去，客户端会丢掉本地缓存重新全量拉一遍。
+  每个源上次同步到哪儿、成功没有，看 PostgreSQL 的 `timeline_source_sync`（`status` = `idle` / `syncing` / `error`，`last_error` 带原文，`synced_at` 是复制**开始**时刻）。
+- **解法**：等它搬完；或 `POST /api/timeline/refresh?wait=1&force=1` **跳过水位**把当前订阅的源全部重扫一遍（外部直接往源库写过东西、没经过抓取 worker 时，`lastNewEntryAt` 不会动，只有这条路能触发）。整库搬不动时用 `POST /api/timeline/rebuild`：换一个空聚合库重搬，同时作废全部水位、清掉旧 checkpoint。
 
-### `POST /api/timeline/refresh` 直接 500 且一条复制任务都没有：CouchDB 的 JS 查询服务卡死了
+### `POST /api/timeline/refresh` 直接 500：CouchDB 的 JS 查询服务卡死了
 
-- **现象**：客户端一条内容都同步不到（订阅列表还在，因为那是客户端推上去的），`POST /api/timeline/refresh?wait=1` 返回 500；`_replicator` 里**一条**本服务的任务都没有，用户库里的 `_design/timeline-maintain` 与 `_local/state` 也不存在。
+- **现象**：客户端一条内容都同步不到（订阅列表还在，因为那是客户端推上去的），`POST /api/timeline/refresh?wait=1` 返回 500；用户库里的 `_design/timeline-maintain` 与 `_local/state` 也不存在。（`_replicator` 里没有任务**是正常的** —— 按需搬运不往那儿写文档。）
 - **原因**：聚合这条链路处处要用 CouchDB 的 **JS 查询服务**（写设计文档要编译 JS、剪枝查 `by_published_at` 视图、复制过滤器在源端执行）。`couch_proc_manager` 一旦卡死，这些操作全部超时：日志里是
   `rexi_server: ... mfa: fabric_rpc:update_docs/3 exit:{timeout,{gen_server,call,[couch_proc_manager,{get_proc,{client,undefined,undefined,<<"javascript">>,...}},5000]}}`，
   请求侧是 `POST /<库名> 500`（写设计文档）或 `GET .../_view/... timeout`。
-  于是 `ensureTimelineDesignDoc` 装不上设计文档（旧实现还把这次失败吞掉并缓存成"已就位"），剪枝那步查一个不存在的视图抛 404 —— 整轮 reconcile 中断，**复制任务一条都不建**，客户端自然拉不到东西。
+  于是 `ensureTimelineDesignDoc` 装不上设计文档（旧实现还把这次失败吞掉并缓存成"已就位"）→ 这一步的失败会让 reconcile 抛 500，**脏源一个都不入队**，客户端自然拉不到东西。（剪枝那一步现在降级成告警：它是清理动作，不该拦住搬运。）
 - **怎么确认**（dev 实测）：
   ```bash
   curl -s -u admin:admin "http://localhost:5984/_node/_local/_system" | head -c 200   # beam 本身健康
@@ -114,7 +135,7 @@
   curl -s -u admin:admin "http://localhost:5984/<库名>/_design/timeline-maintain"     # 404 = 没装上
   docker logs <couchdb 容器> --tail 2000 2>&1 | grep couch_proc_manager
   ```
-- **解法**：重启 couchdb（`docker restart <couchdb 容器>`；不能只 `up -d` 别的服务）。**根因通常是 fd 不够**：容器默认 `nofile=1024`，实测 beam 在几十条复制下就占到 900+，调度器里开始报 `{conn_failed,{error,emfile}}` / `sel_conn_closed` / `req_timedout`，`open_port` 起 couchjs 失败后 `couch_proc_manager` 就永久卡住了。两个 compose 的 couchdb 服务已加 `ulimits.nofile: 65536`（配合 `deploy/couchdb-replicator.ini` 的 `max_dbs_open`），改完要**重建**容器（`docker compose up -d couchdb`）才生效，`docker restart` 不会应用新的 ulimit。重启后服务端会自己补装设计文档与过滤器并建任务（`ensure*` 失败不再进缓存），不需要手工修库。
+- **解法**：重启 couchdb（`docker restart <couchdb 容器>`；不能只 `up -d` 别的服务）。**根因通常是 fd 不够**：容器默认 `nofile=1024`，实测 beam 在几十条复制下就占到 900+，调度器里开始报 `{conn_failed,{error,emfile}}` / `sel_conn_closed` / `req_timedout`，`open_port` 起 couchjs 失败后 `couch_proc_manager` 就永久卡住了。两个 compose 的 couchdb 服务已加 `ulimits.nofile: 65536`（配合 `deploy/couchdb-replicator.ini` 的 `max_dbs_open`），改完要**重建**容器（`docker compose up -d couchdb`）才生效，`docker restart` 不会应用新的 ulimit。重启后服务端会自己补装设计文档与过滤器（`ensure*` 失败不再进缓存），不需要手工修库；下一轮聚合会把脏源重新入队。
 
 ### 图片接口返回 502 `image_unavailable`
 
@@ -143,19 +164,20 @@
 
 ### 升级后每个账号都"重建"了一次：v1 → v2 换库重搬
 
-- **现象**：升级到复制器版之后，日志出现一行 `[Timeline] 用户=… 换库重搬：user-timeline_old → user-timeline_new（搬走用户状态 N 条，作废复制任务 M 条）`，每个已有账号一次，用户库名变了。
+- **现象**：升级之后，日志出现一行 `[Timeline] 用户=… 换库重搬：user-timeline_old → user-timeline_new（搬走用户状态 N 条）`（外加可能的一行 `清理遗留常驻复制 M 条`），每个已有账号一次，用户库名变了。
 - **原因**：v1 的聚合库是**我们自己按窗口写进去的**（文档带我们的修订谱系），复制器按源库谱系落库会在同一个 `_id` 上撞出两条互不相干的修订 → 冲突；而"就地清空 + 重建任务"搬不回来（目标端删过的 rev 复制器不会再送）。所以 v1 → v2 走的是**换库重搬**：另建空库、把用户写的状态文档搬过去、旧库删掉，复制器从 0 扫源库。
-- **注意**：这是**一次性**的（新库的状态文档写 `version: 2`），代价是每个账号的窗口内容重搬一遍、客户端重新全量拉一次；内容与订阅/已读收藏都不丢。旧库名变新库名后，客户端若还指着旧库，参照上一条处理。
+- **注意**：这是**一次性**的（新库的状态文档写 `version: 2`），代价是每个账号的窗口内容重搬一遍、客户端重新全量拉一次；内容与订阅/已读收藏都不丢。**换库同时作废全部同步水位**（新库是空的，还信水位的话"源那边没新内容"的源永远不会被搬），所以换库后所有订阅源会重扫一遍。旧库名变新库名后，客户端若还指着旧库，参照上一条处理。
 
-### 某个订阅源一直不搬东西（复制任务 crashing / error）
+### 某个订阅源一直不搬东西（水位行是 error / 一轮聚合没把它算成脏源）
 
-- **现象**：`GET /_scheduler/docs/_replicator` 里某条任务 `state` 是 `crashing` / `error`，或 `_replicator` 文档在但目标库里始终没有该源的内容。
+- **现象**：某个源在用户库里始终没有内容；`timeline_source_sync` 里这一行的 `status` 是 `error`、`last_error` 有原文，或者干脆没有这一行（说明从来没成功同步过）。旧版本里等价的现象是 `_scheduler/docs/_replicator` 里那条常驻任务 `crashing` / `error` —— **新实现不再有这种文档**。
 - **原因**（按出现频率）：
-  1. **源/目标写的是裸库名**：复制器把它当远端 URL 解析，报 `replication_auth_error`（我们写的是带凭据的 URL，见 [replicator.ts](../packages/hono-server/src/couchdb/replicator.ts)）；
-  2. 源库设计文档里没有 `filters.timeline`（新装的过滤器没生效，或库是手工建的）；
+  1. 复制请求失败：源/目标必须是**带凭据的完整 URL**（裸库名会被当远端地址解析，报 `replication_auth_error`，见 [replicator.ts](../packages/hono-server/src/couchdb/replicator.ts)），或 CouchDB 太忙导致超时（`TIMELINE_REPLICATION_TIMEOUT_MS`，失败会清空 `synced_at`，下一轮重试）；
+  2. 源库设计文档里没有 `filters.timeline`（过滤器没装上，或库是手工建的）→ `filter_fetch_error`；
   3. **过滤器的 `query_params` 里出现了叫 `since` 的参数**：它与 CouchDB 自己的 `since` 撞名，过滤器读到的是序号字符串，窗口会静默失效（可能反而多搬）；
-  4. 目标库被手工删了 / `_security` 改坏 → 任务反复重试。
-- **解法**：先看调度器给的 `error` 原文；1、2、4 都可以通过"让代码重新对齐"恢复 —— 退订再订阅该源（删任务 + 删该源条目 + 删 FeedDoc 副本），或直接 `POST /api/timeline/rebuild`（换库重搬）。任务文档**不要手工改**：改参数等于换复制哈希，会触发一次全量重扫。
+  4. 这个源被判成"没更新"：水位判定看的是 `feeds` / `bots` 的 `lastNewEntryAt`。**外部直接往源库写过东西**（脚本、手工导入）不会动它 → 用 `refresh?wait=1&force=1` 强制重扫；
+  5. 目标库被手工删了 / `_security` 改坏 → 复制反复失败。
+- **解法**：先看 `timeline_source_sync.last_error` 与日志里的 `[Timeline]` 行；"让代码重新对齐"的通用手段是**退订再订阅**该源（删条目 + 删 FeedDoc 副本 + 删水位行），或 `POST /api/timeline/rebuild`（换库重搬 + 作废水位）。**不要手工编辑 `_local/<hash>` checkpoint**：它就是"这次从哪个序号接着搬"的依据，改坏了要么漏搬要么全量重扫。
 
 ## 反向代理与网络
 

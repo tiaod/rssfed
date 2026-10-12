@@ -6,10 +6,12 @@ import {
   TIMELINE_SETTING_LIMITS,
   getTimelineSettings,
   parseTimelineSettingsPatch,
+  readTimelineUpdateSeq,
   reconcileUserTimeline,
   updateTimelineSettings,
   waitForSync,
 } from "../services/timeline"
+import { enqueueSourceSyncs, waitForSourceSyncs } from "../workers/timeline-sync"
 import { enqueueTimelineRebuild, enqueueTimelineReconcile } from "../workers/timeline"
 
 /** 中间件写入的请求级变量 */
@@ -21,9 +23,9 @@ export const TIMELINE_ROUTE_PREFIX = "/api/timeline"
 /**
  * 带 `wait=1` 的刷新请求里，服务端最多等多久（毫秒）。
  *
- * 手动同步要一个确定答案，但 HTTP 请求不能无限期挂着：一轮完整的 reconcile 在
- * 「新订阅了上百个源、窗口内历史都要回填」时可能远超这个值。超时后那轮聚合继续在后台
- * 跑完，客户端按「仍在聚合」提示即可（见 routes/timeline.ts 的 /refresh）。
+ * 手动同步要一个确定答案，但 HTTP 请求不能无限期挂着：一次「新订阅了上百个源、窗口内历史
+ * 都要回填」的同步会远超这个值（单源复制几十毫秒到几秒，几百个源受队列并发限制要几分钟）。
+ * 超时后那批同步继续在后台跑完，客户端按「仍在聚合」提示即可。
  */
 const TIMELINE_REFRESH_WAIT_MS = parseInt(process.env.TIMELINE_REFRESH_WAIT_MS ?? "15000")
 
@@ -82,29 +84,49 @@ timelineRouter.patch("/settings", async (c) => {
  * 两种模式：
  *   - 默认（即发即忘）：入队后立刻 202。数据由派生库的 live 复制到端，客户端不该等 ——
  *     等待会把「几百个源里的那几个有更新的」变成一次阻塞式请求。
- *   - `?wait=1`：本请求内把拓扑对齐（新订阅/退订/换窗口在这一步生效），再**轮询派生库**
- *     等复制器把内容送到，返回确切的「本轮新增 N 条」。手动同步（用户点了按钮）用这个模式，
- *     才能给出「同步完成 / 已是最新」的确定结论；等待有上限（TIMELINE_REFRESH_WAIT_MS），
- *     超时就返回 completed=false，而复制仍在后台继续 —— 客户端按「服务端仍在聚合」处理即可。
+ *   - `?wait=1`：本请求内把拓扑对齐（新订阅/退订/换窗口在这一步生效）、把脏源交给同步队列，
+ *     然后**等这批单源同步跑完**并数出确切的「本轮新增 N 条」。手动同步（用户点了按钮）用这个
+ *     模式，才能给出「同步完成 / 已是最新」的确定结论；等待有上限（TIMELINE_REFRESH_WAIT_MS），
+ *     超时就返回 completed=false，而同步仍在后台继续 —— 客户端按「服务端仍在聚合」处理即可。
+ *   - `?force=1`：跳过水位判定，把该用户当前订阅的源**全部**重扫一遍。默认路径只在
+ *     「源那边上次同步之后有过新内容」时才搬，而外部直接往源库写过东西（脚本验证、人工排查）
+ *     是不会体现在 `feeds/bots.lastNewEntryAt` 上的，这时需要显式重扫。**客户端不发送它**：
+ *     600+ 个源全量重扫是分钟级的机器负载，属于运维/验证手段。
  */
 timelineRouter.post("/refresh", async (c) => {
   const userId = c.get("userId")
+  const force = c.req.query("force") === "1"
 
   if (c.req.query("wait") !== "1") {
-    await enqueueTimelineReconcile(userId)
+    await enqueueTimelineReconcile(userId, { force })
     return c.json({ accepted: true, completed: false }, 202)
   }
 
-  // 拓扑对齐本身很轻（列一次订阅 + 列一次 _replicator，稳态下一个写请求都不发），
-  // 所以不进超时预算：超时只用来限制「等复制器送数据」这一段
+  // 留给最后"数一下到底进来多少条"的预算：任务跑完后派生库已经写好了，这段只是把这段
+  // 时间窗口内的 `_changes` 读一遍，几百毫秒就够（超时上限因此最多被撑出这么一点）
+  const countBudgetMs = 2500
   const deadline = Date.now() + TIMELINE_REFRESH_WAIT_MS
-  const result = await reconcileUserTimeline(userId)
-  const sync = await waitForSync(userId, Math.max(0, deadline - Date.now()))
+
+  // 起始序号必须在**入队之前**取：等任务跑完再取的话，条目早就写进去了，会数成 0
+  const since = await readTimelineUpdateSeq(userId)
+
+  // 拓扑对齐本身很轻（列一次订阅 + 一条水位 SQL，稳态下没有脏源就一个复制请求都不发）
+  const result = await reconcileUserTimeline(userId, { force })
+  const jobs = await enqueueSourceSyncs(userId, result.dirtySources)
+  const drained = await waitForSourceSyncs(jobs, deadline - countBudgetMs)
+
+  const sync = await waitForSync(userId, Math.max(countBudgetMs, deadline - Date.now()), {
+    sinceSeq: since,
+    quietRounds: 1,
+    pollIntervalMs: 300,
+    minWaitMs: 0,
+  })
   return c.json({
     accepted: true,
-    completed: sync.completed,
+    completed: drained && sync.completed,
     added: sync.added,
     sources: result.sources,
+    queued: jobs.length,
   })
 })
 

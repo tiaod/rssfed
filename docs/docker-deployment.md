@@ -185,7 +185,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 - **构建缓存**：镜像分层与 pnpm store 都走 BuildKit 缓存，首次构建后再次构建很快。缓存占用的磁盘可用 `docker builder prune` 回收（代价是下次构建重新下载依赖）。
 - **资源**：抓取 + AVIF 压缩与 API 抢 CPU/内存，2 核 4GB 起步；抓取量大时优先把 worker 拆成独立进程。
 - **单库同步**：浏览器只同步 `user-timeline_<随机名>` 一个库（`GET /api/couchdb/sync-targets` 只回这一个库名）：拉取全量 + 回写状态两条 live 通道。库名随机、存在 `user.timeline_db_name` 列，删库前先置空该列。
-- **聚合靠 CouchDB 复制器搬**：每个 (用户 × 订阅源) 一条常驻复制写在 `_replicator` 库里，调参见 `deploy/couchdb-replicator.ini`（`max_jobs` / `max_churn`，compose 会挂进 `local.d/`）。任务卡住/报错看 `GET /_scheduler/docs/_replicator`，别再对着我们的日志找「搬了没搬」；`_replicator` 是系统库，**升级/回滚后不要手工清空**（清掉不会丢内容，但会让所有账号重新全量扫一遍源库）。
+- **聚合的搬运按需触发，不在 `_replicator` 里**：服务端只对「源那边上次同步之后有过新内容」的源跑一次 `POST /_replicate`（跑完即止），并发由 `rss-timeline-sync` 队列控制（`TIMELINE_SYNC_CONCURRENCY`，默认 4）；`deploy/couchdb-replicator.ini`（compose 挂进 `local.d/`）现在只兜住升级/回滚后残留的常驻任务，`_scheduler/docs/_replicator` 里没有本服务的任务才是正常状态。`_replicator` 是系统库，**升级/回滚后不要手工清空**（清掉不会丢内容，但会让残留任务重新排队）。单源同步的进度看 PostgreSQL 的 `timeline_source_sync` 与 Redis 里的 `bull:rss-timeline-sync:*`。
 - **存储量随用户数增长**：派生库是每个用户一份条目副本（含按该用户参数压好的图片附件），用户多了要留意 CouchDB 数据卷与 `image-cache/` 前缀的体积 —— 后者跨用户共享，先看它再看派生库。
 
 ## 7. 代码层生产开关（已完成）

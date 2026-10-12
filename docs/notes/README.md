@@ -29,6 +29,7 @@
 | 文档 | 记录了什么问题 |
 | --- | --- |
 | [`couchdb-replicator-aggregation.md`](aggregation/couchdb-replicator-aggregation.md) | 聚合搬运为什么改用 CouchDB 复制器；复制语义的 5 条边界与三条路线取舍 |
+| [`on-demand-replication.md`](aggregation/on-demand-replication.md) | 常驻复制为什么在生产被打崩（625 条 / load 20.8）；改成按需一次性复制 + 水位后的实测数字与四个易错点 |
 
 ### `frontend-perf/` —— 前端性能
 

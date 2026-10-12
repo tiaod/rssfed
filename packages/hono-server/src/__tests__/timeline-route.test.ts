@@ -6,13 +6,22 @@ const state = vi.hoisted(() => ({
     settings: { windowDays: 3, aiSummaryEnabled: false },
   },
   reconcileQueued: 0,
+  /** 入队 reconcile 时带的选项（force 逃生口） */
+  reconcileQueuedOptions: [] as Array<Record<string, unknown>>,
+  /** wait=1 直连 reconcile 时带的选项 */
+  reconcileOptions: [] as Array<Record<string, unknown>>,
   rebuildQueued: 0,
-  /** wait=1 时拓扑对齐（reconcile）返回的订阅源数 */
+  /** wait=1 时拓扑对齐（reconcile）返回的订阅源数与其判定出来的脏源 */
   inlineSources: 12,
+  inlineDirty: ["feed1"] as string[],
   /** wait=1 时「等复制器送到」的结果；completed=false 模拟超时 */
   inlineSync: { completed: true, added: 7 } as { completed: boolean, added: number },
+  /** wait=1 时入队/等待的替身记录 */
   inlineCalls: 0,
   syncCalls: 0,
+  syncOptions: null as Record<string, unknown> | null,
+  enqueued: [] as Array<{ userId: string, sourceIds: string[] }>,
+  drained: true,
 }))
 
 vi.mock("../auth", () => ({
@@ -24,8 +33,9 @@ vi.mock("../auth", () => ({
 
 // 队列与 PG 都不在单测范围内：这里只验证路由的参数校验与「该入哪个队」的分支
 vi.mock("../workers/timeline", () => ({
-  enqueueTimelineReconcile: async () => {
+  enqueueTimelineReconcile: async (_userId: string, options: Record<string, unknown> = {}) => {
     state.reconcileQueued++
+    state.reconcileQueuedOptions.push(options)
   },
   enqueueTimelineRebuild: async () => {
     state.rebuildQueued++
@@ -36,20 +46,35 @@ vi.mock("../workers/timeline", () => ({
   shutdownTimelineWorkers: async () => {},
 }))
 
+// 单源同步队列同样不进单测：这里只记「脏源有没有被交给队列」
+vi.mock("../workers/timeline-sync", () => ({
+  enqueueSourceSyncs: async (userId: string, sourceIds: string[]) => {
+    state.enqueued.push({ userId, sourceIds })
+    return sourceIds.map(sourceId => ({ id: sourceId }))
+  },
+  waitForSourceSyncs: async () => state.drained,
+  sourceSyncQueue: { getJob: async () => undefined },
+  sourceSyncWorker: { close: async () => {} },
+  shutdownSourceSyncWorker: async () => {},
+}))
+
 vi.mock("../services/timeline", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/timeline")>()
   return {
     ...actual,
     getTimelineSettings: async () => actual.normalizeTimelineSettings({ windowDays: 3 }),
     updateTimelineSettings: async () => state.settings,
-    // wait=1 的刷新分两步：先在本请求内对齐复制拓扑，再轮询派生库等复制器送到。
-    // 两个替身都不碰 CouchDB，覆盖「追平」与「超时」两条分支。
-    reconcileUserTimeline: async () => {
+    // wait=1 的刷新分三步：取起始序号 → 本请求内对齐拓扑并把这批脏源交给同步队列 → 等它们跑完再数条数。
+    // 三个替身都不碰 CouchDB/Redis，覆盖「追平」与「超时」两条分支。
+    readTimelineUpdateSeq: async () => 41,
+    reconcileUserTimeline: async (_userId: string, options: Record<string, unknown> = {}) => {
       state.inlineCalls++
-      return { sources: state.inlineSources }
+      state.reconcileOptions.push(options)
+      return { sources: state.inlineSources, dirtySources: state.inlineDirty }
     },
-    waitForSync: async () => {
+    waitForSync: async (_userId: string, _timeoutMs: number, options: Record<string, unknown>) => {
       state.syncCalls++
+      state.syncOptions = options
       return state.inlineSync
     },
   }
@@ -63,11 +88,17 @@ beforeEach(() => {
     settings: { windowDays: 3, aiSummaryEnabled: false },
   }
   state.reconcileQueued = 0
+  state.reconcileQueuedOptions = []
+  state.reconcileOptions = []
   state.rebuildQueued = 0
   state.inlineSources = 12
+  state.inlineDirty = ["feed1"]
   state.inlineSync = { completed: true, added: 7 }
   state.inlineCalls = 0
   state.syncCalls = 0
+  state.syncOptions = null
+  state.enqueued = []
+  state.drained = true
 })
 
 async function patch(body: unknown) {
@@ -136,21 +167,57 @@ describe("/api/timeline", () => {
     expect(state.rebuildQueued).toBe(1)
   })
 
-  it("POST /refresh?wait=1：本请求内对齐拓扑并等复制器送到，带上确切条数", async () => {
+  it("POST /refresh?wait=1：本请求内对齐拓扑、把脏源交给同步队列、等它们跑完再数条数", async () => {
     const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ accepted: true, completed: true, added: 7, sources: 12 })
+    expect(await res.json()).toMatchObject({
+      accepted: true,
+      completed: true,
+      added: 7,
+      sources: 12,
+      queued: 1,
+    })
     // 直连处理了，就不该再入队（同一份工作不该跑两遍）
     expect(state.reconcileQueued).toBe(0)
     expect(state.inlineCalls).toBe(1)
+    expect(state.enqueued).toEqual([{ userId: "u1", sourceIds: ["feed1"] }])
     expect(state.syncCalls).toBe(1)
+    // 起始序号必须在入队前取好传进来，否则条目已写完、会数成 0
+    expect(state.syncOptions).toMatchObject({ sinceSeq: 41, quietRounds: 1, minWaitMs: 0 })
   })
 
-  it("POST /refresh?wait=1 超时：200 报 completed=false（复制仍在后台跑，不入队重跑）", async () => {
+  it("POST /refresh?wait=1 没等到队排空：200 报 completed=false（同步仍在后台跑，不入队重跑）", async () => {
+    state.drained = false
     state.inlineSync = { completed: false, added: 2 }
     const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ accepted: true, completed: false, added: 2, sources: 12 })
     expect(state.reconcileQueued).toBe(0)
+  })
+
+  it("force=1 跳过水位判定：wait=1 直连带上 force，非 wait 入队也带上", async () => {
+    const waited = await app.request("/api/timeline/refresh?wait=1&force=1", { method: "POST" })
+    expect(waited.status).toBe(200)
+    expect(state.reconcileOptions).toEqual([{ force: true }])
+
+    const queued = await app.request("/api/timeline/refresh?force=1", { method: "POST" })
+    expect(queued.status).toBe(202)
+    expect(state.reconcileQueuedOptions).toEqual([{ force: true }])
+  })
+
+  it("不带 force 时不会误开逃生口（默认路径必须走水位判定）", async () => {
+    await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
+    await app.request("/api/timeline/refresh", { method: "POST" })
+    expect(state.reconcileOptions).toEqual([{ force: false }])
+    expect(state.reconcileQueuedOptions).toEqual([{ force: false }])
+  })
+
+  it("POST /refresh?wait=1 且没有脏源：不入任何同步 job，也不阻塞", async () => {
+    state.inlineDirty = []
+    state.inlineSync = { completed: true, added: 0 }
+    const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toMatchObject({ accepted: true, completed: true, added: 0, queued: 0 })
+    expect(state.enqueued).toEqual([{ userId: "u1", sourceIds: [] }])
   })
 })

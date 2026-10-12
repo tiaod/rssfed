@@ -1,12 +1,17 @@
 import { Queue, Worker } from "bullmq"
 import { connection, createWorkerConnection } from "./connection"
+import { enqueueSourceSyncs, shutdownSourceSyncWorker } from "./timeline-sync"
 import { listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
 
 /**
- * 用户时间线聚合队列。
+ * 用户时间线聚合队列（**拓扑对齐**，不是搬运本身）。
  *
  * 与抓取队列分开的理由：抓取的并发与超时特性完全不同（网络抓取、每源一个 job），
  * 聚合是「一个用户一个长事务」，混在一个队列里会让抓取被聚合堵住。
+ *
+ * **搬运在另一个队列**（`rss-timeline-sync`，见 ./timeline-sync.ts）：这里的 job 只算出
+ * "哪些源脏了"，然后按需把每个源入队。分开是为了让并发按需限流 —— 拓扑对齐并发 1 ，
+ * 而单源搬运必须有几个并发才不会让 600 个源串行搬十几分钟。
  *
  * jobId 直接用 userId（BullMQ 的 jobId 不允许含冒号），于是同一个用户的聚合请求天然去重：
  * 定时任务、客户端刷新、抓取完成通知三方同时打过来也只会有一个在跑。
@@ -14,7 +19,7 @@ import { listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../serv
 export const timelineQueue = new Queue("rss-timeline", { connection })
 
 /** 入队一次用户聚合（同一用户已有排队/执行中的 job 时直接复用） */
-export async function enqueueTimelineReconcile(userId: string): Promise<void> {
+export async function enqueueTimelineReconcile(userId: string, options: { force?: boolean } = {}): Promise<void> {
   const existing = await timelineQueue.getJob(userId)
   if (existing) {
     const state = await existing.getState()
@@ -22,7 +27,7 @@ export async function enqueueTimelineReconcile(userId: string): Promise<void> {
     if (state === "completed" || state === "failed") await existing.remove()
     else return
   }
-  await timelineQueue.add("reconcile", { userId }, {
+  await timelineQueue.add("reconcile", { userId, force: options.force === true }, {
     jobId: userId,
     // 保留少量历史供看板（/admin/queues）查看；聚合结果本身不重要，可随时重跑
     removeOnComplete: { count: 200 },
@@ -69,19 +74,29 @@ export async function notifyTimelineStale(now: number = Date.now()): Promise<voi
 }
 
 export const timelineWorker = new Worker("rss-timeline", async (job) => {
-  const { userId } = job.data as { userId: string }
+  const { userId, force } = job.data as { userId: string, force?: boolean }
   const result = job.name === "rebuild"
     ? await rebuildUserTimeline(userId)
-    : await reconcileUserTimeline(userId)
+    : await reconcileUserTimeline(userId, { force })
 
-  // 只在「真的发生了什么」时打日志：每 5 分钟一轮的安静 tick 不该刷屏（增量都归复制器，
-  // 它自己会写 _scheduler 的状态；这里只在拓扑变化/清理发生时留一行）
-  if (result.createdReplications > 0 || result.removedReplications > 0
-    || result.removedEntries > 0 || result.prunedEntries > 0 || result.failures.length > 0) {
+  // reconcile 只判定"哪些源脏了"，搬运交给 rss-timeline-sync（限并发）。稳态下 dirtySources 为空，
+  // 一个复制请求都不发 —— 这是把常驻复制换成按需复制之后每 5 分钟一轮的全部成本。
+  if (result.dirtySources.length > 0) {
+    const jobs = await enqueueSourceSyncs(userId, result.dirtySources)
     console.log(
-      `[Timeline] user=${userId} 源=${result.sources} ` +
-      `新建复制=${result.createdReplications} 删除复制=${result.removedReplications} ` +
-      `退订删除=${result.removedEntries} 剪枝=${result.prunedEntries} 失败源=${result.failures.length}`,
+      `[Timeline] user=${userId} 源=${result.sources} 脏源=${result.dirtySources.length} `
+      + `（已入队 ${jobs.length} 个单源同步）`,
+    )
+  }
+
+  // 只在「真的发生了什么」时打日志：每 5 分钟一轮的安静 tick 不该刷屏
+  if (result.removedSyncs > 0 || result.removedEntries > 0 || result.prunedEntries > 0
+    || result.purgedReplications > 0 || result.failures.length > 0) {
+    console.log(
+      `[Timeline] user=${userId} 源=${result.sources} `
+      + `退订清理=${result.removedSyncs} 退订删除=${result.removedEntries} `
+      + `剪枝=${result.prunedEntries} 清理遗留常驻任务=${result.purgedReplications} `
+      + `失败源=${result.failures.length}`,
     )
     for (const failure of result.failures.slice(0, 5)) {
       console.warn(`[Timeline] 源 ${failure.sourceId} 聚合失败：${failure.error}`)
@@ -107,8 +122,10 @@ export async function shutdownTimelineWorkers(): Promise<void> {
   clearInterval(timelineInterval)
   // 强制关闭：一轮聚合（尤其 rebuild）可能跑十几分钟，默认的 close() 会一直等当前 job 结束，
   // 于是 SIGTERM 后的优雅退出卡死、容器只能等超时被 SIGKILL。
-  // 丢掉的是「正在处理的那个源」的进度，代价可接受：每个源跑完就落盘游标（见 reconcileUserTimeline），
-  // 已完成的源不会重做；被中断的 job 由 BullMQ 按 stall 检测重新入队，聚合本身是幂等的。
+  // 丢掉的是「正在处理的那个源」的进度，代价可接受：水位是"开始时刻"、搬完才落 idle，
+  // 被中断的源下一轮一定还是脏源；被中断的 job 由 BullMQ 按 stall 检测重新入队。
+  // 先关搬运 worker（它在处理真正的复制请求），再关拓扑 worker。
+  await shutdownSourceSyncWorker()
   await timelineWorker.close(true)
   await timelineQueue.close()
 }
