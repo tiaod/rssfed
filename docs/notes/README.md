@@ -30,6 +30,8 @@
 | --- | --- |
 | [`couchdb-replicator-aggregation.md`](aggregation/couchdb-replicator-aggregation.md) | 聚合搬运为什么改用 CouchDB 复制器；复制语义的 5 条边界与三条路线取舍 |
 | [`on-demand-replication.md`](aggregation/on-demand-replication.md) | 常驻复制为什么在生产被打崩（625 条 / load 20.8）；改成按需一次性复制 + 水位后的实测数字与四个易错点 |
+| [`source-side-retention-plan.md`](aggregation/source-side-retention-plan.md) | 把"保留区间"从每用户过滤改成源库物理裁剪的提案（未落地） |
+| [`storage-refactor-plan.md`](aggregation/storage-refactor-plan.md) | 存储层重构方案：按需复制 + 服务端时间窗口清理 + 状态库独立 + 内容包投影（`channel:{id}` / `bot_feed:{id}`，PG 权威）（提案，待确认） |
 
 ### `frontend-perf/` —— 前端性能
 
