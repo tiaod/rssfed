@@ -12,7 +12,7 @@
  *   ③ 源库（feed 库）里新写入的条目会在下一轮聚合里出现在用户库中；
  *   ④ 拉取通道能在**不重启复制**的情况下拿到服务端后来写入的条目 ——
  *      这是「服务端一有新内容，浏览器几秒内自动看到」的全部依据；
- *   ⑤ 源库里的条目被删除后，客户端也删掉本地副本（退订 / 窗口收窄的语义：本地跟随服务端）；
+ *   ⑤ 源库里的条目被删除后，客户端也删掉本地副本（源库裁剪 → 删除随复制传播 → 镜像语义）；
  *   ⑥ **写方向闸门**（用户库设计文档里的 validate_doc_update）：
  *      经代理写 `entry` 文档被拒（403，否则客户端能影子化/删掉服务端聚合产物）、
  *      写 `entry-state` / `subscription` 这类状态文档放行；
@@ -26,9 +26,9 @@
  *      的 `queued` 必须是 0，这是"不再用几百条常驻任务压机器"的核心行为；
  *      `?force=1` 跳过水位判定重扫全部订阅源（脚本直接往源库写探针条目，不会经过抓取 worker，
  *      所以 PG 里的 `lastNewEntryAt` 不动 —— 这类"外部写入"只能靠 force 触发）；
- *      窗口外的老条目不会被搬进来；退订会把水位行与内容一起清掉；
+ *      源库里直接写入的老条目也会被镜像过来（复制不带任何时间参数）；退订会把水位行与内容一起清掉；
  *   ⑪ **重建 / v1→v2 升级**：伪造一份 version 1 的状态文档，验证「换一个空聚合库重搬」——
- *      老库换掉、用户自己写的状态跟着搬、内容按当前窗口重新搬回来（复制是变更投递不是投影，
+ *      老库换掉、用户自己写的状态跟着搬、内容从源库重新完整搬回来（复制是变更投递不是投影，
  *      就地清空是搬不回来的）。
  *
  * 用法：
@@ -242,7 +242,6 @@ async function waitFor(label, fn, timeoutMs = 60_000, stepMs = 250) {
   throw new Error(`等待超时：${label}`)
 }
 
-/** 探针条目：publishedAt 用当前时间，必然落在窗口内 */
 /**
  * 探针条目：`attachmentBase64` 非空时带上一个附件，模拟**抓取路径已经压好图**的源库文档。
  * 聚合不该再对它做任何事，只把它原样搬进用户库。
@@ -323,7 +322,7 @@ async function replicationDocs(userId) {
 /**
  * 派生库里的**复制 checkpoint**（`_local/<参数哈希>`）。
  *
- * 一次性复制的增量能力全靠它：参数（源库+目标库+过滤器+窗口下界）不变时哈希不变，
+ * 一次性复制的增量能力全靠它：参数（源库 + 目标库 + 过滤器源码）不变时哈希不变，
  * 下一次调用就接着上次的序号继续；哈希一变就是全量重扫。排掉我们自己的 `_local/state`。
  */
 async function timelineCheckpoints(dbName) {
@@ -429,8 +428,8 @@ async function main() {
   // 不释放槽位）。现在搬运走 `POST /_replicate` 的一次性复制，由 `rss-timeline-sync` 队列限并发，
   // 完全不经过复制器调度器 —— 所以这个系统库里不该再出现我们的文档。
   //
-  // 过滤参数的正确性（JS filter 才能搬删除、参数名不能叫 since、窗口下界必须稳定）由
-  // 单测（timeline-replication.test.ts）与"窗口外条目不进来"这条行为断言覆盖。
+  // 过滤器语义（JS filter 才能搬删除、不许有随时间变化的谓词）由单测
+  // （timeline-replication.test.ts）与下面"直接写源库的老条目也会被镜像"这条行为断言覆盖。
   const jobs = await replicationDocs(userId)
   check('该用户没有遗留的常驻复制任务（按需搬运不经过 _replicator 调度器）',
     jobs.length === 0, JSON.stringify(jobs.map(j => j.id)))
@@ -450,18 +449,22 @@ async function main() {
     && Object.keys(sourceDdoc?.views ?? {}).length > 0,
     `filters=${Object.keys(sourceDdoc?.filters ?? {})} views=${Object.keys(sourceDdoc?.views ?? {})}`)
 
-  // ── 4.2 窗口 selector 真的在过滤：窗口外的老条目不会被搬进来 ──
+  // ── 4.2 复制是**精确镜像**：源库里直接写入的老条目也会被搬进来 ──
+  //
+  // 保留策略的权威是源库裁剪（每源最新 N 条），复制本身**不带任何时间参数**。所以一条发布时间
+  // 很老、但确实躺在源库里的条目，重扫时必须出现在用户库 —— 反过来说，"窗口外置不入"这条旧断言
+  // 现在必须**不再**成立（那是旧设计：时间下界塞在 query_params 里）。
   const OLD_ENTRY_ID = `entry:${subscription.feedId}:verifyold`
-  await writeToFeedDbs([probeEntry(OLD_ENTRY_ID, '窗口外的老条目', null,
+  await writeToFeedDbs([probeEntry(OLD_ENTRY_ID, '源库里的老条目', null,
     new Date(Date.now() - 60 * 86_400_000).toISOString())])
-  // 脚本是**直接写源库**的（模拟抓取产物），PG 里的 feeds.lastNewEntryAt 不会动，所以默认
-  // 水位判定认为"这个源没有新内容"、不会搬 —— 要验证过滤行为必须显式重扫（force）
+  // 脚本是**直接写源库**的（模拟抓取产物），PG 里的 feeds.lastChangedAt 不会动，所以默认
+  // 水位判定认为"这个源没有变化"、不会搬 —— 要验证镜像必须显式重扫（force）
   await session.request('/api/timeline/refresh?wait=1&force=1', { method: 'POST' })
   const oldEntry = await couch(`/${timelineDb}/${encodeURIComponent(OLD_ENTRY_ID)}`).catch(() => null)
-  check('窗口外的条目不会被搬进用户库（源库 JS filter 按窗口下界过滤）', oldEntry === null,
-    oldEntry ? '老条目竟然进来了' : '未搬入')
+  check('源库里发布时间很老的条目也会被镜像进用户库（复制不带时间下界）', !!oldEntry,
+    oldEntry ? `title=${oldEntry.title}` : '没搬进来 —— 复制还在按窗口过滤？')
 
-  // 同一次强制重扫里，窗口内的探针条目必须**真的**搬进来了。这条件直接看用户库、不经过客户端，
+  // 同一次强制重扫里，探针条目必须**真的**搬进来了。这条件直接看用户库、不经过客户端，
   // 于是"服务端没搬"和"客户端没拉到"两种失败不会混在一起（曾经混过一次，白排查一轮）。
   const copiedEntry = await couch(`/${timelineDb}/${encodeURIComponent(ENTRY_ID)}`).catch(() => null)
   check('按需同步把探针条目搬进了用户库（源库 → 用户库的一次性复制）', !!copiedEntry,
@@ -637,10 +640,10 @@ async function main() {
   const second = { userId: (await signUp2.json())?.user?.id ?? null, timelineDb: null }
   resources.accounts.push(second)
 
-  // 第二个账号有自己的设置（窗口），但它改不了附件：图片策略是 per-feed 的
+  // 第二个账号有自己的设置（AI 摘要开关），但它改不了附件：图片策略是 per-feed 的
   const patched = await session2.request('/api/timeline/settings', {
     method: 'PATCH',
-    body: JSON.stringify({ windowDays: 7 })
+    body: JSON.stringify({ aiSummaryEnabled: true })
   })
   check('第二个账号的时间线设置可改（PATCH 生效）', patched.ok, `HTTP ${patched.status}`)
 
@@ -728,7 +731,7 @@ async function main() {
   //
   // 复制是**变更投递不是投影**：目标端自己删过的 rev，复制器不会再送回来，所以"就地清空再重搬"
   // 做不到（实测）。重建走的是**换库**：另建一个空聚合库、把用户自己写的状态文档搬过去、
-  // 旧库删掉，复制器就会按当前窗口从 0 扫源库把内容重搬一遍。
+  // 旧库删掉，复制器就会从 0 扫源库把内容完整重搬一遍。
   const dbBeforeRebuild = primary.timelineDb
   const rebuilt = await session.request('/api/timeline/rebuild', { method: 'POST' })
   check('重建接口接受请求', rebuilt.status === 202, `HTTP ${rebuilt.status}`)
@@ -801,7 +804,7 @@ async function main() {
   check('临时账号已清理', accountRemoved, `共 ${resources.accounts.length} 个临时账号`)
 
   console.log(failures.length === 0
-    ? '\n全部通过：单库下发 → 按需一次性搬运（水位判定 / 固定下界 + 同 checkpoint / 窗口过滤 / 附件二进制）→ 拉取/回写两条通道 → 删除跟随 → 退订清理 / 重建换库 → 写方向闸门，链路行为符合设计。'
+    ? '\n全部通过：单库下发 → 按需一次性搬运（水位判定 / 固定下界 + 同 checkpoint / 镜像不过滤 / 附件二进制）→ 拉取/回写两条通道 → 删除跟随 → 退订清理 / 重建换库 → 写方向闸门，链路行为符合设计。'
     : `\n失败 ${failures.length} 项：${failures.join('；')}`)
   process.exit(failures.length === 0 ? 0 : 1)
 }

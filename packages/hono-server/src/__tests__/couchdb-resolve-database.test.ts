@@ -148,7 +148,7 @@ describe("resolveDatabase：库名已登记", () => {
     expect(mocks.insert).toHaveBeenCalledTimes(1)
     const written = mocks.insert.mock.calls[0]![0] as { _rev?: string, views?: Record<string, unknown> }
     expect(written._rev).toBe("3-old")
-    expect(Object.keys(written.views ?? {}).sort()).toEqual(["by_feed_published_at", "by_published_at"])
+    expect(Object.keys(written.views ?? {})).toEqual([])
   })
 
   it("并发建库：没抢到库名的一方删掉自己刚建的空库，改用赢家的库（否则订阅会写进没人指得着的孤儿库）", async () => {

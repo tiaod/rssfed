@@ -74,13 +74,3 @@ describe("聚合复制过滤器", () => {
     expect(TIMELINE_REPLICATION_FILTER).not.toContain("req.query")
   })
 })
-
-describe("initialWindowBoundIso（已并入 services/timeline.ts 的 windowStartIso）", () => {
-  it("窗口下界由 windowStartIso 负责，且「不限时间」表示为 null 而不是一个时间戳", async () => {
-    const { windowStartIso } = await import("../services/timeline")
-    const now = Date.parse("2025-01-10T00:00:00.000Z")
-    expect(windowStartIso(3, now)).toBe("2025-01-07T00:00:00.000Z")
-    expect(windowStartIso(30, now)).toBe("2024-12-11T00:00:00.000Z")
-    expect(windowStartIso(0, now)).toBeNull()
-  })
-})

@@ -90,11 +90,10 @@ export const sourceSyncWorker = new Worker("rss-timeline-sync", async (job) => {
   // 安静优先：一轮全量重搬会有几百个源，每个都打一行会把日志刷爆。只在"贵"或"异常"时出声，
   // 平时的进度看队列看板（/admin/queues）与水位表即可。
   if (outcome.skipped) return outcome
-  if (outcome.rebound || outcome.restoredEntries > 0 || outcome.elapsedMs > 3_000) {
+  if (outcome.rebound || outcome.elapsedMs > 3_000) {
     console.log(
       `[Timeline] 同步源 ${sourceId}（用户=${userId}）写入 ${outcome.docsWritten} 份、`
-      + `${outcome.elapsedMs}ms${outcome.rebound ? "（重算窗口下界，从 0 重扫）" : ""}`
-      + `${outcome.restoredEntries > 0 ? `（另救回此前被剪掉的 ${outcome.restoredEntries} 条）` : ""}`,
+      + `${outcome.elapsedMs}ms${outcome.rebound ? "（首搬，从 0 扫该源）" : ""}`,
     )
   }
   return outcome

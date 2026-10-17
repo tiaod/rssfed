@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 const state = vi.hoisted(() => ({
   session: { user: { id: "u1" } } as { user: { id: string } } | null,
   settings: {
-    settings: { windowDays: 3, aiSummaryEnabled: false },
+    settings: { aiSummaryEnabled: false },
   },
   reconcileQueued: 0,
   /** 入队 reconcile 时带的选项（force 逃生口） */
@@ -62,7 +62,7 @@ vi.mock("../services/timeline", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/timeline")>()
   return {
     ...actual,
-    getTimelineSettings: async () => actual.normalizeTimelineSettings({ windowDays: 3 }),
+    getTimelineSettings: async () => actual.normalizeTimelineSettings({ aiSummaryEnabled: false }),
     updateTimelineSettings: async () => state.settings,
     // wait=1 的刷新分三步：取起始序号 → 本请求内对齐拓扑并把这批脏源交给同步队列 → 等它们跑完再数条数。
     // 三个替身都不碰 CouchDB/Redis，覆盖「追平」与「超时」两条分支。
@@ -85,7 +85,7 @@ const { app } = await import("../app")
 beforeEach(() => {
   state.session = { user: { id: "u1" } }
   state.settings = {
-    settings: { windowDays: 3, aiSummaryEnabled: false },
+    settings: { aiSummaryEnabled: false },
   }
   state.reconcileQueued = 0
   state.reconcileQueuedOptions = []
@@ -113,24 +113,29 @@ describe("/api/timeline", () => {
   it("未登录一律 401", async () => {
     state.session = null
     expect((await app.request("/api/timeline/settings")).status).toBe(401)
-    expect((await patch({ windowDays: 7 })).status).toBe(401)
+    expect((await patch({ aiSummaryEnabled: true })).status).toBe(401)
     expect((await app.request("/api/timeline/refresh", { method: "POST" })).status).toBe(401)
   })
 
-  it("GET /settings 下发设置、默认值与合法区间", async () => {
+  it("GET /settings 下发设置与默认值（没有 limits：保留策略已不在用户设置里）", async () => {
     const res = await app.request("/api/timeline/settings")
     expect(res.status).toBe(200)
-    const body = await res.json() as { settings: { windowDays: number }, defaults: { windowDays: number }, limits: { windowDays: { min: number } } }
-    expect(body.settings.windowDays).toBe(3)
-    expect(body.defaults.windowDays).toBe(3)
-    expect(body.limits.windowDays.min).toBe(0)
+    const body = await res.json() as {
+      settings: { aiSummaryEnabled: boolean }
+      defaults: { aiSummaryEnabled: boolean }
+      limits?: unknown
+    }
+    expect(body.settings).toEqual({ aiSummaryEnabled: false })
+    expect(body.defaults).toEqual({ aiSummaryEnabled: false })
+    expect(body).not.toHaveProperty("limits")
   })
 
-  it("PATCH 越界值返回 400 并逐项说明", async () => {
-    const res = await patch({ windowDays: 1000, aiSummaryEnabled: "yes" })
+  it("PATCH 非布尔 aiSummaryEnabled 返回 400 并说明", async () => {
+    const res = await patch({ aiSummaryEnabled: "yes" })
     expect(res.status).toBe(400)
     const body = await res.json() as { details: string[] }
-    expect(body.details).toHaveLength(2)
+    expect(body.details).toHaveLength(1)
+    expect(body.details[0]).toContain("aiSummaryEnabled")
     expect(state.reconcileQueued + state.rebuildQueued).toBe(0)
   })
 
@@ -144,16 +149,16 @@ describe("/api/timeline", () => {
     expect(res.status).toBe(400)
   })
 
-  it("改窗口：入队一次增量聚合（窗口边界由 reconcile 自己回填/剪枝，不重建）", async () => {
-    state.settings = { settings: { windowDays: 7, aiSummaryEnabled: false } }
-    const res = await patch({ windowDays: 7 })
+  it("开 AI 摘要：写入设置并让聚合跑一轮（不重建）", async () => {
+    state.settings = { settings: { aiSummaryEnabled: true } }
+    const res = await patch({ aiSummaryEnabled: true })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ settings: { windowDays: 7 } })
+    expect(await res.json()).toMatchObject({ settings: { aiSummaryEnabled: true } })
     expect(state.reconcileQueued).toBe(1)
     expect(state.rebuildQueued).toBe(0)
   })
 
-  it("图片参数不再是用户设置：整包 PATCH 一律 400，不会入任何队", async () => {
+  it("未知字段不被当真：空补丁一律 400，不会入任何队", async () => {
     const res = await patch({ maxImageCount: 2 })
     expect(res.status).toBe(400)
     expect(state.reconcileQueued).toBe(0)

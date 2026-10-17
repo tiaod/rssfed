@@ -29,11 +29,9 @@ const mocks = vi.hoisted(() => ({
   destroyedByDb: {} as Record<string, string[]>,
   /** 每个库的状态文档（`_local/state`） */
   stateByDb: {} as Record<string, Record<string, unknown> | undefined>,
-  /** 每个库按前缀预置的行（退订删除 / 剪枝用） */
+  /** 每个库按前缀预置的行（退订删除用） */
   rowsByRange: {} as Record<string, Array<{ id: string, value: { rev: string } }>>,
   subscriptions: [] as Array<{ feedId: string }>,
-  settingsWindowDays: 3,
-  settingsMinEntries: 50,
   /** PG 里的同步水位行（`timeline_source_sync` 的 select 结果） */
   watermarks: [] as Array<Record<string, unknown>>,
   /** `feeds` / `bots` 的 lastNewEntryAt（喂给脏源判定） */
@@ -46,9 +44,6 @@ const mocks = vi.hoisted(() => ({
   watermarkDeleteCalls: 0,
   createdTimelines: 0,
   destroyedDbs: [] as string[],
-  viewCalls: [] as Array<Record<string, unknown>>,
-  /** 剪枝视图不可用（设计文档没装上 / JS 查询服务卡死）：view() 直接抛 */
-  viewThrows: false,
 }))
 
 vi.mock("nano", () => ({
@@ -64,8 +59,6 @@ vi.mock("../db", () => {
   const table = (name: string, extra: Record<string, unknown> = {}) => ({ __name: name, ...extra })
   const rowsFor = (name: string): unknown[] => {
     switch (name) {
-      case "userTimelineSettings":
-        return [{ windowDays: mocks.settingsWindowDays, minFeedEntries: mocks.settingsMinEntries, aiSummaryEnabled: false }]
       case "timelineSourceSync":
         return mocks.watermarks
       case "feeds":
@@ -102,14 +95,11 @@ vi.mock("../db", () => {
     user: table("user", { id: "user.id", timelineDbName: "user.timeline_db_name" }),
     userTimelineSettings: table("userTimelineSettings", {
       userId: "user_id",
-      windowDays: "window_days",
       aiSummaryEnabled: "ai_summary_enabled",
     }),
     timelineSourceSync: table("timelineSourceSync", {
       userId: "user_id",
       sourceId: "source_id",
-      windowDays: "window_days",
-      boundIso: "bound_iso",
       syncedAt: "synced_at",
       status: "status",
       sourceSeq: "source_seq",
@@ -174,11 +164,6 @@ vi.mock("../couchdb/client", () => ({
       mocks.bulkByDb[dbName] = [...(mocks.bulkByDb[dbName] ?? []), ...docs]
       return docs.map(() => ({ ok: true }))
     },
-    view: async (_ddoc: string, _name: string, opts: Record<string, unknown>) => {
-      mocks.viewCalls.push(opts)
-      if (mocks.viewThrows) throw Object.assign(new Error("missing"), { statusCode: 404 })
-      return { rows: [] }
-    },
     info: async () => ({ update_seq: 0 }),
     changes: async () => ({ results: [], last_seq: 0 }),
   }),
@@ -190,8 +175,6 @@ function opts_hasRev(doc: Record<string, unknown>): boolean {
 
 // 复制层：新实现只用到「清理遗留常驻任务」与「跑一次性复制」两个入口
 vi.mock("../couchdb/replicator", () => ({
-  initialWindowBoundIso: (windowDays: number, now: number = Date.now()) =>
-    new Date(now - windowDays * 86_400_000).toISOString(),
   purgeLegacyReplications: async (userId: string) => {
     mocks.purgeCalls.push(userId)
     const count = mocks.legacyPurgeCount
@@ -220,8 +203,6 @@ beforeEach(() => {
   mocks.stateByDb = {}
   mocks.rowsByRange = { "entry:feed1:": [] }
   mocks.subscriptions = [{ feedId: "feed1" }]
-  mocks.settingsWindowDays = 3
-  mocks.settingsMinEntries = 50
   mocks.watermarks = []
   mocks.feedFreshness = []
   mocks.botFreshness = []
@@ -230,8 +211,6 @@ beforeEach(() => {
   mocks.watermarkDeleteCalls = 0
   mocks.createdTimelines = 0
   mocks.destroyedDbs = []
-  mocks.viewCalls = []
-  mocks.viewThrows = false
 })
 
 const copiedIds = () => (mocks.bulkByDb["user-timeline_new"] ?? []).map(d => String(d._id))
@@ -240,9 +219,6 @@ const deletedIds = (db = "user-timeline_old") => (mocks.bulkByDb[db] ?? []).filt
 /** 一行"已经同步过、且源那边没有新内容"的水位 */
 const settledWatermark = (overrides: Record<string, unknown> = {}) => ({
   sourceId: "feed1",
-  windowDays: 3,
-  minEntries: 50,
-  boundIso: "2025-01-07T00:00:00.000Z",
   syncedAt: new Date(Date.now() - HOUR),
   status: "idle",
   sourceSeq: "10-abc",
@@ -283,7 +259,7 @@ describe("rebuildUserTimeline：换一个空库重新修剪", () => {
    * 重建之后聚合库是空的，此时若还信水位，那些"源那边没有新内容"的源就永远不会被搬 ——
    * 重建完等于什么都没有。判据是**新库没有状态文档**，所以水位整份作废、全部源重搬。
    */
-  it("重建让水位整份作废：所有源重新入队（新库 = 新哈希 = 从 0 重扫），并清掉遗留常驻任务", async () => {
+  it("重建让水位整份作废：所有源重新入队（新库 = 新 checkpoint = 从 0 重扫），并清掉遗留常驻任务", async () => {
     mocks.watermarks = [settledWatermark()]
     mocks.legacyPurgeCount = 1
 
@@ -298,14 +274,14 @@ describe("rebuildUserTimeline：换一个空库重新修剪", () => {
 
 describe("reconcileUserTimeline：升级与稳态", () => {
   it("老库（状态文档 version 1）走同一条换库重搬路径：老库里我们写的修订不能再留着", async () => {
-    mocks.stateByDb["user-timeline_old"] = { version: 1, windowDays: 3 }
+    mocks.stateByDb["user-timeline_old"] = { version: 1 }
 
     const result = await reconcileUserTimeline("u1")
 
     expect(mocks.createdTimelines).toBe(1)
     expect(mocks.destroyedDbs).toContain("user-timeline_old")
     // 新库被写成 version 2，下一轮不再重搬
-    expect(mocks.stateByDb["user-timeline_new"]).toMatchObject({ version: 2, windowDays: 3 })
+    expect(mocks.stateByDb["user-timeline_new"]).toMatchObject({ version: 2 })
     // 换库 = 内容全空：订阅的源全部重搬一遍
     expect(result.dirtySources).toEqual(["feed1"])
   })
@@ -322,8 +298,8 @@ describe("reconcileUserTimeline：升级与稳态", () => {
    * 稳态 = 源那边没有新内容：**连一次复制请求都不发**。这是把常驻复制换成按需复制之后
    * 每 5 分钟一轮的全部成本（实测单源空转复制也要 ~1.3s，600 个源就是十几分钟机器时间）。
    */
-  it("稳态（水位在手、源没更新、窗口一致、修复已做过）没有脏源，也不碰复制器", async () => {
-    mocks.stateByDb["user-timeline_old"] = { version: 2, windowDays: 3, replicatorsPurged: true, floorRestored: true }
+  it("稳态（水位在手、源没更新、升级清理已做过）没有脏源，也不碰复制器", async () => {
+    mocks.stateByDb["user-timeline_old"] = { version: 2, replicatorsPurged: true }
     mocks.watermarks = [settledWatermark()]
     mocks.feedFreshness = [{ id: "feed1", at: new Date(Date.now() - 2 * HOUR) }]
 
@@ -334,28 +310,8 @@ describe("reconcileUserTimeline：升级与稳态", () => {
     expect(deletedIds()).toEqual([])
   })
 
-  /**
-   * 保底条数上线时的一次性修复：功能之前窗口外的条目早就被剪成 tombstone，而复制器不会再送。
-   * 光靠"换了设置所以是脏源"不够 —— 水位里 `min_entries` 可能已经是当前值（码和库分两次上的
-   * 部署就是这样），那时所有源都不脏，修复永远不发生。所以用一个状态标记强制过一遍。
-   */
-  it("保底条目修复：还没标记时这一轮把所有订阅源都过一遍，并记下标记（只做一次）", async () => {
-    mocks.stateByDb["user-timeline_old"] = { version: 2, windowDays: 3, replicatorsPurged: true }
-    mocks.watermarks = [settledWatermark()] // 水位与当前设置一致 → 本来一个脏源都没有
-    mocks.feedFreshness = [{ id: "feed1", at: new Date(Date.now() - 2 * HOUR) }]
-
-    const first = await reconcileUserTimeline("u1")
-
-    expect(first.dirtySources).toEqual(["feed1"])
-    expect(mocks.stateByDb["user-timeline_old"]).toMatchObject({ floorRestored: true })
-
-    // 第二轮：标记已在 → 又回到"没更新的源不入队"
-    const second = await reconcileUserTimeline("u1")
-    expect(second.dirtySources).toEqual([])
-  })
-
   it("源在上次同步之后有新内容 → 判成脏源（水位就是干这个的）", async () => {
-    mocks.stateByDb["user-timeline_old"] = { version: 2, windowDays: 3, replicatorsPurged: true }
+    mocks.stateByDb["user-timeline_old"] = { version: 2, replicatorsPurged: true }
     mocks.watermarks = [settledWatermark({ syncedAt: new Date(Date.now() - 2 * HOUR) })]
     mocks.feedFreshness = [{ id: "feed1", at: new Date(Date.now() - HOUR) }]
 
@@ -365,7 +321,7 @@ describe("reconcileUserTimeline：升级与稳态", () => {
   })
 
   it("退订：删条目 + 删裸源 id 的 FeedDoc 副本 + 删水位行", async () => {
-    mocks.stateByDb["user-timeline_old"] = { version: 2, windowDays: 3, replicatorsPurged: true }
+    mocks.stateByDb["user-timeline_old"] = { version: 2, replicatorsPurged: true }
     mocks.watermarks = [settledWatermark()]
     mocks.subscriptions = []
     mocks.rowsByRange = { "entry:feed1:": [
@@ -382,37 +338,16 @@ describe("reconcileUserTimeline：升级与稳态", () => {
     expect(result.dirtySources).toEqual([])
   })
 
-  it("换窗口：数据不动，只把源判成脏源（重算下界 = 换哈希 = 重扫回填）", async () => {
-    mocks.stateByDb["user-timeline_old"] = { version: 2, windowDays: 3, replicatorsPurged: true }
-    mocks.watermarks = [settledWatermark({ windowDays: 3 })]
-    mocks.settingsWindowDays = 7
-
-    const result = await reconcileUserTimeline("u1")
-
-    // 数据不删：窗口的裁剪由剪枝负责，重扫只是把窗口外的历史重新过滤一遍
-    expect(deletedIds()).toEqual([])
-    expect(mocks.destroyedByDb["user-timeline_old"] ?? []).toEqual([])
-    expect(result.removedSyncs).toBe(0)
-    expect(result.dirtySources).toEqual(["feed1"])
-  })
-
   it("换库重搬只搬用户意图：entry-state: 与 entry: 只差一个字符，靠字典序分开", () => {
     expect("entry-state:abc" < "entry:").toBe(true)
     expect("entry:feed1:001" >= "entry:" && "entry:feed1:001" <= "entry:\uffff").toBe(true)
   })
-
-  /**
-   * 剪枝视图不可用（用户库的设计文档没装上 / CouchDB 的 JS 查询服务卡死）时，
-   * 剪枝抛 404。它**不能**把整轮 reconcile 带走：把脏源入队才是关键路径，
-   * 原实现让 404 冒泡出去，结果是一条内容都不搬、状态也不写，客户端拿到 500、
-   * 一条内容都同步不到（真机上就是这么表现的）。
-   */
 })
 
 describe("同一用户串行化：并发重建 / 升级只能有一个赢家", () => {
   it("两轮并发聚合落在同一条队列上：第二轮的 reconcile 看到新库的状态（version 2），不再换库", async () => {
     // 第一个 reconcile 会走「老库 version 1 → 换库重搬」，第二个必须等它跑完再开始
-    mocks.stateByDb["user-timeline_old"] = { version: 1, windowDays: 3 }
+    mocks.stateByDb["user-timeline_old"] = { version: 1 }
 
     const [first, second] = await Promise.all([
       reconcileUserTimeline("u1"),

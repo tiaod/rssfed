@@ -313,11 +313,15 @@ function(doc) {
   → 每个 (用户 × 源) 的复制哈希变化，下一轮各自从 0 重扫一次源库（§4.4「聚合库不需要迁移」）。
 - [x] **用户库停止剪枝**：`reconcileUserTimeline` 里的 `pruneOutsideRetention` 调用已删。
   → 用户库变成源库的精确镜像；那条"每用户每 5 分钟 O(用户库) 的扫描"没有了。
-- [ ] **删残留**：`windowStartIso` / `looserBoundIso` / `retentionBoundIso` / `readSourceFloor` /
+- [x] **删残留**（已完成）：`windowStartIso` / `looserBoundIso` / `retentionBoundIso` / `readSourceFloor` /
   `SourceFloor` / `normalizeBoundIso` / `pruneOutsideRetention` 及其三个子函数 / `restoreTombstonedEntries` /
-  用户库 `timeline-maintain` 视图 / `syncSource` 里算下界的整段；
-  schema 删 `user_timeline_settings.window_days|min_feed_entries`、`timeline_source_sync.window_days|min_entries|bound_iso`；
-  **设置页的"窗口 / 保底条数"开关一起删**（现在还在但已经不起作用，会误导）。
+  用户库 `timeline-maintain` 的两条视图（设计文档现在只有 `validate_doc_update`）/ `syncSource` 里算下界的整段。
+- [x] **schema 已删列**（`pnpm db:push` 对 drop 需要交互确认，用等价 SQL 执行、之后 `db:push` 报
+  `No changes detected` 验证过）：`user_timeline_settings.window_days|min_feed_entries`、
+  `timeline_source_sync.window_days|min_entries|bound_iso`。`user_timeline_settings` 只剩 `ai_summary_enabled`。
+- [x] **设置页的"窗口 / 保底条数"已删**（`profile.vue` 两个控件 + `timelineSettings.ts` 的档位/limits/
+  `withCurrentChoice`），`GET /api/timeline/settings` 不再下发 `limits`。`ARCHITECTURE.md` 的保留策略
+  不变量已同步改写。
 - [ ] **上线注意（重要）**：镜像复制意味着**新订阅者的首拉 = 该源库当前全部内容**。
   存量 feed 库还积着全部历史（裁剪每次抓取最多删 2000 条，要几轮才收敛），
   所以正式切之前先跑一次**全量裁剪 sweep**（把每个 feed 库裁到 N），否则首拉可能拉几十万条。

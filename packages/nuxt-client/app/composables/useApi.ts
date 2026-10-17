@@ -84,8 +84,8 @@ export function useApi() {
      * 条目本身走 CouchDB 的 live 复制，不经这些接口；它们只负责设置与「催一次聚合」。
      */
     timeline: {
-      /** 读取当前设置（顺带下发服务端默认值与合法区间） */
-      settings: () => apiFetch<{ settings: TimelineSettingsPayload, defaults: TimelineSettingsPayload, limits: Record<string, { min: number, max: number }> }>(
+      /** 读取当前设置（顺带下发服务端默认值） */
+      settings: () => apiFetch<{ settings: TimelineSettingsPayload, defaults: TimelineSettingsPayload }>(
         `${base}/api/timeline/settings`
       ),
       /** 更新设置（只影响「往用户库里聚合什么」，服务端会顺手催一次聚合） */

@@ -170,36 +170,14 @@ export const TIMELINE_VALIDATE_DOC_UPDATE = `function(newDoc, oldDoc, userCtx) {
  * 禁掉 `entry` / `feed` 就够了。
  */
 /**
- * 用户库设计文档的**视图**定义（导出供升级比对与单测复用）。
+ * 用户库设计文档**不再需要任何视图**。
  *
- * 加视图必须走这里 —— `ensureTimelineDesignDoc` 会按它比对存量库并覆盖升级；
- * 只在新建库时装的话，几百个老库会一直没有新视图（剪枝 404，窗口与保底条数一起失效）。
+ * 保留策略已经全部挪到源库（每条源只留最新 50 条，删除跟着复制传播过来），用户库只是镜像 ——
+ * 以前那两个视图（`by_published_at` 给窗口剪枝、`by_feed_published_at` 给每源保底条数）
+ * 随着剪枝一起删掉了。这里保留一个空对象并参与比对，是为了让存量库（几百个）里的旧视图
+ * **真的被覆盖清掉**，而不是留在那儿没人用、还让"设计文档是否最新"的比对一直不相等。
  */
-export const TIMELINE_DESIGN_DOC_VIEWS = {
-  by_published_at: {
-    map: `function(doc) {
-        if (doc.type === 'entry' && typeof doc.publishedAt === 'string') {
-          emit(doc.publishedAt, null);
-        }
-      }`,
-  },
-  /**
-   * 按「源 + 发布时间」排序（剪枝用）：保留规则是「窗口内 ∨ 该源最新 N 条」，而"最新 N 条"
-   * 只有按源分组才数得出来 —— 复制过滤器只能看单条文档自己的字段，表达不了它，所以条数
-   * 保底落在剪枝侧（见 services/timeline.ts 的 pruneOutsideRetention）。
-   *
-   * key 第一段取 `doc.feedId`（bot 产出写的是 `bot:{botId}`，与源 id 同构）；没有 feedId 的
-   * 异常文档归到 `null` 那一组，至少不会因此逃过剪枝。`publishedAt` 非字符串的文档收不到 ——
-   * 与老的 `by_published_at` 一样，它们本来也不会被复制进来（过滤器只放行带 publishedAt 的）。
-   */
-  by_feed_published_at: {
-    map: `function(doc) {
-        if (doc.type === 'entry' && typeof doc.publishedAt === 'string') {
-          emit([typeof doc.feedId === 'string' ? doc.feedId : null, doc.publishedAt], null);
-        }
-      }`,
-  },
-}
+export const TIMELINE_DESIGN_DOC_VIEWS: Record<string, { map: string }> = {}
 
 const TIMELINE_DESIGN_DOC = {
   _id: "_design/timeline-maintain",

@@ -3,7 +3,6 @@ import type { Context, Next } from "hono"
 import { auth } from "../auth"
 import {
   DEFAULT_TIMELINE_SETTINGS,
-  TIMELINE_SETTING_LIMITS,
   getTimelineSettings,
   parseTimelineSettingsPatch,
   readTimelineUpdateSeq,
@@ -47,17 +46,14 @@ timelineRouter.use("/*", async (c: Context<{ Variables: Variables }>, next: Next
   await next()
 })
 
-/** 读取当前设置（顺带下发默认值与合法区间，客户端不必硬编码一份） */
+/** 读取当前设置（顺带下发默认值，客户端不必硬编码一份） */
 timelineRouter.get("/settings", async (c) => {
   const settings = await getTimelineSettings(c.get("userId"))
-  return c.json({ settings, defaults: DEFAULT_TIMELINE_SETTINGS, limits: TIMELINE_SETTING_LIMITS })
+  return c.json({ settings, defaults: DEFAULT_TIMELINE_SETTINGS })
 })
 
 /**
- * 更新设置。
- *
- * 改窗口不需要重建：窗口是「回填/剪枝」的边界，由下一次聚合自己处理（缩小剪枝、放大回填），
- * 所以入队一次增量聚合即可。条目内容与附件只由源库决定，不随用户设置变化。
+ * 更新设置。条目内容与保留策略只由源库裁剪决定，不随用户设置变化；改完让聚合跑一轮即可。
  */
 timelineRouter.patch("/settings", async (c) => {
   const userId = c.get("userId")

@@ -7,7 +7,7 @@ import { DEFAULT_TIMELINE_SETTINGS, normalizeTimelineSettings } from '~/utils/ti
  * 时间线聚合设置（每用户一份，存在服务端）。
  *
  * 与 useSettings（localStorage 里的浏览器本地偏好）分开：这些设置直接决定**服务端**怎么替
- * 这个用户聚合条目（窗口、AI 开关），跟着账号走、在所有设备上一致，
+ * 这个用户聚合条目（AI 开关），跟着账号走、在所有设备上一致，
  * 因此必须走接口读写，不能落 localStorage。
  *
  * 图片不是用户设置：它按源（per-feed）在抓取时压好，管理员在订阅源管理里调。
@@ -35,7 +35,7 @@ export function useTimelineSettings() {
     }
   }
 
-  /** 保存设置（服务端会顺手催一次聚合：窗口调小要剪枝、调大要回填） */
+  /** 保存设置（服务端会顺手催一次聚合，让改动尽快反映到派生库） */
   async function save(patch: Partial<TimelineSettings>): Promise<void> {
     saving.value = true
     try {
