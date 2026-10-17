@@ -13,9 +13,9 @@
  * 3. 删除只产生墓碑，附件字节要 `_compact` 才回收（`probe-a`）。
  *
  * 刻意的取舍：
- * - **拿不到下界就不裁**（视图行数 ≤ N、或第 N+1 行的 key 不是字符串）：宁可多留，不做不可逆的误删。
- * - **并列时间戳**：按"publishedAt < 下界"严格小于删除，所以并列的会一起留下 —— 保留策略满足
- *   "至少 N 条"即可（方案 §5 风险 7）。
+ * - **并列时间戳不再是问题**：按视图行序（key, doc id 的全序）删最旧的 `total - N` 条，
+ *   所以"最多 N 条"是真的最多（旧的下界方案遇到几百条同 time 的批量抓取会一条都删不掉）。
+ * - **条数不够就不裁**（`total ≤ N`）：一条都不动。
  * - **`publishedAt` 乱序**：刚抓到但发布时间很老的条目会被立刻裁掉（方案 §5 风险 6，与旧行为一致）。
  */
 import { createCouchDb } from "./client"
@@ -30,25 +30,23 @@ export const DEFAULT_TRIM_MAX_BATCHES = 10
 export const DEFAULT_TRIM_VIEW = "main/entries-by-date"
 
 /**
- * 纯函数：从"按 `publishedAt` **降序**取的 key 列表"算出裁剪下界。
- * 返回 `undefined` = 不需要裁剪。
+ * 要删几条：`total - n`，负数按 0 算。纯函数，边界直接单测钉住。
  *
- * `keys.length` 至少要是 `n + 1` 才能判断；正好 `n` 条就是不用裁。
- * 第 `n + 1` 行（下标 `n`）的 key 就是下界：`publishedAt < 下界` 的全删。
+ * **为什么按条数而不是按"第 N+1 条的时间下界"**：下界方案（`publishedAt < bound`）在
+ * **并列时间戳**面前会完全失效 —— 一次批量抓进来的几百条 `publishedAt` 一模一样时，
+ * 下界等于它们自己，一条都删不掉（实测：一个库停在 467 条）。而视图的行序是
+ * `(key, doc id)` 的**全序**，所以"按升序删掉最旧的 `total - n` 行"能精确收敛到 N 条，
+ * 并列时保留 id 较大的那些（确定性，但不是按时间 —— 无副作用）。
  */
-export function trimBound(descendingKeys: readonly unknown[], n: number): string | undefined {
-  if (!Number.isInteger(n) || n <= 0) throw new Error(`trimBound: N 必须是正整数，收到 ${n}`)
-  if (descendingKeys.length <= n) return undefined
-  const bound = descendingKeys[n]
-  if (typeof bound !== "string" || bound.length === 0) return undefined
-  return bound
+export function trimExcess(total: number, n: number): number {
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`trimExcess: N 必须是正整数，收到 ${n}`)
+  if (!Number.isFinite(total) || total <= 0) return 0
+  return Math.max(0, Math.floor(total) - n)
 }
 
 export interface TrimResult {
-  /** 是否真的需要裁剪 */
-  trimmed: boolean
-  /** 裁剪下界（`publishedAt < bound` 的被删）；undefined = 没裁 */
-  bound?: string
+  /** 视图里原本有多少条 */
+  total: number
   /** 删掉的条数 */
   deleted: number
   /** 跑了几批 */
@@ -57,10 +55,10 @@ export interface TrimResult {
 
 /** 裁剪只需要这几样能力；抽出来是为了单测注入假实现 */
 export interface TrimDb {
-  /** 按 `publishedAt` 降序取前 `limit` 行的 key */
-  descendingKeys(viewPath: string, limit: number): Promise<unknown[]>
-  /** 删除 `publishedAt < bound` 的条目（分页），返回**成功**删掉的条数 */
-  deleteBelow(viewPath: string, bound: string, batchSize: number): Promise<number>
+  /** 视图里的总条数（CouchDB 的 `total_rows`，算出要删多少用） */
+  countEntries(viewPath: string): Promise<number>
+  /** 删掉**最旧的** `limit` 条（按视图升序），返回**成功**删掉的条数 */
+  deleteOldest(viewPath: string, limit: number): Promise<number>
   /** 回收磁盘（附件与旧修订） */
   compact(): Promise<void>
 }
@@ -68,8 +66,9 @@ export interface TrimDb {
 /**
  * 每条源裁到最新 N 条。抓取 worker 写完新条目后调用一次即可。
  *
- * 删除批数有上限（`maxBatches`）：首次上线时源库积着全部历史，一次删几千条会压出"删除风暴"
- * （方案 §5 风险 1）。没删完的留给下一次抓取。
+ * 做法：数出总条数 → 升序（最旧在前）分批删掉 `total - n` 条。删除批数有上限
+ * （`maxBatches`）：首次上线时源库积着全部历史，一次删几千条会压出"删除风暴"（方案 §5 风险 1）。
+ * 没删完的留给下一次抓取。
  */
 export async function trimSourceToLatestN(
   db: TrimDb,
@@ -80,21 +79,23 @@ export async function trimSourceToLatestN(
   const batchSize = opts.batchSize ?? DEFAULT_TRIM_BATCH
   const maxBatches = opts.maxBatches ?? DEFAULT_TRIM_MAX_BATCHES
 
-  // 只多取一行就够判断：第 N+1 行的 key 就是下界
-  const bound = trimBound(await db.descendingKeys(viewPath, n + 1), n)
-  if (bound === undefined) return { trimmed: false, deleted: 0, batches: 0 }
+  const total = await db.countEntries(viewPath)
+  let remaining = trimExcess(total, n)
+  if (remaining === 0) return { total, deleted: 0, batches: 0 }
 
   let deleted = 0
   let batches = 0
-  while (batches < maxBatches) {
-    const removed = await db.deleteBelow(viewPath, bound, batchSize)
+  while (batches < maxBatches && remaining > 0) {
+    const removed = await db.deleteOldest(viewPath, Math.min(batchSize, remaining))
     batches += 1
     deleted += removed
-    // 一批没删满说明已经删完；一批一条都没删掉说明没有进展（例如并发 conflict），必须停
-    if (removed < batchSize) break
+    remaining -= removed
+    // 一批没删满说明删完了；一条都没删掉说明没有进展（并发冲突等），必须停
+    if (removed < Math.min(batchSize, remaining + removed)) break
+    if (removed === 0) break
   }
   if (opts.compact && deleted > 0) await db.compact()
-  return { trimmed: true, bound, deleted, batches }
+  return { total, deleted, batches }
 }
 
 /** 真实实现：包一层 nano */
@@ -106,15 +107,16 @@ export function createTrimDb(dbName: string): TrimDb {
     return [design, view]
   }
   return {
-    async descendingKeys(viewPath, limit) {
+    async countEntries(viewPath) {
       const [design, view] = split(viewPath)
-      const res = await db.view(design, view, { descending: true, limit, include_docs: false })
-      return (res.rows ?? []).map((row: { key: unknown }) => row.key)
+      // limit=1 只为触发视图查询，`total_rows` 是索引里的总行数（与 limit 无关）
+      const res = await db.view(design, view, { limit: 1, include_docs: false })
+      return typeof res.total_rows === "number" ? res.total_rows : (res.rows?.length ?? 0)
     },
-    async deleteBelow(viewPath, bound, batchSize) {
+    async deleteOldest(viewPath, limit) {
       const [design, view] = split(viewPath)
-      // 每次都从最低 key 取一批：删掉之后下一批自然接上，不需要游标
-      const res = await db.view(design, view, { endkey: bound, inclusive_end: false, include_docs: true, limit: batchSize })
+      // 升序（最旧在前）取一批：删掉之后下一批自然接上，不需要游标
+      const res = await db.view(design, view, { limit, include_docs: true })
       const docs = (res.rows ?? [])
         .map((row: { doc?: { _id?: string, _rev?: string } }) => row.doc)
         .filter((doc): doc is { _id: string, _rev: string } => Boolean(doc?._id && doc?._rev))

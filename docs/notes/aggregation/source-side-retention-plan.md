@@ -79,10 +79,12 @@ sync worker ──POST /_replicate──▶ 用户库
 #### A. 抓取到新条目（同时挤掉一条老的）
 
 1. worker 写 `entry:feedX:new`（multipart，图片附件与条目一次写入）
-2. worker 裁剪：`view("main","entries-by-date", { descending: true, limit: N + 1 })`
-   - 行数 ≤ N → 无需删，跳到 3
-   - 第 N+1 行的 key 即 `bound` → 删除 `publishedAt < bound` 的条目（分页游标，
-     写法可参考现有 `pruneBelowPerFeedFloor`，`timeline.ts:490-532`）
+2. worker 裁剪：先数总条数（视图 `total_rows`），再按视图**升序**（最旧在前）分批删掉
+   `total − N` 条
+   - `total ≤ N` → 无需删，跳到 3
+   - **不按下界删**：视图行序是 `(key, doc id)` 的全序，"删最旧的总数 − N 条"能精确收敛到 N。
+     下界方案（`publishedAt < 第N+1条的key`）在**并列时间戳**面前会完全失效 —— 一次批量抓进来的
+     几百条时间戳一样时一条都删不掉（实测：一个库停在 467 条）
 3. worker 写 `feeds.last_changed_at = now`
 4. reconcile：`last_changed_at > timeline_source_sync.synced_at` → 脏源 → 入 `rss-timeline-sync`
 5. sync worker：`POST /_replicate`（只有 `filter`，**无 `query_params`**）
@@ -195,7 +197,7 @@ function(doc) {
 | 4 | **bot 库的裁剪会改变对外协议内容**。bot 库是 ActivityPub outbox 的内容源。 | **已定：bot 库不裁剪**，且 bot 数据要挪回 PostgreSQL（标准 BotKit，§10.4）；CouchDB 里只留离线阅读投影 |
 | 5 | **浏览器 tombstone 累积**。删除从源库出发、经用户库复制到每个浏览器；PouchDB 不 purge tombstone。 | 量级与现在的剪枝删除相当，但来源变成"一次删除 × N 订阅者"。上线后观察本地库体积 |
 | 6 | **`publishedAt` 乱序**。"刚抓到但发布时间很老"的条目会被立刻裁掉。 | 与现在的窗口过滤行为一致（现在的下界也按 `publishedAt` 判），不是回归；但要写进代码注释 |
-| 7 | **同一 `publishedAt` 并列**。按 bound 做范围删除可能多留/少留并列条目。 | 保留策略满足"**至少** N 条"即可，允许小幅超出；实现里按 id 去重避免重复删 |
+| 7 | **同一 `publishedAt` 并列**（几百条同时间戳的批量抓取）。 | **已解决**：不按下界删，按视图行序删最旧的 `total − N` 条 → 并列时也精确收敛到 N（保留 id 较大的那些，确定性）。实测 sweep 里 223 个库都收敛到 ≤ 50 |
 | 8 | **裁剪与复制并发**。 | 删除幂等（同 rev 删两次，第二次 conflict，忽略）；水位沿用"记复制**开始**时刻"的纪律（`schema.ts:152-155`），宁可多搬一轮 |
 
 ## 6. 待拍板
@@ -320,6 +322,9 @@ function(doc) {
   存量 feed 库还积着全部历史（裁剪每次抓取最多删 2000 条，要几轮才收敛），
   所以正式切之前先跑一次**全量裁剪 sweep**（把每个 feed 库裁到 N），否则首拉可能拉几十万条。
   这一步在 dev 库上也要做，否则重启服务后第一批脏源同步会很重。
+  **dev 库已执行**（`packages/hono-server/scripts/sweep-trim-feed-dbs.mjs`，可 `--dry-run`）：
+  713 个 feed 库、条目 182,030 → **20,524**（删 131,385，单库最多 50）；随后触发 `_compact`，
+  feed 库文件 2,062MB → **1,366MB**（60s 内完成）。
 - [ ] **db:push + 回填**：`pnpm db:push` 加列，然后
   `UPDATE feeds SET last_changed_at = last_new_entry_at WHERE last_changed_at IS NULL;`
 - [ ] **上线期**：配 `[compactions]`（风险 2），先在单源/小账号确认裁剪与删除传播收敛，再全量放开。
