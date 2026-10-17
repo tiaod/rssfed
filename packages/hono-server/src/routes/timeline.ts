@@ -10,7 +10,12 @@ import {
   updateTimelineSettings,
   waitForSync,
 } from "../services/timeline"
-import { clearTimelineEvents, listTimelineEvents, listTimelineSources } from "../services/timeline-events"
+import {
+  clearTimelineEvents,
+  listTimelineEvents,
+  listTimelineSources,
+  readReconcileHeartbeat,
+} from "../services/timeline-events"
 import { enqueueSourceSyncs, waitForSourceSyncs } from "../workers/timeline-sync"
 import { enqueueTimelineRebuild, enqueueTimelineReconcile } from "../workers/timeline"
 
@@ -130,9 +135,10 @@ timelineRouter.post("/refresh", async (c) => {
 /**
  * 同步日志：给设置页的「同步日志」面板用。
  *
- * 两段数据配着看才有用 ——
- *   - `events`：**发生过什么**（一轮汇聚的结论、重建、首搬、失败），服务端在聚合/同步路径上落流水；
- *   - `sources`：**现在什么样**（每个订阅源上次同步时刻与状态），直接读水位表，不落流水。
+ * 三段数据配着看才有用 ——
+ *   - `events`：**发生过什么**（干了活的汇聚、重建、首搬、失败），空转轮次不进流水；
+ *   - `sources`：**现在什么样**（每个订阅源上次同步时刻与状态），直接读水位表，不落流水；
+ *   - `heartbeat`：**聚合还在不在跑**（最近一轮的时刻 + 连续多少轮无事发生）。
  *
  * `limit` 只作用于 events（默认 120，最多 500）；sources 总是全量（一个用户几十上百个源，很小）。
  */
@@ -140,11 +146,12 @@ timelineRouter.get("/events", async (c) => {
   const userId = c.get("userId")
   const rawLimit = Number(c.req.query("limit") ?? 120)
   const limit = Math.min(500, Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 120)
-  const [events, sources] = await Promise.all([
+  const [events, sources, heartbeat] = await Promise.all([
     listTimelineEvents(userId, limit),
     listTimelineSources(userId),
+    readReconcileHeartbeat(userId),
   ])
-  return c.json({ events, sources })
+  return c.json({ events, sources, heartbeat })
 })
 
 /** 清空同步流水（面板上的「清空」；源状态不受影响，它读的是水位表） */

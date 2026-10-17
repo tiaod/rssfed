@@ -66,7 +66,7 @@ export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job)
     // 有新条目**或裁掉了条目** → 通知各用户的时间线聚合尽快跑一轮（带节流：一轮抓取里几十个源
     // 都有变化时只通知一次）。聚合本身是增量的，安静时每个用户只花一条 SQL。
     if (newEntries.length > 0 || trim.deleted > 0) {
-      void notifyTimelineStale().catch(() => {})
+      void notifyTimelineStale(feedId).catch(() => {})
     }
 
     return { feedId, newEntries: newEntries.length, trimmed: trim.deleted, totalItems: parsed.items?.length ?? 0 }

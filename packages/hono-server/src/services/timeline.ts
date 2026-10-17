@@ -10,7 +10,7 @@ import {
   userTimelineSettings,
   type NewUserTimelineSettings,
 } from "../db"
-import { recordTimelineEvent } from "./timeline-events"
+import { recordReconcileRound, recordTimelineEvent } from "./timeline-events"
 import {
   createCouchDb,
   createTimelineDatabase,
@@ -642,42 +642,22 @@ async function reconcileUserTimelineUnlocked(
   state.version = STATE_VERSION
   await writeTimelineState(dbName, state)
 
-  // ⑧ 流水：这一轮到底做了什么。用户在设置页 →「同步日志」里能看到（旁路，写失败不影响聚合）
-  await recordTimelineEvent({
+  // ⑧ 心跳 + 流水：**空转不记流水**（只更新心跳），干了活的轮次窗口内合并成一条。
+  //    用户在设置页 →「同步日志」里能看到；写失败不影响聚合。
+  await recordReconcileRound({
     userId,
-    kind: "reconcile",
-    level: result.failures.length > 0 ? "warn" : "info",
-    message: describeReconcileRound(result, Date.now() - startedAt),
-    data: {
+    ms: Date.now() - startedAt,
+    round: {
       sources: result.sources,
       dirty: result.dirtySources.length,
       removedSyncs: result.removedSyncs,
       removedEntries: result.removedEntries,
       purgedReplications: result.purgedReplications,
       failures: result.failures.length,
-      ms: Date.now() - startedAt,
     },
   })
 
   return result
-}
-
-/**
- * 一轮汇聚的人话描述（给设置页的同步日志看）。
- *
- * 常态是"无事发生"，所以空转也要记一行、但要短 —— 用户问的是"什么时候触发了汇聚"，
- * 只记有事发生的轮次就等于看不见定时器还在不在跑。
- */
-function describeReconcileRound(result: TimelineReconcileResult, ms: number): string {
-  const parts: string[] = []
-  if (result.dirtySources.length > 0) parts.push(`${result.dirtySources.length} 个源需搬运`)
-  if (result.removedSyncs > 0 || result.removedEntries > 0) {
-    parts.push(`退订清理 ${result.removedSyncs} 个源 / ${result.removedEntries} 条`)
-  }
-  if (result.purgedReplications > 0) parts.push(`清掉 ${result.purgedReplications} 条遗留常驻复制`)
-  if (result.failures.length > 0) parts.push(`${result.failures.length} 个源失败`)
-  const detail = parts.length > 0 ? parts.join("；") : "无需搬运"
-  return `汇聚：订阅 ${result.sources} 个源，${detail}（${ms}ms）`
 }
 
 /** 换库重搬时每批搬运的文档数（`_all_docs` 一页 + `_bulk_docs` 一次） */
@@ -898,6 +878,25 @@ async function rebuildUserTimelineUnlocked(userId: string): Promise<TimelineReco
 }
 
 /** 所有用户 id（定时 reconcile 用；自建服务用户量小，一次全查没有问题） */
+/**
+ * 「订阅了这批源的用户」（去重）。
+ *
+ * 抓取到新内容时只该叫醒**真正订阅了这个源**的用户：以前是给所有用户入队，实测下来
+ * 一个没有任何订阅的账号也会被每 30 秒叫醒一次（4 小时 332 次空转）。水位表上本来就有
+ * `source_id` 索引，这个反查是现成的。
+ *
+ * 注意：**新订阅**还没建水位行，所以查不到 —— 那条路径靠客户端订阅后自己催一次聚合
+ * （`POST /api/timeline/refresh`），以及 5 分钟定时器兜底。这是刻意的：为了覆盖"刚订阅"
+ * 而继续给所有人广播，等于把省下来的空转又加回去。
+ */
+export async function listSubscriberUserIds(sourceIds: string[]): Promise<string[]> {
+  if (sourceIds.length === 0) return []
+  const rows = await db.selectDistinct({ userId: timelineSourceSync.userId })
+    .from(timelineSourceSync)
+    .where(inArray(timelineSourceSync.sourceId, sourceIds))
+  return rows.map(row => row.userId)
+}
+
 export async function listUserIds(): Promise<string[]> {
   const rows = await db.select({ id: user.id }).from(user)
   return rows.map(row => row.id)

@@ -30,6 +30,8 @@ const state = vi.hoisted(() => ({
   sources: [
     { sourceId: "feed1", kind: "feed", title: "源一", syncedAt: new Date("2026-10-17T06:04:31.000Z"), status: "idle", lastError: null },
   ] as unknown[],
+  /** 聚合心跳（GET /events 的第三段） */
+  heartbeat: { at: new Date("2026-10-17T10:31:00.000Z"), quietRounds: 42 } as unknown,
   /** GET /events 收到的 limit 参数（验默认值/上限夹取） */
   eventLimits: [] as number[],
   clearedEvents: 0,
@@ -75,6 +77,7 @@ vi.mock("../services/timeline-events", () => ({
     return state.events
   },
   listTimelineSources: async () => state.sources,
+  readReconcileHeartbeat: async () => state.heartbeat,
   clearTimelineEvents: async () => {
     state.clearedEvents++
   },
@@ -255,10 +258,16 @@ describe("同步日志 /api/timeline/events", () => {
   it("返回流水与各源当前状态；limit 默认 120", async () => {
     const res = await app.request("/api/timeline/events")
     expect(res.status).toBe(200)
-    const body = await res.json() as { events: Array<{ message: string }>, sources: Array<{ title: string }> }
+    const body = await res.json() as {
+      events: Array<{ message: string }>
+      sources: Array<{ title: string }>
+      heartbeat: { quietRounds: number } | null
+    }
     expect(body.events).toHaveLength(2)
     expect(body.events[0]!.message).toContain("汇聚")
     expect(body.sources[0]!.title).toBe("源一")
+    // 心跳是"聚合还在不在跑"的唯一展示口径（空转轮次不进流水）
+    expect(body.heartbeat?.quietRounds).toBe(42)
     expect(state.eventLimits).toEqual([120])
   })
 

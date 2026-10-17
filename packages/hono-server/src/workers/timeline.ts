@@ -1,7 +1,7 @@
 import { Queue, Worker } from "bullmq"
 import { connection, createWorkerConnection } from "./connection"
 import { enqueueSourceSyncs, shutdownSourceSyncWorker } from "./timeline-sync"
-import { listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
+import { listSubscriberUserIds, listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
 
 /**
  * 用户时间线聚合队列（**拓扑对齐**，不是搬运本身）。
@@ -58,18 +58,30 @@ export async function enqueueTimelineRebuild(userId: string): Promise<void> {
 /**
  * 「有新内容了」的通知节流窗口。
  *
- * 一轮抓取里可能几十上百个源都有新条目，每个源都通知一次「给所有用户入队」是纯浪费
- * （每个用户的聚合都要读一次状态文档 + 一条 SQL）。用户量小的时候这个定时通知
- * 本身就足够便宜，节流的意义只是别让它变成每源一次。
+ * 一轮抓取里可能几十上百个源都有新条目，每个源都通知一次是纯浪费（订阅者查询 + 一轮聚合
+ * 都要读状态文档、写心跳）。窗口内的源 id 先攒着，窗口一开一次性把它们换算成订阅者。
  */
 const STALE_NOTIFY_INTERVAL = parseInt(process.env.TIMELINE_NOTIFY_INTERVAL ?? "30000")
 let lastStaleNotifyAt = 0
+/** 节流窗口内攒下来的脏源（窗口一开合并成一次订阅者查询） */
+const pendingStaleSources = new Set<string>()
 
-/** 抓取到新条目后调用：把所有用户的时间线聚合入队（带节流） */
-export async function notifyTimelineStale(now: number = Date.now()): Promise<void> {
+/**
+ * 有源内容变化了 → 把**订阅了这些源的用户**的时间线聚合入队。
+ *
+ * 两处收敛（实测驱动的）：
+ *   1. **只叫醒订阅者**。以前是给所有用户广播，一个没有任何订阅的账号 4 小时被叫醒 332 次，
+ *      每次都是一轮"订阅 0 个源，无需搬运"；消费者从 `timeline_source_sync` 反查更准。
+ *   2. **窗口内攒源、合并查询**。抓取循环里每来一个新条目就会调一次，30 秒节流窗口内的
+ *      源 id 攒起来，窗口一开只查一次订阅者集合。
+ */
+export async function notifyTimelineStale(sourceId: string, now: number = Date.now()): Promise<void> {
+  pendingStaleSources.add(sourceId)
   if (now - lastStaleNotifyAt < STALE_NOTIFY_INTERVAL) return
   lastStaleNotifyAt = now
-  const userIds = await listUserIds()
+  const sourceIds = [...pendingStaleSources]
+  pendingStaleSources.clear()
+  const userIds = await listSubscriberUserIds(sourceIds)
   await Promise.all(userIds.map(id => enqueueTimelineReconcile(id).catch(() => {})))
 }
 

@@ -1,6 +1,6 @@
 import { computed, ref } from 'vue'
 import { summarizeTimelineSources } from '~/utils/timelineLog'
-import type { TimelineEvent, TimelineSourceState } from '~/types/timeline-log'
+import type { TimelineEvent, TimelineHeartbeat, TimelineSourceState } from '~/types/timeline-log'
 
 /**
  * 同步日志（设置页 → 数据 →「同步日志」）。
@@ -13,6 +13,8 @@ export function useTimelineLog() {
 
   const events = ref<TimelineEvent[]>([])
   const sources = ref<TimelineSourceState[]>([])
+  /** 聚合心跳（最近一轮时刻 / 连续空转轮数）；没跑过时是 null */
+  const heartbeat = ref<TimelineHeartbeat | null>(null)
   /** 是否成功拉到过（决定显示「查看」按钮还是列表） */
   const loaded = ref(false)
   const loading = ref(false)
@@ -28,6 +30,7 @@ export function useTimelineLog() {
       const res = await api.timeline.events(limit.value)
       events.value = res.events ?? []
       sources.value = res.sources ?? []
+      heartbeat.value = res.heartbeat ?? null
       loaded.value = true
       error.value = null
     } catch (e: unknown) {
@@ -60,5 +63,9 @@ export function useTimelineLog() {
     }
   }
 
-  return { events, sources, summary, loaded, loading, clearing, error, limit, canLoadMore, load, loadMore, clear }
+  return {
+    events, sources, heartbeat, summary,
+    loaded, loading, clearing, error, limit, canLoadMore,
+    load, loadMore, clear
+  }
 }

@@ -126,8 +126,9 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
  * 为什么放 PostgreSQL 而不是用户库里的 `subscription:` 文档：
  *   - `subscription:` 是**客户端也会写**的文档（PouchDB 双向同步），服务端往上写水位会和
  *     用户的订阅编辑撞出修订冲突；
- *   - 放 PG 还能按 `source_id` 反查"谁订阅了这个源"（将来把
- *     `notifyTimelineStale` 从"给所有用户入队"收窄成"只给订阅了这个源的用户入队"）。
+ *   - 放 PG 才能按 `source_id` 反查"谁订阅了这个源"：抓取到新内容时靠它**只叫醒订阅者**
+ *     （见 `listSubscriberUserIds`）。早期是给所有用户广播，实测一个零订阅账号 4 小时被
+ *     叫醒 332 次、每次都只是空转。
  *
  * 早先这里还存过复制过滤器的"固定下界"（`bound_iso`），现已随「按用户窗口/保底条数」一起
  * 删除：复制不再带任何参数，保留策略的唯一权威是源库裁剪（见 `couchdb/retention.ts`）。
@@ -167,6 +168,24 @@ export const timelineSourceSync = pgTable("timeline_source_sync", {
   primaryKey({ columns: [table.userId, table.sourceId] }),
   // 「谁订阅了这个源」的反查索引（将来做定向通知）
   index("timeline_source_sync_source_idx").on(table.sourceId),
+])
+
+/**
+ * 每用户一行的「聚合心跳」—— 最近一轮聚合是什么时候、连续多少轮什么都没发生。
+ *
+ * 为什么单独一张表而不是往流水里记：定时器 5 分钟一轮，空转占绝大多数（实测 4 小时里
+ * 564/671 条是"无需搬运"）。把它们记成流水会把有价值的事件淹掉；但完全不记又看不见
+ * "聚合到底还在不在跑"。所以空转只更新这一行（每用户一行、覆盖写），流水只记真正干了活的轮次。
+ */
+export const timelineReconcileHeartbeat = pgTable("timeline_reconcile_heartbeat", {
+  userId: text("user_id").primaryKey().references(() => user.id, { onDelete: "cascade" }),
+  /** 最近一轮聚合的完成时刻（不论有没有事发生） */
+  at: timestamp("at").notNull().defaultNow(),
+  /** 连续多少轮"无事发生"；有搬运/清理/失败的那一轮清零 */
+  quietRounds: integer("quiet_rounds").notNull().default(0),
+}, (table) => [
+  // 主键就是 userId，不需要额外索引
+  index("timeline_reconcile_heartbeat_at_idx").on(table.at),
 ])
 
 /**

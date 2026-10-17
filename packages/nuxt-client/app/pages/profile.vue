@@ -70,7 +70,7 @@ const draftTimeline = ref({ ...timelineSettings.value })
  * 不在挂载时就请求 —— 展开时才拉，避免把一个调试面板变成设置页的固定开销。
  */
 const {
-  events: timelineEvents, sources: timelineSources, summary: timelineSummary,
+  events: timelineEvents, sources: timelineSources, summary: timelineSummary, heartbeat: timelineHeartbeat,
   loaded: timelineLogLoaded, loading: timelineLogLoading, clearing: timelineLogClearing,
   error: timelineLogError, canLoadMore: timelineLogCanLoadMore,
   load: loadTimelineLog, loadMore: loadMoreTimelineLog, clear: clearTimelineLog
@@ -537,8 +537,11 @@ const confirmReset = async () => {
                       v-if="timelineLogOpen"
                       class="mt-3 space-y-3"
                     >
-                      <!-- 概览：源数 / 最近一次同步 / 失败与进行中 -->
+                      <!-- 概览：聚合心跳 / 源数 / 最近一次同步 / 失败与进行中 -->
                       <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+                        <span v-if="timelineHeartbeat">
+                          最近一轮聚合 {{ formatSince(timelineHeartbeat.at) }}<template v-if="timelineHeartbeat.quietRounds > 0">（连续 {{ timelineHeartbeat.quietRounds }} 轮无变化，只记心跳不记流水）</template>
+                        </span>
                         <span>订阅源 {{ timelineSummary.total }} 个</span>
                         <span>最近同步 {{ formatSince(timelineSummary.lastSyncedAt) }}</span>
                         <span
@@ -583,7 +586,7 @@ const confirmReset = async () => {
                         v-if="timelineEvents.length === 0 && !timelineLogLoading"
                         class="text-xs text-muted"
                       >
-                        还没有记录。下一轮聚合（最多 5 分钟）后会出现在这里。
+                        还没有记录。只有真正搬了源、清理了退订或出错的轮次才会记进来（空转轮次只更新上面的心跳）。
                       </p>
 
                       <ul
