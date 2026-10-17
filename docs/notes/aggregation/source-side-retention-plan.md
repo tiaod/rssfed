@@ -178,7 +178,8 @@ function(doc) {
 | `user_timeline_settings.window_days`（`schema.ts:110`） | 删除 |
 | `user_timeline_settings.min_feed_entries`（`schema.ts:119`） | 删除 |
 | `timeline_source_sync.window_days`（`:175`）/ `min_entries`（`:177`）/ `bound_iso`（`:184`） | 删除 |
-| `feeds.last_changed_at` / `bots.last_changed_at` | 新增，回填 = `last_new_entry_at` |
+| `feeds.last_changed_at` | 新增，回填 = `last_new_entry_at`（`UPDATE feeds SET last_changed_at = last_new_entry_at`）—— **已加** |
+| `bots.last_changed_at` | **不加**：bot 库不裁剪（§10.7），仍用 `lastNewEntryAt` |
 | `feeds.last_new_entry_at`（`:210`） | **保留** —— 前端"最后更新"仍在读（`services/feeds.ts:285`、`routes/mcp.ts:244`） |
 
 **聚合库不需要迁移**：filter 源码变了 → 每个 (用户 × 源) 的下一次复制自然是新哈希、从 0 重扫；
@@ -191,7 +192,7 @@ function(doc) {
 | 1 | **首次裁剪的删除风暴**。源库现在存着全部历史（可能几十万条），策略上线时第一次裁剪会删掉绝大多数 → 数百个源同时产生大批删除 → 重演"625 条复制压垮 2 核机"。 | 裁剪**限速 / 分批**（如每次抓取最多删 200 条）；上线期与复制入队错峰；先在单源 / 小账号验证收敛 |
 | 2 | **CouchDB 删除不释放磁盘**。删条目只产生 tombstone，附件同理，必须 compaction 才回收。不配的话"砍掉无限增长"只是逻辑上的，磁盘照涨。 | 配 `[compactions]` 或定时 `_compact`；验收标准是**磁盘真的降下来** |
 | 3 | **删除的信号**。`lastNewEntryAt` 只在新条目时更新 → 删除不会触发同步。 | 新增 `last_changed_at`，场景 B 里也写（这是全方案最容易漏、且漏了会静默失效的一点） |
-| 4 | **bot 库的裁剪会改变对外协议内容**。bot 库是 ActivityPub outbox 的内容源。 | **bot 是否适用同一保留策略要单独拍板**（可能用更大的 N，或不裁剪） |
+| 4 | **bot 库的裁剪会改变对外协议内容**。bot 库是 ActivityPub outbox 的内容源。 | **已定：bot 库不裁剪**，且 bot 数据要挪回 PostgreSQL（标准 BotKit，§10.4）；CouchDB 里只留离线阅读投影 |
 | 5 | **浏览器 tombstone 累积**。删除从源库出发、经用户库复制到每个浏览器；PouchDB 不 purge tombstone。 | 量级与现在的剪枝删除相当，但来源变成"一次删除 × N 订阅者"。上线后观察本地库体积 |
 | 6 | **`publishedAt` 乱序**。"刚抓到但发布时间很老"的条目会被立刻裁掉。 | 与现在的窗口过滤行为一致（现在的下界也按 `publishedAt` 判），不是回归；但要写进代码注释 |
 | 7 | **同一 `publishedAt` 并列**。按 bound 做范围删除可能多留/少留并列条目。 | 保留策略满足"**至少** N 条"即可，允许小幅超出；实现里按 id 去重避免重复删 |
@@ -201,7 +202,8 @@ function(doc) {
 
 1. ~~**放弃 selector 吗？**~~ **已定：放弃，用 filter function。** 实测见 §9.1：
    Mango selector 匹配不到墓碑（删除会静默丢失），而 filter function 能带走删除。
-2. **N 取多少？** 建议 50（= 现 `minFeedEntries` 默认）。feed 与 bot 用不同的 N 吗？（bot 见 §10.7）
+2. ~~**N 取多少？**~~ **已定：N = 50**（= 现 `minFeedEntries` 默认），全局一个值。
+   bot 库不适用（不裁剪，见 §10.7）。
 3. **"想多看历史"怎么回应？** 原来靠 per-user 的 `windowDays` / `minFeedEntries` 调，
    现在只能调全局 N（或按源类型分层）。
 4. **上线限速的具体参数**（每次抓取最多删多少条）。
@@ -284,11 +286,33 @@ function(doc) {
 2. **订阅意图放状态库**：reconcile 从状态库读订阅，不再依赖内容库里的 `subscription:` 文档。
 3. **内容包**：`channel:{id}`（共享）与 `bot_feed:{id}`（Bot 对外产出投影）；完整数据在 PostgreSQL，
    CouchDB 只存可重算的离线投影，被按需复制进用户内容库 —— 与本文的复制机制同构，不需要改。
-4. **Bot 产出改放 PostgreSQL**（标准 BotKit），投影从 PG 幂等派生。⚠️ 会反转 `ARCHITECTURE.md`
-   现行的一条不变量（"Bot 的产出也不在 PostgreSQL"），落地时一起改。
+4. **Bot 产出改放 PostgreSQL**（标准 BotKit 的做法），投影从 PG 幂等派生；`bot_feed:{id}` 只是
+   **离线阅读投影**，不受本文的 N=50 裁剪约束（删多少由 PG 侧的投影策略决定）。
+   ⚠️ 会反转 `ARCHITECTURE.md` 现行的一条不变量（"Bot 的产出也不在 PostgreSQL"），落地时一起改。
 5. **冲突按"保留最新修改"**：客户端可写文档带 `updatedAt`，读到 `_conflicts` 时保留最新并把输的分支
    显式删掉；不用 `validate_doc_update` 拒过期写（慢钟设备会被永久拒写）。
 6. **不做历史数据迁移**：服务端与客户端旧库一律清空重建（客户端换新库名 + 启动清旧库，
    同时把 `feeds.couch_db_name` / `user.timeline_db_name` 置空，否则下一次 ensure 会去找已删的库）。
-7. **Bot 库是否适用同一裁剪要单独定**（§5 风险 4）：bot 库是 ActivityPub outbox 的内容源
-   （`routes/bots.ts`），裁掉会影响对外可见历史 —— 可能用更大的 N，或不裁。
+7. ~~**Bot 库是否适用同一裁剪**~~ **已定：不裁**。bot 库是 ActivityPub outbox 的内容源
+   （`routes/bots.ts`），裁掉会改变对外可见历史；而且数据要挪回 PostgreSQL，CouchDB 只剩投影。
+
+## 11. 落地进度
+
+按"先把源库变有界、再切复制方式、最后删旧机制"的顺序推进（每步都保持测试全绿）：
+
+- [x] **裁剪模块**：`couchdb/retention.ts` 的 `trimSourceToLatestN()`（视图降序取 N+1 行算下界 →
+  分页删，单批 200 / 单次最多 10 批；拿不到下界就不裁）+ 13 个单测。
+- [x] **接进抓取 worker**：写完新条目后裁剪一次；`compact` 不放在抓取路径上。
+- [x] **`feeds.last_changed_at`**：新增列；worker 在"有新条目 / 首次缓存图标 / 裁掉了条目"时写它，
+  `lastNewEntryAt` 只在真的拿到新内容时写（前端"最后更新"仍读它）。
+- [x] **脏源判定改信号源**：feed 读 `lastChangedAt`（老行回退 `lastNewEntryAt`），bot 仍读 `lastNewEntryAt`。
+  → "只裁剪删除、没有新增"的源现在也会触发同步（§3.3 场景 B 的回归钉子）。
+- [ ] **切复制方式**：`replicator.ts` 去掉 `query_params`，filter 换成"只挡设计文档"（§4.3）；
+  这一步会让每个 (用户 × 源) 的复制哈希变化 → 各自从 0 重扫一次（§4.4「聚合库不需要迁移」）。
+- [ ] **删旧机制**：`pruneOutsideRetention` / `pruneBelowPerFeedFloor` / `restoreTombstonedEntries` /
+  `readSourceFloor` / `replicationQueryParams` / 用户库 `timeline-maintain` 视图；
+  schema 删 `user_timeline_settings.window_days|min_feed_entries`、`timeline_source_sync.window_days|min_entries|bound_iso`；
+  设置页对应开关一起删。
+- [ ] **db:push + 回填**：`pnpm db:push` 加列，然后
+  `UPDATE feeds SET last_changed_at = last_new_entry_at WHERE last_changed_at IS NULL;`
+- [ ] **上线期**：配 `[compactions]`（风险 2），先在单源/小账号确认裁剪与删除传播收敛，再全量放开。

@@ -737,7 +737,8 @@ async function deleteSourceWatermark(userId: string, sourceId: string): Promise<
  * 判据按"宁可多搬一次空转，也不能漏"排：
  *   · 没有水位行 / 上次同步没成功（syncedAt 为空）→ 要搬（新订阅、上次失败）；
  *   · 水位记的窗口或**保底条数**与当前设置不一致 → 要搬（换设置 = 重算下界 = 换复制哈希 = 从 0 重扫）；
- *   · 源在**上次同步开始之后**又有过新内容（`lastNewEntryAt > syncedAt`）→ 要搬；
+ *   · 源在**上次同步开始之后**又有过变化（feed 看 `lastChangedAt`、bot 看 `lastNewEntryAt`，
+ *     都 > `syncedAt`）→ 要搬（`lastChangedAt` 把"只裁剪删除"也覆盖进来）；
  *   · 其余（源那边没动静）→ 不搬，连一次复制请求都不发。
  *
  * 注意比较的是"同步**开始**时刻"：复制进行中写入的条目，其 `lastNewEntryAt` 会大于开始时刻，
@@ -756,15 +757,21 @@ export function sourceNeedsSync(input: {
   return input.sourceUpdatedAt != null && input.sourceUpdatedAt > input.watermark.syncedAt
 }
 
-/** 订阅源的"最后一次有新内容"时间（一条 SQL 拿全部：每源一次请求在 600+ 源时不可接受） */
+/**
+ * 订阅源的"最后一次内容变化"时间（一条 SQL 拿全部：每源一次请求在 600+ 源时不可接受）。
+ *
+ * feed 用 `lastChangedAt`（新增**或裁剪删除**），bot 用 `lastNewEntryAt`（bot 库不裁剪，见
+ * `docs/notes/aggregation/source-side-retention-plan.md` §10.7）。
+ * 老行可能还没回填 `last_changed_at`，回退到 `last_new_entry_at`。
+ */
 async function readSourceFreshness(sources: TimelineSource[]): Promise<Map<string, Date | null>> {
   const out = new Map<string, Date | null>()
   const feedIds = sources.filter(source => source.kind === "feed").map(source => source.id)
   const botIds = sources.filter(source => source.kind === "bot").map(source => source.id.slice("bot:".length))
   if (feedIds.length > 0) {
-    const rows = await db.select({ id: feeds.id, at: feeds.lastNewEntryAt })
+    const rows = await db.select({ id: feeds.id, at: feeds.lastChangedAt, newAt: feeds.lastNewEntryAt })
       .from(feeds).where(inArray(feeds.id, feedIds))
-    for (const row of rows) out.set(row.id, row.at)
+    for (const row of rows) out.set(row.id, row.at ?? row.newAt)
   }
   if (botIds.length > 0) {
     const rows = await db.select({ id: botsTable.id, at: botsTable.lastNewEntryAt })

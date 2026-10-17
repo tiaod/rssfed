@@ -2,6 +2,7 @@ import { Worker, Queue } from "bullmq"
 import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
 import { ensureFeedDatabase, ensureBotDatabase, createCouchDb } from "../couchdb/client"
+import { createTrimDb, trimSourceToLatestN } from "../couchdb/retention"
 import { feedDocId } from "../couchdb/doc-ids"
 import { parseFeedUrl, formatFeedError, type ParsedFeed, type ParsedItem } from "../rss/parser"
 import { cacheEntryImages, cacheSingleImage, FEED_ICON_CACHE_VERSION, type EntryImageOptions } from "../rss/entry-images"
@@ -37,29 +38,38 @@ export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job)
 
   try {
     const parsed = await parseFeedUrl(url)
-    const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
+    const feedDbName = await ensureFeedDatabase(feedId)
+    const feedDb = createCouchDb(feedDbName)
 
     // 依次更新 FeedDoc 元数据、PostgreSQL 注册表，再写入新条目并通知相关 Bot
     const iconCached = await updateFeedDoc(feedDb, feedId, url, parsed)
     await updateFeedRegistry(feedId, url, parsed)
     const newEntries = await insertNewEntries(feedDb, feedId, parsed.items ?? [])
-    // 抓到新条目时记录时间，供前端增量同步判断（只同步有新内容的源）
-    if (newEntries.length > 0) {
-      await db.update(feeds).set({ lastNewEntryAt: new Date() }).where(eq(feeds.id, feedId))
-    } else if (iconCached) {
-      // 无新条目但首次缓存了 feed 图标：同样 touch，让前端同步拉取图标附件
-      await db.update(feeds).set({ lastNewEntryAt: new Date() }).where(eq(feeds.id, feedId))
+    // 源库保留策略：每条源只留最新 N 条 —— 整个保留链路的唯一权威
+    // （见 docs/notes/aggregation/source-side-retention-plan.md）。
+    // 超限才动数据；拿不到边界时一条都不删。compact 不放在这里：删除只产生墓碑，
+    // 附件字节由 CouchDB 自身的 [compactions] 或定时 compact 回收。
+    const trim = await trimSourceToLatestN(createTrimDb(feedDbName), { compact: false })
+    // 两个时间戳语义不同，别混：
+    //   lastNewEntryAt → "抓到新内容"（前端"最后更新"用）
+    //   lastChangedAt  → "源内容变了"（脏源判定用；**裁剪删除也算**，否则只删不增的源永不触发同步）
+    const now = new Date()
+    const patch: { lastNewEntryAt?: Date, lastChangedAt?: Date } = {}
+    if (newEntries.length > 0 || iconCached) patch.lastNewEntryAt = now
+    if (newEntries.length > 0 || iconCached || trim.deleted > 0) patch.lastChangedAt = now
+    if (Object.keys(patch).length > 0) {
+      await db.update(feeds).set(patch).where(eq(feeds.id, feedId))
     }
     // 无论有无新条目都同步相关 Bot：FeedDoc 元信息需在无新条目时也能校正
     await notifyRelatedBots(feedId, newEntries)
 
-    // 抓到新条目 → 通知各用户的时间线聚合尽快跑一轮（带节流：一轮抓取里几十个源
-    // 都有新内容时只通知一次）。聚合本身是增量的，安静时每个用户只花一条 SQL。
-    if (newEntries.length > 0) {
+    // 有新条目**或裁掉了条目** → 通知各用户的时间线聚合尽快跑一轮（带节流：一轮抓取里几十个源
+    // 都有变化时只通知一次）。聚合本身是增量的，安静时每个用户只花一条 SQL。
+    if (newEntries.length > 0 || trim.deleted > 0) {
       void notifyTimelineStale().catch(() => {})
     }
 
-    return { feedId, newEntries: newEntries.length, totalItems: parsed.items?.length ?? 0 }
+    return { feedId, newEntries: newEntries.length, trimmed: trim.deleted, totalItems: parsed.items?.length ?? 0 }
   } catch (err) {
     // 抓取失败，更新 feed 注册表的 errorMessage
     await markFeedError(feedId, url, err)

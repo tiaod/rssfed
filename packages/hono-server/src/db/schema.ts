@@ -206,8 +206,17 @@ export const timelineSourceSync = pgTable("timeline_source_sync", {
   image: text("image"),
   errorMessage: text("error_message"),
   lastFetchedAt: timestamp("last_fetched_at"),
-  /** 最后抓到新条目的时间：Worker 抓取到新条目时更新，供前端增量同步判断 */
+  /** 最后抓到新条目的时间：Worker 抓取到新条目时更新，供前端"最后更新"展示 */
   lastNewEntryAt: timestamp("last_new_entry_at"),
+  /**
+   * 源库内容**最后一次变化**的时间（新增**或裁剪删除**都算）。
+   *
+   * 脏源判定用它而不是 `lastNewEntryAt`：裁剪只删不增，只看新增的话删除永远触发不了同步，
+   * 用户库里就会永久留一条已从源库裁掉的条目（见
+   * `docs/notes/aggregation/source-side-retention-plan.md` §3.3 场景 B）。
+   * 回填值 = `last_new_entry_at`；bot 库不裁剪，仍用 `lastNewEntryAt`。
+   */
+  lastChangedAt: timestamp("last_changed_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   /** 抓取状态：active 正常抓取 / paused 用户暂停（worker 跳过） */
   status: text("status").notNull().default("active"),
