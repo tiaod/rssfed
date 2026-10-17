@@ -45,29 +45,22 @@ export function authenticatedDbUrl(dbName: string): string {
 /**
  * 聚合复制用的**过滤函数**（装在 feed / bot 库的设计文档里，由复制器在源端执行）。
  *
- * 为什么是 JS filter 而不是 Mango selector —— 两条实测结论：
+ * 它的职责只剩一件事：**挡住设计文档**，其余一律放行 —— **包括删除**。
  *
- *   1. **selector 复制不搬删除**。Mango 只能对文档正文字段求值，而删除后的文档只有
- *      `_id/_rev/_deleted`，没有任何字段可匹配，于是被静默跳过：源端删掉的条目会在用户库里
- *      永久留着（`_changes` 里那条 `deleted:true` 根本不会被选中）。JS filter 会拿到
- *      `{_deleted: true}`，所以这里第一行就放行删除 —— 这是「源端删除 → 用户库 / 浏览器跟随删除」
- *      唯一可靠的实现方式。
- *   2. 窗口下界走 `req.query`（`query_params`）而不是写死在函数里。**参数名不能叫 `since`**：
- *      它会和 `_changes` 自己的 `since`（起始序号）撞车，filter 里读到的就成了序号字符串，
- *      于是 `publishedAt >= "0"` 恒真、窗口形同虚设。
- *
- * 窗口下界在**创建复制任务时**算一次并固定（见 couchdb/replicator.ts），所以这个过滤器只会
- * 越来越松；窗口的权威是服务端每轮的 prune（selector 变严不会删目标端已有文档）。
+ * - 为什么必须用 JS filter 而不是 Mango selector：selector 只能对文档正文字段求值，而删除后
+ *   的文档只有 `_id/_rev/_deleted`，没有可匹配字段，于是被静默跳过 —— 源端删掉的条目会在
+ *   用户库永久留着。JS filter 能拿到 `{_deleted: true}`，`_id` 也不是 `_design/...`，
+ *   所以删除会跟着复制传播（实测见 `docs/notes/aggregation/source-side-retention-plan.md` §9.1）。
+ * - 为什么没有时间谓词：保留策略的唯一权威是**源库裁剪**（每条源只留最新 N 条，抓取 worker 做）。
+ *   复制只做"精确镜像"。时间下界一旦进复制参数，换窗口就是换哈希、从 0 重扫源库
+ *   （`couchdb-replicator-aggregation.md` 结论 3）—— 这条开销是这次重构要去掉的。
+ * - 为什么不能干脆不用 filter：feed/bot 库的 `_design/main` 里有 `entries-by-date` 视图，
+ *   bot outbox API 在用；而用户库自己也有 `_design/main`，搬过去会撞车。
+ * - `type === 'feed'` 的元信息照样放行：前端要显示源标题/图标。
  */
-export const TIMELINE_REPLICATION_FILTER_QUERY_PARAM = "minPublishedAt"
-
-export const TIMELINE_REPLICATION_FILTER = `function(doc, req) {
-  if (doc._deleted) return true;
-  if (doc.type === 'feed') return true;
-  if (doc.type !== 'entry') return false;
-  var bound = req.query.${TIMELINE_REPLICATION_FILTER_QUERY_PARAM};
-  if (!bound) return true;
-  return typeof doc.publishedAt === 'string' && doc.publishedAt >= bound;
+export const TIMELINE_REPLICATION_FILTER = `function(doc) {
+  // 源库的设计文档不能搬进用户库：用户库自己也有 _design/main
+  return doc._id.indexOf('_design/') !== 0;
 }`
 
 /** 复制文档里引用过滤器的方式：`<设计文档名>/<过滤器名>` */

@@ -1022,24 +1022,10 @@ async function reconcileUserTimelineUnlocked(
     }
   }
 
-  // ④ 剪枝：保留规则（窗口 ∨ 每源保底条数）的权威在这里。复制器的过滤下界是固定的（见
-  //    replicator.ts），会越来越松，所以每轮都剪一遍。
-  //
-  //    剪枝失败**不能**拦住后面的入队：它是清理动作，而搬运才是关键路径。最典型的失败是
-  //    用户库的设计文档没装上（CouchDB 的 JS 查询服务一忙，写设计文档就 500，见 client.ts 的
-  //    ensureTimelineDesignDoc）→ 视图查询 404。原实现让这个 404 冒泡出去，整轮 reconcile
-  //    直接中断：一个源都不搬、`_local/state` 也不写，客户端拿到 500、一条内容都同步不到，
-  //    而日志里只有一句 `missing`。这里降级成一行告警，让内容照常搬（等设计文档补上之后下一轮再剪）。
-  try {
-    result.prunedEntries += await pruneOutsideRetention(scope, {
-      windowStart: windowStartIso(settings.windowDays),
-      minEntries: settings.minFeedEntries,
-    })
-  } catch (err) {
-    console.warn(
-      `[Timeline] 用户=${userId} 剪枝失败（本轮跳过，聚合照常入队）：${(err as Error)?.message ?? err}`,
-    )
-  }
+  // ④ 用户库**不再剪枝**：保留策略的唯一权威是源库裁剪（每条源只留最新 N 条）——
+  //    源库删掉的条目会跟着复制传播过来，用户库因此是精确镜像，不需要自己再挑一遍
+  //    （见 docs/notes/aggregation/source-side-retention-plan.md）。
+  //    这一步原来每轮都要扫用户库全部条目，是整个聚合链路里唯一随数据量恶化的成本。
 
   // ⑤ 升级清理：老版本给每个 (用户 × 源) 建了一条**常驻**复制，它们会继续占槽位与长轮询、
   //    还会和新的一次性复制抢复制器，所以升级后一次性删干净。靠状态文档里的标记只做一次。

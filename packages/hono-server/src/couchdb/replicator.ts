@@ -2,16 +2,18 @@ import {
   authenticatedDbUrl,
   nanoServer,
   REPLICATION_FILTER_PATH,
-  TIMELINE_REPLICATION_FILTER_QUERY_PARAM,
 } from "./client"
 
 /**
  * 用户时间线的聚合搬运：交给 **CouchDB 复制器**，但由**我们**决定"什么时候搬哪个源"。
  *
- * 搬运本身仍然是一条 (源库 → 该用户聚合库) 的复制，过滤器挂在源库设计文档上
- * （`main/timeline` + `query_params.minPublishedAt`），附件走 CouchDB 内部 multipart。
- * 与早期实现的区别只有一点：**不再创建常驻（continuous）复制**，改成
- * `POST /_replicate` 的**一次性同步复制**，由 `rss-timeline-sync` 队列限并发地触发。
+ * 搬运本身是一条 (源库 → 该用户聚合库) 的复制，过滤器挂在源库设计文档上（`main/timeline`，
+ * 职责降级为"只挡设计文档"），附件走 CouchDB 内部 multipart。**不带任何 `query_params`**：
+ * 保留策略的唯一权威是**源库裁剪**（每条源只留最新 N 条，见
+ * `docs/notes/aggregation/source-side-retention-plan.md`），复制只做精确镜像。
+ *
+ * 与早期实现的区别只有一点：**不再创建常驻（continuous）复制**，改成 `POST /_replicate` 的
+ * **一次性同步复制**，由 `rss-timeline-sync` 队列限并发地触发。
  *
  * 为什么不留常驻任务（实测）：
  *   - 每个 (用户 × 源) 一条常驻复制时，625 条一起做首次追赶会把机器压死：
@@ -20,21 +22,19 @@ import {
  *     `max_jobs` 事实上变成"最多多少个源会被搬"（设 50 时 573 个源一条都搬不过来）。
  *   一次性复制把并发完全交给我们的队列（`TIMELINE_SYNC_CONCURRENCY`），机器压力可控，
  *   而"要搬哪个源"由 PG 里的水位表（`timeline_source_sync`）按
- *   `feeds/bots.lastNewEntryAt > synced_at` 判定 —— 没更新的源连一次复制请求都不发。
+ *   `feeds.lastChangedAt / bots.lastNewEntryAt > synced_at` 判定 —— 没变化的源连一次复制请求都不发。
  *
- * 四条必须知道的边界（都实测过，见 docs/notes/aggregation/couchdb-replicator-aggregation.md
- * 与 report/aggregation-ondemand/ 的按需复制探针）：
+ * 四条必须知道的边界（都实测过，见 docs/notes/aggregation/ 下的留档与
+ * report/aggregation-* 的探针输出）：
  *   ① **过滤器只能用 JS filter**：Mango selector 不搬删除（删除后的文档没有字段可匹配），
- *      而「源端删除跟随」是必须成立的性质。
- *   ② **query_params 里不能有叫 `since` 的参数**：它会和 `_changes` 自己的 since 撞名，
- *      过滤器读到的是序号字符串，窗口会静默失效。
- *   ③ **复制器的 checkpoint 是按「复制参数哈希」存的**（两端 `_local/<哈希>`），与调用方式
- *      无关：同参数再调一次会**接着上次的序号继续**（实测增量 1 条只搬 1 条），而**换了参数
- *      （窗口下界）就是换了哈希 → 从 0 重扫源库** —— 窗口放大要的回填正是靠它自动发生的。
- *      所以下界必须**稳定存下来**（水位表里的 `bound_iso`），不能每次按"现在"重算。
- *   ④ 复制是"变更投递"不是"投影"：目标端**自己删过**的文档不会再被送回来（目标端已经
- *      认识那个 rev）。所以剪枝（窗口收窄）留在服务端做，且它是**单向**的 —— 剪掉的历史
- *      不会因为之后把窗口放大而回来，要找回历史只能走「重建」（重建聚合库后重搬）。
+ *      而「源端删除跟随」正是本方案让用户库保持镜像的机制。
+ *   ② **checkpoint 是按「源库 + 目标库 + 过滤器源码」算的**（两端 `_local/<哈希>`）：同一份
+ *      过滤器再调一次会**接着上次的序号继续**；改了过滤器源码就是新哈希 → 从 0 重扫。
+ *      所以过滤器里不能写随时间的谓词（早期把窗口下界塞进 `query_params` 就是这么坏掉的）。
+ *   ③ **不带 `query_params` 也就少一个坑**：以前参数名不能叫 `since`（会和 `_changes` 的
+ *      since 撞名），现在整块消失了。
+ *   ④ 复制是"变更投递"不是"投影"：目标端**自己删过**的文档不会再被送回来（目标端已经认识
+ *      那个 rev，见 probe-e）。要找回历史只能走「重建」（重建聚合库后重搬）。
  */
 
 /** 本服务创建的**历史**常驻复制文档前缀：升级后要把它们清掉（见 purgeLegacyReplications） */
@@ -72,25 +72,6 @@ export function parseReplicationDocId(id: string): ParsedReplicationId | null {
   return { userId: match[1]!, windowDays: Number(match[2]), sourceId: match[3]! }
 }
 
-/**
- * 复制任务的过滤参数。`minPublishedAt` 由调用方从水位表里取出并保持**稳定**。
- *
- * 下界若随时间推移，每次同步都得改参数，而改参数 = 换哈希 = 丢 checkpoint 从头重扫，
- * 代价不可接受。代价是过滤器会越来越"松"（多放行一些刚滑出窗口的老条目），
- * 但保留规则的权威是剪枝（services/timeline.ts 的 pruneOutsideRetention）——多进来的会被删掉。
- *
- * `boundIso` 为 null 时**不带这个参数**（过滤器放行全部条目）：窗口不限时间，或该源的整个
- * 历史都不够保底条数（这两种情况该源本来就该全留）。
- *
- * 反过来，**下界变松时**（窗口放大、或保底条数要求更早的历史）→ 换哈希 → 复制器从 0 扫源库，
- * 这正是"回填历史"要的行为；但已经被剪掉的条目回不来（见模块头注释 ④）。
- */
-export function replicationQueryParams(boundIso: string | null): Record<string, string> {
-  const params: Record<string, string> = {}
-  if (boundIso) params[TIMELINE_REPLICATION_FILTER_QUERY_PARAM] = boundIso
-  return params
-}
-
 /** 单源一次性复制的超时上限。单源常态是几百毫秒（实测：无更新空转 1.3s、增量 1.7s、
  *  168 条 × 20KB 全量 3.5s）；超时说明源库异常大或 CouchDB 卡住，让任务失败重试比挂死好。 */
 const REPLICATION_TIMEOUT_MS = Math.max(5_000, parseInt(process.env.TIMELINE_REPLICATION_TIMEOUT_MS ?? "120000") || 120_000)
@@ -125,8 +106,11 @@ export interface SourceReplicationResult {
 export async function runSourceReplication(spec: {
   sourceDb: string
   targetDb: string
-  /** 保留集合的下界；null = 无下界（窗口不限时间 / 该源历史不够保底条数） */
-  boundIso: string | null
+  /**
+   * @deprecated 过渡期保留字段：**已不参与复制**。下界计算与水位里的 bound 会随
+   * `windowDays` / `minFeedEntries` 一起删掉（见 source-side-retention-plan.md §11）。
+   */
+  boundIso?: string | null
 }): Promise<SourceReplicationResult> {
   const startedAt = Date.now()
   const timer = { timedOut: false }
@@ -142,7 +126,9 @@ export async function runSourceReplication(spec: {
       continuous: false,
       create_target: false,
       filter: REPLICATION_FILTER_PATH,
-      query_params: replicationQueryParams(spec.boundIso),
+      // **没有任何 query_params**：保留策略的唯一权威是源库裁剪，复制只做精确镜像。
+      // 参数一旦进这里，换参数就是换哈希 → 从 0 重扫源库；而且窗口过滤会和源库裁剪
+      // 变成两套权威（用户库不再自己剪枝）。
     },
   }) as Promise<ReplicateResponse>
 
@@ -170,8 +156,6 @@ export async function runSourceReplication(spec: {
     console.log("[Timeline][debug] 复制", JSON.stringify({
       source: spec.sourceDb,
       target: spec.targetDb,
-      boundIso: spec.boundIso,
-      queryParams: replicationQueryParams(spec.boundIso),
       ok: res?.ok,
       error: res?.error,
       reason: res?.reason,

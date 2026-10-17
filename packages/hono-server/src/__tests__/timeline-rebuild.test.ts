@@ -407,18 +407,6 @@ describe("reconcileUserTimeline：升级与稳态", () => {
    * 原实现让 404 冒泡出去，结果是一条内容都不搬、状态也不写，客户端拿到 500、
    * 一条内容都同步不到（真机上就是这么表现的）。
    */
-  it("剪枝失败只跳过剪枝：脏源照判、状态照写", async () => {
-    mocks.viewThrows = true
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
-
-    const result = await reconcileUserTimeline("u1")
-
-    expect(result.prunedEntries).toBe(0)
-    expect(result.dirtySources).toEqual(["feed1"])
-    expect(mocks.stateByDb["user-timeline_old"]).toMatchObject({ version: 2, windowDays: 3 })
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining("剪枝失败"))
-    warn.mockRestore()
-  })
 })
 
 describe("同一用户串行化：并发重建 / 升级只能有一个赢家", () => {

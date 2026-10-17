@@ -307,12 +307,19 @@ function(doc) {
   `lastNewEntryAt` 只在真的拿到新内容时写（前端"最后更新"仍读它）。
 - [x] **脏源判定改信号源**：feed 读 `lastChangedAt`（老行回退 `lastNewEntryAt`），bot 仍读 `lastNewEntryAt`。
   → "只裁剪删除、没有新增"的源现在也会触发同步（§3.3 场景 B 的回归钉子）。
-- [ ] **切复制方式**：`replicator.ts` 去掉 `query_params`，filter 换成"只挡设计文档"（§4.3）；
-  这一步会让每个 (用户 × 源) 的复制哈希变化 → 各自从 0 重扫一次（§4.4「聚合库不需要迁移」）。
-- [ ] **删旧机制**：`pruneOutsideRetention` / `pruneBelowPerFeedFloor` / `restoreTombstonedEntries` /
-  `readSourceFloor` / `replicationQueryParams` / 用户库 `timeline-maintain` 视图；
+- [x] **切复制方式**：`replicator.ts` 不再发送 `query_params`，filter 降级为"只挡设计文档"（§4.3）。
+  → 每个 (用户 × 源) 的复制哈希变化，下一轮各自从 0 重扫一次源库（§4.4「聚合库不需要迁移」）。
+- [x] **用户库停止剪枝**：`reconcileUserTimeline` 里的 `pruneOutsideRetention` 调用已删。
+  → 用户库变成源库的精确镜像；那条"每用户每 5 分钟 O(用户库) 的扫描"没有了。
+- [ ] **删残留**：`windowStartIso` / `looserBoundIso` / `retentionBoundIso` / `readSourceFloor` /
+  `SourceFloor` / `normalizeBoundIso` / `pruneOutsideRetention` 及其三个子函数 / `restoreTombstonedEntries` /
+  用户库 `timeline-maintain` 视图 / `syncSource` 里算下界的整段；
   schema 删 `user_timeline_settings.window_days|min_feed_entries`、`timeline_source_sync.window_days|min_entries|bound_iso`；
-  设置页对应开关一起删。
+  **设置页的"窗口 / 保底条数"开关一起删**（现在还在但已经不起作用，会误导）。
+- [ ] **上线注意（重要）**：镜像复制意味着**新订阅者的首拉 = 该源库当前全部内容**。
+  存量 feed 库还积着全部历史（裁剪每次抓取最多删 2000 条，要几轮才收敛），
+  所以正式切之前先跑一次**全量裁剪 sweep**（把每个 feed 库裁到 N），否则首拉可能拉几十万条。
+  这一步在 dev 库上也要做，否则重启服务后第一批脏源同步会很重。
 - [ ] **db:push + 回填**：`pnpm db:push` 加列，然后
   `UPDATE feeds SET last_changed_at = last_new_entry_at WHERE last_changed_at IS NULL;`
 - [ ] **上线期**：配 `[compactions]`（风险 2），先在单源/小账号确认裁剪与删除传播收敛，再全量放开。
