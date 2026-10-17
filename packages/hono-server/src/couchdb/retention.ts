@@ -2,18 +2,21 @@
  * 时间窗口清理：**保留策略的唯一权威**。
  *
  * 设计依据与实测结论见 `docs/notes/aggregation/storage-refactor-plan.md`（§5 / §13）。
- * 三条必须成立的性质：
+ * 现在的形状（四个探针实测之后定的）：
  *
- * 1. **窗口只有服务端算**：`retentionBoundIso()` 是唯一的边界来源，客户端不得用本机时钟现算。
- * 2. **源库直接 purge 活文档，不产生删除**（实测：201 成功、文档从 `_all_docs` 与 `_changes`
- *    同时消失、`_changes` 不留"取不到 rev"的行，复制器不会因此报错）。
- *    → 所以"先标准删除、再扫 `_changes` 找墓碑"两步是多余的。
- * 3. **冲突文档要把所有叶子一起 purge**：只 purge winner 时 loser 会顶上、文档仍然存在（实测）。
+ * 1. **源库不清**（永久存档）→ 本模块不负责源库。
+ * 2. **汇聚库按 `N_agg` 清理，用 delete（留墓碑），不 purge**。原因实测过（§13.E）：
+ *    目标端 purge 抹掉修订记忆后，**全量重扫会把它们从完整源库搬回来**；而 delete 留墓碑时
+ *    重扫 0 复活。日常增量复制两种情况都不会复活，所以区别只在重扫/重建。
+ * 3. **墓碑不清**：墓碑是"重扫不复活"的唯一保证，清掉就要引入宽限期/账本/ack 一整套。
+ *    代价是墓碑线性增长（约百字节/条，附件已被 compact 回收），只监控。
+ * 4. **窗口只有服务端算**：`retentionBoundIso()` 是唯一来源，客户端只用下发的 bound。
  *
- * 另一个刻意的取舍：**`publishedAt` 缺失或不是字符串的条目一律不清理**。
- * 日期缺失只让库大一点，误删是不可逆的（源库是内容的唯一来源）。
+ * `purgeExpired()` / `purgeTombstones()` 保留给**手工维护**（偶尔清理源库归档、或以后真的
+ * 给墓碑定一个"X 个月后清"的策略），不在日常链路上。
  *
- * 本模块是纯加法：只有被 worker 显式调用才会动数据，不改变任何现有行为。
+ * 刻意的取舍：**`publishedAt` 缺失或不是字符串的条目一律不清理**。
+ * 日期缺失只让库大一点，误删是不可逆的。
  */
 import { createCouchDb } from "./client"
 
@@ -170,9 +173,10 @@ export async function purgeExpired(
 }
 
 /**
- * 汇聚库的过期清理：**故意用 delete（留墓碑）而不是 purge**。
- * 墓碑是"这条内容过期了"投递给客户端的唯一渠道（客户端不带 selector 拉取，会跟着删本地副本）。
- * 墓碑本身由 `pending_purge` 账本在宽限期之后清掉（见 `purgeTombstones`）。
+ * 汇聚库的过期清理：**用 delete（留墓碑）而不是 purge** —— 这是日常链路上的那个函数。
+ *
+ * 两个理由（实测 §13.E）：墓碑能挡住"全量重扫时被完整源库搬回来"；同时它会把删除顺带到客户端。
+ * 墓碑本身不清（§5.1），所以这里只 delete + 交给 compact 回收附件字节。
  */
 export async function deleteExpired(
   db: RetentionDb,
@@ -198,7 +202,8 @@ export async function deleteExpired(
   return run
 }
 
-/** 墓碑账本的清理：按宽限期挑出可清的，分批 purge + compact */
+/** 墓碑的分批 purge + compact。**不在日常链路上**：墓碑默认不清，这个函数留给
+ *  "以后给墓碑定一个 X 个月上限"或手工维护时用（清掉之后的一次重扫会复活那批老文档一次）。 */
 export async function purgeTombstones(
   db: RetentionDb,
   rows: readonly TombstoneRecord[],
