@@ -11,13 +11,15 @@ import {
 /**
  * 聚合流水：把"这一轮到底发生了什么"从服务端控制台搬到用户能看见的地方（设置页 → 同步日志）。
  *
- * 三条明确的设计取舍（都来自实测：首版 4 小时记了 671 条，其中 564 条是纯空转）：
- *   1. **空转不记流水**。定时器 5 分钟一轮，绝大多数轮次什么都没变；这些轮次只更新一行
- *      `timeline_reconcile_heartbeat`（心跳），流水留给真正干了活的轮次。
- *   2. **活跃期的连续轮次合并成一条**。抓取循环期间每 30 秒就可能有一轮"搬了 1 个源"，
- *      逐条记还是会刷屏；窗口内（`RECONCILE_MERGE_WINDOW_MS`）的同类轮次并成一条
- *      「连续 N 轮，共 M 个源需搬运」。
+ * 三条明确的设计取舍：
+ *   1. **每一轮都记**（包括空转）。排查问题时"聚合跑了但没有要搬的"本身就是答案：能区分
+ *      "没触发聚合"和"触发了但判定没变化"。空转轮次靠**汇聚冷却**（每用户 5 分钟最多一轮，
+ *      见 workers/timeline 的 enqueueTimelineReconcile）压住频率，而不是靠不记。
+ *   2. **窗口内连续轮次合并成一条**。冷却窗口内可能因为手动同步/强刷再跑一两轮，
+ *      2 分钟内（`RECONCILE_MERGE_WINDOW_MS`）的同类轮次并成一条
+ *      「连续 N 轮，共 M 个源需搬运 / 连续 N 轮无需搬运」。
  *   3. **只记离散动作，不记每个源**。源级"现在什么样"直接读 `timeline_source_sync`。
+ *      另有一行 `timeline_reconcile_heartbeat` 作为概览用的心跳（最近一轮时刻 + 连续空转轮数）。
  *
  * 写流水是**旁路**：内部吞异常，日志写不进去绝不影响聚合本身。
  */
@@ -25,8 +27,13 @@ import {
 /** 每用户保留多少条流水（合并后一天也就几十条，2000 条 ≈ 一个月） */
 export const TIMELINE_EVENT_KEEP = 2000
 
-/** 连续"有变化"的汇聚在这个窗口内合并成一条（活跃抓取期一轮几十秒） */
-export const RECONCILE_MERGE_WINDOW_MS = 5 * 60_000
+/**
+ * 相邻两轮汇聚在这个窗口内合并成一条。
+ *
+ * 正常节奏被冷却限制在 5 分钟一轮，所以合并主要发生在"手动同步/强刷"造成的连发上；
+ * 2 分钟足够把它们并掉，又不会把正常的定时轮次糊成一条。
+ */
+export const RECONCILE_MERGE_WINDOW_MS = 2 * 60_000
 
 export type TimelineEventKind = "reconcile" | "rebuild" | "source-sync" | "error"
 export type TimelineEventLevel = "info" | "warn" | "error"
@@ -89,9 +96,9 @@ export function describeReconcileRound(round: ReconcileRoundSummary, ms: number)
   return `汇聚：订阅 ${round.sources} 个源，${detail}（${ms}ms）`
 }
 
-/** 合并后的描述：「连续 8 轮，共 15 个源需搬运」 */
+/** 合并后的描述：「连续 3 轮，共 15 个源需搬运」/「连续 5 轮无需搬运」 */
 function describeMergedRound(rounds: number, dirty: number, sources: number, failures: number): string {
-  const parts = [`连续 ${rounds} 轮，共 ${dirty} 个源需搬运`]
+  const parts = [dirty > 0 ? `连续 ${rounds} 轮，共 ${dirty} 个源需搬运` : `连续 ${rounds} 轮无需搬运`]
   if (failures > 0) parts.push(`累计 ${failures} 个源失败`)
   return `汇聚：订阅 ${sources} 个源，${parts.join("；")}`
 }
@@ -122,7 +129,7 @@ export async function recordTimelineEvent(input: {
 }
 
 /**
- * 记一轮聚合：**先更新心跳**，只有"干了活"的轮次才写流水（窗口内并进上一条）。
+ * 记一轮聚合：更新心跳 + 写一条流水（空转也写，合并窗口内并进上一条）。
  *
  * 心跳与流水分开，是因为读法不同：心跳永远只有最新一次（覆盖写），流水是历史。
  */
@@ -147,9 +154,8 @@ export async function recordReconcileRound(input: {
             : sql`${timelineReconcileHeartbeat.quietRounds} + 1`,
         },
       })
-    if (!meaningful) return
+    // ② 流水：空转也记（排查时要能区分"没触发"和"触发了但没变化"）；能并进上一条就并
 
-    // ② 流水：能并进上一条就并，否则新起一条
     if (await mergeIntoPreviousReconcile(userId, round)) return
     await db.insert(timelineEvents).values({
       userId,

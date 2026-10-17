@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto"
 import type { DocumentScope } from "nano"
-import { and, eq, inArray } from "drizzle-orm"
+import { and, eq, gt, inArray, isNull, or, sql } from "drizzle-orm"
 import {
   bots as botsTable,
   db,
@@ -879,22 +879,41 @@ async function rebuildUserTimelineUnlocked(userId: string): Promise<TimelineReco
 
 /** 所有用户 id（定时 reconcile 用；自建服务用户量小，一次全查没有问题） */
 /**
- * 「订阅了这批源的用户」（去重）。
+ * 「这批源里，哪些用户真的有内容要搬」（去重）。
  *
- * 抓取到新内容时只该叫醒**真正订阅了这个源**的用户：以前是给所有用户入队，实测下来
- * 一个没有任何订阅的账号也会被每 30 秒叫醒一次（4 小时 332 次空转）。水位表上本来就有
- * `source_id` 索引，这个反查是现成的。
+ * 抓取到新内容时只该叫醒**确实有待搬内容**的用户：
+ *   - 以前给所有用户广播，实测一个零订阅账号 4 小时被叫醒 332 次、每次都是空转；
+ *   - 只看"谁订阅了"还不够 —— 订了但水位已经追平的用户同样会空转，所以这里直接把脏源判据
+ *     （`feeds.lastChangedAt` / `bots.lastNewEntryAt` 与水位比较，同 `sourceNeedsSync`）写进 SQL。
+ * 水位表的 `source_id` 索引就是为这个反查建的。
  *
  * 注意：**新订阅**还没建水位行，所以查不到 —— 那条路径靠客户端订阅后自己催一次聚合
- * （`POST /api/timeline/refresh`），以及 5 分钟定时器兜底。这是刻意的：为了覆盖"刚订阅"
- * 而继续给所有人广播，等于把省下来的空转又加回去。
+ * （`POST /api/timeline/refresh`）与 5 分钟定时器兜底。
  */
-export async function listSubscriberUserIds(sourceIds: string[]): Promise<string[]> {
+export async function listDirtySubscribers(sourceIds: string[]): Promise<string[]> {
   if (sourceIds.length === 0) return []
-  const rows = await db.selectDistinct({ userId: timelineSourceSync.userId })
+  const feedRows = await db.selectDistinct({ userId: timelineSourceSync.userId })
     .from(timelineSourceSync)
-    .where(inArray(timelineSourceSync.sourceId, sourceIds))
-  return rows.map(row => row.userId)
+    .innerJoin(feeds, eq(feeds.id, timelineSourceSync.sourceId))
+    .where(and(
+      inArray(timelineSourceSync.sourceId, sourceIds),
+      or(
+        isNull(timelineSourceSync.syncedAt),
+        gt(feeds.lastChangedAt, timelineSourceSync.syncedAt),
+      ),
+    ))
+  // bot 库不裁剪，"源内容变了"用 lastNewEntryAt（同 sourceNeedsSync 的判据）
+  const botRows = await db.selectDistinct({ userId: timelineSourceSync.userId })
+    .from(timelineSourceSync)
+    .innerJoin(botsTable, eq(sql`'bot:' || ${botsTable.id}`, timelineSourceSync.sourceId))
+    .where(and(
+      inArray(timelineSourceSync.sourceId, sourceIds),
+      or(
+        isNull(timelineSourceSync.syncedAt),
+        gt(botsTable.lastNewEntryAt, timelineSourceSync.syncedAt),
+      ),
+    ))
+  return [...new Set([...feedRows, ...botRows].map(row => row.userId))]
 }
 
 export async function listUserIds(): Promise<string[]> {

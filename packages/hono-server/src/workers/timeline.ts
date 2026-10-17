@@ -1,7 +1,8 @@
 import { Queue, Worker } from "bullmq"
 import { connection, createWorkerConnection } from "./connection"
 import { enqueueSourceSyncs, shutdownSourceSyncWorker } from "./timeline-sync"
-import { listSubscriberUserIds, listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
+import { listDirtySubscribers, listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
+import { readReconcileHeartbeat } from "../services/timeline-events"
 
 /**
  * 用户时间线聚合队列（**拓扑对齐**，不是搬运本身）。
@@ -18,7 +19,21 @@ import { listSubscriberUserIds, listUserIds, rebuildUserTimeline, reconcileUserT
  */
 export const timelineQueue = new Queue("rss-timeline", { connection })
 
-/** 入队一次用户聚合（同一用户已有排队/执行中的 job 时直接复用） */
+/**
+ * 汇聚冷却：一轮聚合**结束**之后，这个窗口内不再开下一轮。
+ *
+ * 为什么不丢弃而是排到冷却结束：抓取到新内容本来就该搬，只是没必要每 30 秒一轮。
+ * 用 BullMQ 的 `delay` 把 job 排到冷却结束那一刻，既不会丢通知，也天然去重
+ * （`jobId = userId`，窗口内后来的通知只会命中同一个 job）。
+ * 0 = 关闭冷却。
+ */
+const RECONCILE_COOLDOWN_MS = parseInt(process.env.TIMELINE_RECONCILE_COOLDOWN ?? "300000")
+
+/**
+ * 入队一次用户聚合（同一用户已有排队/执行中的 job 时直接复用）。
+ *
+ * 冷却窗口内不立刻跑，而是把 job 排到冷却结束（`force` 绕过冷却：手动同步/强刷）。
+ */
 export async function enqueueTimelineReconcile(userId: string, options: { force?: boolean } = {}): Promise<void> {
   const existing = await timelineQueue.getJob(userId)
   if (existing) {
@@ -27,12 +42,28 @@ export async function enqueueTimelineReconcile(userId: string, options: { force?
     if (state === "completed" || state === "failed") await existing.remove()
     else return
   }
+  const delay = options.force === true ? 0 : await remainingReconcileCooldown(userId)
   await timelineQueue.add("reconcile", { userId, force: options.force === true }, {
     jobId: userId,
+    delay,
     // 保留少量历史供看板（/admin/queues）查看；聚合结果本身不重要，可随时重跑
     removeOnComplete: { count: 200 },
     removeOnFail: { count: 50 },
   })
+}
+
+/** 距上一轮聚合结束还剩多少冷却（0 = 可以立刻跑） */
+async function remainingReconcileCooldown(userId: string): Promise<number> {
+  if (RECONCILE_COOLDOWN_MS <= 0) return 0
+  try {
+    const heartbeat = await readReconcileHeartbeat(userId)
+    if (!heartbeat) return 0
+    const elapsed = Date.now() - new Date(heartbeat.at).getTime()
+    return elapsed >= RECONCILE_COOLDOWN_MS ? 0 : RECONCILE_COOLDOWN_MS - elapsed
+  } catch {
+    // 读不到心跳（迁移中/表还没建）就当没有冷却，宁可多跑一轮也别卡住聚合
+    return 0
+  }
 }
 
 /**
@@ -70,8 +101,8 @@ const pendingStaleSources = new Set<string>()
  * 有源内容变化了 → 把**订阅了这些源的用户**的时间线聚合入队。
  *
  * 两处收敛（实测驱动的）：
- *   1. **只叫醒订阅者**。以前是给所有用户广播，一个没有任何订阅的账号 4 小时被叫醒 332 次，
- *      每次都是一轮"订阅 0 个源，无需搬运"；消费者从 `timeline_source_sync` 反查更准。
+ *   1. **只叫醒"确实有内容要搬"的用户**。以前是给所有用户广播，一个零订阅账号 4 小时被叫醒
+ *      332 次、每次都是空转；现在从水位表反查时连"水位是否已追平"一起判掉，空转直接不发生。
  *   2. **窗口内攒源、合并查询**。抓取循环里每来一个新条目就会调一次，30 秒节流窗口内的
  *      源 id 攒起来，窗口一开只查一次订阅者集合。
  */
@@ -81,7 +112,7 @@ export async function notifyTimelineStale(sourceId: string, now: number = Date.n
   lastStaleNotifyAt = now
   const sourceIds = [...pendingStaleSources]
   pendingStaleSources.clear()
-  const userIds = await listSubscriberUserIds(sourceIds)
+  const userIds = await listDirtySubscribers(sourceIds)
   await Promise.all(userIds.map(id => enqueueTimelineReconcile(id).catch(() => {})))
 }
 

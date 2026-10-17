@@ -138,11 +138,15 @@ describe("describeReconcileRound", () => {
 })
 
 describe("recordReconcileRound", () => {
-  it("空转：只更新心跳，一条流水都不写", async () => {
+  it("空转：心跳 quietRounds=1，同时仍写一条流水（方便排查）", async () => {
     await recordReconcileRound({ userId: "u1", round: round(), ms: 15 })
-    expect(mocks.inserts.map(i => i.table)).toEqual(["timelineReconcileHeartbeat"])
+    expect(mocks.inserts.map(i => i.table)).toEqual(["timelineReconcileHeartbeat", "timelineEvents"])
     expect(mocks.inserts[0]!.values).toMatchObject({ userId: "u1", quietRounds: 1 })
-    expect(mocks.updates).toHaveLength(0)
+    expect(mocks.inserts[1]!.values).toMatchObject({
+      kind: "reconcile",
+      level: "info",
+      message: "汇聚：订阅 129 个源，无需搬运（15ms）",
+    })
   })
 
   it("干了活、且没有上一条：新起一条流水（并保留心跳）", async () => {
@@ -169,6 +173,20 @@ describe("recordReconcileRound", () => {
     expect(mocks.updates[0]).toMatchObject({
       message: "汇聚：订阅 129 个源，连续 3 轮，共 4 个源需搬运",
       data: { rounds: 3, dirty: 4 },
+    })
+  })
+
+  it("窗口内的连续空转：合并成「连续 N 轮无需搬运」", async () => {
+    mocks.previousReconcile = {
+      id: 9,
+      at: new Date(Date.now() - 30_000),
+      data: { sources: 129, dirty: 0, rounds: 4, removedSyncs: 0, removedEntries: 0, purgedReplications: 0, failures: 0 },
+    }
+    await recordReconcileRound({ userId: "u1", round: round(), ms: 18 })
+    expect(mocks.inserts.map(i => i.table)).toEqual(["timelineReconcileHeartbeat"])
+    expect(mocks.updates[0]).toMatchObject({
+      message: "汇聚：订阅 129 个源，连续 5 轮无需搬运",
+      data: { rounds: 5, dirty: 0 },
     })
   })
 

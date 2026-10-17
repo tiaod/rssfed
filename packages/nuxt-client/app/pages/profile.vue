@@ -519,7 +519,7 @@ const confirmReset = async () => {
                           同步日志
                         </p>
                         <p class="mt-1 text-xs text-muted">
-                          服务端聚合与源同步的过程记录：什么时候跑了一轮汇聚、退订清理了什么、重建过几次、哪个源失败了。只保留最近 2000 条（约一周），纯排查用。
+                          服务端聚合与源同步的过程记录：什么时候跑了一轮汇聚、退订清理了什么、重建过几次、哪个源失败了。聚合有 5 分钟冷却，所以常态是每 5 分钟一条；空转轮次也会记（用来确认聚合确实在跑）。只保留最近 2000 条。
                         </p>
                       </div>
                       <UButton
@@ -540,7 +540,7 @@ const confirmReset = async () => {
                       <!-- 概览：聚合心跳 / 源数 / 最近一次同步 / 失败与进行中 -->
                       <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
                         <span v-if="timelineHeartbeat">
-                          最近一轮聚合 {{ formatSince(timelineHeartbeat.at) }}<template v-if="timelineHeartbeat.quietRounds > 0">（连续 {{ timelineHeartbeat.quietRounds }} 轮无变化，只记心跳不记流水）</template>
+                          最近一轮聚合 {{ formatSince(timelineHeartbeat.at) }}<template v-if="timelineHeartbeat.quietRounds > 0">（连续 {{ timelineHeartbeat.quietRounds }} 轮无变化）</template>
                         </span>
                         <span>订阅源 {{ timelineSummary.total }} 个</span>
                         <span>最近同步 {{ formatSince(timelineSummary.lastSyncedAt) }}</span>
@@ -586,7 +586,7 @@ const confirmReset = async () => {
                         v-if="timelineEvents.length === 0 && !timelineLogLoading"
                         class="text-xs text-muted"
                       >
-                        还没有记录。只有真正搬了源、清理了退订或出错的轮次才会记进来（空转轮次只更新上面的心跳）。
+                        还没有记录。下一轮聚合（受 5 分钟冷却限制）后会出现 —— 空转轮次也会记一条。
                       </p>
 
                       <ul
