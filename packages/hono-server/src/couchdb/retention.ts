@@ -1,249 +1,127 @@
 /**
- * 时间窗口清理：**保留策略的唯一权威**。
+ * 源库裁剪：**每条源只保留最新 N 条**。
  *
- * 设计依据与实测结论见 `docs/notes/aggregation/storage-refactor-plan.md`（§5 / §13）。
- * 现在的形状（四个探针实测之后定的）：
+ * 这是 `docs/notes/aggregation/source-side-retention-plan.md` 唯一的写入侧新模块。
+ * 整个保留策略只有这一处权威：源库裁剪 → 删除跟着复制自然传播 → 用户库/浏览器是精确镜像。
+ * 所以这里**没有窗口、没有 bound、没有 per-user 参数**，只有"第 N+1 条的发布时间"这一个下界。
  *
- * 1. **源库不清**（永久存档）→ 本模块不负责源库。
- * 2. **汇聚库按 `N_agg` 清理，用 delete（留墓碑），不 purge**。原因实测过（§13.E）：
- *    目标端 purge 抹掉修订记忆后，**全量重扫会把它们从完整源库搬回来**；而 delete 留墓碑时
- *    重扫 0 复活。日常增量复制两种情况都不会复活，所以区别只在重扫/重建。
- * 3. **墓碑不清**：墓碑是"重扫不复活"的唯一保证，清掉就要引入宽限期/账本/ack 一整套。
- *    代价是墓碑线性增长（约百字节/条，附件已被 compact 回收），只监控。
- * 4. **窗口只有服务端算**：`retentionBoundIso()` 是唯一来源，客户端只用下发的 bound。
+ * 三条实测前提（见方案文档 §9「本轮实测补充」）：
+ * 1. 复制必须用 **filter function**（`probe-f`：删除会以 `_deleted` 变更跟着复制）。
+ *    **不能用 Mango selector** —— selector 匹配不到墓碑，删除会静默丢失。
+ * 2. 裁剪用**标准 delete**，不用 `_purge`（`probe-e`：purge 抹掉修订记忆后，一次全量重扫
+ *    会把被删的条目从完整源库搬回来；delete 留墓碑则不会）。
+ * 3. 删除只产生墓碑，附件字节要 `_compact` 才回收（`probe-a`）。
  *
- * `purgeExpired()` / `purgeTombstones()` 保留给**手工维护**（偶尔清理源库归档、或以后真的
- * 给墓碑定一个"X 个月后清"的策略），不在日常链路上。
- *
- * 刻意的取舍：**`publishedAt` 缺失或不是字符串的条目一律不清理**。
- * 日期缺失只让库大一点，误删是不可逆的。
+ * 刻意的取舍：
+ * - **拿不到下界就不裁**（视图行数 ≤ N、或第 N+1 行的 key 不是字符串）：宁可多留，不做不可逆的误删。
+ * - **并列时间戳**：按"publishedAt < 下界"严格小于删除，所以并列的会一起留下 —— 保留策略满足
+ *   "至少 N 条"即可（方案 §5 风险 7）。
+ * - **`publishedAt` 乱序**：刚抓到但发布时间很老的条目会被立刻裁掉（方案 §5 风险 6，与旧行为一致）。
  */
 import { createCouchDb } from "./client"
 
-/** 一次 `_purge` 请求里带的文档数 */
-export const DEFAULT_PURGE_BATCH = 1000
-/** 单次清理最多跑几页（限速用；剩下的留给下一轮） */
-export const DEFAULT_MAX_PAGES = 50
-/** 泳道之外的默认视图：源库 `_design/main` 里的 `entries-by-date`（key = publishedAt） */
-export const DEFAULT_RETENTION_VIEW = "main/entries-by-date"
-
-/** 视图行：`doc` 只在 `include_docs=true` 时有值 */
-export interface RetentionRow {
-  id: string
-  doc?: { _rev?: string, _conflicts?: string[], publishedAt?: unknown } | null
-}
-
-/** 待清理的文档：`revs` 含冲突叶子（必须一起清，否则文档还在） */
-export interface PurgeEntry {
-  id: string
-  revs: string[]
-}
-
-/** 墓碑账本里的一行（`deleted_at` 是我们做删除动作时记下的时刻） */
-export interface TombstoneRecord {
-  id: string
-  rev: string
-  deletedAt: string
-}
-
-export interface RetentionRun {
-  /** 实际扫描的页数 */
-  pages: number
-  /** 真正被清掉的文档数 */
-  docs: number
-  /** 真正被清掉的 rev 数（含冲突叶子） */
-  revs: number
-  /** 请求了但没被清掉的 rev 数：已被清过、或 rev 已不是叶子 —— 探测 A 实测属正常，不是错误 */
-  skipped: number
-}
+/** 每条源保留的条数（方案建议 50 = 旧 `minFeedEntries` 默认值，顺便解决低频源兜底） */
+export const DEFAULT_SOURCE_RETENTION_ENTRIES = 50
+/** 单批删除条数（首次裁剪要限速，见方案 §5 风险 1） */
+export const DEFAULT_TRIM_BATCH = 200
+/** 单次裁剪最多跑几批（剩下的下次抓取再删，避免一次删几千条） */
+export const DEFAULT_TRIM_MAX_BATCHES = 10
+/** 源库 view：`_design/main/entries-by-date`，key = publishedAt */
+export const DEFAULT_TRIM_VIEW = "main/entries-by-date"
 
 /**
- * retention 只需要 CouchDB 的这几样能力。抽成接口是为了单测能注入假实现，
- * 不去 mock 整个 nano（见 `__tests__/couchdb-retention.test.ts`）。
+ * 纯函数：从"按 `publishedAt` **降序**取的 key 列表"算出裁剪下界。
+ * 返回 `undefined` = 不需要裁剪。
+ *
+ * `keys.length` 至少要是 `n + 1` 才能判断；正好 `n` 条就是不用裁。
+ * 第 `n + 1` 行（下标 `n`）的 key 就是下界：`publishedAt < 下界` 的全删。
  */
-export interface RetentionDb {
-  /** 取「`publishedAt` 严格小于 bound」的前 `limit` 行（含 doc，好拿叶子 rev 与冲突叶子） */
-  rowsBefore(viewPath: string, boundIso: string, limit: number): Promise<RetentionRow[]>
-  /** `POST _purge`；返回真正被清掉的 rev（空数组 = 没清掉，正常） */
-  purge(body: Record<string, string[]>): Promise<Record<string, string[]>>
-  /** 批量删除（汇聚库用：**故意留墓碑**，好让客户端跟着缩水） */
-  bulkDelete(docs: Array<{ _id: string, _rev: string, _deleted: true }>): Promise<void>
-  /** `POST _compact`：purge/delete 之后回收磁盘（探针 A 实测 200KB 附件能被真正回收） */
+export function trimBound(descendingKeys: readonly unknown[], n: number): string | undefined {
+  if (!Number.isInteger(n) || n <= 0) throw new Error(`trimBound: N 必须是正整数，收到 ${n}`)
+  if (descendingKeys.length <= n) return undefined
+  const bound = descendingKeys[n]
+  if (typeof bound !== "string" || bound.length === 0) return undefined
+  return bound
+}
+
+export interface TrimResult {
+  /** 是否真的需要裁剪 */
+  trimmed: boolean
+  /** 裁剪下界（`publishedAt < bound` 的被删）；undefined = 没裁 */
+  bound?: string
+  /** 删掉的条数 */
+  deleted: number
+  /** 跑了几批 */
+  batches: number
+}
+
+/** 裁剪只需要这几样能力；抽出来是为了单测注入假实现 */
+export interface TrimDb {
+  /** 按 `publishedAt` 降序取前 `limit` 行的 key */
+  descendingKeys(viewPath: string, limit: number): Promise<unknown[]>
+  /** 删除 `publishedAt < bound` 的条目（分页），返回**成功**删掉的条数 */
+  deleteBelow(viewPath: string, bound: string, batchSize: number): Promise<number>
+  /** 回收磁盘（附件与旧修订） */
   compact(): Promise<void>
 }
 
-/** 保留窗口下界：`now - days 天`。**服务端算一次**，全链路共用同一个值 */
-export function retentionBoundIso(now: Date, days: number): string {
-  return new Date(now.getTime() - days * 86_400_000).toISOString()
-}
-
 /**
- * 是否已过期。只有"能确定早于下界"的才返回 true：
- * 缺失、非字符串、无法比较的一律 false（宁可不删）。
- */
-export function isExpiredDoc(publishedAt: unknown, boundIso: string): boolean {
-  return typeof publishedAt === "string" && publishedAt.length > 0 && publishedAt < boundIso
-}
-
-export function chunk<T>(items: readonly T[], size: number): T[][] {
-  if (size <= 0) throw new Error("chunk: size 必须为正数")
-  const out: T[][] = []
-  for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size))
-  return out
-}
-
-/** 视图行 → 待清理条目（同一 id 的多个分支合并；缺 rev 的行跳过） */
-export function collectPurgeEntries(rows: readonly RetentionRow[]): PurgeEntry[] {
-  const byId = new Map<string, Set<string>>()
-  for (const row of rows) {
-    const rev = row.doc?._rev
-    if (!row.id || typeof rev !== "string" || rev.length === 0) continue
-    const revs = byId.get(row.id) ?? new Set<string>()
-    revs.add(rev)
-    // 冲突分支也是叶子：只 purge winner 的话 loser 会顶上，文档仍然存在（探针 A 实测）
-    for (const conflict of row.doc?._conflicts ?? []) {
-      if (typeof conflict === "string" && conflict.length > 0) revs.add(conflict)
-    }
-    byId.set(row.id, revs)
-  }
-  return [...byId].map(([id, revs]) => ({ id, revs: [...revs] }))
-}
-
-/** 合并成一个 `_purge` 请求体 */
-export function buildPurgeBody(entries: readonly PurgeEntry[]): Record<string, string[]> {
-  const body: Record<string, string[]> = {}
-  for (const entry of entries) body[entry.id] = [...entry.revs]
-  return body
-}
-
-/** 统计"真正被清掉"的量。请求过但没清掉的（`purged[id]` 为空）计成 skipped，不是失败 */
-export function summarizePurge(purged: Record<string, string[]> | undefined): { docs: number, revs: number, empty: number } {
-  let docs = 0
-  let revs = 0
-  let empty = 0
-  for (const revsOfId of Object.values(purged ?? {})) {
-    if (Array.isArray(revsOfId) && revsOfId.length > 0) {
-      docs += 1
-      revs += revsOfId.length
-    } else {
-      empty += 1
-    }
-  }
-  return { docs, revs, empty }
-}
-
-/** 墓碑账本里有资格被清的行：删除时刻**有效且**早于 `now - graceDays` */
-export function selectPurgeableTombstones(rows: readonly TombstoneRecord[], now: Date, graceDays: number): TombstoneRecord[] {
-  const bound = retentionBoundIso(now, graceDays)
-  return rows.filter((row) => typeof row.deletedAt === "string" && row.deletedAt.length > 0 && row.deletedAt < bound)
-}
-
-/**
- * 源库/投影库的窗口清理：反复取「窗口外」的一页 → 直接 purge。
+ * 每条源裁到最新 N 条。抓取 worker 写完新条目后调用一次即可。
  *
- * 终止条件（任一）：
- *   - 这一页没有可清理的条目；
- *   - 这一页**一条都没真清掉**（没有进展，继续只会拿同一页无限循环 —— 例如全是非叶子 rev）；
- *   - 这一页不足一页（已经扫到尾）；
- *   - 达到 `maxBatches`（限速，剩下的下一轮再来）。
+ * 删除批数有上限（`maxBatches`）：首次上线时源库积着全部历史，一次删几千条会压出"删除风暴"
+ * （方案 §5 风险 1）。没删完的留给下一次抓取。
  */
-export async function purgeExpired(
-  db: RetentionDb,
-  opts: { viewPath?: string, boundIso: string, batchSize?: number, maxBatches?: number },
-): Promise<RetentionRun> {
-  const viewPath = opts.viewPath ?? DEFAULT_RETENTION_VIEW
-  const batchSize = opts.batchSize ?? DEFAULT_PURGE_BATCH
-  const maxBatches = opts.maxBatches ?? DEFAULT_MAX_PAGES
-  const run: RetentionRun = { pages: 0, docs: 0, revs: 0, skipped: 0 }
-  while (run.pages < maxBatches) {
-    const rows = await db.rowsBefore(viewPath, opts.boundIso, batchSize)
-    const entries = collectPurgeEntries(rows.filter((row) => isExpiredDoc(row.doc?.publishedAt, opts.boundIso)))
-    if (entries.length === 0) break
-    const requested = entries.reduce((sum, entry) => sum + entry.revs.length, 0)
-    const purged = await db.purge(buildPurgeBody(entries))
-    const summary = summarizePurge(purged)
-    run.pages += 1
-    run.docs += summary.docs
-    run.revs += summary.revs
-    run.skipped += requested - summary.revs
-    if (summary.revs === 0) break
-    if (rows.length < batchSize) break
+export async function trimSourceToLatestN(
+  db: TrimDb,
+  opts: { n?: number, viewPath?: string, batchSize?: number, maxBatches?: number, compact?: boolean } = {},
+): Promise<TrimResult> {
+  const n = opts.n ?? DEFAULT_SOURCE_RETENTION_ENTRIES
+  const viewPath = opts.viewPath ?? DEFAULT_TRIM_VIEW
+  const batchSize = opts.batchSize ?? DEFAULT_TRIM_BATCH
+  const maxBatches = opts.maxBatches ?? DEFAULT_TRIM_MAX_BATCHES
+
+  // 只多取一行就够判断：第 N+1 行的 key 就是下界
+  const bound = trimBound(await db.descendingKeys(viewPath, n + 1), n)
+  if (bound === undefined) return { trimmed: false, deleted: 0, batches: 0 }
+
+  let deleted = 0
+  let batches = 0
+  while (batches < maxBatches) {
+    const removed = await db.deleteBelow(viewPath, bound, batchSize)
+    batches += 1
+    deleted += removed
+    // 一批没删满说明已经删完；一批一条都没删掉说明没有进展（例如并发 conflict），必须停
+    if (removed < batchSize) break
   }
-  return run
+  if (opts.compact && deleted > 0) await db.compact()
+  return { trimmed: true, bound, deleted, batches }
 }
 
-/**
- * 汇聚库的过期清理：**用 delete（留墓碑）而不是 purge** —— 这是日常链路上的那个函数。
- *
- * 两个理由（实测 §13.E）：墓碑能挡住"全量重扫时被完整源库搬回来"；同时它会把删除顺带到客户端。
- * 墓碑本身不清（§5.1），所以这里只 delete + 交给 compact 回收附件字节。
- */
-export async function deleteExpired(
-  db: RetentionDb,
-  opts: { viewPath?: string, boundIso: string, batchSize?: number, maxBatches?: number },
-): Promise<RetentionRun> {
-  const viewPath = opts.viewPath ?? DEFAULT_RETENTION_VIEW
-  const batchSize = opts.batchSize ?? DEFAULT_PURGE_BATCH
-  const maxBatches = opts.maxBatches ?? DEFAULT_MAX_PAGES
-  const run: RetentionRun = { pages: 0, docs: 0, revs: 0, skipped: 0 }
-  while (run.pages < maxBatches) {
-    const rows = await db.rowsBefore(viewPath, opts.boundIso, batchSize)
-    const entries = collectPurgeEntries(rows.filter((row) => isExpiredDoc(row.doc?.publishedAt, opts.boundIso)))
-    if (entries.length === 0) break
-    // 只删 winner：聚合条目的冲突极罕见（复制用 new_edits:false 写入），出现了由 LWW 裁决处理
-    const docs = entries.map((entry) => ({ _id: entry.id, _rev: entry.revs[0]!, _deleted: true as const }))
-    await db.bulkDelete(docs)
-    run.pages += 1
-    run.docs += docs.length
-    run.revs += docs.length
-    run.skipped += entries.reduce((sum, entry) => sum + entry.revs.length, 0) - docs.length
-    if (rows.length < batchSize) break
-  }
-  return run
-}
-
-/** 墓碑的分批 purge + compact。**不在日常链路上**：墓碑默认不清，这个函数留给
- *  "以后给墓碑定一个 X 个月上限"或手工维护时用（清掉之后的一次重扫会复活那批老文档一次）。 */
-export async function purgeTombstones(
-  db: RetentionDb,
-  rows: readonly TombstoneRecord[],
-  opts: { now: Date, graceDays: number, batchSize?: number, compact?: boolean },
-): Promise<RetentionRun> {
-  const batchSize = opts.batchSize ?? DEFAULT_PURGE_BATCH
-  const run: RetentionRun = { pages: 0, docs: 0, revs: 0, skipped: 0 }
-  const due = selectPurgeableTombstones(rows, opts.now, opts.graceDays)
-  for (const batch of chunk(due, batchSize)) {
-    const requested = batch.length
-    const purged = await db.purge(Object.fromEntries(batch.map((row) => [row.id, [row.rev]])))
-    const summary = summarizePurge(purged)
-    run.pages += 1
-    run.docs += summary.docs
-    run.revs += summary.revs
-    run.skipped += requested - summary.revs
-  }
-  if (opts.compact && run.revs > 0) await db.compact()
-  return run
-}
-
-/** 真实实现：包一层 nano。`_purge` 没被 nano 封装，走 `db.request`；它需要 admin 权限 */
-export function createRetentionDb(dbName: string): RetentionDb {
-  const db = createCouchDb(dbName) as ReturnType<typeof createCouchDb> & {
-    request: (opts: { path: string, method: string, body?: unknown }) => Promise<unknown>
+/** 真实实现：包一层 nano */
+export function createTrimDb(dbName: string): TrimDb {
+  const db = createCouchDb(dbName)
+  const split = (viewPath: string): [string, string] => {
+    const [design, view] = viewPath.split("/")
+    if (!design || !view) throw new Error(`trim: 视图路径要形如 main/entries-by-date，收到 ${viewPath}`)
+    return [design, view]
   }
   return {
-    async rowsBefore(viewPath, boundIso, limit) {
-      const [design, view] = viewPath.split("/")
-      if (!design || !view) throw new Error(`retention: 视图路径要形如 main/entries-by-date，收到 ${viewPath}`)
-      // 窗口外的条目在视图的**低端**：endkey = 下界（不含），从最小发布时间往后取一页
-      const res = await db.view(design, view, { endkey: boundIso, inclusive_end: false, limit, include_docs: true })
-      return (res.rows ?? []).map((row: { id: string, doc?: unknown }) => ({ id: row.id, doc: row.doc as RetentionRow["doc"] }))
+    async descendingKeys(viewPath, limit) {
+      const [design, view] = split(viewPath)
+      const res = await db.view(design, view, { descending: true, limit, include_docs: false })
+      return (res.rows ?? []).map((row: { key: unknown }) => row.key)
     },
-    async purge(body) {
-      const res = (await db.request({ path: "_purge", method: "POST", body })) as { purged?: Record<string, string[]> }
-      return res?.purged ?? {}
-    },
-    async bulkDelete(docs) {
-      await db.bulk({ docs } as never)
+    async deleteBelow(viewPath, bound, batchSize) {
+      const [design, view] = split(viewPath)
+      // 每次都从最低 key 取一批：删掉之后下一批自然接上，不需要游标
+      const res = await db.view(design, view, { endkey: bound, inclusive_end: false, include_docs: true, limit: batchSize })
+      const docs = (res.rows ?? [])
+        .map((row: { doc?: { _id?: string, _rev?: string } }) => row.doc)
+        .filter((doc): doc is { _id: string, _rev: string } => Boolean(doc?._id && doc?._rev))
+      if (docs.length === 0) return 0
+      const results = await db.bulk({ docs: docs.map((doc) => ({ _id: doc._id, _rev: doc._rev, _deleted: true })) })
+      // 只统计成功删掉的：并发的同 rev 删除会作为 conflict 返回，忽略即可（幂等，方案 §5 风险 8）
+      return (results as Array<{ error?: string }>).filter((result) => !result.error).length
     },
     async compact() {
       await db.compact()
