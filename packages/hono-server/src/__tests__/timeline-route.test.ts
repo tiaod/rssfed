@@ -22,6 +22,17 @@ const state = vi.hoisted(() => ({
   syncOptions: null as Record<string, unknown> | null,
   enqueued: [] as Array<{ userId: string, sourceIds: string[] }>,
   drained: true,
+  /** GET /events 的替身数据（真实实现在 services/timeline-events.ts，单测只验路由契约） */
+  events: [
+    { id: 2, at: new Date("2026-10-17T06:04:30.000Z"), kind: "reconcile", level: "info", message: "汇聚：订阅 129 个源，无需搬运（800ms）", data: { sources: 129 } },
+    { id: 1, at: new Date("2026-10-16T22:00:00.000Z"), kind: "rebuild", level: "warn", message: "重建完成", data: null },
+  ] as unknown[],
+  sources: [
+    { sourceId: "feed1", kind: "feed", title: "源一", syncedAt: new Date("2026-10-17T06:04:31.000Z"), status: "idle", lastError: null },
+  ] as unknown[],
+  /** GET /events 收到的 limit 参数（验默认值/上限夹取） */
+  eventLimits: [] as number[],
+  clearedEvents: 0,
 }))
 
 vi.mock("../auth", () => ({
@@ -56,6 +67,17 @@ vi.mock("../workers/timeline-sync", () => ({
   sourceSyncQueue: { getJob: async () => undefined },
   sourceSyncWorker: { close: async () => {} },
   shutdownSourceSyncWorker: async () => {},
+}))
+
+vi.mock("../services/timeline-events", () => ({
+  listTimelineEvents: async (_userId: string, limit: number) => {
+    state.eventLimits.push(limit)
+    return state.events
+  },
+  listTimelineSources: async () => state.sources,
+  clearTimelineEvents: async () => {
+    state.clearedEvents++
+  },
 }))
 
 vi.mock("../services/timeline", async (importOriginal) => {
@@ -99,6 +121,8 @@ beforeEach(() => {
   state.syncOptions = null
   state.enqueued = []
   state.drained = true
+  state.eventLimits = []
+  state.clearedEvents = 0
 })
 
 async function patch(body: unknown) {
@@ -224,5 +248,43 @@ describe("/api/timeline", () => {
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ accepted: true, completed: true, added: 0, queued: 0 })
     expect(state.enqueued).toEqual([{ userId: "u1", sourceIds: [] }])
+  })
+})
+
+describe("同步日志 /api/timeline/events", () => {
+  it("返回流水与各源当前状态；limit 默认 120", async () => {
+    const res = await app.request("/api/timeline/events")
+    expect(res.status).toBe(200)
+    const body = await res.json() as { events: Array<{ message: string }>, sources: Array<{ title: string }> }
+    expect(body.events).toHaveLength(2)
+    expect(body.events[0]!.message).toContain("汇聚")
+    expect(body.sources[0]!.title).toBe("源一")
+    expect(state.eventLimits).toEqual([120])
+  })
+
+  it("limit 会被夹到 1..500（0、负数、超上限、非数字都退化成默认）", async () => {
+    for (const [query, expected] of [
+      ["?limit=300", 300],
+      ["?limit=9999", 500],
+      ["?limit=0", 120],
+      ["?limit=-5", 120],
+      ["?limit=abc", 120],
+    ] as const) {
+      await app.request(`/api/timeline/events${query}`)
+      expect(state.eventLimits.at(-1)).toBe(expected)
+    }
+  })
+
+  it("DELETE 清空该用户的流水", async () => {
+    const res = await app.request("/api/timeline/events", { method: "DELETE" })
+    expect(res.status).toBe(200)
+    expect(await res.json()).toEqual({ ok: true })
+    expect(state.clearedEvents).toBe(1)
+  })
+
+  it("未登录一律 401（流水属于当前用户）", async () => {
+    state.session = null
+    expect((await app.request("/api/timeline/events")).status).toBe(401)
+    expect((await app.request("/api/timeline/events", { method: "DELETE" })).status).toBe(401)
   })
 })

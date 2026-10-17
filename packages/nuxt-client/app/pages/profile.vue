@@ -7,6 +7,13 @@ import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimate'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
+import {
+  formatSince,
+  formatTimelineEventData,
+  formatTimelineEventTime,
+  timelineEventColor,
+  timelineEventLabel
+} from '~/utils/timelineLog'
 import { timelineSettingsEqual } from '~/utils/timelineSettings'
 
 definePageMeta({
@@ -54,6 +61,27 @@ const {
   error: timelineError, load: loadTimelineSettings, save: saveTimelineSettings
 } = useTimelineSettings()
 const draftTimeline = ref({ ...timelineSettings.value })
+
+/**
+ * 同步日志（调试用，折叠在「数据」里）。
+ *
+ * 服务端的聚合过程用户平时看不见（只在服务端控制台），排查"时间线怎么不动了"时用它：
+ * 一轮汇聚什么时候跑的、判了几个脏源、退订清理了什么、重建过几次、哪些源失败。
+ * 不在挂载时就请求 —— 展开时才拉，避免把一个调试面板变成设置页的固定开销。
+ */
+const {
+  events: timelineEvents, sources: timelineSources, summary: timelineSummary,
+  loaded: timelineLogLoaded, loading: timelineLogLoading, clearing: timelineLogClearing,
+  error: timelineLogError, canLoadMore: timelineLogCanLoadMore,
+  load: loadTimelineLog, loadMore: loadMoreTimelineLog, clear: clearTimelineLog
+} = useTimelineLog()
+const timelineLogOpen = ref(false)
+
+/** 展开并（首次）拉取；已展开时再点是「刷新」 */
+async function openTimelineLog(): Promise<void> {
+  timelineLogOpen.value = true
+  if (!timelineLogLoaded.value) await loadTimelineLog()
+}
 
 // 服务端设置到达后同步草稿（进入页面时 load 是异步的）
 watch(timelineSettings, (next) => {
@@ -477,6 +505,149 @@ const confirmReset = async () => {
                         label="重置"
                         @click="openResetConfirm"
                       />
+                    </div>
+                  </UCard>
+
+                  <!--
+                    同步日志：服务端的聚合过程（汇聚/清理/重建/失败）用户看不到，折叠在这里当调试面板。
+                    默认折叠、展开才拉：设置页是低频页面，不该在挂载时就多打一个接口。
+                  -->
+                  <UCard>
+                    <div class="flex items-start justify-between gap-3">
+                      <div>
+                        <p class="text-sm font-medium">
+                          同步日志
+                        </p>
+                        <p class="mt-1 text-xs text-muted">
+                          服务端聚合与源同步的过程记录：什么时候跑了一轮汇聚、退订清理了什么、重建过几次、哪个源失败了。只保留最近 2000 条（约一周），纯排查用。
+                        </p>
+                      </div>
+                      <UButton
+                        v-if="!timelineLogOpen"
+                        color="neutral"
+                        variant="ghost"
+                        size="sm"
+                        icon="i-lucide-scroll-text"
+                        label="查看"
+                        @click="openTimelineLog"
+                      />
+                    </div>
+
+                    <div
+                      v-if="timelineLogOpen"
+                      class="mt-3 space-y-3"
+                    >
+                      <!-- 概览：源数 / 最近一次同步 / 失败与进行中 -->
+                      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+                        <span>订阅源 {{ timelineSummary.total }} 个</span>
+                        <span>最近同步 {{ formatSince(timelineSummary.lastSyncedAt) }}</span>
+                        <span
+                          v-if="timelineSummary.syncing > 0"
+                          class="text-info"
+                        >同步中 {{ timelineSummary.syncing }}</span>
+                        <span
+                          v-if="timelineSummary.errors > 0"
+                          class="text-error"
+                        >失败 {{ timelineSummary.errors }}</span>
+                      </div>
+
+                      <div class="flex flex-wrap gap-2">
+                        <UButton
+                          color="neutral"
+                          variant="ghost"
+                          size="sm"
+                          icon="i-lucide-refresh-cw"
+                          label="刷新"
+                          :loading="timelineLogLoading"
+                          @click="loadTimelineLog"
+                        />
+                        <UButton
+                          color="neutral"
+                          variant="ghost"
+                          size="sm"
+                          icon="i-lucide-eraser"
+                          label="清空"
+                          :loading="timelineLogClearing"
+                          @click="clearTimelineLog"
+                        />
+                      </div>
+
+                      <p
+                        v-if="timelineLogError"
+                        class="text-xs text-error"
+                      >
+                        {{ timelineLogError }}
+                      </p>
+
+                      <p
+                        v-if="timelineEvents.length === 0 && !timelineLogLoading"
+                        class="text-xs text-muted"
+                      >
+                        还没有记录。下一轮聚合（最多 5 分钟）后会出现在这里。
+                      </p>
+
+                      <ul
+                        v-else
+                        class="max-h-80 space-y-1.5 overflow-y-auto pr-1"
+                      >
+                        <li
+                          v-for="event in timelineEvents"
+                          :key="event.id"
+                          class="flex items-start gap-2 text-xs"
+                        >
+                          <span class="shrink-0 font-mono text-muted tabular-nums">
+                            {{ formatTimelineEventTime(event.at) }}
+                          </span>
+                          <UBadge
+                            :color="timelineEventColor(event.kind, event.level)"
+                            variant="subtle"
+                            size="xs"
+                            class="shrink-0"
+                          >
+                            {{ timelineEventLabel(event.kind) }}
+                          </UBadge>
+                          <span class="min-w-0 break-words">
+                            {{ event.message }}
+                            <span
+                              v-if="formatTimelineEventData(event.data)"
+                              class="text-muted"
+                            >· {{ formatTimelineEventData(event.data) }}</span>
+                          </span>
+                        </li>
+                      </ul>
+
+                      <UButton
+                        v-if="timelineLogCanLoadMore"
+                        color="neutral"
+                        variant="ghost"
+                        size="sm"
+                        icon="i-lucide-chevrons-down"
+                        label="加载更多"
+                        :loading="timelineLogLoading"
+                        @click="loadMoreTimelineLog"
+                      />
+
+                      <!-- 源级状态：这是"现在什么样"，不是流水；数据来自水位表 -->
+                      <details class="text-xs">
+                        <summary class="cursor-pointer text-muted">
+                          各源状态（{{ timelineSources.length }}）
+                        </summary>
+                        <ul class="mt-2 max-h-60 space-y-1 overflow-y-auto pr-1">
+                          <li
+                            v-for="source in timelineSources"
+                            :key="source.sourceId"
+                            class="flex items-center justify-between gap-2"
+                          >
+                            <span class="min-w-0 truncate">{{ source.title ?? source.sourceId }}</span>
+                            <span
+                              class="shrink-0 font-mono text-muted"
+                              :class="source.status === 'error' ? 'text-error' : ''"
+                            >
+                              {{ source.syncedAt ? formatTimelineEventTime(source.syncedAt) : '未同步' }} · {{ source.status }}
+                            </span>
+                          </li>
+                        </ul>
+                      </details>
                     </div>
                   </UCard>
                 </div>

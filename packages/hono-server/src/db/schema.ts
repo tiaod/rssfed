@@ -8,6 +8,7 @@ import {
   uniqueIndex,
   jsonb,
   primaryKey,
+  serial,
 } from "drizzle-orm/pg-core"
 import { relations } from "drizzle-orm"
 import { user } from "./auth-schema"
@@ -128,12 +129,8 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
  *   - 放 PG 还能按 `source_id` 反查"谁订阅了这个源"（将来把
  *     `notifyTimelineStale` 从"给所有用户入队"收窄成"只给订阅了这个源的用户入队"）。
  *
- * `bound_iso` 是复制过滤器 `query_params.minPublishedAt` 的**固定下界**：复制器的
- * checkpoint 由参数哈希决定，下界一变就是新哈希 → 该源从 0 重扫。所以它必须稳定地存下来，
- * 不能在每次同步时按"现在"重算。换窗口 = 重算下界 = 故意的全量重扫（回填语义靠它）。
- * 下界取「窗口下界」与「保底条数折算出的下界」里**更松**的那个；稳态下它只放不收
- * （保底条数会随新条目把折算下界往前推，收紧跟"内容已经在库里"无关，却会丢掉 checkpoint
- * 让整个源库每来一条新内容就重扫一遍）。
+ * 早先这里还存过复制过滤器的"固定下界"（`bound_iso`），现已随「按用户窗口/保底条数」一起
+ * 删除：复制不再带任何参数，保留策略的唯一权威是源库裁剪（见 `couchdb/retention.ts`）。
  *
  * `synced_at` 记的是**复制开始**的时刻而不是完成时刻，这是为了堵一个丢数据的竞态：
  * 抓取 worker 在复制进行中写入新条目时，那条变更可能没被本次复制的 `_changes` 读到，
@@ -170,6 +167,34 @@ export const timelineSourceSync = pgTable("timeline_source_sync", {
   primaryKey({ columns: [table.userId, table.sourceId] }),
   // 「谁订阅了这个源」的反查索引（将来做定向通知）
   index("timeline_source_sync_source_idx").on(table.sourceId),
+])
+
+/**
+ * 用户时间线同步的**事件流水** —— 设置页「同步日志」直接读它。
+ *
+ * 为什么单独存一张表，而不是往控制台打日志：聚合结果只由服务端产生，用户在浏览器里看不到
+ * "什么时候跑了一轮汇聚、判了几个脏源、退订清理了几条、什么时候重建过"。把这些离散动作
+ * 落一行留档，排查"我的时间线怎么不动了"时不用再翻服务端控制台。
+ *
+ * 刻意**不**给每个源同步都记一条（一轮 100+ 条会把流水刷爆）：源级的"现在什么状态"直接读
+ * `timeline_source_sync`（它本来就是每源一行），这里只记**离散动作**与失败。
+ * 每用户只保留最近 `TIMELINE_EVENT_KEEP` 条（见 services/timeline-events.ts 的裁剪）。
+ */
+export const timelineEvents = pgTable("timeline_events", {
+  id: serial("id").primaryKey(),
+  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
+  at: timestamp("at").notNull().defaultNow(),
+  /** reconcile（一轮汇聚）/ rebuild（重建聚合库）/ source-sync（首搬）/ error */
+  kind: text("kind").notNull(),
+  /** info / warn / error */
+  level: text("level").notNull().default("info"),
+  /** 给人看的一句话（中文、短），客户端直接展示 */
+  message: text("message").notNull(),
+  /** 结构化补充（脏源数、耗时、源 id 等），客户端可展开看 */
+  data: jsonb("data"),
+}, (table) => [
+  // 「某用户最近 N 条」是唯一的查询形态
+  index("timeline_events_user_id_idx").on(table.userId, table.id),
 ])
 
 /** Feed 注册表 — 记录所有已知订阅源的元数据，供 Worker 定时抓取 */export const feeds = pgTable("feeds", {

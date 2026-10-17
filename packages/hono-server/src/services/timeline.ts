@@ -10,6 +10,7 @@ import {
   userTimelineSettings,
   type NewUserTimelineSettings,
 } from "../db"
+import { recordTimelineEvent } from "./timeline-events"
 import {
   createCouchDb,
   createTimelineDatabase,
@@ -484,6 +485,15 @@ export async function syncSubscriptionSource(input: {
       eq(timelineSourceSync.userId, userId),
       eq(timelineSourceSync.sourceId, sourceId),
     ))
+    if (rebound) {
+      // 只记「首搬」：稳态增量每轮可能有上百个源，逐个记会把流水刷爆（源级状态看源状态表）
+      await recordTimelineEvent({
+        userId,
+        kind: "source-sync",
+        message: `首次同步源 ${sourceId}：搬入 ${res.docsWritten} 份（${res.elapsedMs}ms）`,
+        data: { sourceId, docsWritten: res.docsWritten, elapsedMs: res.elapsedMs },
+      })
+    }
     return { sourceId, docsWritten: res.docsWritten, elapsedMs: res.elapsedMs, rebound }
   } catch (err) {
     const message = ((err as Error)?.message ?? String(err)).slice(0, 500)
@@ -495,6 +505,13 @@ export async function syncSubscriptionSource(input: {
       eq(timelineSourceSync.userId, userId),
       eq(timelineSourceSync.sourceId, sourceId),
     )).catch(() => {})
+    await recordTimelineEvent({
+      userId,
+      kind: "error",
+      level: "error",
+      message: `源 ${sourceId} 同步失败：${message}`,
+      data: { sourceId, error: message },
+    })
     throw err
   }
 }
@@ -537,6 +554,7 @@ async function reconcileUserTimelineUnlocked(
   userId: string,
   options: { force?: boolean } = {},
 ): Promise<TimelineReconcileResult> {
+  const startedAt = Date.now()
   let dbName = await ensureTimelineDatabase(userId)
   let scope = createCouchDb(dbName)
   let state = await readTimelineState(dbName)
@@ -624,7 +642,42 @@ async function reconcileUserTimelineUnlocked(
   state.version = STATE_VERSION
   await writeTimelineState(dbName, state)
 
+  // ⑧ 流水：这一轮到底做了什么。用户在设置页 →「同步日志」里能看到（旁路，写失败不影响聚合）
+  await recordTimelineEvent({
+    userId,
+    kind: "reconcile",
+    level: result.failures.length > 0 ? "warn" : "info",
+    message: describeReconcileRound(result, Date.now() - startedAt),
+    data: {
+      sources: result.sources,
+      dirty: result.dirtySources.length,
+      removedSyncs: result.removedSyncs,
+      removedEntries: result.removedEntries,
+      purgedReplications: result.purgedReplications,
+      failures: result.failures.length,
+      ms: Date.now() - startedAt,
+    },
+  })
+
   return result
+}
+
+/**
+ * 一轮汇聚的人话描述（给设置页的同步日志看）。
+ *
+ * 常态是"无事发生"，所以空转也要记一行、但要短 —— 用户问的是"什么时候触发了汇聚"，
+ * 只记有事发生的轮次就等于看不见定时器还在不在跑。
+ */
+function describeReconcileRound(result: TimelineReconcileResult, ms: number): string {
+  const parts: string[] = []
+  if (result.dirtySources.length > 0) parts.push(`${result.dirtySources.length} 个源需搬运`)
+  if (result.removedSyncs > 0 || result.removedEntries > 0) {
+    parts.push(`退订清理 ${result.removedSyncs} 个源 / ${result.removedEntries} 条`)
+  }
+  if (result.purgedReplications > 0) parts.push(`清掉 ${result.purgedReplications} 条遗留常驻复制`)
+  if (result.failures.length > 0) parts.push(`${result.failures.length} 个源失败`)
+  const detail = parts.length > 0 ? parts.join("；") : "无需搬运"
+  return `汇聚：订阅 ${result.sources} 个源，${detail}（${ms}ms）`
 }
 
 /** 换库重搬时每批搬运的文档数（`_all_docs` 一页 + `_bulk_docs` 一次） */
@@ -824,10 +877,24 @@ export async function rebuildUserTimeline(userId: string): Promise<TimelineRecon
 /** 重建本体（调用方必须已经持有该用户的锁） */
 async function rebuildUserTimelineUnlocked(userId: string): Promise<TimelineReconcileResult> {
   const oldDbName = await ensureTimelineDatabase(userId)
+  await recordTimelineEvent({
+    userId,
+    kind: "rebuild",
+    level: "warn",
+    message: `开始重建聚合库（换一个新库重搬，旧库 ${oldDbName} 稍后删除）`,
+    data: { oldDbName },
+  })
   await rederiveUserTimeline(userId, oldDbName)
   // 新库没有状态文档 → reconcile 的 ② 会把水位整份作废、所有源重新入队重搬一遍，
   // 同时 ⑤ 会把遗留的常驻复制任务清掉（那是升级动作，新库的标记还没写）
-  return await reconcileUserTimelineUnlocked(userId)
+  const result = await reconcileUserTimelineUnlocked(userId)
+  await recordTimelineEvent({
+    userId,
+    kind: "rebuild",
+    message: `重建完成：${result.sources} 个源全部重新回填（${result.dirtySources.length} 个已入队）`,
+    data: { sources: result.sources, dirty: result.dirtySources.length },
+  })
+  return result
 }
 
 /** 所有用户 id（定时 reconcile 用；自建服务用户量小，一次全查没有问题） */

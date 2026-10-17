@@ -10,6 +10,7 @@ import {
   updateTimelineSettings,
   waitForSync,
 } from "../services/timeline"
+import { clearTimelineEvents, listTimelineEvents, listTimelineSources } from "../services/timeline-events"
 import { enqueueSourceSyncs, waitForSourceSyncs } from "../workers/timeline-sync"
 import { enqueueTimelineRebuild, enqueueTimelineReconcile } from "../workers/timeline"
 
@@ -124,6 +125,32 @@ timelineRouter.post("/refresh", async (c) => {
     sources: result.sources,
     queued: jobs.length,
   })
+})
+
+/**
+ * 同步日志：给设置页的「同步日志」面板用。
+ *
+ * 两段数据配着看才有用 ——
+ *   - `events`：**发生过什么**（一轮汇聚的结论、重建、首搬、失败），服务端在聚合/同步路径上落流水；
+ *   - `sources`：**现在什么样**（每个订阅源上次同步时刻与状态），直接读水位表，不落流水。
+ *
+ * `limit` 只作用于 events（默认 120，最多 500）；sources 总是全量（一个用户几十上百个源，很小）。
+ */
+timelineRouter.get("/events", async (c) => {
+  const userId = c.get("userId")
+  const rawLimit = Number(c.req.query("limit") ?? 120)
+  const limit = Math.min(500, Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 120)
+  const [events, sources] = await Promise.all([
+    listTimelineEvents(userId, limit),
+    listTimelineSources(userId),
+  ])
+  return c.json({ events, sources })
+})
+
+/** 清空同步流水（面板上的「清空」；源状态不受影响，它读的是水位表） */
+timelineRouter.delete("/events", async (c) => {
+  await clearTimelineEvents(c.get("userId"))
+  return c.json({ ok: true })
 })
 
 /** 重建派生库（服务端写的条目/源元信息整体删掉再全量回填；用户状态文档不动） */

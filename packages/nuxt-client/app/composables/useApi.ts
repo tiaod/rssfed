@@ -11,6 +11,7 @@ import type {
 } from '~/types/bot'
 import type { SiteSettingsPublic, SiteSettingsFull, SiteSettingsUpdate } from '~/types/site'
 import type { McpToken, McpTokenCreated } from '~/types/mcp'
+import type { TimelineLogPayload } from '~/types/timeline-log'
 import type { TimelineSettings as TimelineSettingsPayload } from '~/utils/timelineSettings'
 import { resolveApiBase } from '~/utils/apiBase'
 import { importOpmlStreaming, type OpmlImportEvent } from '~/utils/opmlImport'
@@ -104,7 +105,19 @@ export function useApi() {
         { method: 'POST', params }
       ),
       /** 重建派生库（设置页的「重建时间线」） */
-      rebuild: () => apiFetch<{ accepted: boolean }>(`${base}/api/timeline/rebuild`, { method: 'POST' })
+      rebuild: () => apiFetch<{ accepted: boolean }>(`${base}/api/timeline/rebuild`, { method: 'POST' }),
+      /**
+       * 同步日志（设置页 → 数据 →「同步日志」调试面板）。
+       *
+       * 返回两段：`events` = 服务端落下的流水（汇聚/重建/首搬/失败），
+       * `sources` = 每个订阅源的当前同步状态（读水位表，不是流水）。
+       */
+      events: (limit?: number) => apiFetch<TimelineLogPayload>(
+        `${base}/api/timeline/events`,
+        { params: limit ? { limit } : undefined }
+      ),
+      /** 清空流水（源状态不受影响） */
+      clearEvents: () => apiFetch<{ ok: boolean }>(`${base}/api/timeline/events`, { method: 'DELETE' })
     },
     bots: {
       list: () => apiFetch<BotInfo[]>(`${base}/api/bots`),
