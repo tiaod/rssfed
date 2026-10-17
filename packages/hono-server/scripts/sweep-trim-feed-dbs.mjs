@@ -18,6 +18,14 @@
  *   node packages/hono-server/scripts/sweep-trim-feed-dbs.mjs             # 真删
  *
  * 环境变量：COUCHDB_URL / COUCHDB_USER / COUCHDB_PASSWORD / SOURCE_RETENTION_ENTRIES(默认 50)
+ *
+ * **跑完还要让下游收敛**：这个脚本绕过抓取路径直接删源库文档，不会更新 PG 的
+ * `feeds.last_changed_at`，而聚合侧的判据是「源在上次同步开始后有变化」—— 不 bump 的话
+ * 一条删除都不会被搬到用户库。跑完执行一次：
+ *
+ *   UPDATE feeds SET last_changed_at = now() WHERE last_changed_at IS NOT NULL;
+ *
+ * 下一轮聚合（默认 5 分钟）就会把每个源重扫一遍，用户库/浏览器跟着删到镜像状态。
  */
 const COUCH = (process.env.COUCHDB_URL ?? 'http://localhost:5984').replace(/\/+$/, '')
 const USER = process.env.COUCHDB_USER ?? 'admin'
@@ -115,7 +123,8 @@ async function main() {
   if (problems.length > 10) console.log(`   … 另有 ${problems.length - 10} 个`)
   console.log(DRY_RUN
     ? '\n（dry-run 结束；去掉 --dry-run 就真删。删除只留墓碑，磁盘要 compact 才回落。）'
-    : '\n（已删。磁盘不会立刻回落：CouchDB 删除只产生墓碑，需要 [compactions] 或定时 _compact。）')
+    : '\n（已删。磁盘不会立刻回落：CouchDB 删除只产生墓碑，需要 [compactions] 或定时 _compact。）'
+      + '\n记得 bump 下游：UPDATE feeds SET last_changed_at = now() WHERE last_changed_at IS NOT NULL;')
 }
 
 main().catch((err) => {
