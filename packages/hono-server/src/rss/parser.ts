@@ -1,5 +1,7 @@
 import http from "node:http"
 import https from "node:https"
+import { promisify } from "node:util"
+import zlib from "node:zlib"
 import { parseFeed } from "feedsmith"
 import { HttpProxyAgent } from "http-proxy-agent"
 import { HttpsProxyAgent } from "https-proxy-agent"
@@ -11,16 +13,22 @@ import { rewriteRssHubUrl } from "./rsshub"
  * 故意**不读 HTTP_PROXY / HTTPS_PROXY**：那两个是进程级惯例变量，axios（nano 访问 CouchDB）、
  * AWS SDK、undici 等库都会自动认，一设就把 CouchDB / S3 / ActivityPub 的请求也一起拖进代理，
  * 排查起来非常隐蔽。所以这里用独立变量，影响范围只到本模块导出的 agent 使用者：
- * 本文件的 fetchUrl 与 `images/fetch.ts`。
+ * 本文件的 fetchFeed 与 `images/fetch.ts`。
  *
  * RSS_FETCH_NO_PROXY 默认绕过本机（localhost/127.0.0.1/::1）——RSSHUB_BASE_URL 指向本地实例，
  * 不绕过的话本地请求会被丢给代理。
  *
- * 代理是**按域名**好坏不一的：先试代理，网络级失败再回退直连（见 fetchUrl 注释）。
+ * 代理链路好坏是**按域名**的（见 fetchUrl 注释），所以先走哪条路由由两项共同决定：
+ *   1. `RSS_FETCH_PREFER`：没有该域名的路由记忆时先试哪条（`proxy` 默认 / `direct`）；
+ *   2. 路由记忆：某域名最近走通的那条链路优先，网络级失败再切另一条（TTL 见 ROUTE_MEMO_TTL_MS）。
+ * 对于「直连就能通」的源，默认的 `proxy` 偏好会把每一轮抓取都塞进计费代理；
+ * 想省代理流量就设 `RSS_FETCH_PREFER=direct`，被墙的域名会在第一次失败后被记住、之后自动改走代理。
  */
 const PROXY = process.env.RSS_FETCH_PROXY || process.env.rss_fetch_proxy
 const NO_PROXY = (process.env.RSS_FETCH_NO_PROXY || process.env.rss_fetch_no_proxy || "localhost,127.0.0.1,::1")
   .split(",").map((s) => s.trim().toLowerCase().replace(/^\[|\]$/g, "")).filter(Boolean)
+/** 没有路由记忆时先试哪条：proxy（默认，被墙站点快）| direct（省代理流量） */
+const PREFER_DIRECT = (process.env.RSS_FETCH_PREFER || process.env.rss_fetch_prefer || "proxy").toLowerCase() === "direct"
 
 // 连接级代理可复用，创建一次即可（内部有连接池）
 export const httpAgent = PROXY ? new HttpProxyAgent(PROXY) : undefined
@@ -102,9 +110,10 @@ function extractProtocolCover(item: any): string | undefined {
  * 从而保证订阅身份稳定。
  */
 export async function parseFeedUrl(url: string): Promise<ParsedFeed> {
-  const targetUrl = rewriteRssHubUrl(url)
-  const xml = await fetchUrl(targetUrl)
-  return parseFeedContent(xml)
+  const result = await fetchParsedFeed(url)
+  // 不带 validators 时不会拿到 304；真出现说明调用方给了条件头却没处理，属于编程错误
+  if (result.notModified) throw new Error("Unexpected 304 Not Modified")
+  return result.feed
 }
 
 /** 解析 feed 字符串内容（RSS/Atom/RDF/JSON 自动识别并归一化） */
@@ -270,11 +279,96 @@ function describeError(err: unknown): string {
   return one(err)
 }
 
+/** feed 响应的 HTTP 缓存验证器（条件请求用） */
+export interface FeedValidators {
+  /**
+   * 验证器**来源**的 URL（一般是重定向链的最后一跳）。
+   * 验证器只对它自己的资源有效：请求走到这个 URL 时才会带上，重定向中间跳不带。
+   * 旧版 FeedDoc 没有这个字段时按「只对第一跳生效」处理。
+   */
+  url?: string
+  /** 上一次响应头里的 ETag（原样保存带引号的值） */
+  etag?: string
+  /** 上一次响应头里的 Last-Modified */
+  lastModified?: string
+}
+
+/** fetchFeed 的结果：notModified 表示服务端回了 304，正文可以一个字节都不读 */
+export type FeedFetchResult =
+  | { notModified: true, etag?: string, lastModified?: string, validatorUrl?: string }
+  | { notModified: false, content: string, etag?: string, lastModified?: string, validatorUrl?: string }
+
+/** fetchParsedFeed 的结果：notModified 时没有任何条目 */
+export type ParsedFeedResult =
+  | { notModified: true }
+  | { notModified: false, feed: ParsedFeed, etag?: string, lastModified?: string, validatorUrl?: string }
+
+const CLIENT_UA = "RSSFed/0.1.0"
+
+/**
+ * 允许服务端压缩响应。
+ *
+ * 订阅源是文本（XML/Atom/JSON），实测 gzip 后只剩原大小的 1/5~1/7
+ * （2026-10-17：wechat2rss 658KB→134KB、youtube 28.7KB→4.1KB、macworld 536KB→95KB）。
+ * Node 的 http 请求默认**不发** Accept-Encoding，所以之前每一轮抓取都在拿未压缩的全文。
+ */
+const ACCEPT_ENCODING = "gzip, deflate, br"
+const MAX_REDIRECTS = 5
+
+const gunzip = promisify(zlib.gunzip)
+const inflate = promisify(zlib.inflate)
+const inflateRaw = promisify(zlib.inflateRaw)
+const brotliDecompress = promisify(zlib.brotliDecompress)
+
+/** 头字段可能是 string[]；统一取第一个值 */
+function headerValue(value: string | string[] | undefined): string | undefined {
+  if (Array.isArray(value)) return value[0]
+  return value
+}
+
+/** 解一层 Content-Encoding；不认识的编码直接报错（比把压缩字节当 XML 解析好排查） */
+async function decodeOne(body: Buffer, enc: string): Promise<Buffer> {
+  try {
+    if (enc === "gzip" || enc === "x-gzip") return await gunzip(body)
+    if (enc === "deflate") {
+      // 少数服务端发的是 raw deflate（无 zlib 头），先按标准 deflate 解，失败再退 raw
+      try { return await inflate(body) } catch { return await inflateRaw(body) }
+    }
+    if (enc === "br") return await brotliDecompress(body)
+  } catch (err) {
+    throw new Error(`解压响应失败（${enc}）: ${describeError(err)}`)
+  }
+  throw new Error(`不支持的 Content-Encoding: ${enc}`)
+}
+
+/**
+ * 按 Content-Encoding 解压响应体。
+ * 头里可能有多层编码（`gzip, br`），按声明的逆序逐层解。
+ */
+async function decodeContent(body: Buffer, encoding: string | undefined): Promise<Buffer> {
+  if (!encoding) return body
+  const layers = encoding
+    .split(",")
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e !== "" && e !== "identity")
+    .reverse()
+  let out = body
+  for (const enc of layers) out = await decodeOne(out, enc)
+  return out
+}
+
+/** 一次 HTTP 取数的原始结果（body 仍是压缩态，重定向/304 时为空） */
+interface RawResponse {
+  status: number
+  headers: http.IncomingHttpHeaders
+  body: Buffer
+}
+
 /**
  * 单次取数、不重试：useProxy 决定这次走不走代理。
- * 3xx 交给外层 fetchUrl 继续跟（每跳重新判断该不该走代理）。
+ * 3xx（含 304）交给外层处理；HTTP 4xx/5xx 直接 reject。
  */
-function requestOnce(url: string, useProxy: boolean, redirects: number): Promise<string> {
+function requestOnce(url: string, useProxy: boolean, extraHeaders: http.OutgoingHttpHeaders): Promise<RawResponse> {
   const isHttps = url.startsWith("https")
   const agent = useProxy ? (isHttps ? httpsAgent : httpAgent) : undefined
 
@@ -282,29 +376,24 @@ function requestOnce(url: string, useProxy: boolean, redirects: number): Promise
     const mod = isHttps ? https : http
     const req = mod.get(url, {
       agent,
-      headers: { "User-Agent": "RSSFed/0.1.0" },
+      headers: { "User-Agent": CLIENT_UA, "Accept-Encoding": ACCEPT_ENCODING, ...extraHeaders },
       timeout: 10000,
     }, (res) => {
-      // 3xx 重定向
-      if ([301, 302, 307, 308].includes(res.statusCode ?? 0)) {
-        const location = res.headers.location
+      const status = res.statusCode ?? 0
+      // 3xx：重定向与 304 都没有（也不需要）响应体，交给外层判断
+      if (status >= 300 && status < 400) {
         res.resume()
-        if (location) {
-          const next = new URL(location, url).href
-          fetchUrl(next, redirects + 1).then(resolve, reject)
-        } else {
-          reject(new Error(`Redirect without location: ${res.statusCode}`))
-        }
+        resolve({ status, headers: res.headers, body: Buffer.alloc(0) })
         return
       }
-      if (res.statusCode !== 200) {
+      if (status !== 200) {
         res.resume()
-        reject(new Error(`HTTP ${res.statusCode}`))
+        reject(new Error(`HTTP ${status}`))
         return
       }
       const chunks: Buffer[] = []
       res.on("data", (chunk: Buffer) => chunks.push(chunk))
-      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")))
+      res.on("end", () => resolve({ status, headers: res.headers, body: Buffer.concat(chunks) }))
       res.on("error", reject)
     })
     req.on("error", reject)
@@ -312,16 +401,28 @@ function requestOnce(url: string, useProxy: boolean, redirects: number): Promise
   })
 }
 
+/** 单条链路（代理 / 直连）的路由记忆 */
+interface RouteMemo {
+  /** 最近一次走通的链路 */
+  prefer: "proxy" | "direct"
+  at: number
+}
+
 /**
- * 「这个域名走代理网络级失败过」的短期记忆（TTL 10 分钟）。
+ * 「这个域名哪条链路最近走通过」的短期记忆（默认 TTL 30 分钟，可用 RSS_FETCH_ROUTE_TTL 调）。
  *
- * 代理链路是按域名好坏不一的，而失败要等满超时才有结论。图片缓存是**逐张**下载的
- * （images/fetch.ts 还带 4 次重试），要是每张图都先撞一次代理超时，一个源就能跑几分钟
- * （2026-10-10 实测单个抓取 job 158.9s、队列吞吐掉到 0.4 个/分钟）。所以把失败过的域名
- * 记下来：TTL 内直连优先；代理下一次成功会自动清掉这条记录，节点恢复后不用重启。
+ * 为什么要记：两条链路都要试，而失败要等满超时才有结论。图片缓存是**逐张**下载的，
+ * 要是每张图都先撞一次错误链路，一个源就能跑几分钟（2026-10-10 实测单个抓取 job 158.9s、
+ * 队列吞吐掉到 0.4 个/分钟）。记录走通的那条之后，同一域名的后续请求直接沿用它。
+ *
+ * 与旧实现（只记「代理失败过的域名」）的区别：**直连失败同样要记** —— 否则
+ * `RSS_FETCH_PREFER=direct` 下被墙站点每轮抓取都会先撞满一次直连超时。
  */
-const PROXY_FAIL_TTL_MS = 10 * 60 * 1000
-const proxyFailedHosts = new Map<string, number>()
+const ROUTE_MEMO_TTL_MS = (() => {
+  const raw = parseInt(process.env.RSS_FETCH_ROUTE_TTL || process.env.rss_fetch_route_ttl || "")
+  return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000
+})()
+const routeMemos = new Map<string, RouteMemo>()
 
 function urlHost(url: string): string {
   try {
@@ -331,43 +432,53 @@ function urlHost(url: string): string {
   }
 }
 
-function proxyRecentlyFailed(host: string): boolean {
-  if (!host) return false
-  const at = proxyFailedHosts.get(host)
-  if (at === undefined) return false
-  if (Date.now() - at > PROXY_FAIL_TTL_MS) {
-    proxyFailedHosts.delete(host)
-    return false
+/** 该域名下一轮先试哪条链路：优先沿用它最近走通的那条，否则按 RSS_FETCH_PREFER */
+function routePreference(host: string): "proxy" | "direct" {
+  if (host) {
+    const memo = routeMemos.get(host)
+    if (memo) {
+      if (Date.now() - memo.at <= ROUTE_MEMO_TTL_MS) return memo.prefer
+      routeMemos.delete(host)
+    }
   }
-  return true
+  return PREFER_DIRECT ? "direct" : "proxy"
+}
+
+/** 记下该域名这次走通的链路（供后续请求沿用） */
+function rememberRoute(host: string, prefer: "proxy" | "direct"): void {
+  if (host) routeMemos.set(host, { prefer, at: Date.now() })
+}
+
+/** 测试用：清空路由记忆（生产不需要调用） */
+export function clearRouteMemo(): void {
+  routeMemos.clear()
 }
 
 /**
- * 按「先代理、网络级失败回退直连」的顺序取一次 URL，取数逻辑交给 request(useProxy)。
+ * 按「该域名的路由记忆 → 网络级失败再切另一条」的顺序取一次 URL，取数逻辑交给 request(useProxy)。
  *
- * 两条链路都要试的原因见 fetchUrl 注释；HTTP 4xx/5xx 是服务器给的答复，不换链路重试。
- * 订阅抓取（fetchUrl）与图片下载（images/fetch.ts 的 httpGet）共用这一层，
+ * 两条链路都要试的原因见 fetchFeed 注释；HTTP 4xx/5xx 是服务器给的答复，不换链路重试。
+ * 订阅抓取（fetchFeed）与图片下载（images/fetch.ts 的 httpGet）共用这一层，
  * 所以「哪条链路能用」的记忆也是两边共享的。
  */
 export async function withProxyFallback<T>(url: string, request: (useProxy: boolean) => Promise<T>): Promise<T> {
   if (!shouldProxy(url)) return request(false)
 
   const host = urlHost(url)
-  // 失败过的域名直连优先；否则代理优先（被墙站点快）
-  const proxyFirst = !proxyRecentlyFailed(host)
-  const first = proxyFirst ? { useProxy: true, name: "代理" } : { useProxy: false, name: "直连" }
-  const second = proxyFirst ? { useProxy: false, name: "直连" } : { useProxy: true, name: "代理" }
+  // 走通过的那条优先；没记忆时按 RSS_FETCH_PREFER（默认代理，因为被墙站点走代理快）
+  const preferred = routePreference(host)
+  const first = preferred === "proxy" ? { useProxy: true, name: "代理" } : { useProxy: false, name: "直连" }
+  const second = preferred === "proxy" ? { useProxy: false, name: "直连" } : { useProxy: true, name: "代理" }
   let firstError: unknown
 
   for (const [i, attempt] of [first, second].entries()) {
     try {
       const result = await request(attempt.useProxy)
-      // 代理这次通了：清掉失败记忆，下一轮恢复「代理优先」
-      if (attempt.useProxy) proxyFailedHosts.delete(host)
+      // 这次走通了：记住链路，下一轮直接沿用它（节点恢复/被墙变化都由下一次成功自动纠正）
+      rememberRoute(host, attempt.useProxy ? "proxy" : "direct")
       return result
     } catch (err) {
       if (!isNetworkError(err)) throw err
-      if (attempt.useProxy) proxyFailedHosts.set(host, Date.now())
       if (i === 0) {
         firstError = err
         continue
@@ -379,17 +490,82 @@ export async function withProxyFallback<T>(url: string, request: (useProxy: bool
 }
 
 /**
- * 抓取 URL 返回文本内容，支持代理、代理失败回退直连、重定向。
- * 超时 10 秒，最多跟随 5 次重定向。
+ * 抓取 feed 原始文本（代理/直连切换、重定向、gzip 解压、ETag/Last-Modified 条件请求）。
+ * 超时 10 秒，最多跟随 5 次重定向；服务端回 304 时 `notModified` 为 true 且不含正文。
  *
  * 为什么要回退：代理链路好坏是**按域名**的。2026-10-10 实测（Clash 节点）：
  * openai.com / wired.com / naturecanada.ca 直连 0.5-0.7s 就通、走代理直接挂死到超时；
- * 而 news.ycombinator.com / discord.com 直连必然超时、走代理 0.4-0.9s。一刀切代理会把
- * 前一类源弄挂，所以先试代理（被墙站点快），网络级失败再回退直连。
+ * 而 news.ycombinator.com / discord.com 直连必然超时、走代理 0.4-0.9s。
+ * 所以两条链路都要试，先试哪条由 RSS_FETCH_PREFER 与路由记忆决定（见文件头注释）。
+ *
+ * 为什么要带条件请求：订阅源每 15 分钟抓一轮，绝大多数轮次内容没变。服务端支持
+ * ETag/Last-Modified 时，带验证器只换回一个 304（几百字节），而不是整份 XML。
  */
-async function fetchUrl(url: string, redirects = 0): Promise<string> {
-  if (redirects > 5) throw new Error("Too many redirects")
-  return withProxyFallback(url, (useProxy) => requestOnce(url, useProxy, redirects))
+export async function fetchFeed(url: string, validators?: FeedValidators): Promise<FeedFetchResult> {
+  return fetchFeedWithRedirects(rewriteRssHubUrl(url), validators, 0)
+}
+
+async function fetchFeedWithRedirects(
+  url: string,
+  validators: FeedValidators | undefined,
+  redirects: number,
+): Promise<FeedFetchResult> {
+  if (redirects > MAX_REDIRECTS) throw new Error("Too many redirects")
+
+  // 条件请求头只带在「验证器来源的那个 URL」上：重定向中间跳是另一个资源，
+  // 把最终资源的 ETag 发给它既无意义也可能被误判。旧版 FeedDoc 没有 url 时按第一跳处理。
+  const validatorMatches = validators
+    ? (validators.url !== undefined ? validators.url === url : redirects === 0)
+    : false
+  const headers: http.OutgoingHttpHeaders = {}
+  if (validatorMatches) {
+    // 优先 If-Modified-Since：部分服务端（Apache mod_deflate）会按压缩变体改写 ETag
+    //（实测 codingnow 的响应是 `ETag: "...-gzip"`），把它原样带回去反而永远命中不了；
+    // If-Modified-Since 与 Content-Encoding 无关。只有拿不到 Last-Modified 时才用 ETag。
+    if (validators!.lastModified) headers["If-Modified-Since"] = validators!.lastModified
+    else if (validators!.etag) headers["If-None-Match"] = validators!.etag
+  }
+
+  const res = await withProxyFallback(url, (useProxy) => requestOnce(url, useProxy, headers))
+
+  if (res.status === 304) {
+    return {
+      notModified: true,
+      etag: headerValue(res.headers.etag),
+      lastModified: headerValue(res.headers["last-modified"]),
+      validatorUrl: url,
+    }
+  }
+  if (res.status >= 300 && res.status < 400) {
+    const location = headerValue(res.headers.location)
+    if (!location) throw new Error(`Redirect without location: ${res.status}`)
+    return fetchFeedWithRedirects(new URL(location, url).href, validators, redirects + 1)
+  }
+
+  const body = await decodeContent(res.body, headerValue(res.headers["content-encoding"]))
+  return {
+    notModified: false,
+    content: body.toString("utf-8"),
+    etag: headerValue(res.headers.etag),
+    lastModified: headerValue(res.headers["last-modified"]),
+    validatorUrl: url,
+  }
+}
+
+/**
+ * 抓取并解析订阅源；带 validators 时可能直接返回 `{ notModified: true }`（服务端 304）。
+ * 调用方拿到新内容后把响应头里的 etag/lastModified 存下来，下一轮再带回去即可跳过全文下载。
+ */
+export async function fetchParsedFeed(url: string, validators?: FeedValidators): Promise<ParsedFeedResult> {
+  const fetched = await fetchFeed(url, validators)
+  if (fetched.notModified) return { notModified: true }
+  return {
+    notModified: false,
+    feed: parseFeedContent(fetched.content),
+    etag: fetched.etag,
+    lastModified: fetched.lastModified,
+    validatorUrl: fetched.validatorUrl,
+  }
 }
 
 /**

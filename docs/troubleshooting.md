@@ -249,6 +249,39 @@ for(const f of walk('packages/nuxt-client/app'))
 JS
 ```
 
+### 代理流量异常高：几百个源每 15 分钟全量重下，且能直连的源也走代理
+
+- **现象**：代理/机场流量持续消耗，像一个常驻下载任务；抓取本身看起来一切正常（条目在更新、队列在跑）。
+- **原因**：三条叠加的抓取行为，都是当初按「稳」做的取舍，不是故障：
+  1. **每个源每 15 分钟抓一次、且不带条件请求** —— 内容没变也重下整份 XML（705 个源 ≈ 6.8 万次/天）；
+  2. **请求不声明 `Accept-Encoding`** —— Node 的 http 默认不发，服务端就一直回未压缩全文；
+     实测压缩后只剩 1/5~1/7（wechat2rss 658KB→134KB、youtube 28.7KB→4.1KB、macworld 536KB→95KB）；
+  3. **默认「先代理」** —— 能直连的源（实测 wechat2rss、rsshub.bestblogs.dev、macworld）也走代理，
+     这部分对计费代理是纯浪费。
+- **排查**（先量级、再来源，别凭感觉调参）：
+  ```bash
+  # ① 本机对外入向速率（两次采样相减；WSL/宿主机都可）
+  awk '/eth0/{print $2}' /proc/net/dev; sleep 30; awk '/eth0/{print $2}' /proc/net/dev
+  # ② 抽样一个源，对比压缩前后传输字节（走代理时加 -x <proxy>）
+  curl -s -o /dev/null -w 'plain %{size_download}\n' '<feed-url>'
+  curl -s -o /dev/null --compressed -w 'gzip  %{size_download}\n' '<feed-url>'
+  # ③ 看响应头有没有 ETag / Last-Modified —— 有就能在下一轮只换回 304
+  curl -s -D - -o /dev/null '<feed-url>' | grep -iE 'etag|last-modified|content-encoding'
+  ```
+- **解法**：抓取层现在会带 `Accept-Encoding: gzip, deflate, br` 并在响应头有
+  `ETag` / `Last-Modified` 时发条件请求（304 直接短路，不解析、不写入、不裁剪）。
+  计费代理环境再加一行配置来避免「能直连的源也走代理」：
+  ```bash
+  RSS_FETCH_PREFER=direct   # 先直连；被墙域名网络级失败一次后记住并自动改走代理
+  ```
+  调度侧还有自适应降频（`FETCH_ADAPTIVE`，默认开）：按「距上次抓到新条目多久」把轮询从
+  15m 逐级拉到 30m / 1h / 3h / 6h，抓到新内容立刻回到 15m；内容安静的源不再每 15 分钟全量轮询。
+  `FETCH_ADAPTIVE=0` 可恢复旧的全量轮询，`FETCH_MAX_INTERVAL` 调整降频上限。
+  代价：`direct` 下被墙源第一轮会先等满一次 10s 直连超时，之后由路由记忆（默认 30 分钟）走代理；
+  想恢复旧行为删掉该变量即可（默认 `proxy`）。
+- **验证**：重启服务后看连续两轮抓取——支持验证器的源第二轮应是 304（抓取耗时骤降），
+  代理侧流量明显下降；`feeds.last_fetched_at` 仍照常滚动。
+
 ## 前端交互
 
 ### 条目弹窗里的正文无法用鼠标选中

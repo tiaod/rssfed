@@ -11,6 +11,8 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const ENV_KEYS = [
   "RSS_FETCH_PROXY", "rss_fetch_proxy",
   "RSS_FETCH_NO_PROXY", "rss_fetch_no_proxy",
+  "RSS_FETCH_PREFER", "rss_fetch_prefer",
+  "RSS_FETCH_ROUTE_TTL", "rss_fetch_route_ttl",
   "HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
   "NO_PROXY", "no_proxy",
 ] as const
@@ -195,5 +197,101 @@ describe("代理失败回退直连", () => {
       return "ok"
     })
     expect(calls).toEqual([false])
+  })
+})
+
+/**
+ * 默认全程走代理 = 每个能直连的源都在烧代理流量。RSS_FETCH_PREFER=direct 让「能直连的
+ * 先直连」，被墙域名在第一次网络级失败后由路由记忆自动改走代理（见 parser.ts 文件头）。
+ */
+describe("RSS_FETCH_PREFER=direct：能直连的不烧代理", () => {
+  it("先直连；直连网络失败回退代理，并记住代理", async () => {
+    const parser = await load({ RSS_FETCH_PROXY: "http://127.0.0.1:7890", RSS_FETCH_PREFER: "direct" })
+    const calls: boolean[] = []
+    const request = async (useProxy: boolean) => {
+      calls.push(useProxy)
+      if (!useProxy) throw Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" })
+      return "ok"
+    }
+
+    expect(await parser.withProxyFallback("https://blocked.example.com/feed", request)).toBe("ok")
+    expect(calls).toEqual([false, true])
+
+    // 第二次沿用「最近走通过」的代理，不再先撞一次直连超时
+    calls.length = 0
+    expect(await parser.withProxyFallback("https://blocked.example.com/feed", request)).toBe("ok")
+    expect(calls).toEqual([true])
+  })
+
+  it("直连成功时记住直连，后续不再尝试代理", async () => {
+    const parser = await load({ RSS_FETCH_PROXY: "http://127.0.0.1:7890", RSS_FETCH_PREFER: "direct" })
+    const calls: boolean[] = []
+    const request = async (useProxy: boolean) => {
+      calls.push(useProxy)
+      return "ok"
+    }
+
+    await parser.withProxyFallback("https://direct.example.com/feed", request)
+    await parser.withProxyFallback("https://direct.example.com/feed", request)
+    expect(calls).toEqual([false, false])
+  })
+})
+
+/** 订阅源是文本：不带 Accept-Encoding 会一直拿未压缩全文；带验证器则内容没变时只回 304。 */
+describe("条件请求与响应压缩", () => {
+  const servers: import("node:http").Server[] = []
+
+  afterEach(async () => {
+    await Promise.all(servers.splice(0).map((s) => new Promise<void>((r) => s.close(() => r()))))
+  })
+
+  /** 起一个自定义行为的本地 HTTP 服务，返回 feed 地址 */
+  async function serve(handler: import("node:http").RequestListener): Promise<string> {
+    const http = await import("node:http")
+    const server = http.createServer(handler)
+    servers.push(server)
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r))
+    const port = (server.address() as import("node:net").AddressInfo).port
+    return `http://127.0.0.1:${port}/feed`
+  }
+
+  const RSS = `<?xml version="1.0"?><rss version="2.0"><channel><title>本地源</title><item><title>条目一</title><guid>g1</guid></item></channel></rss>`
+
+  it("请求带 Accept-Encoding，gzip 响应能正确解压", async () => {
+    const zlib = await import("node:zlib")
+    let acceptEncoding = ""
+    const url = await serve((req, res) => {
+      acceptEncoding = String(req.headers["accept-encoding"] ?? "")
+      res.writeHead(200, { "Content-Type": "application/rss+xml", "Content-Encoding": "gzip" })
+      res.end(zlib.gzipSync(Buffer.from(RSS)))
+    })
+
+    const parser = await load({})
+    const feed = await parser.parseFeedUrl(url)
+
+    expect(acceptEncoding).toContain("gzip")
+    expect(feed.title).toBe("本地源")
+    expect(feed.items[0]?.title).toBe("条目一")
+  })
+
+  it("带 ETag 条件请求命中 304 时返回 notModified，不再返回正文", async () => {
+    const url = await serve((req, res) => {
+      if (req.headers["if-none-match"] === '"v1"') {
+        res.writeHead(304, { ETag: '"v1"' })
+        res.end()
+        return
+      }
+      res.writeHead(200, { "Content-Type": "application/rss+xml", ETag: '"v1"' })
+      res.end(RSS)
+    })
+
+    const parser = await load({})
+    const first = await parser.fetchParsedFeed(url)
+    if (first.notModified) throw new Error("首次抓取不应该拿到 304")
+    expect(first.feed.title).toBe("本地源")
+    expect(first.etag).toBe('"v1"')
+
+    const second = await parser.fetchParsedFeed(url, { etag: first.etag })
+    expect(second.notModified).toBe(true)
   })
 })
