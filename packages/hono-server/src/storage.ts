@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3'
 import type { Readable } from 'node:stream'
 
 /**
@@ -13,12 +13,21 @@ import type { Readable } from 'node:stream'
  *
  * 由 STORAGE_DRIVER 选择，两侧对 key 的语义完全一致，可随时切换。
  */
+/** 列表返回的单个对象（key 是逻辑 key，不含 pathPrefix） */
+export interface StorageObjectInfo {
+  key: string
+  lastModified: Date
+  size: number
+}
+
 export interface Storage {
   write(content: Buffer, key: string, contentType?: string): Promise<string>
   read(key: string): Promise<Buffer>
   readWithMeta(key: string): Promise<{ content: Buffer; contentType: string }>
   delete(key: string): Promise<void>
   exists(key: string): Promise<boolean>
+  /** 列出某前缀下的全部对象（给缓存清理用；只读、可能较慢，不要放请求路径上） */
+  list(prefix: string): Promise<StorageObjectInfo[]>
   /** 可直接对外访问的 URL；未配置公开域名时返回 undefined，由调用方回退到 /api/files/* 代理 */
   getPublicUrl(key: string): string | undefined
 }
@@ -119,6 +128,32 @@ export class S3Storage implements Storage {
     }
   }
 
+  /** 分页列出前缀下的对象；返回的 key 去掉 pathPrefix，与写入时用的逻辑 key 一致 */
+  async list(prefix: string): Promise<StorageObjectInfo[]> {
+    const fullPrefix = this.getFullKey(prefix)
+    // 逻辑 key → 完整 key 之间差一个 "<pathPrefix>/"，返回时必须切掉
+    const stripLength = this.pathPrefix ? this.pathPrefix.length + 1 : 0
+    const result: StorageObjectInfo[] = []
+    let token: string | undefined
+    do {
+      const response = await this.client.send(new ListObjectsV2Command({
+        Bucket: this.bucket,
+        Prefix: fullPrefix,
+        ContinuationToken: token,
+      }))
+      for (const object of response.Contents ?? []) {
+        if (!object.Key) continue
+        result.push({
+          key: object.Key.slice(stripLength),
+          lastModified: object.LastModified ?? new Date(0),
+          size: object.Size ?? 0,
+        })
+      }
+      token = response.IsTruncated ? response.NextContinuationToken : undefined
+    } while (token)
+    return result
+  }
+
   getPublicUrl(key: string): string | undefined {
     const fullKey = this.getFullKey(key)
     if (this.publicDomain) {
@@ -191,6 +226,36 @@ export class FilesystemStorage implements Storage {
     } catch {
       return false
     }
+  }
+
+  /** 递归列目录；mtime 当 lastModified（缓存清理只按时间判断） */
+  async list(prefix: string): Promise<StorageObjectInfo[]> {
+    const result: StorageObjectInfo[] = []
+    const walk = async (dir: string): Promise<void> => {
+      // 目录不存在（还没写过任何对象）等同空列表
+      const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => null)
+      if (!entries) return
+      for (const entry of entries) {
+        const full = path.join(dir, entry.name)
+        if (entry.isDirectory()) {
+          await walk(full)
+          continue
+        }
+        try {
+          const stat = await fs.stat(full)
+          result.push({
+            // 统一用 / 作分隔符，与 S3 实现返回的 key 形状一致
+            key: path.relative(this.root, full).split(path.sep).join('/'),
+            lastModified: stat.mtime,
+            size: stat.size,
+          })
+        } catch {
+          // 遍历过程中被删掉：跳过
+        }
+      }
+    }
+    await walk(this.resolvePath(prefix))
+    return result
   }
 
   getPublicUrl(key: string): string | undefined {

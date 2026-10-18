@@ -3,7 +3,6 @@ import {
   getCompressedImage,
   imageCacheKey,
   isFetchableImageUrl,
-  isPrivateHost,
   normalizeImageRequest,
   IMAGE_CACHE_VERSION,
 } from "../images/cache"
@@ -33,11 +32,16 @@ function memoryStorage(): Storage & { files: Map<string, Buffer> } {
       files.delete(key)
     },
     exists: async (key: string) => files.has(key),
+    list: async (prefix: string) => [...files.entries()]
+      .filter(([key]) => key.startsWith(prefix))
+      .map(([key, content]) => ({ key, lastModified: new Date(0), size: content.length })),
     getPublicUrl: () => undefined,
   }
 }
 
 const AVIF_STUB = Buffer.from("avif-bytes")
+const IMAGE_SIZE = { width: 800, height: 600 }
+const BLURHASH = "L43yGppefQpepyflfQflfQfQfQfQ"
 
 /** 假的下载/压缩：记录调用次数，返回固定字节 */
 function fakeCodec() {
@@ -50,7 +54,23 @@ function fakeCodec() {
     },
     compress: async (_buffer: Buffer, _opts?: { maxWidth?: number, quality?: number }) => {
       calls.compress++
-      return { buffer: AVIF_STUB, width: 800, height: 600 }
+      return { buffer: AVIF_STUB, width: IMAGE_SIZE.width, height: IMAGE_SIZE.height }
+    },
+  }
+}
+
+/** 假的尺寸探测 / blurhash：记录调用次数（命中路径靠它们从 AVIF 现算） */
+function fakeMeta() {
+  const calls = { size: 0, blurhash: 0 }
+  return {
+    calls,
+    size: async (_buffer: Buffer) => {
+      calls.size++
+      return IMAGE_SIZE
+    },
+    blurhash: async (_buffer: Buffer) => {
+      calls.blurhash++
+      return BLURHASH
     },
   }
 }
@@ -87,7 +107,7 @@ describe("normalizeImageRequest", () => {
   })
 })
 
-describe("isFetchableImageUrl / isPrivateHost", () => {
+describe("isFetchableImageUrl", () => {
   it("只放行 http(s)", () => {
     expect(isFetchableImageUrl("https://x.test/a.png")).toBe(true)
     expect(isFetchableImageUrl("http://x.test/a.png")).toBe(true)
@@ -95,50 +115,37 @@ describe("isFetchableImageUrl / isPrivateHost", () => {
     expect(isFetchableImageUrl("data:image/png;base64,AAAA")).toBe(false)
     expect(isFetchableImageUrl("not a url")).toBe(false)
   })
-
-  it("识别本机 / 私有网段 / 云元数据地址", () => {
-    for (const url of [
-      "http://localhost/a.png",
-      "http://foo.localhost/a.png",
-      "http://127.0.0.1/a.png",
-      "http://10.1.2.3/a.png",
-      "http://172.16.0.9/a.png",
-      "http://192.168.1.1/a.png",
-      "http://169.254.169.254/latest/meta-data/",
-      "http://metadata.google.internal/computeMetadata/v1/",
-      "http://[::1]/a.png",
-    ]) {
-      expect(isPrivateHost(url), url).toBe(true)
-    }
-    for (const url of ["https://cdn.example.com/a.png", "http://172.32.0.1/a.png", "http://8.8.8.8/a.png"]) {
-      expect(isPrivateHost(url), url).toBe(false)
-    }
-  })
 })
 
 describe("getCompressedImage", () => {
-  it("未命中：下载 + 压缩 + 落盘（本体与尺寸元数据），返回 hit=false", async () => {
+  it("未命中：下载 + 压缩 + 只落盘 AVIF 本体，返回 hit=false 与尺寸/blurhash", async () => {
     const storage = memoryStorage()
     const codec = fakeCodec()
+    const meta = fakeMeta()
     const result = await getCompressedImage(
       { url: "https://cdn.test/a.png" },
-      { storage, download: codec.download, compress: codec.compress },
+      { storage, ...codec, ...meta },
     )
 
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.hit).toBe(false)
-    expect(result.width).toBe(800)
+    expect(result.width).toBe(IMAGE_SIZE.width)
+    expect(result.height).toBe(IMAGE_SIZE.height)
+    expect(result.blurhash).toBe(BLURHASH)
     expect(result.buffer).toEqual(AVIF_STUB)
     expect(storage.files.has(result.key)).toBe(true)
-    expect(storage.files.has(`${result.key}.json`)).toBe(true)
+    // 只有 AVIF 本体：不再写 sidecar 元数据对象
+    expect([...storage.files.keys()]).toEqual([result.key])
     expect(codec.calls).toEqual({ download: 1, compress: 1 })
+    expect(meta.calls).toEqual({ size: 0, blurhash: 1 })
   })
 
-  it("第二次取同一 URL + 参数：命中缓存，不再下载", async () => {
+  it("第二次取同一 URL + 参数：命中缓存，不再下载/压缩，尺寸与 blurhash 从本体现算", async () => {
     const storage = memoryStorage()
     const codec = fakeCodec()
-    const deps = { storage, download: codec.download, compress: codec.compress }
+    const meta = fakeMeta()
+    const deps = { storage, ...codec, ...meta }
     const first = await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
     const second = await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
 
@@ -146,14 +153,18 @@ describe("getCompressedImage", () => {
     if (!first.ok || !second.ok) return
     expect(second.hit).toBe(true)
     expect(second.key).toBe(first.key)
-    expect(second.width).toBe(800) // 尺寸来自 sidecar，不必重新解码
+    expect(second.width).toBe(IMAGE_SIZE.width)
+    expect(second.height).toBe(IMAGE_SIZE.height)
+    expect(second.blurhash).toBe(BLURHASH)
     expect(codec.calls).toEqual({ download: 1, compress: 1 })
+    // 未命中一次 blurhash，命中路径再各算一次
+    expect(meta.calls).toEqual({ size: 1, blurhash: 2 })
   })
 
   it("并发同一 URL：合并成一次下载", async () => {
     const storage = memoryStorage()
     const codec = fakeCodec()
-    const deps = { storage, download: codec.download, compress: codec.compress }
+    const deps = { storage, ...codec, ...fakeMeta() }
     await Promise.all([
       getCompressedImage({ url: "https://cdn.test/same.png" }, deps),
       getCompressedImage({ url: "https://cdn.test/same.png" }, deps),
@@ -188,17 +199,7 @@ describe("getCompressedImage", () => {
     const codec = fakeCodec()
     const result = await getCompressedImage(
       { url: "file:///etc/passwd" },
-      { storage: memoryStorage(), download: codec.download, compress: codec.compress },
-    )
-    expect(result).toEqual({ ok: false, reason: "invalid-url" })
-    expect(codec.calls.download).toBe(0)
-  })
-
-  it("allowPrivateHosts=false 时挡住内网地址（对外接口的默认行为）", async () => {
-    const codec = fakeCodec()
-    const result = await getCompressedImage(
-      { url: "http://127.0.0.1:8080/a.png" },
-      { storage: memoryStorage(), download: codec.download, compress: codec.compress, allowPrivateHosts: false },
+      { storage: memoryStorage(), ...codec, ...fakeMeta() },
     )
     expect(result).toEqual({ ok: false, reason: "invalid-url" })
     expect(codec.calls.download).toBe(0)
@@ -211,97 +212,47 @@ describe("getCompressedImage", () => {
     }
     const result = await getCompressedImage(
       { url: "https://cdn.test/a.png" },
-      { storage, download: fakeCodec().download, compress: fakeCodec().compress },
+      { storage, ...fakeCodec(), ...fakeMeta() },
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
     expect(result.buffer).toEqual(AVIF_STUB)
   })
 
-  it("命中本体但缺 sidecar 时用解码补尺寸", async () => {
+  it("命中但尺寸/blurhash 算不出来时降级为 0 / undefined，不影响取图", async () => {
     const storage = memoryStorage()
     const key = imageCacheKey({ url: "https://cdn.test/a.png" })
     storage.files.set(key, AVIF_STUB)
-    const size = vi.fn(async () => ({ width: 320, height: 240 }))
-    const result = await getCompressedImage(
-      { url: "https://cdn.test/a.png" },
-      { storage, size, download: fakeCodec().download, compress: fakeCodec().compress },
-    )
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.hit).toBe(true)
-    expect(result.width).toBe(320)
-    expect(size).toHaveBeenCalledTimes(1)
-  })
-
-  it("未命中：blurhash 与压缩字节一起落 sidecar 并随结果返回", async () => {
-    const storage = memoryStorage()
-    const makeBlurhash = vi.fn(async () => "L43yGppefQpepyflfQflfQfQfQfQ")
-    const result = await getCompressedImage(
-      { url: "https://cdn.test/a.png" },
-      { storage, download: fakeCodec().download, compress: fakeCodec().compress, blurhash: makeBlurhash },
-    )
-
-    expect(result.ok).toBe(true)
-    if (!result.ok) return
-    expect(result.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
-    const sidecar = JSON.parse(storage.files.get(`${result.key}.json`)!.toString("utf8"))
-    expect(sidecar.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
-    expect(makeBlurhash).toHaveBeenCalledTimes(1)
-  })
-
-  it("命中：blurhash 直接读 sidecar，不重新解码", async () => {
-    const storage = memoryStorage()
-    const makeBlurhash = vi.fn(async () => "L43yGppefQpepyflfQflfQfQfQfQ")
-    const deps = { storage, download: fakeCodec().download, compress: fakeCodec().compress, blurhash: makeBlurhash }
-    await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
-    const second = await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
-
-    expect(second.ok).toBe(true)
-    if (!second.ok) return
-    expect(second.hit).toBe(true)
-    expect(second.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
-    expect(makeBlurhash).toHaveBeenCalledTimes(1) // 只有未命中那一次
-  })
-
-  it("老对象的 sidecar 没有 blurhash：命中时现算并回写（下次直接读）", async () => {
-    const storage = memoryStorage()
-    const key = imageCacheKey({ url: "https://cdn.test/a.png" })
-    storage.files.set(key, AVIF_STUB)
-    // 先前的版本写下的 sidecar：只有来源与尺寸
-    storage.files.set(
-      `${key}.json`,
-      Buffer.from(JSON.stringify({ sourceUrl: "https://cdn.test/a.png", width: 800, height: 600 })),
-    )
-    const makeBlurhash = vi.fn(async () => "L43yGppefQpepyflfQflfQfQfQfQ")
-    const deps = { storage, download: fakeCodec().download, compress: fakeCodec().compress, blurhash: makeBlurhash }
-
-    const first = await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
-    expect(first.ok && first.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
-    // 回写保留了原有字段
-    const rewritten = JSON.parse(storage.files.get(`${key}.json`)!.toString("utf8"))
-    expect(rewritten).toMatchObject({ sourceUrl: "https://cdn.test/a.png", width: 800, height: 600 })
-
-    const second = await getCompressedImage({ url: "https://cdn.test/a.png" }, deps)
-    expect(second.ok && second.blurhash).toBe("L43yGppefQpepyflfQflfQfQfQfQ")
-    expect(makeBlurhash).toHaveBeenCalledTimes(1) // 第二次读回写好的 sidecar
-  })
-
-  it("算不出 blurhash 时结果与 sidecar 都不带该字段（前端退化为透明占位）", async () => {
-    const storage = memoryStorage()
     const result = await getCompressedImage(
       { url: "https://cdn.test/a.png" },
       {
         storage,
-        download: fakeCodec().download,
-        compress: fakeCodec().compress,
+        size: async () => null,
         blurhash: async () => null,
+        ...fakeCodec(),
       },
     )
     expect(result.ok).toBe(true)
     if (!result.ok) return
+    expect(result.hit).toBe(true)
+    expect(result.width).toBe(0)
+    expect(result.height).toBe(0)
     expect(result.blurhash).toBeUndefined()
-    const sidecar = JSON.parse(storage.files.get(`${result.key}.json`)!.toString("utf8"))
-    expect(sidecar.blurhash).toBeUndefined()
+  })
+})
+
+describe("命中路径不再读写 sidecar", () => {
+  it("已有 AVIF 本体但没有任何 .json 时，命中照常工作", async () => {
+    const storage = memoryStorage()
+    const key = imageCacheKey({ url: "https://cdn.test/a.png" })
+    storage.files.set(key, AVIF_STUB)
+    const codec = fakeCodec()
+    const result = await getCompressedImage(
+      { url: "https://cdn.test/a.png" },
+      { storage, ...codec, ...fakeMeta() },
+    )
+    expect(result.ok && result.hit).toBe(true)
+    expect(codec.calls).toEqual({ download: 0, compress: 0 })
+    expect([...storage.files.keys()]).toEqual([key])
   })
 })

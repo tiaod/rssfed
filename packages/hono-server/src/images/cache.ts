@@ -12,19 +12,18 @@ import {
 import { blurhashFromImage } from "./blurhash"
 
 /**
- * 图片缓存服务：把「远程图片 URL + 压缩参数」映射成一份**内容寻址**的 AVIF 缓存对象。
+ * 图片缓存：把「远程图片 URL + 压缩参数」映射成一份**内容寻址**的 AVIF 缓存对象。
  *
- * 存在的理由：同一张正文图可能在多个 feed 库里按不同的 per-feed 参数各压一版
- * （抓取路径），也可能被本次抓取之外的东西反复取用。如果每处都重新下载压缩一遍，
- * CPU 与带宽会随调用次数放大。这里用 `sha256(url + 有效参数)` 做 key 落进 Storage，
- * 于是「同一 URL + 同一参数」全实例只下载压缩一次，路径只是读一个对象。
+ * 唯一消费者是抓取路径（`rss/entry-images.ts`）：同一条图片 URL 会在多个条目里重复出现
+ * （公众号文章内嵌的模板图、站点图标等），第二次起直接读缓存对象，不再下载 + 压缩。
+ * 缓存对象只是**中间产物** —— 条目真正要的是 CouchDB 附件；缓存只为省重复的下载/编码。
  *
- * 它不是 HTTP 缓存：没有 TTL、没有失效，key 里带 `IMAGE_CACHE_VERSION`，
- * 改压缩实现（影响已有字节的含义）时递增版本即可让旧对象自然被绕过。
+ * 因为它可以随时重建，所以允许过期：老对象由 `images/cache-gc.ts` 按
+ * `IMAGE_CACHE_TTL_DAYS`（默认 30 天）清掉；清掉之后最多是「下次遇到同 URL 时重下一遍」，
+ * 不影响任何已入库数据。key 里带 `IMAGE_CACHE_VERSION`，改压缩实现时递增版本即可让旧对象失效。
  *
- * 消费方：
- *   - `rss/entry-images.ts`（源库附件，抓取路径 —— **唯一**产出条目附件的地方）
- *   - `GET /api/images/cached`（按需压缩，浏览器/客户端直取）
+ * 没有 sidecar 元数据：命中时用 `probeImageSize` / `blurhashFromImage` 从 AVIF 本体现算
+ * （头部解码是毫秒级），省掉每张图一个 JSON 对象的写与读。
  */
 
 /** 缓存 key 的版本：改 key 结构或压缩实现语义时 +1（旧对象随即失效） */
@@ -32,14 +31,6 @@ export const IMAGE_CACHE_VERSION = 1
 
 /** 缓存对象在 Storage 里的前缀（与上传类附件的 key 空间分开，便于按前缀清理/统计） */
 export const IMAGE_CACHE_PREFIX = "image-cache"
-
-/** 压缩参数的有效范围（路由侧同样用它校验 query，避免非法参数各写一份） */
-export const IMAGE_PARAM_LIMITS = {
-  minWidth: 16,
-  maxWidth: 4096,
-  minQuality: 1,
-  maxQuality: 100,
-} as const
 
 /** 单张图的压缩请求：url 必填，参数缺省时走全局默认（见 images/fetch.ts） */
 export interface CompressedImageRequest {
@@ -51,7 +42,7 @@ export interface CompressedImageRequest {
 
 /** 压缩后的图片本体与元数据 */
 export interface CompressedImage {
-  /** Storage 里的对象 key（AVIF 本体）。尺寸元数据在同 key + `.json` */
+  /** Storage 里的对象 key（AVIF 本体） */
   key: string
   buffer: Buffer
   contentType: "image/avif"
@@ -62,10 +53,8 @@ export interface CompressedImage {
   hit: boolean
   /**
    * 占位图用的 BlurHash（见 images/blurhash.ts）。
-   *
-   * 跟着**压缩参数**一起缓存在 sidecar 里：同一张图 + 同一组参数只算一次，
-   * 之后不管被多少个 feed 库、多少个用户库取用，直接读 sidecar。
-   * 算不出来（sidecar 缺失且解码失败）时为 undefined —— 前端退化为透明占位。
+   * 命中路径同样现场计算（不再有 sidecar 可读）；算不出来时为 undefined，
+   * 前端退化为透明占位，不影响取图本身。
    */
   blurhash?: string
 }
@@ -81,18 +70,6 @@ export interface ImageCacheDeps {
   compress?: typeof compressToAvif
   size?: typeof probeImageSize
   blurhash?: typeof blurhashFromImage
-}
-
-/** sidecar（`<key>.json`）里记录的元数据。字段都可选：老对象可能只有一部分 */
-interface CachedImageMeta {
-  sourceUrl?: string
-  width?: number
-  height?: number
-  blurhash?: string
-  /** 压缩参数（仅供排查，读路径不用） */
-  maxWidth?: number
-  quality?: number
-  createdAt?: string
 }
 
 /** 同进程内同一 key 的并发合并：同一批条目里重复出现的图片不必压两遍 */
@@ -135,40 +112,10 @@ export function isFetchableImageUrl(raw: string): boolean {
   }
 }
 
-/**
- * 是否指向本机 / 私有网段 / 链路本地地址（含云元数据地址）。
- *
- * 只用于**对外接口**的兜底（见 routes/images.ts）：内部抓取路径不加这道门，
- * 因为正文图本来就可能来自内网里的自建图床/RSSHub —— 那些地址是订阅源内容带进来的，
- * 与「任何登录用户都能让服务端请求任意 URL」是两件事。按主机名字面量判断，
- * 不做 DNS 解析（DNS rebinding 不在本层防御范围内）。
- */
-export function isPrivateHost(raw: string): boolean {
-  let host: string
+/** 按 key 读缓存本体；不存在或读失败一律返回 null（缓存是加速手段，不该把可用性拖下水） */
+async function readCachedBody(key: string, store: Storage): Promise<Buffer | null> {
   try {
-    host = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "")
-  } catch {
-    return true // 解析不了的一律按危险处理
-  }
-  if (host === "localhost" || host.endsWith(".localhost") || host === "metadata.google.internal") return true
-  if (host === "::1" || host === "0:0:0:0:0:0:0:1") return true
-  if (host.startsWith("fe80:") || host.startsWith("fc") || host.startsWith("fd")) return true // IPv6 链路本地/唯一本地
-  // IPv4（含 127.0.0.0/8、10/8、172.16/12、192.168/16、169.254/16、0.0.0.0）
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host)
-  if (!m) return false
-  const [a, b] = [Number(m[1]), Number(m[2])]
-  if (a === 0 || a === 127 || a === 10) return true
-  if (a === 169 && b === 254) return true
-  if (a === 172 && b >= 16 && b <= 31) return true
-  if (a === 192 && b === 168) return true
-  return false
-}
-
-/** 直接按 key 读缓存对象（路由命中路径用；不存在返回 null） */
-export async function readCachedImage(key: string, deps: ImageCacheDeps = {}): Promise<{ content: Buffer, contentType: string } | null> {
-  const store = deps.storage ?? defaultStorage
-  try {
-    return await store.readWithMeta(key)
+    return (await store.readWithMeta(key)).content
   } catch {
     return null
   }
@@ -179,16 +126,13 @@ export async function readCachedImage(key: string, deps: ImageCacheDeps = {}): P
  *
  * 失败一律以 `{ ok:false, reason }` 返回（不抛错）：调用方是批量聚合循环，
  * 单张失败只该记一次原因，不该中断整批。
- *
- * `allowPrivateHosts=false` 时拒绝内网地址（对外接口用，见 isPrivateHost）。
  */
 export async function getCompressedImage(
   req: CompressedImageRequest,
-  deps: ImageCacheDeps & { allowPrivateHosts?: boolean } = {},
+  deps: ImageCacheDeps = {},
 ): Promise<CompressedImageResult> {
   const { url, maxWidth, quality, maxSourceBytes } = normalizeImageRequest(req)
   if (!isFetchableImageUrl(url)) return { ok: false, reason: "invalid-url" }
-  if (deps.allowPrivateHosts === false && isPrivateHost(url)) return { ok: false, reason: "invalid-url" }
 
   const key = imageCacheKey(req)
   const pending = inflight.get(key)
@@ -201,58 +145,33 @@ export async function getCompressedImage(
   const makeBlurhash = deps.blurhash ?? blurhashFromImage
 
   const task = (async (): Promise<CompressedImageResult> => {
-    // ① 命中：本体在就行，尺寸元数据缺失时现算（老对象 / 元数据写失败）
-    const cached = await readCachedImage(key, { storage: store })
+    // ① 命中：本体在就够了，尺寸与 blurhash 从 AVIF 现算
+    const cached = await readCachedBody(key, store)
     if (cached) {
-      const meta = await readCachedMeta(key, store)
-      const size = meta ?? await probeSize(cached.content)
-      // blurhash 是后加的字段：老对象的 sidecar 里没有。现算一次并回写 sidecar ——
-      // 代价是命中路径多一次 32px 解码，换来的是不必为了占位图重新下载源图。
-      // 算不出来就当作没有（前端退化 1×1 透明），不影响取图本身。
-      let blurhash = meta?.blurhash
-      if (!blurhash) {
-        blurhash = (await makeBlurhash(cached.content)) ?? undefined
-        if (blurhash) {
-          await writeCachedMeta(key, store, {
-            ...(meta ?? {}),
-            width: size?.width,
-            height: size?.height,
-            blurhash,
-          })
-        }
-      }
+      const size = await probeSize(cached)
+      const blurhash = (await makeBlurhash(cached)) ?? undefined
       return {
         ok: true,
         key,
-        buffer: cached.content,
+        buffer: cached,
         contentType: "image/avif",
         width: size?.width ?? 0,
         height: size?.height ?? 0,
-        sourceUrl: meta?.sourceUrl ?? url,
+        sourceUrl: url,
         hit: true,
         blurhash,
       }
     }
 
-    // ② 未命中：下载 → 压缩 → 落盘（先本体后元数据：元数据缺失可由本体补，反之不行）
+    // ② 未命中：下载 → 压缩 → 落盘
     const outcome = await download(url, maxSourceBytes)
     if (!outcome.buffer) return { ok: false, reason: outcome.reason ?? "network" }
     const compressed = await compress(outcome.buffer, { maxWidth, quality })
     if (!compressed) return { ok: false, reason: "decode" }
-    // 占位图字符串与压缩字节一起落 sidecar：同一张图 + 同一组参数只算这一次
     const blurhash = (await makeBlurhash(compressed.buffer)) ?? undefined
     // 落盘失败只降级为「这次没缓存」：缓存是加速手段，不该让它把可用性拖下水
     //（对象存储抖动 / 本地盘满 / 测试里没配 Storage 都走这里）
     await store.write(compressed.buffer, key, "image/avif").catch(() => {})
-    await writeCachedMeta(key, store, {
-      sourceUrl: url,
-      width: compressed.width,
-      height: compressed.height,
-      blurhash,
-      maxWidth,
-      quality,
-      createdAt: new Date().toISOString(),
-    })
     return {
       ok: true,
       key,
@@ -271,30 +190,5 @@ export async function getCompressedImage(
     return await task
   } finally {
     inflight.delete(key)
-  }
-}
-
-/**
- * 写 sidecar（尺寸 / 来源 / blurhash）。
- *
- * 失败只丢元数据，不影响本次取图：下次读本体会用 probeImageSize 现算尺寸、
- * blurhash 也会重新算一遍（见命中路径）。
- */
-async function writeCachedMeta(key: string, store: Storage, meta: CachedImageMeta): Promise<void> {
-  await store
-    .write(Buffer.from(JSON.stringify(meta)), `${key}.json`, "application/json")
-    .catch(() => {
-      // 元数据写失败不影响使用（下次读本体现算）
-    })
-}
-
-/** 读 sidecar 元数据；不存在或损坏返回 null */
-async function readCachedMeta(key: string, store: Storage): Promise<CachedImageMeta | null> {
-  try {
-    const raw = await store.read(`${key}.json`)
-    const parsed = JSON.parse(raw.toString("utf8")) as CachedImageMeta
-    return parsed
-  } catch {
-    return null
   }
 }

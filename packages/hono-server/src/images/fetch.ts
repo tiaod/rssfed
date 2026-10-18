@@ -6,12 +6,10 @@ import { httpAgent, httpsAgent, withProxyFallback } from "../rss/parser"
 /**
  * 单张远程图片的下载与压缩原语。
  *
- * 从 `rss/entry-images.ts` 抽出来是因为它现在有两个消费者：
- *   1. `rss/entry-images.ts` —— 按**源**的策略把正文图写进 feed 库附件；
- *   2. `images/cache.ts` —— 按**用户**的策略把同一张图写进各自的 timeline 库附件，
- *      以及 `GET /api/images/cached` 的按需压缩（见 routes/images.ts）。
- * 两边必须用同一套下载/解码/压缩实现：不然「同一张图在 feed 库能缓存、在用户库缓存不了」
- * 这种差异会非常难查，也违背了内容寻址缓存「同一 URL + 同一参数只压一次」的前提。
+ * 两个消费者共用同一套实现：
+ *   1. `rss/entry-images.ts` —— 按**源**的图片策略把正文图压进 feed 库附件；
+ *   2. `images/cache.ts` —— 内容寻址的去重缓存（同 URL + 同参数只下一次、压一次）。
+ * 必须共用：否则「缓存里存的字节」与「写进附件的字节」可能对不上。
  */
 
 /** 压缩后最大宽度（保持宽高比，小图不放大） */
@@ -172,7 +170,7 @@ export async function compressToAvif(
 /**
  * 只读一张已压缩图片的像素尺寸。
  *
- * 给缓存命中但元数据 sidecar 缺失的场景兜底（见 images/cache.ts）：解码一张 AVIF 的头部
+ * 给缓存命中路径现算尺寸（见 images/cache.ts）：解码一张 AVIF 的头部
  * 比重新下载压缩便宜得多，代价是每张图一次 sharp metadata。
  */
 export async function probeImageSize(buffer: Buffer): Promise<{ width: number, height: number } | null> {

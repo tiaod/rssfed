@@ -13,6 +13,7 @@ import { verifyProxyAuthReady } from "./couchdb/proxy-auth"
 import { shutdownWorkers } from "./workers"
 import { shutdownBots, ensureFedifySchema } from "./bots"
 import { bootstrapAdminFromEnv } from "./bootstrap-admin"
+import { startImageCacheGc } from "./images/cache-gc"
 
 const port = parseInt(process.env.PORT ?? "3001")
 
@@ -107,6 +108,9 @@ ensureFedifySchema().then(() => {
 }).catch((err) => {
   console.error("Failed to ensure Fedify schema:", err)
 })
+
+// 图片缓存（抓取去重的中间产物）按 IMAGE_CACHE_TTL_DAYS 定期清理：异步跑，不阻塞启动
+startImageCacheGc()
 
 console.log(`Server running on http://localhost:${port}`)
 

@@ -30,6 +30,9 @@ vi.mock("../storage", () => {
         files.delete(key)
       },
       exists: async (key: string) => files.has(key),
+      list: async (prefix: string) => [...files.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([key, content]) => ({ key, lastModified: new Date(0), size: content.length })),
       getPublicUrl: () => undefined,
     },
   }

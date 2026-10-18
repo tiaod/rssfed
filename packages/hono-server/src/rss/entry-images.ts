@@ -202,8 +202,8 @@ export const FEED_ICON_CACHE_VERSION = 2
  * 下载并压缩单张图片（feed 图标 / 头像等），返回附件数据与 CachedImage 元数据。
  * 失败返回 null（含缓存服务不可用）。
  *
- * 去重交给内容寻址缓存（同 URL + 同参数全局只压一次，见 images/cache.ts 的 inflight 表），
- * 这里不再自己维护进程内 Map —— 那份 Map 只活在一个进程里，多实例部署时并不共享。
+ * 去重交给内容寻址缓存与它进程内的 inflight 表（同 URL + 同参数只压一次，
+ * 见 images/cache.ts）；部署是单副本，进程内合并已经够用。
  */
 export async function cacheSingleImage(url: string): Promise<{ image: CachedImage, data: Buffer } | null> {
   const result = await getCompressedImage({ url, maxWidth: FEED_ICON_MAX_WIDTH })

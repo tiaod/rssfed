@@ -137,11 +137,10 @@
   ```
 - **解法**：重启 couchdb（`docker restart <couchdb 容器>`；不能只 `up -d` 别的服务）。**根因通常是 fd 不够**：容器默认 `nofile=1024`，实测 beam 在几十条复制下就占到 900+，调度器里开始报 `{conn_failed,{error,emfile}}` / `sel_conn_closed` / `req_timedout`，`open_port` 起 couchjs 失败后 `couch_proc_manager` 就永久卡住了。两个 compose 的 couchdb 服务已加 `ulimits.nofile: 65536`（配合 `deploy/couchdb-replicator.ini` 的 `max_dbs_open`），改完要**重建**容器（`docker compose up -d couchdb`）才生效，`docker restart` 不会应用新的 ulimit。重启后服务端会自己补装设计文档与过滤器（`ensure*` 失败不再进缓存），不需要手工修库；下一轮聚合会把脏源重新入队。
 
-### 图片接口返回 502 `image_unavailable`
+### 条目没有配图：抓取时图片压缩失败
 
-- **现象**：`GET /api/images/cached?url=…&w=…&q=…` 返回 502，响应体 `{"error":"image_unavailable","reason":…}`。
-- **原因**：看 `reason`（取值见 `images/fetch.ts` 的 `ImageFailReason`）——`invalid-url`（URL 不合法，或**公网接口**拿到内网/回环地址被 `isPrivateHost` 挡掉，防 SSRF）、`http-status`（403 防盗链 / 404 / 5xx）、`content-type`（返回的不是图片）、`too-large`（源图超过 `maxSourceImageBytes`）、`timeout` / `network`（连不上或读取超时）、`redirect-limit`（跳转超过 3 次）、`decode`（sharp 解不出来）。这条链路只在**抓取**时跑：失败只记数不阻塞（worker 打的一行 `[EntryImages] … 原因[…]`），条目照常入库、只是没有附件，聚合不会再重试。
-- **注意**：`invalid-url` 有两种来源（URL 本身非法 vs. 内网地址被拒），响应里不区分；本地 dev 用内网图床调试时要在调用侧显式 `allowPrivateHosts`（见 `images/cache.ts` 的依赖注入），抓取路径与公网接口的默认值不同。
+- **现象**：worker 日志里出现 `[EntryImages] … 失败 N 张 原因[…]`，对应条目照常入库、只是没有图片附件。
+- **原因**：看 `reason`（取值见 `images/fetch.ts` 的 `ImageFailReason`）——`http-status`（403 防盗链 / 404 / 5xx）、`content-type`（返回的不是图片）、`too-large`（源图超过 `maxSourceImageBytes`）、`timeout` / `network`（连不上或读取超时）、`redirect-limit`（跳转超过 3 次）、`decode`（sharp 解不出来）、`invalid-url`（地址不合法或不是 http(s)）。这条链路只在**抓取**时跑，失败只记数不阻塞，聚合不会再重试。
 - **解法**：先直接 `curl -I <源图 URL>` 确认可达；大图调大 `MAX_SOURCE_IMAGE_BYTES`，或在该 feed 的图片策略里单独调（订阅源管理页 / `feeds` 表的图片列）。同一张图 + 同一组参数只会失败一次，不会反复重试拖慢抓取；已经入库的条目要等下次抓到新条目或按源重抓才会带上图。
 
 ### 同步全报 `Database does not exist`：库名还登记着，库却没了

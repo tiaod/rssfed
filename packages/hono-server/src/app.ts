@@ -7,7 +7,6 @@ import { botsRouter } from "./routes/bots"
 import { userRouter } from "./routes/user"
 import { userTokensRouter } from "./routes/user-tokens"
 import { couchdbRouter, COUCHDB_ROUTE_PREFIX } from "./routes/couchdb"
-import { imagesRouter, IMAGES_ROUTE_PREFIX } from "./routes/images"
 import { timelineRouter, TIMELINE_ROUTE_PREFIX } from "./routes/timeline"
 import { siteSettingsPublicRouter, siteSettingsAdminRouter } from "./routes/site-settings"
 import { mcpRouter } from "./routes/mcp"
@@ -34,7 +33,6 @@ app.route("/api/bots", botsRouter)
 app.route("/api/user", userRouter)
 app.route("/api/user/tokens", userTokensRouter)
 app.route(COUCHDB_ROUTE_PREFIX, couchdbRouter)
-app.route(IMAGES_ROUTE_PREFIX, imagesRouter)
 app.route(TIMELINE_ROUTE_PREFIX, timelineRouter)
 app.route("/api/site-settings", siteSettingsPublicRouter)
 app.route("/api/admin/site-settings", siteSettingsAdminRouter)
