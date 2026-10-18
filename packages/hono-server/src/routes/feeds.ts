@@ -150,7 +150,9 @@ feedsRouter.post("/import-opml", requireAuth, async (c) => {
         await mapWithConcurrency(unique, 5, async (item) => {
           if (clientGone) return
           try {
-            const meta = await ensureFeedRegistered(item)
+            // 导入不做内联探测：标题用 OPML 的，内容交给 worker 首抓（几十上百个源同步下载会很慢，
+            // 且已注册的源还会因此白下一遍，见 ensureFeedRegistered 注释）
+            const meta = await ensureFeedRegistered(item, { probe: false })
             const subscribed = await addSubscriptionIfAbsent(userDb, item, meta)
             if (subscribed) imported++
             else skipped++

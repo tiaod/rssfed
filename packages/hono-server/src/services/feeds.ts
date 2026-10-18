@@ -49,19 +49,34 @@ export async function resolveFeedId(url: string): Promise<string> {
 
 /**
  * 确保 feed 已登记：PostgreSQL 注册表 + per-feed CouchDB 库。
- * 首轮解析失败不阻塞（用 OPML 标题兜底），统一入队抓取（jobId 去重）。
+ *
+ * 对**已注册**的 feed：不再联网探测（注册表里已有元信息），也不重复入队抓取 ——
+ * 调度器本来就在轮询它，重复入队只会让同一个源多下一次。OPML 重复导入时这能省掉
+ * 「每个源先内联下载一遍 + worker 再下载一遍」的两份浪费。
+ *
+ * 对**新** feed：默认内联探测一次拿标题/描述（单次添加需要即时确认），
+ * `probe: false` 时跳过 —— OPML 导入用 OPML 里的标题兜底，真正的抓取交给 worker，
+ * 不必在导入请求里同步下载几十上百个源（首轮解析失败也不阻塞，错误状态由 worker 标记）。
  */
-export async function ensureFeedRegistered(item: OpmlFeed): Promise<FeedMeta> {
-  const feedId = await resolveFeedId(item.url)
+export async function ensureFeedRegistered(
+  item: OpmlFeed,
+  options: { probe?: boolean } = {},
+): Promise<FeedMeta> {
+  const probe = options.probe ?? true
+  // 一次查询同时拿到 id 与「是否已注册」，避免 resolveFeedId 之后再查一遍
+  const existing = await db.query.feeds.findFirst({ where: eq(feeds.url, item.url) })
+  const feedId = existing?.id ?? deriveFeedId(item.url)
 
   let parsed: ParsedFeed | null = null
-  try {
-    parsed = await parseFeedUrl(item.url)
-  } catch {
-    // 忽略：用标题兜底，错误状态由 Worker 抓取时标记
+  if (!existing && probe) {
+    try {
+      parsed = await parseFeedUrl(item.url)
+    } catch {
+      // 忽略：用标题兜底，错误状态由 Worker 抓取时标记
+    }
   }
 
-  const title = parsed?.title ?? item.title ?? item.url
+  const title = parsed?.title ?? existing?.title ?? item.title ?? item.url
   await db.insert(feeds).values({
     id: feedId,
     url: item.url,
@@ -86,14 +101,14 @@ export async function ensureFeedRegistered(item: OpmlFeed): Promise<FeedMeta> {
     } as any)
   }
 
-  // 无论首轮解析成败都入队一次抓取（enqueueFetch 内含 jobId 去重与旧记录清理）
-  await enqueueFetch(feedId, item.url)
+  // 只有新 feed 需要首抓；已注册的由调度器按轮次抓（手动「立即抓取」走 refetchFeed）
+  if (!existing) await enqueueFetch(feedId, item.url)
 
   return {
     feedId,
     title,
-    siteUrl: parsed?.link,
-    description: parsed?.description,
+    siteUrl: parsed?.link ?? existing?.siteUrl ?? undefined,
+    description: parsed?.description ?? existing?.description ?? undefined,
   }
 }
 

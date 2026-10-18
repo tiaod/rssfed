@@ -2,6 +2,7 @@ import http from "node:http"
 import https from "node:https"
 import sharp from "sharp"
 import { httpAgent, httpsAgent, withProxyFallback } from "../rss/parser"
+import { envInt } from "../env"
 
 /**
  * 单张远程图片的下载与压缩原语。
@@ -13,11 +14,11 @@ import { httpAgent, httpsAgent, withProxyFallback } from "../rss/parser"
  */
 
 /** 压缩后最大宽度（保持宽高比，小图不放大） */
-export const DEFAULT_MAX_IMAGE_WIDTH = parseInt(process.env.MAX_IMAGE_WIDTH ?? "1200")
+export const DEFAULT_MAX_IMAGE_WIDTH = envInt("MAX_IMAGE_WIDTH", 1200)
 /** AVIF 编码质量：越低体积越小（正文图片 40-50 即可接受） */
-export const DEFAULT_AVIF_QUALITY = parseInt(process.env.AVIF_QUALITY ?? "45")
+export const DEFAULT_AVIF_QUALITY = envInt("AVIF_QUALITY", 45, { min: 0, max: 100 })
 /** 源图下载大小上限（字节），超出即放弃缓存 */
-export const DEFAULT_MAX_SOURCE_IMAGE_BYTES = parseInt(process.env.MAX_SOURCE_IMAGE_BYTES ?? "8388608")
+export const DEFAULT_MAX_SOURCE_IMAGE_BYTES = envInt("MAX_SOURCE_IMAGE_BYTES", 8388608)
 /** 单张源图下载超时（毫秒） */
 export const IMAGE_DOWNLOAD_TIMEOUT = 10_000
 /** 限制输入像素数，防止超大图耗尽内存 */

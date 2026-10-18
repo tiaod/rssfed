@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest"
-import { fetchIntervalMs, isFeedDue, type FetchScheduleOptions, type FeedScheduleState } from "../workers/fetch-schedule"
+import {
+  fetchIntervalMs,
+  isFeedDue,
+  feedJitterMs,
+  type FetchScheduleOptions,
+  type FeedScheduleState,
+} from "../workers/fetch-schedule"
 
 const MIN = 60 * 1000
 const HOUR = 60 * MIN
@@ -95,5 +101,74 @@ describe("isFeedDue：到期判定（含一个 tick 的容差）", () => {
   it("关闭自适应时每轮都到期（旧行为）", () => {
     const disabled: FetchScheduleOptions = { ...opts, enabled: false }
     expect(isFeedDue({ ...state(60 * DAY), lastFetchedAt: new Date(NOW - 1 * MIN) }, disabled, NOW)).toBe(true)
+  })
+})
+
+describe("无验证器源：降频档位提前一档", () => {
+  it("quiet 1h → 30m；6h → 1h；2d → 3h（有验证器源分别是 15m / 30m / 1h）", () => {
+    expect(fetchIntervalMs(state(1 * HOUR, { hasFetchValidators: false }), opts, NOW)).toBe(2 * BASE)
+    expect(fetchIntervalMs(state(6 * HOUR, { hasFetchValidators: false }), opts, NOW)).toBe(4 * BASE)
+    expect(fetchIntervalMs(state(2 * DAY, { hasFetchValidators: false }), opts, NOW)).toBe(12 * BASE)
+  })
+
+  it("安静不足 30m 仍用基础间隔（新内容不会迟到）", () => {
+    expect(fetchIntervalMs(state(20 * MIN, { hasFetchValidators: false }), opts, NOW)).toBe(BASE)
+  })
+
+  it("有验证器或状态未知（老数据/从未抓过）不提前降频", () => {
+    expect(fetchIntervalMs(state(1 * HOUR, { hasFetchValidators: true }), opts, NOW)).toBe(BASE)
+    expect(fetchIntervalMs(state(1 * HOUR, { hasFetchValidators: null }), opts, NOW)).toBe(BASE)
+    expect(fetchIntervalMs(state(1 * HOUR), opts, NOW)).toBe(BASE)
+  })
+
+  it("FETCH_NO_VALIDATOR_SLOWDOWN=0 时关闭提前", () => {
+    const noSlow: FetchScheduleOptions = { ...opts, slowNonValidator: false }
+    expect(fetchIntervalMs(state(1 * HOUR, { hasFetchValidators: false }), noSlow, NOW)).toBe(BASE)
+  })
+})
+
+describe("失败源：按连续失败次数指数退避", () => {
+  function errorState(streak: number | null): FeedScheduleState {
+    return state(30 * DAY, { errorMessage: "HTTP 403", errorStreak: streak })
+  }
+
+  it("第 1 次失败仍按基础间隔重试（瞬时抖动快速恢复）", () => {
+    expect(fetchIntervalMs(errorState(1), opts, NOW)).toBe(BASE)
+    expect(fetchIntervalMs(errorState(null), opts, NOW)).toBe(BASE)
+  })
+
+  it("连续失败 2/3/4 次 → 30m / 1h / 2h", () => {
+    expect(fetchIntervalMs(errorState(2), opts, NOW)).toBe(2 * BASE)
+    expect(fetchIntervalMs(errorState(3), opts, NOW)).toBe(4 * BASE)
+    expect(fetchIntervalMs(errorState(4), opts, NOW)).toBe(8 * BASE)
+  })
+
+  it("退避倍数有上限，且被 FETCH_MAX_INTERVAL 封顶", () => {
+    expect(fetchIntervalMs(errorState(6), opts, NOW)).toBe(6 * HOUR)
+    expect(fetchIntervalMs(errorState(50), opts, NOW)).toBe(6 * HOUR)
+  })
+
+  it("错误源的 isFeedDue 也按退避间隔判定", () => {
+    expect(isFeedDue({ ...errorState(3), lastFetchedAt: new Date(NOW - 40 * MIN) }, opts, NOW)).toBe(false)
+    expect(isFeedDue({ ...errorState(3), lastFetchedAt: new Date(NOW - 55 * MIN) }, opts, NOW)).toBe(true)
+  })
+})
+
+describe("feedJitterMs：确定性错峰", () => {
+  it("同一 feed 恒定，落在窗口内", () => {
+    const a = feedJitterMs("feed_abc", 90_000)
+    expect(feedJitterMs("feed_abc", 90_000)).toBe(a)
+    expect(a).toBeGreaterThanOrEqual(0)
+    expect(a).toBeLessThan(90_000)
+  })
+
+  it("不同 feed 通常落在不同点（不是所有 job 同一延迟）", () => {
+    const values = new Set(["feed_a", "feed_b", "feed_c", "feed_d", "feed_e"].map(id => feedJitterMs(id, 90_000)))
+    expect(values.size).toBeGreaterThan(1)
+  })
+
+  it("窗口 <= 0 时不抖动", () => {
+    expect(feedJitterMs("feed_abc", 0)).toBe(0)
+    expect(feedJitterMs("feed_abc", -1)).toBe(0)
   })
 })

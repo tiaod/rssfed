@@ -1,6 +1,7 @@
 import { Queue, Worker, type Job } from "bullmq"
 import { connection, createWorkerConnection } from "./connection"
 import { syncSubscriptionSource } from "../services/timeline"
+import { envInt } from "../env"
 
 /**
  * 「按需单源同步」队列：一个 job = 一次 (某个源库 → 某个用户的聚合库) 的一次性 CouchDB 复制。
@@ -21,7 +22,7 @@ import { syncSubscriptionSource } from "../services/timeline"
  */
 export const sourceSyncQueue = new Queue("rss-timeline-sync", { connection })
 
-const SYNC_CONCURRENCY = Math.max(1, parseInt(process.env.TIMELINE_SYNC_CONCURRENCY ?? "4") || 4)
+const SYNC_CONCURRENCY = envInt("TIMELINE_SYNC_CONCURRENCY", 4)
 
 export interface SourceSyncJobData {
   userId: string

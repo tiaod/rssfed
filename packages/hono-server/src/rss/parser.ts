@@ -6,6 +6,7 @@ import { parseFeed } from "feedsmith"
 import { HttpProxyAgent } from "http-proxy-agent"
 import { HttpsProxyAgent } from "https-proxy-agent"
 import { rewriteRssHubUrl } from "./rsshub"
+import { envInt } from "../env"
 
 /**
  * 抓取专用代理（只作用于订阅抓取与图片缓存）。
@@ -30,9 +31,11 @@ const NO_PROXY = (process.env.RSS_FETCH_NO_PROXY || process.env.rss_fetch_no_pro
 /** 没有路由记忆时先试哪条：proxy（默认，被墙站点快）| direct（省代理流量） */
 const PREFER_DIRECT = (process.env.RSS_FETCH_PREFER || process.env.rss_fetch_prefer || "proxy").toLowerCase() === "direct"
 
-// 连接级代理可复用，创建一次即可（内部有连接池）
-export const httpAgent = PROXY ? new HttpProxyAgent(PROXY) : undefined
-export const httpsAgent = PROXY ? new HttpsProxyAgent(PROXY) : undefined
+// 连接级代理可复用，创建一次即可（内部有连接池）。keepAlive 让同一目标的后续请求复用
+// 已建立的 CONNECT 隧道：代理链路每请求省一次 TCP+TLS 握手（2026-10-18 实测同一 host
+// 连续请求 ~700ms → ~180ms/次），对「一个 tick 里几十个请求打同一个 host」收益最明显。
+export const httpAgent = PROXY ? new HttpProxyAgent(PROXY, { keepAlive: true }) : undefined
+export const httpsAgent = PROXY ? new HttpsProxyAgent(PROXY, { keepAlive: true }) : undefined
 
 /**
  * 该 URL 是否应走抓取代理：未配置代理时恒为 false；
@@ -315,6 +318,20 @@ const CLIENT_UA = "RSSFed/0.1.0"
 const ACCEPT_ENCODING = "gzip, deflate, br"
 const MAX_REDIRECTS = 5
 
+/**
+ * 抓取响应体大小上限（压缩态 / 解压后）。
+ *
+ * 正常订阅源是几百 KB 量级（实测 gzip 后 4KB~134KB）；几十 MB 只可能是异常源、
+ * 被投毒的内容或压缩炸弹。原先两处都是无上限收集，一个坏源就能把 4 个并发 worker
+ * 的内存顶爆 —— 抓取失败只该是一个 job 失败，不该拖垮进程。
+ */
+const MAX_FEED_BYTES = envInt("MAX_FEED_BYTES", 32 * 1024 * 1024)
+const MAX_FEED_DECODED_BYTES = envInt("MAX_FEED_DECODED_BYTES", 64 * 1024 * 1024)
+/** 上限的展示形式（错误信息里用） */
+function describeBytes(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${Math.round(bytes / 1024 / 1024)}MB` : `${Math.round(bytes / 1024)}KB`
+}
+
 const gunzip = promisify(zlib.gunzip)
 const inflate = promisify(zlib.inflate)
 const inflateRaw = promisify(zlib.inflateRaw)
@@ -326,16 +343,32 @@ function headerValue(value: string | string[] | undefined): string | undefined {
   return value
 }
 
+/** 解压配置：用 zlib 的 maxOutputLength 直接给解压结果设上限（比解压完再量省内存） */
+const DECODE_OPTS: zlib.ZlibOptions = { maxOutputLength: MAX_FEED_DECODED_BYTES }
+
+/** zlib 因 maxOutputLength 拒绝输出时的错误（gunzip / inflate / brotli 共用） */
+function isOutputTooLarge(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code
+  return code === "ERR_BUFFER_TOO_LARGE" || (err instanceof Error && /maxOutputLength|output length/i.test(err.message))
+}
+
 /** 解一层 Content-Encoding；不认识的编码直接报错（比把压缩字节当 XML 解析好排查） */
 async function decodeOne(body: Buffer, enc: string): Promise<Buffer> {
   try {
-    if (enc === "gzip" || enc === "x-gzip") return await gunzip(body)
+    if (enc === "gzip" || enc === "x-gzip") return await gunzip(body, DECODE_OPTS)
     if (enc === "deflate") {
       // 少数服务端发的是 raw deflate（无 zlib 头），先按标准 deflate 解，失败再退 raw
-      try { return await inflate(body) } catch { return await inflateRaw(body) }
+      try { return await inflate(body, DECODE_OPTS) } catch (err) {
+        // 超限就别再试 raw 了（同样超限），直接抛给外层转成可读错误
+        if (isOutputTooLarge(err)) throw err
+        return await inflateRaw(body, DECODE_OPTS)
+      }
     }
-    if (enc === "br") return await brotliDecompress(body)
+    if (enc === "br") return await brotliDecompress(body, DECODE_OPTS)
   } catch (err) {
+    if (isOutputTooLarge(err)) {
+      throw new Error(`解压后响应体超过上限（${describeBytes(MAX_FEED_DECODED_BYTES)}）`)
+    }
     throw new Error(`解压响应失败（${enc}）: ${describeError(err)}`)
   }
   throw new Error(`不支持的 Content-Encoding: ${enc}`)
@@ -391,9 +424,31 @@ function requestOnce(url: string, useProxy: boolean, extraHeaders: http.Outgoing
         reject(new Error(`HTTP ${status}`))
         return
       }
+      // 有 Content-Length 时先做一次零成本拒绝；没有的靠下面的流式累计兜底
+      const declaredLength = Number(headerValue(res.headers["content-length"]))
+      if (Number.isFinite(declaredLength) && declaredLength > MAX_FEED_BYTES) {
+        res.destroy()
+        reject(new Error(`响应体超过上限（${describeBytes(MAX_FEED_BYTES)}）`))
+        return
+      }
       const chunks: Buffer[] = []
-      res.on("data", (chunk: Buffer) => chunks.push(chunk))
-      res.on("end", () => resolve({ status, headers: res.headers, body: Buffer.concat(chunks) }))
+      let received = 0
+      let oversized = false
+      res.on("data", (chunk: Buffer) => {
+        if (oversized) return
+        received += chunk.length
+        if (received > MAX_FEED_BYTES) {
+          oversized = true
+          // 不传 Error：传了会 emit 未接管的 error 事件（同 images/fetch.ts 的踩坑）
+          res.destroy()
+          reject(new Error(`响应体超过上限（${describeBytes(MAX_FEED_BYTES)}）`))
+          return
+        }
+        chunks.push(chunk)
+      })
+      res.on("end", () => {
+        if (!oversized) resolve({ status, headers: res.headers, body: Buffer.concat(chunks) })
+      })
       res.on("error", reject)
     })
     req.on("error", reject)
@@ -418,10 +473,7 @@ interface RouteMemo {
  * 与旧实现（只记「代理失败过的域名」）的区别：**直连失败同样要记** —— 否则
  * `RSS_FETCH_PREFER=direct` 下被墙站点每轮抓取都会先撞满一次直连超时。
  */
-const ROUTE_MEMO_TTL_MS = (() => {
-  const raw = parseInt(process.env.RSS_FETCH_ROUTE_TTL || process.env.rss_fetch_route_ttl || "")
-  return Number.isFinite(raw) && raw > 0 ? raw : 30 * 60 * 1000
-})()
+const ROUTE_MEMO_TTL_MS = envInt("RSS_FETCH_ROUTE_TTL", 30 * 60 * 1000)
 const routeMemos = new Map<string, RouteMemo>()
 
 function urlHost(url: string): string {

@@ -6,6 +6,7 @@ import {
   DEFAULT_MAX_SOURCE_IMAGE_BYTES,
   type ImageFailReason,
 } from "../images/fetch"
+import { envInt } from "../env"
 
 /**
  * 条目图片缓存：**按源（feed）的策略**决定一篇正文里缓存哪些图、缓存成什么参数。
@@ -28,7 +29,7 @@ import {
  * 这个值退化为**请求数硬顶**：预算要压缩完才知道大小，一篇上万张 1KB 小图
  * 在填满预算之前会发出海量请求，必须有个上限兜住。
  */
-const DEFAULT_MAX_IMAGE_COUNT = parseInt(process.env.MAX_IMAGE_COUNT ?? "200")
+const DEFAULT_MAX_IMAGE_COUNT = envInt("MAX_IMAGE_COUNT", 200)
 /**
  * 每篇 entry 缓存的附件**总体积**上限（压缩后字节）—— 主约束。
  *
@@ -36,7 +37,7 @@ const DEFAULT_MAX_IMAGE_COUNT = parseInt(process.env.MAX_IMAGE_COUNT ?? "200")
  * 大图自然少存几 张。实测模拟（report/image-cache-diagnosis）：1MB 预算可覆盖
  * 93.4% 的正文图、被截断 140 条；同等覆盖率下比固定 20 张省约 110MB。
  */
-const DEFAULT_MAX_ENTRY_IMAGE_BYTES = parseInt(process.env.MAX_ENTRY_IMAGE_BYTES ?? String(1024 * 1024))
+const DEFAULT_MAX_ENTRY_IMAGE_BYTES = envInt("MAX_ENTRY_IMAGE_BYTES", 1024 * 1024)
 /** 下载并发上限 */
 const DOWNLOAD_CONCURRENCY = 3
 
@@ -184,7 +185,7 @@ async function fetchCompressed(url: string, options: EntryImageOptions): Promise
  * 而 64px/190px 都是 0–15ms（AVIF 解码开销随像素数超线性增长）。
  * 64px 足够覆盖 3x 屏幕密度下的 20px 头像。
  */
-const FEED_ICON_MAX_WIDTH = parseInt(process.env.FEED_ICON_MAX_WIDTH ?? "64")
+const FEED_ICON_MAX_WIDTH = envInt("FEED_ICON_MAX_WIDTH", 64)
 
 /**
  * feed 图标压缩参数版本。

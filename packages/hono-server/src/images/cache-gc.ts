@@ -1,5 +1,6 @@
 import { storage as defaultStorage, type Storage } from "../storage"
 import { IMAGE_CACHE_PREFIX } from "./cache"
+import { envInt } from "../env"
 
 /**
  * 图片缓存清理（GC）。
@@ -25,10 +26,9 @@ const DEFAULT_MAX_DELETES = 20_000
 /** 删除并发 */
 const DELETE_CONCURRENCY = 16
 
-/** 读保留天数：非法/空值回退默认，避免 parseInt("") = NaN 让清理静默失效 */
+/** 读保留天数：空串/非法值回退默认；0/负数表示关闭清理（由调用方判断） */
 function ttlDaysFromEnv(): number {
-  const parsed = Number.parseInt(process.env.IMAGE_CACHE_TTL_DAYS ?? "", 10)
-  return Number.isFinite(parsed) ? parsed : DEFAULT_TTL_DAYS
+  return envInt("IMAGE_CACHE_TTL_DAYS", DEFAULT_TTL_DAYS, { min: -1 })
 }
 
 export interface ImageCacheGcOptions {

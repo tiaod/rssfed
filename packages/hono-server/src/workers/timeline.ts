@@ -3,6 +3,7 @@ import { connection, createWorkerConnection } from "./connection"
 import { enqueueSourceSyncs, shutdownSourceSyncWorker } from "./timeline-sync"
 import { listDirtySubscribers, listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
 import { readReconcileHeartbeat } from "../services/timeline-events"
+import { envInt } from "../env"
 
 /**
  * 用户时间线聚合队列（**拓扑对齐**，不是搬运本身）。
@@ -27,7 +28,7 @@ export const timelineQueue = new Queue("rss-timeline", { connection })
  * （`jobId = userId`，窗口内后来的通知只会命中同一个 job）。
  * 0 = 关闭冷却。
  */
-const RECONCILE_COOLDOWN_MS = parseInt(process.env.TIMELINE_RECONCILE_COOLDOWN ?? "300000")
+const RECONCILE_COOLDOWN_MS = envInt("TIMELINE_RECONCILE_COOLDOWN", 300_000, { min: 0 })
 
 /**
  * 入队一次用户聚合（同一用户已有排队/执行中的 job 时直接复用）。
@@ -92,7 +93,7 @@ export async function enqueueTimelineRebuild(userId: string): Promise<void> {
  * 一轮抓取里可能几十上百个源都有新条目，每个源都通知一次是纯浪费（订阅者查询 + 一轮聚合
  * 都要读状态文档、写心跳）。窗口内的源 id 先攒着，窗口一开一次性把它们换算成订阅者。
  */
-const STALE_NOTIFY_INTERVAL = parseInt(process.env.TIMELINE_NOTIFY_INTERVAL ?? "30000")
+const STALE_NOTIFY_INTERVAL = envInt("TIMELINE_NOTIFY_INTERVAL", 30_000)
 let lastStaleNotifyAt = 0
 /** 节流窗口内攒下来的脏源（窗口一开合并成一次订阅者查询） */
 const pendingStaleSources = new Set<string>()
@@ -158,7 +159,7 @@ export async function scheduleTimelineReconciles(): Promise<void> {
   }
 }
 
-const TIMELINE_INTERVAL = parseInt(process.env.TIMELINE_INTERVAL ?? "300000")
+const TIMELINE_INTERVAL = envInt("TIMELINE_INTERVAL", 300_000)
 const timelineInterval = setInterval(scheduleTimelineReconciles, TIMELINE_INTERVAL)
 
 export async function shutdownTimelineWorkers(): Promise<void> {

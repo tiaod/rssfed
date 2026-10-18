@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 import type { Context, Next } from "hono"
 import { auth } from "../auth"
+import { envInt } from "../env"
 import {
   DEFAULT_TIMELINE_SETTINGS,
   getTimelineSettings,
@@ -32,7 +33,7 @@ export const TIMELINE_ROUTE_PREFIX = "/api/timeline"
  * 都要回填」的同步会远超这个值（单源复制几十毫秒到几秒，几百个源受队列并发限制要几分钟）。
  * 超时后那批同步继续在后台跑完，客户端按「仍在聚合」提示即可。
  */
-const TIMELINE_REFRESH_WAIT_MS = parseInt(process.env.TIMELINE_REFRESH_WAIT_MS ?? "15000")
+const TIMELINE_REFRESH_WAIT_MS = envInt("TIMELINE_REFRESH_WAIT_MS", 15_000)
 
 export const timelineRouter = new Hono<{ Variables: Variables }>()
 

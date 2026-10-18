@@ -224,6 +224,14 @@ export const timelineEvents = pgTable("timeline_events", {
   siteUrl: text("site_url"),
   image: text("image"),
   errorMessage: text("error_message"),
+  /**
+   * 上一次成功响应是否带回 ETag/Last-Modified（条件请求验证器）。
+   * 调度器据此对「每轮只能整份下载」的源提前一档降频（见 workers/fetch-schedule.ts）；
+   * null = 还没成功抓过（按有验证器处理，不提前降频，避免误伤新源）。
+   */
+  hasFetchValidators: boolean("has_fetch_validators"),
+  /** 连续抓取失败次数：调度器按它指数退避；成功抓取一次归零（见 markFeedError / markFeedNotModified） */
+  errorStreak: integer("error_streak").notNull().default(0),
   lastFetchedAt: timestamp("last_fetched_at"),
   /** 最后抓到新条目的时间：Worker 抓取到新条目时更新，供前端"最后更新"展示 */
   lastNewEntryAt: timestamp("last_new_entry_at"),

@@ -422,8 +422,18 @@ async function setDatabaseSecurity(
 
 // ── Per-Feed 数据库 ──
 
-/** 确保 feed 库存在并返回库名（首次调用时生成随机库名并持久化映射） */
-export async function ensureFeedDatabase(feedId: string): Promise<string> {
+/**
+ * 确保 feed 库存在并返回库名（首次调用时生成随机库名并持久化映射）。
+ *
+ * `knownDbName` 是调度器从 PostgreSQL 一并查出来、塞进 job data 的库名：稳态下（库已存在）
+ * 直接跳过「按 feedId 查库名」这一次 PG 查询，只补一次进程内缓存的复制过滤器安装。
+ * 传空/未传（首抓、手工 refetch）时回退到完整解析路径。
+ */
+export async function ensureFeedDatabase(feedId: string, knownDbName?: string | null): Promise<string> {
+  if (knownDbName) {
+    await ensureReplicationFilter(knownDbName)
+    return knownDbName
+  }
   const dbName = await resolveDatabase("feed", feedId, COUCHDB_FEED_PREFIX)
   return dbName
 }
