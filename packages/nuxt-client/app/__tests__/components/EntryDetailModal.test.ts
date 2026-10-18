@@ -396,8 +396,8 @@ describe('EntryDetailModal 正文区的 pointerdown', () => {
     const wrapper = await mountCentered()
     const body = wrapper.get('.relative.min-h-full')
     // 复刻 reka-ui DialogOverlayImpl 的处理器：pointerdown + .left.prevent
-    wrapper.get('.umodal').element.addEventListener('pointerdown', (e) => {
-      if (e.button === 0) e.preventDefault()
+    wrapper.get('.umodal').element.addEventListener('pointerdown', (e: Event) => {
+      if ((e as PointerEvent).button === 0) e.preventDefault()
     })
 
     const event = new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 })
