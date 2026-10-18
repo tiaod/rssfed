@@ -359,6 +359,54 @@ describe('EntryDetailModal', () => {
   })
 })
 
+describe('EntryDetailModal 正文区的 pointerdown', () => {
+  /**
+   * 这两个用例钉住正文区 pointerdown 处理器的两条约束 —— 它们是一对矛盾，缺哪条都会退化：
+   *   - 不能掐断冒泡：reka-ui 的 DismissableLayer 靠这次 pointerdown 冒泡到 document
+   *     清掉「刚才点在层内」的标记，掐断了下一次点遮罩就会被吞掉（要点两次才关）。
+   *   - 但要抵消遮罩层那一下 preventDefault：遮罩层挂着 `pointerdown + .left.prevent`，
+   *     正文嵌在遮罩层里，不抵消的话浏览器不补发 mousedown，正文就没法用鼠标拖选。
+   */
+  async function mountCentered() {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(1)
+    g.entries.value = [makeEntry(1)]
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+    return wrapper
+  }
+
+  it('不掐断冒泡：点正文的 pointerdown 仍会冒泡到祖先（reka-ui 靠它收尾外部点击状态）', async () => {
+    const wrapper = await mountCentered()
+    // 非全屏（scrollable）正文分支的根节点；祖先用 UModal 桩的根模拟遮罩层
+    const body = wrapper.get('.relative.min-h-full')
+    const ancestorSpy = vi.fn()
+    wrapper.get('.umodal').element.addEventListener('pointerdown', ancestorSpy)
+
+    body.element.dispatchEvent(new PointerEvent('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      button: 0
+    }))
+
+    expect(ancestorSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('抵消遮罩层那一次 preventDefault（鼠标左键）：浏览器才会补发 mousedown，正文可拖选', async () => {
+    const wrapper = await mountCentered()
+    const body = wrapper.get('.relative.min-h-full')
+    // 复刻 reka-ui DialogOverlayImpl 的处理器：pointerdown + .left.prevent
+    wrapper.get('.umodal').element.addEventListener('pointerdown', (e) => {
+      if (e.button === 0) e.preventDefault()
+    })
+
+    const event = new PointerEvent('pointerdown', { bubbles: true, cancelable: true, button: 0 })
+    body.element.dispatchEvent(event)
+
+    expect(event.defaultPrevented).toBe(false)
+  })
+})
+
 describe('EntryDetailModal 的历史记录', () => {
   it('地址里没有条目（时间线 / 收藏页）→ 打开时照旧压一条自己的历史', async () => {
     const pushSpy = vi.spyOn(window.history, 'pushState')

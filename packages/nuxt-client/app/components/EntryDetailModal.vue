@@ -114,16 +114,28 @@ function resetScroll() {
 }
 
 /**
- * 拦下正文区的 pointerdown，不让它冒泡到 reka-ui 的遮罩层。
+ * 正文区的 pointerdown：只抵消遮罩层那一次 preventDefault，不阻断冒泡。
  *
- * `scrollable` 的模态（居中弹窗，以及全屏但不固定顶/底栏）在 DOM 上把内容嵌在遮罩层里面，
+ * 背景：`scrollable` 的模态（居中弹窗，以及全屏但不固定顶/底栏）在 DOM 上把内容嵌在遮罩层里面，
  * 而 reka-ui 给遮罩层挂了 `pointerdown` + `.left.prevent`（原意只是「点遮罩本身别选中东西」）。
  * 事件从正文冒泡上去同样会被 preventDefault —— 浏览器随后就不再补发 mousedown，
  * 没有 mousedown，鼠标拖选根本不会开始，正文于是「选不中」。
- * 在正文这一层就地掐断冒泡即可：遮罩层那个处理器除了 preventDefault 什么都不做。
+ *
+ * 但这里不能像原来那样 stopPropagation：reka-ui 的「点击外部关闭」状态机
+ * （DismissableLayer/utils.ts 的 usePointerDownOutside）靠「层内的 pointerdown 冒泡到 document
+ * 时把 isPointerInsideDOMTree 归位」来收尾。事件被掐在正文层就到不了 document，
+ * 「刚才点在层内」这个标记会一直留着 —— 下一次点遮罩时它被误判成「这次也在层内」，弹窗不关；
+ * 再点一次才关（即「点一下正文，再点遮罩要关两次」）。
+ *
+ * 所以保留完整冒泡，只把这一路上的 preventDefault 换成空操作：遮罩层那个处理器
+ * 除了 preventDefault 什么都不做，置空它等价于「没有遮罩层时的默认行为」——
+ * 浏览器照常补发 mousedown、正文可以拖选，而 reka-ui 的状态机也能收到这次 pointerdown 自己收尾。
+ * 正文里更深的处理器（链接、图片放大、Swiper 手势）在本函数之前就已跑完，不受影响。
  */
-function stopPointerDownPropagation(event: PointerEvent) {
-  event.stopPropagation()
+function neutralizeOverlayPreventDefault(event: PointerEvent) {
+  // 只有 scrollable 时正文才嵌在遮罩层里；遮罩层那个处理器也只对左键 preventDefault（.left）
+  if (!isScrollable.value || event.button !== 0) return
+  event.preventDefault = () => {}
 }
 
 // 非全屏（居中弹窗）在触屏设备上的原生划卡：横向位移足够、接近水平、速度够快才翻页
@@ -614,12 +626,12 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
     <template #body>
       <!--
         全屏（手机恒定全屏，桌面选全屏档也是）：Swiper 三槽划卡。
-        两条正文分支都挂 stopPointerDownPropagation，原因见该函数。
+        两条正文分支都挂 neutralizeOverlayPreventDefault，原因见该函数。
       -->
       <div
         v-if="isFullscreen"
         class="article-swiper relative h-full"
-        @pointerdown="stopPointerDownPropagation"
+        @pointerdown="neutralizeOverlayPreventDefault"
       >
         <ClientOnly>
           <!--
@@ -683,7 +695,7 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
         v-else
         ref="bodyRef"
         class="relative min-h-full"
-        @pointerdown="stopPointerDownPropagation"
+        @pointerdown="neutralizeOverlayPreventDefault"
         @touchstart.passive="onTouchStart"
         @touchend.passive="onTouchEnd"
       >

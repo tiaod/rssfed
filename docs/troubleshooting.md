@@ -291,7 +291,15 @@ JS
   1. `scrollable` 的 `UModal`（居中弹窗，以及全屏但不固定顶/底栏）把内容**嵌在遮罩层里面**，reka-ui 给遮罩层挂了 `pointerdown` + `.left.prevent`，事件从正文冒泡上去照样被取消；
   2. 全屏档的 Swiper 默认 `simulateTouch`，把鼠标拖动也当划卡手势，同样在 `pointerdown` 上取消默认行为。
 - **排查手法**：弹窗里执行 `document.addEventListener('pointerdown', e => console.log(e.defaultPrevented, e.target))`，打印 `true` 即命中本条。
-- **解法**：见 `EntryDetailModal.vue` 的 `stopPointerDownPropagation`（在正文层掐断冒泡）与 Swiper 的 `:simulate-touch="false"`（桌面翻页走浮钮与 ←/→ 键，触屏滑动不受影响）。
+- **解法**：见 `EntryDetailModal.vue` 的 `neutralizeOverlayPreventDefault`（保留冒泡、只把遮罩层那一次 `preventDefault` 置空）与 Swiper 的 `:simulate-touch="false"`（桌面翻页走浮钮与 ←/→ 键，触屏滑动不受影响）。
+- **别改回 `stopPropagation`**：在正文层掐断冒泡会让 reka-ui 的外部点击状态机漏收一次 `pointerdown`，症状变成下一条（点遮罩要关两次）。
+
+### 弹窗里点过正文之后，点遮罩（弹窗外）要关两次
+
+- **现象**：打开条目弹窗、先在正文里点一下，再点弹窗外侧**不会关闭**；再点一次才关。没点过正文时行为正常。
+- **原因**：reka-ui 的 `DismissableLayer`（`DismissableLayer/utils.ts` 的 `usePointerDownOutside`）用一个内部标记 `isPointerInsideDOMTree` 区分「这次按下发生在层内还是层外」：层内按下时由 content 的 capture 阶段置 `true`，同一个 `pointerdown` 冒泡到 `document` 时再清回 `false`。正文区早先为修上一条挂了 `pointerdown` + `stopPropagation`，事件到不了 `document`，标记就一直停在 `true`；下一次点遮罩被误判成「这次也点在层内」，既不关也顺手清了标记，于是第二下才生效。
+- **排查**：DevTools 里在 `EntryDetailModal` 的正文节点上确认没有 `pointerdown` 的 `stopPropagation`；或直接按「点一下正文 → 点遮罩」复现。
+- **解法**：同见 `neutralizeOverlayPreventDefault` —— 不阻断冒泡，只抵消遮罩层的 `preventDefault`。回归用例：`EntryDetailModal.test.ts` 的「正文区的 pointerdown」两条；真实浏览器回归见 `report/verify-modal-outside.mjs`（未纳入版本控制）。
 
 ### 同步成功后，同步弹层里还挂着几行「已同步 0%」
 
