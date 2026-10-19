@@ -3,6 +3,7 @@ import https from "node:https"
 import sharp from "sharp"
 import { httpAgent, httpsAgent, withProxyFallback } from "../rss/parser"
 import { envInt } from "../env"
+import { withImageSlot } from "./concurrency"
 
 /**
  * 单张远程图片的下载与压缩原语。
@@ -21,8 +22,8 @@ export const DEFAULT_AVIF_QUALITY = envInt("AVIF_QUALITY", 45, { min: 0, max: 10
 export const DEFAULT_MAX_SOURCE_IMAGE_BYTES = envInt("MAX_SOURCE_IMAGE_BYTES", 8388608)
 /** 单张源图下载超时（毫秒） */
 export const IMAGE_DOWNLOAD_TIMEOUT = 10_000
-/** 限制输入像素数，防止超大图耗尽内存 */
-export const MAX_INPUT_PIXELS = 40_000_000
+/** 限制输入像素数，防止超大图耗尽内存（可按机器内存收紧，见 .env.example） */
+export const MAX_INPUT_PIXELS = envInt("MAX_INPUT_PIXELS", 40_000_000)
 
 /** 图片扩展名兜底（见 looksLikeImage） */
 const IMAGE_EXT_RE = /\.(?:avif|webp|png|jpe?g|gif|bmp|tiff?)(?:$|[?#])/i
@@ -154,18 +155,22 @@ export async function compressToAvif(
 ): Promise<{ buffer: Buffer, width: number, height: number } | null> {
   const maxWidth = opts.maxWidth ?? DEFAULT_MAX_IMAGE_WIDTH
   const quality = opts.quality ?? DEFAULT_AVIF_QUALITY
-  try {
-    const meta = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
-    if (!meta.width || !meta.height) return null
-    const out = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS })
-      .resize({ width: maxWidth, withoutEnlargement: true })
-      .avif({ quality })
-      .toBuffer()
-    const outMeta = await sharp(out).metadata()
-    return { buffer: out, width: outMeta.width ?? meta.width, height: outMeta.height ?? meta.height }
-  } catch {
-    return null // 非图片/损坏数据：跳过
-  }
+  // 整条链路里唯一一次「源图全量解码 + AVIF 编码」都在这里，是内存大头。
+  // 名额是进程级共享的（见 images/concurrency.ts）：抓取并发 × 每篇张数再大，同时压的也就这么多张。
+  return withImageSlot(async () => {
+    try {
+      const meta = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS }).metadata()
+      if (!meta.width || !meta.height) return null
+      const out = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS })
+        .resize({ width: maxWidth, withoutEnlargement: true })
+        .avif({ quality })
+        .toBuffer()
+      const outMeta = await sharp(out).metadata()
+      return { buffer: out, width: outMeta.width ?? meta.width, height: outMeta.height ?? meta.height }
+    } catch {
+      return null // 非图片/损坏数据：跳过
+    }
+  })
 }
 
 /**

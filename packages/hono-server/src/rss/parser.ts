@@ -321,12 +321,18 @@ const MAX_REDIRECTS = 5
 /**
  * 抓取响应体大小上限（压缩态 / 解压后）。
  *
- * 正常订阅源是几百 KB 量级（实测 gzip 后 4KB~134KB）；几十 MB 只可能是异常源、
- * 被投毒的内容或压缩炸弹。原先两处都是无上限收集，一个坏源就能把 4 个并发 worker
- * 的内存顶爆 —— 抓取失败只该是一个 job 失败，不该拖垮进程。
+ * 正常订阅源是几百 KB 量级：705 个源抽样里最大的是 1.8MB（实测见
+ * report/proxy-traffic-diagnosis/sample_sizes.txt）；几十 MB 只可能是异常源、被投毒的内容
+ * 或压缩炸弹。原先两处都是无上限收集，一个坏源就能把并发 worker 的内存顶爆 ——
+ * 抓取失败只该是一个 job 失败，不该拖垮进程。
+ *
+ * 默认值按「实测最大值的 8 倍」定，不是随手取的整数：单次抓取的峰值内存 ≈ 2×压缩态
+ * （流式收块 + concat 拼接） + 解压后，`FETCH_CONCURRENCY`(4) 个 worker 一起跑就是
+ * 4×(2×16+32)=256MB 的上界。生产机只有 2G，这个量级已经到顶；确有超大源要放宽时，
+ * 请同时下调 FETCH_CONCURRENCY。
  */
-const MAX_FEED_BYTES = envInt("MAX_FEED_BYTES", 32 * 1024 * 1024)
-const MAX_FEED_DECODED_BYTES = envInt("MAX_FEED_DECODED_BYTES", 64 * 1024 * 1024)
+export const MAX_FEED_BYTES = envInt("MAX_FEED_BYTES", 16 * 1024 * 1024)
+export const MAX_FEED_DECODED_BYTES = envInt("MAX_FEED_DECODED_BYTES", 32 * 1024 * 1024)
 /** 上限的展示形式（错误信息里用） */
 function describeBytes(bytes: number): string {
   return bytes >= 1024 * 1024 ? `${Math.round(bytes / 1024 / 1024)}MB` : `${Math.round(bytes / 1024)}KB`

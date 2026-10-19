@@ -1,5 +1,6 @@
 import sharp from "sharp"
 import { MAX_INPUT_PIXELS } from "./fetch"
+import { withImageSlot } from "./concurrency"
 
 /**
  * Wolt BlurHash 编码（**服务端**）：抓取图片时算一次，跟着 entry 的 `images[]` 落库；
@@ -180,19 +181,23 @@ export async function blurhashFromImage(
   buffer: Buffer,
   opts: { componentX?: number, componentY?: number } = {}
 ): Promise<string | null> {
-  try {
-    const { data, info } = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS })
-      .resize({
-        width: BLURHASH_DECODE_SIZE,
-        height: BLURHASH_DECODE_SIZE,
-        fit: "inside",
-        withoutEnlargement: true,
-      })
-      .ensureAlpha()
-      .raw()
-      .toBuffer({ resolveWithObject: true })
-    return encodeBlurhash(data, info.width, info.height, opts.componentX ?? 4, opts.componentY ?? 3)
-  } catch {
-    return null // 非图片 / 损坏数据：没有占位图也能渲染，不该让抓取失败
-  }
+  // 一次 AVIF 完整解码（只是随后缩到 32px，但解码本身要占内存）：同样走图片并发名额，
+  // 否则抓取一批图时「压缩」与「算 blurhash」会各开一份并发，实际峰值翻倍。
+  return withImageSlot(async () => {
+    try {
+      const { data, info } = await sharp(buffer, { limitInputPixels: MAX_INPUT_PIXELS })
+        .resize({
+          width: BLURHASH_DECODE_SIZE,
+          height: BLURHASH_DECODE_SIZE,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .ensureAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true })
+      return encodeBlurhash(data, info.width, info.height, opts.componentX ?? 4, opts.componentY ?? 3)
+    } catch {
+      return null // 非图片 / 损坏数据：没有占位图也能渲染，不该让抓取失败
+    }
+  })
 }

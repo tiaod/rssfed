@@ -4,7 +4,15 @@ import { eq, sql } from "drizzle-orm"
 import { ensureFeedDatabase, createCouchDb } from "../couchdb/client"
 import { createTrimDb, trimSourceToLatestN, DEFAULT_SOURCE_RETENTION_ENTRIES } from "../couchdb/retention"
 import { feedDocId } from "../couchdb/doc-ids"
-import { fetchParsedFeed, formatFeedError, type FeedValidators, type ParsedFeed, type ParsedItem } from "../rss/parser"
+import {
+  fetchParsedFeed,
+  formatFeedError,
+  MAX_FEED_BYTES,
+  MAX_FEED_DECODED_BYTES,
+  type FeedValidators,
+  type ParsedFeed,
+  type ParsedItem,
+} from "../rss/parser"
 import { cacheEntryImages, cacheSingleImage, FEED_ICON_CACHE_VERSION, type EntryImageOptions } from "../rss/entry-images"
 import { db, feeds, type EntryDoc } from "../db"
 import { connection, createWorkerConnection } from "./connection"
@@ -15,6 +23,7 @@ import { buildFeedRegistryUpdate } from "./feed-registry"
 import { notifyTimelineStale, shutdownTimelineWorkers } from "./timeline"
 import { enqueueBotCopy, shutdownBotCopyWorkers } from "./bot-sync"
 import { envInt, formatDuration } from "../env"
+import { IMAGE_CONCURRENCY } from "../images/concurrency"
 
 export const fetchQueue = new Queue("rss-fetch", { connection })
 
@@ -475,6 +484,8 @@ if (!isTestProcess) {
   console.log(
     `[Fetch] 配置: 基础间隔=${formatDuration(FETCH_INTERVAL)} 自适应=${FETCH_ADAPTIVE ? "开" : "关"}` +
     ` 降频上限=${formatDuration(FETCH_MAX_INTERVAL)} 并发=${FETCH_CONCURRENCY}` +
+    ` 响应体上限=${Math.round(MAX_FEED_BYTES / 1048576)}MB/${Math.round(MAX_FEED_DECODED_BYTES / 1048576)}MB` +
+    ` 图片压缩并发=${IMAGE_CONCURRENCY}` +
     ` 无验证器提前降频=${FETCH_NO_VALIDATOR_SLOWDOWN ? "开" : "关"} 错峰窗口=${formatDuration(FETCH_JITTER_SPAN_MS)}`,
   )
 }
