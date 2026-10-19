@@ -11,6 +11,7 @@ import {
   type NewUserTimelineSettings,
 } from "../db"
 import { recordReconcileRound, recordTimelineEvent } from "./timeline-events"
+import { readTimelineUserState } from "./timeline-lifecycle"
 import {
   createCouchDb,
   createTimelineDatabase,
@@ -476,6 +477,18 @@ export async function syncSubscriptionSource(input: {
 
   try {
     const res = await runSourceReplication({ sourceDb, targetDb })
+    // 无变化时 CouchDB 的响应是上一次会话的 history（session_id / source_last_seq 都是旧的），
+    // 里面 docs_written 还是**累计值**，直接用会把"历史上写了多少"当成本轮（实测每轮都报 4,782）。
+    // 判据用我们自己的水位：源库序号没动 = 本轮没产生新 checkpoint = 什么都没写。
+    const advanced = existing?.sourceSeq == null || res.sourceLastSeq !== existing.sourceSeq
+    const docsWritten = advanced ? res.docsWritten : 0
+    // **写失败不能算成功**：墓碑 GC 的安全窗建立在"订阅者 synced_at 之后源库的 `_changes`
+    // 一定能读到墓碑"上。若本轮真的有文档没写进去却推进了水位，GC 之后会清掉这些墓碑 →
+    // 目标端永久缺一次删除。按失败处理：水位不推进（syncedAt 清空），下一轮从 checkpoint
+    // 重试（复制是幂等的）。只有"真的推进了 checkpoint"的会话才看这个计数。
+    if (advanced && res.writeFailures > 0) {
+      throw new Error(`复制有 ${res.writeFailures} 篇文档写入失败，本轮不推进水位（下一轮重试）`)
+    }
     await db.update(timelineSourceSync).set({
       syncedAt: startedAt,
       status: "idle",
@@ -490,11 +503,11 @@ export async function syncSubscriptionSource(input: {
       await recordTimelineEvent({
         userId,
         kind: "source-sync",
-        message: `首次同步源 ${sourceId}：搬入 ${res.docsWritten} 份（${res.elapsedMs}ms）`,
-        data: { sourceId, docsWritten: res.docsWritten, elapsedMs: res.elapsedMs },
+        message: `首次同步源 ${sourceId}：搬入 ${docsWritten} 份（${res.elapsedMs}ms）`,
+        data: { sourceId, docsWritten, elapsedMs: res.elapsedMs },
       })
     }
-    return { sourceId, docsWritten: res.docsWritten, elapsedMs: res.elapsedMs, rebound }
+    return { sourceId, docsWritten, elapsedMs: res.elapsedMs, rebound }
   } catch (err) {
     const message = ((err as Error)?.message ?? String(err)).slice(0, 500)
     await db.update(timelineSourceSync).set({
@@ -546,6 +559,22 @@ export async function reconcileUserTimeline(
   userId: string,
   options: { force?: boolean } = {},
 ): Promise<TimelineReconcileResult> {
+  // 生命周期闸门（见 services/timeline-lifecycle.ts）：
+  //   - 休眠用户完全不做聚合（源库墓碑 GC 把他当"没有订阅者"，回来时会重建）；
+  //   - 刚恢复、等重建的用户也先不做增量 —— 暂停期间 GC 可能已经清掉墓碑，增量会漏删，
+  //     必须等 worker 先把空库重搬一遍（rebuildUserTimeline 内部走 unlocked 版本，不受此限）。
+  const lifecycle = await readTimelineUserState(userId)
+  if (lifecycle.aggregationPausedAt || lifecycle.needsRebuild) {
+    return {
+      userId,
+      sources: 0,
+      dirtySources: [],
+      removedSyncs: 0,
+      removedEntries: 0,
+      purgedReplications: 0,
+      failures: [],
+    }
+  }
   return await withUserLock(userId, () => reconcileUserTimelineUnlocked(userId, options))
 }
 
@@ -877,7 +906,6 @@ async function rebuildUserTimelineUnlocked(userId: string): Promise<TimelineReco
   return result
 }
 
-/** 所有用户 id（定时 reconcile 用；自建服务用户量小，一次全查没有问题） */
 /**
  * 「这批源里，哪些用户真的有内容要搬」（去重）。
  *
@@ -895,28 +923,30 @@ export async function listDirtySubscribers(sourceIds: string[]): Promise<string[
   const feedRows = await db.selectDistinct({ userId: timelineSourceSync.userId })
     .from(timelineSourceSync)
     .innerJoin(feeds, eq(feeds.id, timelineSourceSync.sourceId))
+    .leftJoin(userTimelineSettings, eq(userTimelineSettings.userId, timelineSourceSync.userId))
     .where(and(
       inArray(timelineSourceSync.sourceId, sourceIds),
       or(
         isNull(timelineSourceSync.syncedAt),
         gt(feeds.lastChangedAt, timelineSourceSync.syncedAt),
       ),
+      // 休眠/等重建的用户不叫醒（他们要么不聚合、要么等重建，见 timeline-lifecycle.ts）
+      isNull(userTimelineSettings.aggregationPausedAt),
+      or(isNull(userTimelineSettings.needsRebuild), eq(userTimelineSettings.needsRebuild, false)),
     ))
   // bot 库不裁剪，"源内容变了"用 lastNewEntryAt（同 sourceNeedsSync 的判据）
   const botRows = await db.selectDistinct({ userId: timelineSourceSync.userId })
     .from(timelineSourceSync)
     .innerJoin(botsTable, eq(sql`'bot:' || ${botsTable.id}`, timelineSourceSync.sourceId))
+    .leftJoin(userTimelineSettings, eq(userTimelineSettings.userId, timelineSourceSync.userId))
     .where(and(
       inArray(timelineSourceSync.sourceId, sourceIds),
       or(
         isNull(timelineSourceSync.syncedAt),
         gt(botsTable.lastNewEntryAt, timelineSourceSync.syncedAt),
       ),
+      isNull(userTimelineSettings.aggregationPausedAt),
+      or(isNull(userTimelineSettings.needsRebuild), eq(userTimelineSettings.needsRebuild, false)),
     ))
   return [...new Set([...feedRows, ...botRows].map(row => row.userId))]
-}
-
-export async function listUserIds(): Promise<string[]> {
-  const rows = await db.select({ id: user.id }).from(user)
-  return rows.map(row => row.id)
 }

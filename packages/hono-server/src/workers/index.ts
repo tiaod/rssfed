@@ -22,6 +22,7 @@ import { enqueueFetchJob } from "./enqueue"
 import { buildFeedRegistryUpdate } from "./feed-registry"
 import { notifyTimelineStale, shutdownTimelineWorkers } from "./timeline"
 import { enqueueBotCopy, shutdownBotCopyWorkers } from "./bot-sync"
+import { shutdownTimelineMaintenance, startTimelineMaintenance } from "./maintenance"
 import { envInt, formatDuration } from "../env"
 import { IMAGE_CONCURRENCY } from "../images/concurrency"
 
@@ -586,8 +587,12 @@ const fetchInterval = isTestProcess ? null : setInterval(() => {
   })
 }, FETCH_INTERVAL)
 
+// 定时维护：源库墓碑 GC + 休眠用户暂停（见 workers/maintenance.ts）
+if (!isTestProcess) startTimelineMaintenance()
+
 export async function shutdownWorkers() {
   if (fetchInterval) clearInterval(fetchInterval)
+  shutdownTimelineMaintenance()
   // 测试进程里 worker 为 null（见 isTestProcess 注释）
   await worker?.close()
   await fetchQueue.close()

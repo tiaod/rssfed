@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { parseReplicationDocId, replicationDocId } from "../couchdb/replicator"
+import { parseReplicationDocId, replicationDocId, summarizeReplicationSession } from "../couchdb/replicator"
 import { REPLICATION_FILTER_PATH, TIMELINE_REPLICATION_FILTER } from "../couchdb/client"
 
 /**
@@ -72,5 +72,49 @@ describe("聚合复制过滤器", () => {
   it("没有时间谓词（否则随时间变的过滤器源码 = 换哈希 = 每轮全量重扫）", () => {
     expect(TIMELINE_REPLICATION_FILTER).not.toContain("publishedAt")
     expect(TIMELINE_REPLICATION_FILTER).not.toContain("req.query")
+  })
+})
+
+describe("summarizeReplicationSession", () => {
+  it("无变化（本次 session 不在 history 里）→ 写了 0，不拿上一次会话的旧数据冒充", () => {
+    expect(summarizeReplicationSession({
+      session_id: "new-noop-session",
+      history: [{ session_id: "old", docs_written: 4782, doc_write_failures: 0 }],
+    })).toEqual({ docsWritten: 0, writeFailures: 0 })
+  })
+
+  it("history 计数是累计值，要减去上一条才是本次增量", () => {
+    expect(summarizeReplicationSession({
+      session_id: "s3",
+      history: [
+        { session_id: "s3", docs_written: 7, doc_write_failures: 0 },
+        { session_id: "s2", docs_written: 6, doc_write_failures: 0 },
+        { session_id: "s1", docs_written: 4, doc_write_failures: 0 },
+      ],
+    })).toEqual({ docsWritten: 1, writeFailures: 0 })
+  })
+
+  it("第一次会话没有上一条可比，整份都算本次", () => {
+    expect(summarizeReplicationSession({
+      session_id: "s1",
+      history: [{ session_id: "s1", docs_written: 4219, doc_write_failures: 0 }],
+    })).toEqual({ docsWritten: 4219, writeFailures: 0 })
+  })
+
+  it("写失败同样是增量：历史失败不会让水位永远卡住", () => {
+    expect(summarizeReplicationSession({
+      session_id: "s2",
+      history: [
+        { session_id: "s2", docs_written: 10, doc_write_failures: 2 },
+        { session_id: "s1", docs_written: 8, doc_write_failures: 2 },
+      ],
+    })).toEqual({ docsWritten: 2, writeFailures: 0 })
+    expect(summarizeReplicationSession({
+      session_id: "s3",
+      history: [
+        { session_id: "s3", docs_written: 11, doc_write_failures: 3 },
+        { session_id: "s2", docs_written: 10, doc_write_failures: 2 },
+      ],
+    })).toEqual({ docsWritten: 1, writeFailures: 1 })
   })
 })

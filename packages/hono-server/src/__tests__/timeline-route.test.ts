@@ -85,6 +85,17 @@ vi.mock("../services/timeline-events", () => ({
   },
 }))
 
+// 生命周期（活跃度上报 / 休眠恢复）不在单测范围内：替身保证路由中间件不碰 PG
+vi.mock("../services/timeline-lifecycle", () => ({
+  touchTimelineActivity: async () => {},
+  resumeTimelineUser: async () => false,
+  readTimelineUserState: async () => ({
+    lastActiveAt: null,
+    aggregationPausedAt: null,
+    needsRebuild: false,
+  }),
+}))
+
 vi.mock("../services/timeline", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../services/timeline")>()
   return {

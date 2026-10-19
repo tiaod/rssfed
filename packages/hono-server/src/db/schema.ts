@@ -110,6 +110,18 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
    * 队列、重试）后续接入时不需要再改数据结构。
    */
   aiSummaryEnabled: boolean("ai_summary_enabled"),
+
+  // ── 休眠用户的生命周期（见 services/timeline-lifecycle.ts）──────────────
+  // 长期不用的账号不再每 5 分钟被 reconcile 空转（服务端聚合 + 源库复制）+ 不推进水位；
+  // 回来时**重建**派生库而不是补增量 —— 只有这样才能安全地清理源库墓碑（GC 把休眠用户
+  // 当成"没有订阅者"）。三列都留在本表而不是 `user`（Better Auth 管的结构）里。
+  /** 最近一次客户端调用时间线接口的时刻（上报有节流，只用于判断休眠） */
+  lastActiveAt: timestamp("last_active_at"),
+  /** 非空 = 已休眠暂停聚合；恢复时置空并重建派生库 */
+  aggregationPausedAt: timestamp("aggregation_paused_at"),
+  /** 暂停后已恢复、等待重建（重建成功前不做增量，见 workers/timeline.ts） */
+  needsRebuild: boolean("needs_rebuild").notNull().default(false),
+
   updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
 })
 
@@ -168,6 +180,38 @@ export const timelineSourceSync = pgTable("timeline_source_sync", {
   primaryKey({ columns: [table.userId, table.sourceId] }),
   // 「谁订阅了这个源」的反查索引（将来做定向通知）
   index("timeline_source_sync_source_idx").on(table.sourceId),
+])
+
+/**
+ * 源库**墓碑清理**的待办表（见 `couchdb/tombstone-gc.ts`）。
+ *
+ * 背景：源库裁剪用标准 delete（墓碑是"删除能传播 / 重扫不复活"的载体），于是墓碑只增不减。
+ * 新订阅/重建时复制从 0 重扫，会把源库全部历史墓碑搬进用户库 —— 一个重历史源能一次写几千到
+ * 几万份（实测 5.1 万）。GC 的目标是：**等所有活跃订阅者的水位都越过某个墓碑之后**把它
+ * `_purge` 掉再 compact，这样首搬只需要搬当前 ≤N 条活文档。
+ *
+ * 为什么在 PG 里按墓碑记一行，而不是每次都扫源库 `_changes` 找删除：
+ *   - 判断"能不能清"需要**墓碑的生成时间**（订阅者在它之后成功同步过一次，才保证已经收到删除）。
+ *     CouchDB 的墓碑只有 `_id/_rev/_deleted`，读不到时间；扫 changes 只能拿到"发现时间"，
+ *     对历史墓碑（功能上线前就存在的 17 万个）会全部按"现在"算、要等每个源再变更一次才放行。
+ *   - 按 `(source_id, doc_id, rev)` 落一行，GC 直接在 PG 里筛可清的墓碑，不用每次全量扫源库。
+ *   - 历史墓碑由 GC 首次全量扫 changes 时补录（`first_seen_at` = 补录时刻，保守但不丢）。
+ *
+ * `first_seen_at` 与 `timeline_source_sync.synced_at` 都是 PG 时间；判断规则：
+ * `first_seen_at < min(该源所有活跃订阅者的 synced_at) - grace` 才可 purge。
+ */
+export const timelineSourceTombstone = pgTable("timeline_source_tombstone", {
+  /** 源 id（feeds.id）；抓取 worker 只在 feed 库产生墓碑 */
+  sourceId: text("source_id").notNull().references(() => feeds.id, { onDelete: "cascade" }),
+  /** 被删条目的文档 id（`entry:<feedId>:<...>`） */
+  docId: text("doc_id").notNull(),
+  /** 被删的修订 id（`_purge` 要按 rev 清；墓碑被后续修订覆盖时是旧值，purge 会返回空，按已清处理） */
+  rev: text("rev").notNull(),
+  /** 发现/补录时刻（GC 只清早于订阅者水位的行） */
+  firstSeenAt: timestamp("first_seen_at").notNull().defaultNow(),
+}, (table) => [
+  primaryKey({ columns: [table.sourceId, table.docId, table.rev] }),
+  // GC 每源一次 "取待清列表"，主键前缀已经能走索引，不需要额外索引
 ])
 
 /**

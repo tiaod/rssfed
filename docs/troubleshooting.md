@@ -108,6 +108,27 @@
   [notes/aggregation/on-demand-replication.md](notes/aggregation/on-demand-replication.md)），所以水位判定是
   **必需**而不是优化：稳态下一轮聚合一个复制请求都不发（`refresh?wait=1` 返回 `queued: 0`）。
 
+### 重建 / 新订阅时一次写入几千到几万条：源库墓碑重放（已加 GC）
+
+- **现象**：`[Timeline] 同步源 xxx（用户=…）写入 4782 份、5070ms` 这类日志出现在**新订阅、重建、换设备首拉**时；
+  日常增量只有几十条。源库 `doc_del_count` 很大（重历史源可到几万），用户库墓碑数也一路涨。
+  注意：旧版本这行份数取的是 CouchDB 复制任务 history 里的**累计值**（无变化时还会返回上一次会话的旧值），
+  数字会虚高；判断是否墓碑重放看用户库 `doc_del_count` 与首搬耗时，或直接跑下面的 GC 脚本看"可清"数。
+  现在这行已改成**单次增量**（见 `couchdb/replicator.ts` 的 `summarizeReplicationSession`）。
+- **原因**：保留策略用标准 delete 留墓碑（删除能传播 / 重扫不复活），墓碑只增不减；首搬从 0 重扫时
+  复制会把源库**全部历史墓碑**再搬一遍（实际首搬写入 ≈ 该源墓碑数 + 当前 ≤N 条活文档；旧日志的累计值只作参考）。
+- **解法**（现行实现）：后台墓碑 GC（`couchdb/tombstone-gc.ts` + `services/timeline-maintenance.ts`）
+  在每个源库 `_changes` 里记录条目墓碑，等**所有活跃订阅者**都成功同步过之后 `_purge` 再 `_compact`，
+  首搬就只剩 ≤N 条活文档。运维可手动 dry-run / 实清：
+  ```bash
+  cd packages/hono-server
+  pnpm tombstone-gc                # 只报告
+  pnpm tombstone-gc --apply        # 真清（purge + compact）
+  ```
+  被"订阅者还没同步到墓碑之后"挡住的源会自动把 `feeds.last_changed_at` 往前拨一次，让下一轮聚合补同步
+  （静默源也能清）。**休眠账号**（默认 90 天未用，`TIMELINE_DORMANT_DAYS`）停止聚合、回来时自动重建，
+  否则它们的旧水位会让所有源都清不动。
+
 ### 时间线一直空、提示条停在「已同步 0 条」：这一轮还没把内容搬过来
 
 - **现象**：登录正常、订阅列表有内容、`GET /api/couchdb/sync-targets` 也下发了 `user-timeline_xxx`，但时间线始终空白（或只出现几条），`POST /api/timeline/refresh?wait=1` 返回 `{"accepted":true,"completed":false}`。

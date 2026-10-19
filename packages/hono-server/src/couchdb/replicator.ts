@@ -77,10 +77,16 @@ export function parseReplicationDocId(id: string): ParsedReplicationId | null {
 const REPLICATION_TIMEOUT_MS = Math.max(5_000, parseInt(process.env.TIMELINE_REPLICATION_TIMEOUT_MS ?? "120000") || 120_000)
 
 /** `POST /_replicate` 的响应：真正关心的计数在 `history[0]` 里 */
-interface ReplicateResponse {
+export interface ReplicateResponse {
   ok?: boolean
+  session_id?: string
   source_last_seq?: string | number
-  history?: Array<{ docs_written?: number, docs_read?: number, doc_write_failures?: number }>
+  history?: Array<{
+    session_id?: string
+    docs_written?: number
+    docs_read?: number
+    doc_write_failures?: number
+  }>
   error?: string
   reason?: string
 }
@@ -91,6 +97,34 @@ export interface SourceReplicationResult {
   /** 本次复制到达的源库序号（诊断用，落进水位表） */
   sourceLastSeq: string | null
   elapsedMs: number
+  /** 本次复制目标端写失败的文档数（>0 时调用方不应推进水位，见下方说明） */
+  writeFailures: number
+}
+
+/**
+ * 从 `_replicate` 响应里取出**本次会话**的写入数。
+ *
+ * 坑（实测）：CouchDB 的 `history[].docs_written / doc_write_failures` 是**这个复制任务的
+ * 累计值**，不是本会话增量；而且**没有产生新 checkpoint 的会话（无变化）不会追加 history
+ * 条目**，此时响应里 `history[0]` 是上一次会话的旧数据、`session_id` 也是旧的。
+ * 所以：
+ *   - 先用顶层 `session_id` 在 history 里找当前会话；找不到 = 无变化，本次写了 0；
+ *   - 找到后与**上一条** history 相减，才是本次的写入/失败数。
+ * 不这样算的话，日志里的"搬入 N 份"会一直是累计值（实测一个 4 千墓碑的源每轮都报
+ * 4,782 份，看起来像每轮都在重搬）。
+ */
+export function summarizeReplicationSession(res: ReplicateResponse): { docsWritten: number, writeFailures: number } {
+  const history = res.history ?? []
+  const sessionId = res.session_id
+  if (!sessionId) return { docsWritten: 0, writeFailures: 0 }
+  const index = history.findIndex(entry => entry.session_id === sessionId)
+  if (index < 0) return { docsWritten: 0, writeFailures: 0 }
+  const current = history[index]!
+  const previous = history[index + 1]
+  return {
+    docsWritten: Math.max(0, (current.docs_written ?? 0) - (previous?.docs_written ?? 0)),
+    writeFailures: Math.max(0, (current.doc_write_failures ?? 0) - (previous?.doc_write_failures ?? 0)),
+  }
 }
 
 /**
@@ -150,7 +184,7 @@ export async function runSourceReplication(spec: {
     throw new Error(timer.timedOut ? message : `复制请求失败：${message}`)
   }
 
-  const history = res?.history?.[0]
+  const { docsWritten, writeFailures } = summarizeReplicationSession(res)
   // 排查开关：单源复制的参数与计数（正常不打印 —— 一次聚合可能有几百个源）
   if (process.env.TIMELINE_DEBUG_REPLICATION === "1") {
     console.log("[Timeline][debug] 复制", JSON.stringify({
@@ -159,16 +193,23 @@ export async function runSourceReplication(spec: {
       ok: res?.ok,
       error: res?.error,
       reason: res?.reason,
-      docs_read: history?.docs_read,
-      docs_written: history?.docs_written,
-      doc_write_failures: history?.doc_write_failures,
+      session_id: res?.session_id,
+      docs_written: docsWritten,
+      doc_write_failures: writeFailures,
       source_last_seq: res?.source_last_seq,
     }))
   }
+  if (res?.error) {
+    throw new Error(`复制失败：${res.error}${res.reason ? `（${res.reason}）` : ""}`)
+  }
+  // 写失败**不在这一层抛**：无变化时响应里的 history 是上次会话的旧数据（见
+  // summarizeReplicationSession），拿旧失败当新失败会让水位永远卡住。调用方先判断
+  // 「这次有没有真的推进 checkpoint」（`sourceLastSeq` 与水位里的值比较），再决定是否失败。
   return {
-    docsWritten: typeof history?.docs_written === "number" ? history.docs_written : 0,
+    docsWritten,
     sourceLastSeq: res?.source_last_seq != null ? String(res.source_last_seq) : null,
     elapsedMs: Date.now() - startedAt,
+    writeFailures,
   }
 }
 

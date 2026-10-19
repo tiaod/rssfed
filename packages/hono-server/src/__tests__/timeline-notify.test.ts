@@ -46,7 +46,6 @@ vi.mock("../workers/timeline-sync", () => ({
 }))
 
 vi.mock("../services/timeline", () => ({
-  listUserIds: async () => [],
   rebuildUserTimeline: async () => ({}),
   reconcileUserTimeline: async () => ({}),
   listDirtySubscribers: async (sourceIds: string[]) => {

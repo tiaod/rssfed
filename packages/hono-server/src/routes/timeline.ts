@@ -19,6 +19,7 @@ import {
 } from "../services/timeline-events"
 import { enqueueSourceSyncs, waitForSourceSyncs } from "../workers/timeline-sync"
 import { enqueueTimelineRebuild, enqueueTimelineReconcile } from "../workers/timeline"
+import { resumeTimelineUser, touchTimelineActivity } from "../services/timeline-lifecycle"
 
 /** 中间件写入的请求级变量 */
 type Variables = { userId: string }
@@ -49,7 +50,20 @@ export const timelineRouter = new Hono<{ Variables: Variables }>()
 timelineRouter.use("/*", async (c: Context<{ Variables: Variables }>, next: Next) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
-  c.set("userId", session.user.id)
+  const userId = session.user.id
+  c.set("userId", userId)
+
+  // 活跃度上报（写库有节流，见 services/timeline-lifecycle.ts）：只影响休眠判定，
+  // 失败不能让请求挂掉，所以不 await 错误。
+  void touchTimelineActivity(userId)
+
+  // 休眠用户回来了：清暂停标记 + 置 needsRebuild，入队重建。重建完成前不做增量
+  //（暂停期间源库墓碑可能已被 GC 清掉，增量会漏删，见 workers/timeline.ts）。
+  if (await resumeTimelineUser(userId)) {
+    console.log(`[Timeline] user=${userId} 休眠后恢复，已入队重建`)
+    await enqueueTimelineRebuild(userId)
+  }
+
   await next()
 })
 

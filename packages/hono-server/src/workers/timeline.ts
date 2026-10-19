@@ -1,7 +1,12 @@
 import { Queue, Worker } from "bullmq"
 import { connection, createWorkerConnection } from "./connection"
 import { enqueueSourceSyncs, shutdownSourceSyncWorker } from "./timeline-sync"
-import { listDirtySubscribers, listUserIds, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
+import { listDirtySubscribers, rebuildUserTimeline, reconcileUserTimeline } from "../services/timeline"
+import {
+  listTimelineScheduleTargets,
+  markTimelineRebuildDone,
+  readTimelineUserState,
+} from "../services/timeline-lifecycle"
 import { readReconcileHeartbeat } from "../services/timeline-events"
 import { envInt } from "../env"
 
@@ -119,9 +124,25 @@ export async function notifyTimelineStale(sourceId: string, now: number = Date.n
 
 export const timelineWorker = new Worker("rss-timeline", async (job) => {
   const { userId, force } = job.data as { userId: string, force?: boolean }
+
+  // 生命周期闸门（见 services/timeline-lifecycle.ts）：
+  //   - 休眠用户不做任何聚合（源库墓碑 GC 把他当"没有订阅者"，回来时会重建）；
+  //   - 恢复中的用户只跑重建 —— 重建完成前的增量一律不做（暂停期间 GC 可能清掉了墓碑，
+  //     增量复制拿不到期间的删除，会永久留下该删的条目）。
+  const lifecycle = await readTimelineUserState(userId)
+  if (lifecycle.aggregationPausedAt) {
+    console.log(`[Timeline] user=${userId} 已休眠暂停聚合，跳过 ${job.name}`)
+    return { skipped: "paused" as const }
+  }
+  if (job.name !== "rebuild" && lifecycle.needsRebuild) {
+    await enqueueTimelineRebuild(userId)
+    return { skipped: "needs_rebuild" as const }
+  }
+
   const result = job.name === "rebuild"
     ? await rebuildUserTimeline(userId)
     : await reconcileUserTimeline(userId, { force })
+  if (job.name === "rebuild") await markTimelineRebuildDone(userId)
 
   // reconcile 只判定"哪些源脏了"，搬运交给 rss-timeline-sync（限并发）。稳态下 dirtySources 为空，
   // 一个复制请求都不发 —— 这是把常驻复制换成按需复制之后每 5 分钟一轮的全部成本。
@@ -152,8 +173,12 @@ export const timelineWorker = new Worker("rss-timeline", async (job) => {
 /** 定时把「可能有新内容」的用户排进队列（真正的增量判断在 reconcile 里，安静时只花一条 SQL） */
 export async function scheduleTimelineReconciles(): Promise<void> {
   try {
-    const userIds = await listUserIds()
-    await Promise.all(userIds.map(id => enqueueTimelineReconcile(id).catch(() => {})))
+    const targets = await listTimelineScheduleTargets()
+    await Promise.all(targets.map((target) => (
+      target.needsRebuild
+        ? enqueueTimelineRebuild(target.userId)
+        : enqueueTimelineReconcile(target.userId)
+    ).catch(() => {})))
   } catch (err) {
     console.warn("[Timeline] 定时聚合入队失败：", (err as Error)?.message ?? err)
   }
