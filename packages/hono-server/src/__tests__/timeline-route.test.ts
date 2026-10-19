@@ -53,7 +53,9 @@ vi.mock("../workers/timeline", () => ({
   enqueueTimelineRebuild: async () => {
     state.rebuildQueued++
   },
-  timelineQueue: { getJob: async () => undefined },
+  // metaValues 是给 app.ts → bullboard.ts 的 BullMQAdapter 看的：它只认真实 Queue 实例，
+  // 或 metaValues.version 以 "bullmq" 开头的鸭子类型（不跑看板，所以不需要真队列方法）
+  timelineQueue: { getJob: async () => undefined, metaValues: { version: "bullmq@5" } },
   timelineWorker: { close: async () => {} },
   notifyTimelineStale: async () => {},
   shutdownTimelineWorkers: async () => {},
@@ -66,7 +68,7 @@ vi.mock("../workers/timeline-sync", () => ({
     return sourceIds.map(sourceId => ({ id: sourceId }))
   },
   waitForSourceSyncs: async () => state.drained,
-  sourceSyncQueue: { getJob: async () => undefined },
+  sourceSyncQueue: { getJob: async () => undefined, metaValues: { version: "bullmq@5" } },
   sourceSyncWorker: { close: async () => {} },
   shutdownSourceSyncWorker: async () => {},
 }))
