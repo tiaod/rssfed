@@ -32,9 +32,12 @@ function memoryStorage(): Storage & { files: Map<string, Buffer> } {
       files.delete(key)
     },
     exists: async (key: string) => files.has(key),
-    list: async (prefix: string) => [...files.entries()]
-      .filter(([key]) => key.startsWith(prefix))
-      .map(([key, content]) => ({ key, lastModified: new Date(0), size: content.length })),
+    async *listBatches(prefix: string) {
+      const rows = [...files.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .map(([key, content]) => ({ key, lastModified: new Date(0), size: content.length }))
+      for (let i = 0; i < rows.length; i += 1000) yield rows.slice(i, i + 1000)
+    },
     getPublicUrl: () => undefined,
   }
 }

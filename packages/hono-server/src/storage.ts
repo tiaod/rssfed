@@ -26,8 +26,16 @@ export interface Storage {
   readWithMeta(key: string): Promise<{ content: Buffer; contentType: string }>
   delete(key: string): Promise<void>
   exists(key: string): Promise<boolean>
-  /** 列出某前缀下的全部对象（给缓存清理用；只读、可能较慢，不要放请求路径上） */
-  list(prefix: string): Promise<StorageObjectInfo[]>
+  /**
+   * 按批列出某前缀下的对象（给缓存清理用；只读、可能较慢，不要放请求路径上）。
+   *
+   * 刻意**不**返回完整数组：图片缓存的对象数随流量线性增长（实测 10 天 8.9 万个），
+   * 一次性 list 会把「单轮清理的峰值内存」绑在缓存总量上（实测约 240B/对象，百万级 ≈ 240MB）。
+   * 调用方按批消费、边扫边删，峰值内存只与 `batchSize` 有关，与缓存有多大无关。
+   *
+   * 顺序不做保证（S3 按 key 字典序，本地后端按目录遍历顺序），调用方不得依赖。
+   */
+  listBatches(prefix: string, batchSize?: number): AsyncGenerator<StorageObjectInfo[]>
   /** 可直接对外访问的 URL；未配置公开域名时返回 undefined，由调用方回退到 /api/files/* 代理 */
   getPublicUrl(key: string): string | undefined
 }
@@ -128,30 +136,35 @@ export class S3Storage implements Storage {
     }
   }
 
-  /** 分页列出前缀下的对象；返回的 key 去掉 pathPrefix，与写入时用的逻辑 key 一致 */
-  async list(prefix: string): Promise<StorageObjectInfo[]> {
+  /**
+   * 分页列出前缀下的对象；返回的 key 去掉 pathPrefix，与写入时用的逻辑 key 一致。
+   * 一页一批 yield（S3 单页上限 1000），不把结果攒进数组。
+   */
+  async *listBatches(prefix: string, batchSize = 1000): AsyncGenerator<StorageObjectInfo[]> {
     const fullPrefix = this.getFullKey(prefix)
     // 逻辑 key → 完整 key 之间差一个 "<pathPrefix>/"，返回时必须切掉
     const stripLength = this.pathPrefix ? this.pathPrefix.length + 1 : 0
-    const result: StorageObjectInfo[] = []
+    const pageSize = Math.min(1000, Math.max(1, Math.trunc(batchSize)))
     let token: string | undefined
     do {
       const response = await this.client.send(new ListObjectsV2Command({
         Bucket: this.bucket,
         Prefix: fullPrefix,
+        MaxKeys: pageSize,
         ContinuationToken: token,
       }))
+      const batch: StorageObjectInfo[] = []
       for (const object of response.Contents ?? []) {
         if (!object.Key) continue
-        result.push({
+        batch.push({
           key: object.Key.slice(stripLength),
           lastModified: object.LastModified ?? new Date(0),
           size: object.Size ?? 0,
         })
       }
+      if (batch.length > 0) yield batch
       token = response.IsTruncated ? response.NextContinuationToken : undefined
     } while (token)
-    return result
   }
 
   getPublicUrl(key: string): string | undefined {
@@ -228,34 +241,45 @@ export class FilesystemStorage implements Storage {
     }
   }
 
-  /** 递归列目录；mtime 当 lastModified（缓存清理只按时间判断） */
-  async list(prefix: string): Promise<StorageObjectInfo[]> {
-    const result: StorageObjectInfo[] = []
-    const walk = async (dir: string): Promise<void> => {
+  /**
+   * 递归列目录，按批 yield；mtime 当 lastModified（缓存清理只按时间判断）。
+   *
+   * 用显式栈而不是递归：async generator 不能在递归回调里 yield，递归只能把整棵树攒完
+   * 再返回，那就退化回「全量进内存」了。单目录的 readdir 仍会一次性返回该目录所有名字
+   * —— 缓存 key 若按 hash 前缀分片（如 `image-cache/v1/<2 位十六进制>/…`）可以进一步
+   * 压这里，目前未分片。
+   */
+  async *listBatches(prefix: string, batchSize = 1000): AsyncGenerator<StorageObjectInfo[]> {
+    const size = Math.max(1, Math.trunc(batchSize))
+    const stack = [this.resolvePath(prefix)]
+    let batch: StorageObjectInfo[] = []
+    while (stack.length > 0) {
+      const dir = stack.pop()!
       // 目录不存在（还没写过任何对象）等同空列表
       const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => null)
-      if (!entries) return
+      if (!entries) continue
       for (const entry of entries) {
         const full = path.join(dir, entry.name)
         if (entry.isDirectory()) {
-          await walk(full)
+          stack.push(full)
           continue
         }
-        try {
-          const stat = await fs.stat(full)
-          result.push({
-            // 统一用 / 作分隔符，与 S3 实现返回的 key 形状一致
-            key: path.relative(this.root, full).split(path.sep).join('/'),
-            lastModified: stat.mtime,
-            size: stat.size,
-          })
-        } catch {
-          // 遍历过程中被删掉：跳过
+        const stat = await fs.stat(full).catch(() => null)
+        // 遍历过程中被删掉：跳过
+        if (!stat) continue
+        batch.push({
+          // 统一用 / 作分隔符，与 S3 实现返回的 key 形状一致
+          key: path.relative(this.root, full).split(path.sep).join('/'),
+          lastModified: stat.mtime,
+          size: stat.size,
+        })
+        if (batch.length >= size) {
+          yield batch
+          batch = []
         }
       }
     }
-    await walk(this.resolvePath(prefix))
-    return result
+    if (batch.length > 0) yield batch
   }
 
   getPublicUrl(key: string): string | undefined {

@@ -33,11 +33,13 @@ function memoryStorage(
       deleteCalls.push(key)
     },
     exists: async (key: string) => objects.has(key),
-    list: async (prefix: string) => {
+    async *listBatches(prefix: string, batchSize = 1000) {
       api.listPrefixes.push(prefix)
-      return [...objects.entries()]
+      const rows = [...objects.entries()]
         .filter(([key]) => options.listIgnoresPrefix || key.startsWith(prefix))
         .map(([key, object]) => ({ key, lastModified: object.lastModified, size: 1 }))
+      const size = Math.max(1, Math.trunc(batchSize))
+      for (let i = 0; i < rows.length; i += size) yield rows.slice(i, i + size)
     },
     getPublicUrl: () => undefined,
   }
@@ -56,7 +58,10 @@ describe("gcImageCache：按时间清理图片缓存", () => {
 
     expect(result).toEqual({
       scanned: 4,
+      scannedBytes: 4,
+      oldestAgeDays: 40,
       deleted: 3,
+      deletedBytes: 3,
       deletedLegacyMeta: 2, // sidecar 已无读者，不看年龄
       deletedExpired: 1, // old.avif
       failed: 0,
@@ -64,6 +69,33 @@ describe("gcImageCache：按时间清理图片缓存", () => {
       capped: false,
     })
     expect([...storage.objects.keys()]).toEqual(["image-cache/v1/new.avif"])
+  })
+
+  it("流式扫描：按批处理、边扫边删，跨批的删除上限与统计都正确", async () => {
+    const storage = memoryStorage([
+      { key: "image-cache/v1/a.avif", ageDays: 40 },
+      { key: "image-cache/v1/b.avif", ageDays: 41 },
+      { key: "image-cache/v1/c.avif", ageDays: 42 },
+      { key: "image-cache/v1/d.avif", ageDays: 1 },
+      { key: "image-cache/v1/e.json", ageDays: 1 },
+    ])
+    // batchSize=1：每个对象一批，验证「达上限跨批收手」与跨批统计
+    const first = await gcImageCache({ storage, ttlDays: 30, now: NOW, maxDeletes: 2, batchSize: 1 })
+    expect(first.scanned).toBe(5)
+    expect(first.scannedBytes).toBe(5)
+    expect(first.deleted).toBe(2)
+    expect(first.capped).toBe(true)
+    expect(first.oldestAgeDays).toBe(42)
+    expect([...storage.objects.keys()]).toEqual([
+      "image-cache/v1/c.avif",
+      "image-cache/v1/d.avif",
+      "image-cache/v1/e.json",
+    ])
+
+    const second = await gcImageCache({ storage, ttlDays: 30, now: NOW, maxDeletes: 2, batchSize: 2 })
+    expect(second.deleted).toBe(2) // c.avif 过期 + e.json sidecar
+    expect(second.capped).toBe(false)
+    expect([...storage.objects.keys()]).toEqual(["image-cache/v1/d.avif"])
   })
 
   it("边界：恰好到期不算过期（必须严格大于 TTL）", async () => {
