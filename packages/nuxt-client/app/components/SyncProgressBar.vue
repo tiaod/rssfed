@@ -13,8 +13,11 @@
  * 本地存储故障（配额耗尽 / 数据库损坏）时改为常驻警示条：此时同步已被熔断，
  * 继续显示进度只会让人以为还在正常拉取，真正要做的是重置本地缓存。
  */
-import { computed } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { usePouchDb } from '~/composables/usePouchDb'
+import { useTimelineCloudInfo } from '~/composables/useTimelineCloudInfo'
+import { formatBytes, useStorageEstimate } from '~/composables/useStorageEstimate'
+import { formatEta } from '~/utils/syncEta'
 import { summarizeSyncStatuses } from '~/utils/syncStatusSummary'
 
 const pouch = usePouchDb()
@@ -39,6 +42,43 @@ const progress = computed(() => summary.value.progress)
 
 /** 有同步活动、或已熔断时显示进度条 */
 const isSyncing = computed(() => remainingCount.value > 0 || !!storageError.value)
+
+/**
+ * 体积信息：同步时把「云端多大 / 本地占多少」一并显示，方便判断这次要不要等。
+ *
+ * 口径差异见 useTimelineCloudInfo / useStorageEstimate 头注释：云端是库的活数据量，
+ * 本地是整个站点的缓存占用（浏览器没有按库统计体积的接口）。
+ */
+const cloudInfo = useTimelineCloudInfo()
+const storageEstimate = useStorageEstimate()
+
+const cloudSizeText = computed(() => {
+  const size = cloudInfo.info.value?.externalSize
+  return typeof size === 'number' ? formatBytes(size) : ''
+})
+
+const localSizeText = computed(() => {
+  if (!storageEstimate.supported.value || !storageEstimate.info.value) return ''
+  return formatBytes(storageEstimate.info.value.usage)
+})
+
+/** 剩余时间估算（见 utils/syncEta）；算不出来时为空串，不显示 */
+const etaText = computed(() => {
+  const eta = summary.value.etaMs
+  return typeof eta === 'number' ? formatEta(eta) : ''
+})
+
+/** 只在真的开始同步时读一次体积（refresh 内部有缓存，连续同步不会重复请求） */
+function refreshSizes() {
+  if (!isSyncing.value) return
+  void cloudInfo.refresh()
+  void storageEstimate.refresh()
+}
+
+onMounted(refreshSizes)
+watch(isSyncing, (syncing) => {
+  if (syncing) refreshSizes()
+})
 </script>
 
 <template>
@@ -63,7 +103,12 @@ const isSyncing = computed(() => remainingCount.value > 0 || !!storageError.valu
           {{ storageError }}
         </template>
         <template v-else>
-          正在同步（{{ progress }}%）
+          正在同步（{{ progress }}%）<span
+            v-if="cloudSizeText || localSizeText"
+            class="hidden sm:inline"
+          ><template v-if="cloudSizeText"> · 云端 {{ cloudSizeText }}</template><template v-if="localSizeText"> · 本站 {{ localSizeText }}</template></span><span
+            v-if="etaText"
+          > · 预计还需 {{ etaText }}</span>
         </template>
       </span>
     </div>

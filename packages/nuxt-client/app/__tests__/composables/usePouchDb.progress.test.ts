@@ -240,6 +240,99 @@ describe('时间线 live 复制：进度与状态', () => {
     expect(pouch.syncStatuses[TIMELINE_ID]!.error).toContain('network down')
     expect(H.tasks[0]!.cancelled).toBe(false)
   })
+
+  /**
+   * 剩余时间估算：只用「本轮」的写入速率 × 服务端剩余条数。
+   *
+   * 累计写入数（docs_written）是复制实例级的，跨轮不可比 —— 上一轮跑了几千条之后，
+   * 这一轮第一批就会把它抬高，拿它算速率会得到假速度。所以每轮都要重新取基准。
+   */
+  it('剩余时间按本轮实测速率折算；样本不足时不显示', async () => {
+    await startLive()
+    const T0 = 1_700_000_000_000
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(T0)
+    try {
+      // 第一批：建立本轮基准，但窗口不足 3 秒 → 算不出来
+      H.tasks[0]!.emitChange({ docs_written: 10, pending: 90 })
+      expect(pouch.syncStatuses[TIMELINE_ID]!.etaMs).toBeUndefined()
+
+      // 10 秒写入 20 条 → 2 条/秒，剩 65 条 → 约 32.5 秒
+      nowSpy.mockReturnValue(T0 + 10_000)
+      H.tasks[0]!.emitChange({ docs_written: 30, pending: 65 })
+      expect(pouch.syncStatuses[TIMELINE_ID]!.etaMs).toBe(32_500)
+
+      // pending 到 0 = 已拉完：ETA 不再有意义，清掉而不是显示「不到 10 秒」
+      nowSpy.mockReturnValue(T0 + 20_000)
+      H.tasks[0]!.emitChange({ docs_written: 95, pending: 0 })
+      expect(pouch.syncStatuses[TIMELINE_ID]!.etaMs).toBeUndefined()
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  it('暂停后的新一轮重新取速率基准，不继承上一轮的累计写入数', async () => {
+    await startLive()
+    const T0 = 1_700_000_000_000
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(T0)
+    try {
+      // 第一轮：10 秒写 20 条，然后收尾
+      H.tasks[0]!.emitChange({ docs_written: 10, pending: 100 })
+      nowSpy.mockReturnValue(T0 + 10_000)
+      H.tasks[0]!.emitChange({ docs_written: 30, pending: 90 })
+      H.tasks[0]!.emitPaused()
+      expect(pouch.syncStatuses[TIMELINE_ID]!.etaMs).toBeUndefined()
+
+      // 第二轮：服务端又推了 40 条。本轮 10 秒写 10 条 → 1 条/秒，剩 25 条 → 25 秒。
+      // 若沿用上一轮基准（10 条 / T0），会算成 (50-10)/20s = 2 条/秒 → 12.5 秒
+      nowSpy.mockReturnValue(T0 + 20_000)
+      H.tasks[0]!.emitChange({ docs_written: 40, pending: 25 })
+      nowSpy.mockReturnValue(T0 + 30_000)
+      H.tasks[0]!.emitChange({ docs_written: 50, pending: 25 })
+      expect(pouch.syncStatuses[TIMELINE_ID]!.etaMs).toBe(25_000)
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
+
+  /**
+   * 手动同步也会把状态写成 syncing（用户点按钮那一刻），但那是**新一轮**：
+   * 上一轮的速率基准必须作废，否则拿「上一轮的累计写入数 / 这一轮的时间」会算出假速度。
+   * 基准放在状态对象里而不是复制闭包里，正是为了识别这类「状态被外部重建」的边界。
+   */
+  it('手动同步开始的新一轮重置速率基准', async () => {
+    await startLive()
+    const T0 = 1_700_000_000_000
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(T0)
+    try {
+      // 上一轮已经累计写入 1010 条（live 复制实例的累计值），然后安静下来
+      H.tasks[0]!.emitChange({ docs_written: 1000, pending: 100 })
+      nowSpy.mockReturnValue(T0 + 10_000)
+      H.tasks[0]!.emitChange({ docs_written: 1010, pending: 90 })
+      H.tasks[0]!.emitPaused()
+
+      // 手动同步：先把 refresh 挂住，好在「同步中」的状态里注入新一批 change
+      let release!: (value: { accepted: boolean, completed?: boolean, added?: number }) => void
+      H.refresh = () => new Promise((resolve) => {
+        release = resolve
+      })
+      const pending = pouch.syncNow()
+      await vi.waitFor(() => expect(pouch.syncStatuses[TIMELINE_ID]?.status).toBe('syncing'))
+      await vi.waitFor(() => expect(H.tasks[0]!.listenerCount('change')).toBeGreaterThan(0))
+
+      nowSpy.mockReturnValue(T0 + 20_000)
+      H.tasks[0]!.emitChange({ docs_written: 1020, pending: 25 })
+      nowSpy.mockReturnValue(T0 + 30_000)
+      H.tasks[0]!.emitChange({ docs_written: 1060, pending: 25 })
+      // 本轮 10 秒写 40 条 → 4 条/秒，剩 25 条 → 6.25 秒；
+      // 若沿用上一轮基准（1000 条 / T0），会算成 30 秒 60 条 = 2 条/秒 → 12.5 秒
+      expect(pouch.syncStatuses[TIMELINE_ID]!.etaMs).toBe(6250)
+
+      release({ accepted: true, completed: true, added: 0 })
+      await pending
+    } finally {
+      nowSpy.mockRestore()
+    }
+  })
 })
 
 /**

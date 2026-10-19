@@ -11,16 +11,21 @@ import SyncStatusIndicator from '../../components/SyncStatusIndicator.vue'
  * 状态文案（含「同步已暂停」）走 utils/syncStatusSummary 的纯函数，另有单测。
  */
 
-// 只替换掉指示器真正依赖的几样东西：同步状态、暂停开关、本地存储故障、手动同步
+// 只替换掉指示器真正依赖的几样东西：同步状态、暂停开关、本地存储故障、手动同步、体积信息
 const H = vi.hoisted(() => ({
-  statuses: null as Record<string, { status: string, version: number, lastSyncedAt?: string, progress?: number, docsWritten?: number }> | null,
+  statuses: null as Record<string, { status: string, version: number, lastSyncedAt?: string, progress?: number, docsWritten?: number, etaMs?: number }> | null,
   paused: null as { value: boolean } | null,
   storageBroken: null as { value: string | null } | null,
   pauseSync: vi.fn(),
   resumeSync: vi.fn(),
   resetLocalData: vi.fn(async () => {}),
   sync: vi.fn(),
-  toastAdd: vi.fn()
+  toastAdd: vi.fn(),
+  cloudInfo: null as { value: unknown } | null,
+  cloudRefresh: vi.fn(),
+  storageInfo: null as { value: unknown } | null,
+  storageSupported: null as { value: boolean } | null,
+  storageRefresh: vi.fn()
 }))
 
 vi.mock('~/composables/usePouchDb', async () => {
@@ -40,6 +45,31 @@ vi.mock('~/composables/usePouchDb', async () => {
 vi.mock('~/composables/useManualSync', async () => {
   const { ref: rf } = await import('vue')
   return { useManualSync: () => ({ syncing: rf(false), sync: H.sync }) }
+})
+
+vi.mock('~/composables/useTimelineCloudInfo', async () => {
+  const { ref: rf } = await import('vue')
+  return {
+    useTimelineCloudInfo: () => ({
+      info: (H.cloudInfo ??= rf(null) as unknown as { value: unknown }),
+      loading: rf(false),
+      refresh: H.cloudRefresh
+    })
+  }
+})
+
+vi.mock('~/composables/useStorageEstimate', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('~/composables/useStorageEstimate')>()
+  const { ref: rf } = await import('vue')
+  return {
+    ...actual,
+    useStorageEstimate: () => ({
+      info: (H.storageInfo ??= rf(null) as unknown as { value: unknown }),
+      supported: (H.storageSupported ??= rf(false) as unknown as { value: boolean }),
+      loading: rf(false),
+      refresh: H.storageRefresh
+    })
+  }
 })
 
 // Nuxt auto-import 的 useToast：这里只关心暂停动作给出的反馈
@@ -88,6 +118,11 @@ beforeEach(() => {
   H.resetLocalData.mockClear()
   H.sync.mockClear()
   H.toastAdd.mockClear()
+  H.cloudInfo = null
+  H.cloudRefresh.mockClear()
+  H.storageInfo = null
+  H.storageSupported = null
+  H.storageRefresh.mockClear()
 })
 
 describe('SyncStatusIndicator（左下角同步指示器）', () => {
@@ -205,5 +240,41 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
     expect(H.resetLocalData.mock.invocationCallOrder[0]!)
       .toBeLessThan(H.sync.mock.invocationCallOrder[0]!)
     expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({ title: '本地缓存已重置' }))
+  })
+
+  it('弹层里报云端库体积（external）与本站缓存占用，并说明两个数字的口径不同', async () => {
+    H.cloudInfo = {
+      value: { docCount: 4965, externalSize: 796_947_140, activeSize: null, fileSize: null, updateSeq: null }
+    }
+    H.storageInfo = { value: { usage: 214 * 1024 * 1024, quota: null, ratio: null, persisted: null } }
+    H.storageSupported = { value: true }
+
+    const wrapper = mountIndicator()
+    await wrapper.vm.$nextTick()
+
+    // 云端报的是库的活数据量（external），本地报的是整站缓存；两个数字分开写，不混成一句话
+    expect(detailLines(wrapper)).toContain('云端库 760.0 MB · 4965 条')
+    expect(detailLines(wrapper)).toContain('本站缓存 214.0 MB')
+    // 挂载时读一次（悬停还会再刷新，见 refreshSizes）
+    expect(H.cloudRefresh).toHaveBeenCalled()
+    expect(H.storageRefresh).toHaveBeenCalled()
+  })
+
+  it('体积拿不到时这两行都不出现（不显示 0 B）', async () => {
+    const wrapper = mountIndicator()
+    await wrapper.vm.$nextTick()
+    expect(detailLines(wrapper).some(line => line.includes('云端库') || line.includes('本站缓存'))).toBe(false)
+  })
+
+  it('明细行带剩余时间估算：有 etaMs 才拼「预计还需」，没有就不出现', async () => {
+    const wrapper = mountIndicator()
+    H.statuses!['feed-a'] = { status: 'syncing', version: 0, progress: 30, docsWritten: 60, etaMs: 120_000 }
+    await wrapper.vm.$nextTick()
+    expect(detailLines(wrapper)).toContain('已同步 30%（60 条），预计还需 2 分钟')
+
+    // 服务端没给余量 / 样本不足：状态里没有 etaMs，文案回到不带预计的样子
+    H.statuses!['feed-a'] = { status: 'syncing', version: 0, progress: 30, docsWritten: 60 }
+    await wrapper.vm.$nextTick()
+    expect(detailLines(wrapper)).toContain('已同步 30%（60 条）')
   })
 })

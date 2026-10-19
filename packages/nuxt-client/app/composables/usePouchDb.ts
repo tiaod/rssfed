@@ -9,6 +9,8 @@ import { useUserStore } from '~/stores/user'
 import { errorMessage } from '~/utils/errorMessage'
 import { feedDocId } from '~/utils/feedDocId'
 import { isStorageFailure } from '~/utils/storageFailure'
+import { computeRemainingMs } from '~/utils/syncEta'
+import type { EtaBase } from '~/utils/syncEta'
 import {
   lastTimelineUrlKey,
   localDbName,
@@ -47,6 +49,26 @@ export interface SyncStatus {
   docsWritten?: number
   /** 本次复制在服务端剩余待拉取的变更数（change 事件的 pending，0 表示已拉完） */
   pending?: number
+  /**
+   * 估算的本轮剩余时间（毫秒）。
+   *
+   * 由 `pending` 与**本轮**实测写入速率折算（见 utils/syncEta），undefined 表示样本不足
+   * 或服务端没给 pending —— UI 此时不显示 ETA，而不是显示一个假的 0。
+   *
+   * 为什么不用云端库体积 ÷ 带宽：只有首次全量同步才要过整库，日常增量只拉几条；
+   * 而实际耗时的大头常在浏览器写 IndexedDB 这一侧，体积推不出速度。详见 utils/syncEta 头注释。
+   */
+  etaMs?: number
+  /**
+   * 本轮 ETA 的速率基准（内部字段，见 utils/syncEta）：本轮第一批发 change 事件时的
+   * 累计写入数与时间。
+   *
+   * 为什么要放在状态里而不是复制闭包里：`beginManualSync` 也会把状态写成 syncing
+   * （用户点同步那一刻），闭包变量感知不到「这是一轮新的」，会把上一轮的基准拿来算速率。
+   * 收尾（idle）或手动同步重建状态对象时不带这两个字段，等于「下一批重新取基准」。
+   */
+  etaBaseWritten?: number
+  etaBaseAt?: number
 }
 
 /**
@@ -913,10 +935,35 @@ export function usePouchDb() {
           if (doc?.type !== 'entry' || typeof doc.feedId !== 'string' || !doc.feedId) continue
           pouchState.syncedEntryDocsByFeed[doc.feedId] = (pouchState.syncedEntryDocsByFeed[doc.feedId] ?? 0) + 1
         }
+
+        // ── 剩余时间估算（见 utils/syncEta） ──
+        // 基准是「本轮」的：上一轮已经收尾（状态被换成不带基准的 idle/error）或这是手动同步
+        // 新建的状态，就说明这是新一轮，以本批为起点。`docs_written` 是复制实例的累计值，
+        // 上一轮跑了几千条之后这一轮第一批就会把它抬高，跨轮相减会得到「每秒几千条」的假速度。
+        const now = Date.now()
+        const prev = syncStatuses[TIMELINE_ID]
+        const written = typeof i.docs_written === 'number' ? i.docs_written : 0
+        const hasBase = prev?.status === 'syncing'
+          && typeof prev.etaBaseWritten === 'number'
+          && typeof prev.etaBaseAt === 'number'
+        const base: EtaBase = hasBase
+          ? { written: prev.etaBaseWritten as number, at: prev.etaBaseAt as number }
+          : { written, at: now }
+        // pending 为 0 = 已经拉完，ETA 没有意义；某批没带 pending 时沿用上一批的估算，
+        // 免得数字闪一下消失（computeRemainingMs 自身会在样本不足时返回 null）。
+        const etaMs = i.pending === 0
+          ? undefined
+          : computeRemainingMs({ pending: i.pending, written, base, now })
+            ?? (hasBase ? prev?.etaMs : undefined)
+
         markSyncing({
-          progress: computeReplicateProgress(i, syncStatuses[TIMELINE_ID]?.progress ?? 0),
+          progress: computeReplicateProgress(i, prev?.progress ?? 0),
           ...(typeof i.docs_written === 'number' ? { docsWritten: i.docs_written } : {}),
-          ...(typeof i.pending === 'number' ? { pending: i.pending } : {})
+          ...(typeof i.pending === 'number' ? { pending: i.pending } : {}),
+          ...(etaMs !== undefined ? { etaMs } : {}),
+          // 基准随状态带下去：下一批据此继续算速率（见 SyncStatus 上的字段注释）
+          etaBaseWritten: base.written,
+          etaBaseAt: base.at
         })
       }
 

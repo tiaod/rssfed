@@ -114,6 +114,18 @@ describe('summarizeSyncStatuses', () => {
     expect(s.syncingDetails).toEqual([{ feedId: 'b', progress: 50, docsWritten: 40 }])
   })
 
+  it('剩余时间取正在同步的目标里最慢的那个；都算不出来时为 null', () => {
+    expect(summarizeSyncStatuses({ a: { status: 'syncing', progress: 10 } }).etaMs).toBeNull()
+
+    const s = summarizeSyncStatuses({
+      a: { status: 'syncing', progress: 10, etaMs: 30_000 },
+      b: { status: 'syncing', progress: 20, etaMs: 120_000 },
+      // 已结束的库不参与：ETA 只在「正在同步」时有意义
+      c: { status: 'idle', etaMs: 999_000 }
+    })
+    expect(s.etaMs).toBe(120_000)
+  })
+
   it('进度明细最多列出 MAX_SYNCING_DETAILS 条，避免弹层被撑爆', () => {
     const statuses: Record<string, SyncStatusLike> = {}
     for (let i = 0; i < 8; i++) statuses[`f${i}`] = { status: 'syncing', progress: i * 10 }
@@ -179,9 +191,32 @@ describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
     ])
   })
 
+  it('同步中：有剩余时间估算时拼在明细行末尾（没估出来就整段不出现）', () => {
+    const withEta = summarizeSyncStatuses({
+      b: { status: 'syncing', progress: 60, docsWritten: 40, etaMs: 120_000 }
+    })
+    expect(syncStatusDetails(withEta, now)).toEqual([
+      '剩余 1 / 1 个同步目标（60%）',
+      '已同步 60%（40 条），预计还需 2 分钟'
+    ])
+
+    // 服务端还没给 pending / 样本不足：状态里没有 etaMs，不出现「预计还需」的空壳
+    const noEta = summarizeSyncStatuses({ b: { status: 'syncing', progress: 60, docsWritten: 40 } })
+    expect(syncStatusDetails(noEta, now)[1]).toBe('已同步 60%（40 条）')
+  })
+
+  it('同步中：还没有进度但算出了 ETA 时也给一句（不显示 0%）', () => {
+    const s = summarizeSyncStatuses({ b: { status: 'syncing', etaMs: 30_000 } })
+    expect(syncStatusDetails(s, now)).toEqual([
+      '剩余 1 / 1 个同步目标（0%）',
+      '正在拉取，预计还需 30 秒'
+    ])
+  })
+
   it('同步中：进度满了但库还没结束，提示「即将完成」而不是 100%', () => {
     const s = summarizeSyncStatuses({
-      b: { status: 'syncing', progress: 100, docsWritten: 120 }
+      // 进度满格时再报「预计还需」只是「马上就好」的噪音，不拼 ETA
+      b: { status: 'syncing', progress: 100, docsWritten: 120, etaMs: 3_000 }
     })
     expect(syncStatusDetails(s, now)).toEqual([
       '剩余 1 / 1 个同步目标（100%）',

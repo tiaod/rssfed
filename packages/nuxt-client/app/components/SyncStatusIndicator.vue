@@ -6,9 +6,11 @@
  * 同步中 → 暂停同步，已暂停 → 继续同步，其余 → 立即同步。
  * 状态判定与文案在 utils/syncStatusSummary 里（纯函数，便于单测）。
  */
-import { computed } from 'vue'
+import { computed, onMounted, watch } from 'vue'
 import { usePouchDb } from '~/composables/usePouchDb'
 import { useManualSync } from '~/composables/useManualSync'
+import { useTimelineCloudInfo } from '~/composables/useTimelineCloudInfo'
+import { formatBytes, useStorageEstimate } from '~/composables/useStorageEstimate'
 import { summarizeSyncStatuses, syncStatusLabel, syncStatusDetails } from '~/utils/syncStatusSummary'
 import type { SyncState } from '~/utils/syncStatusSummary'
 
@@ -19,6 +21,48 @@ const summary = computed(() => summarizeSyncStatuses(pouch.syncStatuses, {
 }))
 const label = computed(() => syncStatusLabel(summary.value.state))
 const details = computed(() => syncStatusDetails(summary.value))
+
+/**
+ * 体积信息：云端库用 CouchDB 的 `GET /{db}`，本地用 StorageManager.estimate()。
+ *
+ * 两个数字口径不同，展示时都不能含糊（见 useTimelineCloudInfo / useStorageEstimate 头注释）：
+ * 云端报外部字节（external，近似一次全量同步要过的量），本地只能报「整个站点」。
+ */
+const cloudInfo = useTimelineCloudInfo()
+const storageEstimate = useStorageEstimate()
+
+/** 云端库体积：`云端库 797.3 MB · 4965 条`（拿不到体积时只说条数） */
+const cloudLine = computed(() => {
+  const info = cloudInfo.info.value
+  if (!info) return ''
+  const size = info.externalSize !== null ? formatBytes(info.externalSize) : ''
+  return size ? `云端库 ${size} · ${info.docCount} 条` : `云端库 ${info.docCount} 条`
+})
+
+/** 本地占用：浏览器拿不到「某个 PouchDB 库」的体积，这里是整个站点的缓存用量 */
+const localLine = computed(() => {
+  if (!storageEstimate.supported.value || !storageEstimate.info.value) return ''
+  return `本站缓存 ${formatBytes(storageEstimate.info.value.usage)}`
+})
+
+onMounted(() => {
+  void cloudInfo.refresh()
+  void storageEstimate.refresh()
+})
+
+/** 悬停时刷新：体积变化慢，refresh 内部有缓存，不会每次悬停都打请求 */
+function refreshSizes() {
+  void cloudInfo.refresh()
+  void storageEstimate.refresh()
+}
+
+// 一轮同步结束后体积可能刚变大（服务端聚合进来新条目、本地也多了一份）：
+// 顺手强刷一次，免得用户看到的是同步前的旧数字（refresh 的缓存默认 60 秒）
+watch(() => summary.value.lastSyncedAt, (next, prev) => {
+  if (!next || next === prev) return
+  void cloudInfo.refresh(true)
+  void storageEstimate.refresh()
+})
 
 // 点击触发手动同步：与顶部工具栏的同步按钮共用逻辑，结果会有 toast 反馈。
 // 这里不给按钮挂 loading —— 按钮一旦变 disabled 就会丢焦点，悬停中的弹层也会跟着收起；
@@ -101,6 +145,7 @@ function handleClick() {
       square
       :aria-label="actionLabel"
       @click="handleClick"
+      @pointerenter="refreshSizes"
     >
       <UIcon
         :name="ICONS[summary.state]"
@@ -130,6 +175,19 @@ function handleClick() {
           class="text-muted"
         >
           {{ line }}
+        </span>
+        <!-- 体积信息：口径见脚本里的 cloudLine / localLine 注释 -->
+        <span
+          v-if="cloudLine"
+          class="text-muted"
+        >
+          {{ cloudLine }}
+        </span>
+        <span
+          v-if="localLine"
+          class="text-muted"
+        >
+          {{ localLine }}
         </span>
         <span class="text-dimmed">点击{{ actionLabel }}</span>
       </div>

@@ -5,6 +5,8 @@
  * usePouchSyncStatus 并把它传进来。
  */
 
+import { formatEta } from '~/utils/syncEta'
+
 /** 单个库的同步状态里本模块需要的字段（结构兼容 usePouchDb 的 SyncStatus） */
 export interface SyncStatusLike {
   status: 'syncing' | 'idle' | 'error' | 'queued'
@@ -14,6 +16,8 @@ export interface SyncStatusLike {
   progress?: number
   /** 本次复制已写入的文档数 */
   docsWritten?: number
+  /** 估算的本轮剩余时间（毫秒）；undefined 表示样本不足或服务端没给余量，不显示 */
+  etaMs?: number
 }
 
 export type SyncState = 'syncing' | 'error' | 'success' | 'idle' | 'paused' | 'storage-error'
@@ -23,6 +27,8 @@ export interface SyncingDetail {
   feedId: string
   progress?: number
   docsWritten?: number
+  /** 该库本轮的剩余时间估算（毫秒）；undefined = 算不出来，不显示 */
+  etaMs?: number
 }
 
 export interface SyncStatusSummary {
@@ -46,6 +52,13 @@ export interface SyncStatusSummary {
   progress: number
   /** 正在同步的库及其内部进度（顺序与状态表一致，最多 MAX_SYNCING_DETAILS 条） */
   syncingDetails: SyncingDetail[]
+  /**
+   * 本轮剩余时间估算（毫秒），取各正在同步库里的最大值。
+   *
+   * null 表示算不出来（样本不足 / 服务端没给余量）：UI 此时不显示 ETA，
+   * 而不是显示 0 —— 那会让人以为马上就完成。
+   */
+  etaMs: number | null
   /** 失败的库数量（含未带失败原因的） */
   errorCount: number
   /** 失败原因（按库去重前的原始顺序，可能少于 errorCount） */
@@ -110,8 +123,15 @@ export function summarizeSyncStatuses(
     .map(([feedId, s]) => ({
       feedId,
       ...(typeof s.progress === 'number' ? { progress: s.progress } : {}),
-      ...(typeof s.docsWritten === 'number' ? { docsWritten: s.docsWritten } : {})
+      ...(typeof s.docsWritten === 'number' ? { docsWritten: s.docsWritten } : {}),
+      ...(typeof s.etaMs === 'number' ? { etaMs: s.etaMs } : {})
     }))
+
+  // 本轮剩余时间：多目标时取最慢的那个（同一时刻能看到的只有它在拖后腿）
+  const etas = list
+    .filter(s => s.status === 'syncing' && typeof s.etaMs === 'number')
+    .map(s => s.etaMs as number)
+  const etaMs = etas.length ? Math.max(...etas) : null
 
   // 源内进度加权：完成的库记满，进行中的库按内部百分比折算。
   // 沿用「已完成库数 / 总库数」会让一个几千条的源在拉到一半时进度条纹丝不动
@@ -131,6 +151,7 @@ export function summarizeSyncStatuses(
     done,
     progress: total === 0 ? 0 : Math.min(100, Math.round(progressUnits / total * 100)),
     syncingDetails,
+    etaMs,
     errorCount,
     errors,
     lastSyncedAt,
@@ -175,16 +196,25 @@ export function syncStatusLabel(state: SyncState): string {
  */
 function syncingDetailLine(item: SyncingDetail): string {
   const written = item.docsWritten ?? 0
+  // 有估算才拼「预计还需」：样本不足时（etaMs undefined）整段不出现，不留一个空壳
+  const etaText = typeof item.etaMs === 'number' ? formatEta(item.etaMs) : ''
+  const etaTail = etaText ? `，预计还需 ${etaText}` : ''
+
   if (item.progress === undefined) {
-    return written > 0 ? `正在拉取（已同步 ${written} 条）` : '正在拉取…'
+    // progress 为 undefined 表示服务端还没返回变更余量（见 usePouchDb 的 change 监听），
+    // 此时不能显示 0%（那是谎报），只说「正在拉取」
+    if (written > 0) return `正在拉取（已同步 ${written} 条）${etaTail}`
+    return etaText ? `正在拉取${etaTail}` : '正在拉取…'
   }
-  // 进度条已经满格但库还没结束：最后一批（含 checkpoint 写入）在路上
+  // 进度条已经满格但库还没结束：最后一批（含 checkpoint 写入）在路上。
+  // 这时候再报 ETA 只会显示「还需几秒」，没有信息量
   if (item.progress >= 100) {
     return written > 0 ? `即将完成（已同步 ${written} 条）` : '即将完成'
   }
-  return written > 0
+  const progressText = written > 0
     ? `已同步 ${item.progress}%（${written} 条）`
     : `已同步 ${item.progress}%`
+  return `${progressText}${etaTail}`
 }
 
 /** 弹层明细行：同步中看进度，失败看原因，成功看时间与覆盖范围，已暂停看提示 */
