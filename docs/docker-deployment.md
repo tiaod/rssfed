@@ -186,7 +186,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 - **资源**：抓取 + AVIF 压缩与 API 抢 CPU/内存，2 核 4GB 起步；抓取量大时优先把 worker 拆成独立进程。**图片解码/压缩的并发是进程内内存峰值的总开关**：默认按核数（2 核 1、4 核 2、8 核以上 4），2G 内存的机器保持默认或显式 `IMAGE_CONCURRENCY=1`——实测同一进程连续压 12 张 12MP 图比压 1 张多占约 340MB（数据见 [images/concurrency.ts](../packages/hono-server/src/images/concurrency.ts)）。抓取响应体上限（`MAX_FEED_BYTES` / `MAX_FEED_DECODED_BYTES`，默认 16MB / 32MB）同理：放宽就要同步下调 `FETCH_CONCURRENCY`。
 - **单库同步**：浏览器只同步 `user-timeline_<随机名>` 一个库（`GET /api/couchdb/sync-targets` 只回这一个库名）：拉取全量 + 回写状态两条 live 通道。库名随机、存在 `user.timeline_db_name` 列，删库前先置空该列。
 - **聚合的搬运按需触发，不在 `_replicator` 里**：服务端只对「源那边上次同步之后有过新内容」的源跑一次 `POST /_replicate`（跑完即止），并发由 `rss-timeline-sync` 队列控制（`TIMELINE_SYNC_CONCURRENCY`，默认 4）；`deploy/couchdb-replicator.ini`（compose 挂进 `local.d/`）现在只兜住升级/回滚后残留的常驻任务，`_scheduler/docs/_replicator` 里没有本服务的任务才是正常状态。`_replicator` 是系统库，**升级/回滚后不要手工清空**（清掉不会丢内容，但会让残留任务重新排队）。单源同步的进度看 PostgreSQL 的 `timeline_source_sync` 与 Redis 里的 `bull:rss-timeline-sync:*`。
-- **存储量随用户数增长**：派生库是每个用户一份条目副本（附件沿用源库成品，不再按用户重压），用户多了要先看 CouchDB 数据卷；`image-cache/` 前缀只是抓取去重用的中间产物，按 `IMAGE_CACHE_TTL_DAYS`（默认 30 天）自动清理，体积有界。
+- **存储量随用户数增长**：派生库是每个用户一份条目副本（附件沿用源库成品，不再按用户重压），用户多了要先看 CouchDB 数据卷；`image-cache/` 前缀只是抓取去重用的中间产物，按 `IMAGE_CACHE_TTL_DAYS`（默认 7 天）自动清理，体积有界。
 
 ## 7. 代码层生产开关（已完成）
 

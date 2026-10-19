@@ -17,9 +17,10 @@ import { blurhashFromImage } from "./blurhash"
  * 唯一消费者是抓取路径（`rss/entry-images.ts`）：同一条图片 URL 会在多个条目里重复出现
  * （公众号文章内嵌的模板图、站点图标等），第二次起直接读缓存对象，不再下载 + 压缩。
  * 缓存对象只是**中间产物** —— 条目真正要的是 CouchDB 附件；缓存只为省重复的下载/编码。
+ * 浏览器/客户端读的永远是 CouchDB 附件，不会读这里（旧版还有个按需压缩接口，已删除）。
  *
  * 因为它可以随时重建，所以允许过期：老对象由 `images/cache-gc.ts` 按
- * `IMAGE_CACHE_TTL_DAYS`（默认 30 天）清掉；清掉之后最多是「下次遇到同 URL 时重下一遍」，
+ * `IMAGE_CACHE_TTL_DAYS`（默认 7 天）清掉；清掉之后最多是「下次遇到同 URL 时重下一遍」，
  * 不影响任何已入库数据。key 里带 `IMAGE_CACHE_VERSION`，改压缩实现时递增版本即可让旧对象失效。
  *
  * 没有 sidecar 元数据：命中时用 `probeImageSize` / `blurhashFromImage` 从 AVIF 本体现算
