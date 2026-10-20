@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest"
 import { eq } from "drizzle-orm"
 import { drizzle } from "drizzle-orm/postgres-js"
 import { feeds } from "../db/schema"
-import { buildFeedRegistryUpdate } from "../workers/feed-registry"
+import { buildFeedRegistryUpdate, validatorsFromFeedRow } from "../workers/feed-registry"
 import type { ParsedFeed } from "../rss/parser"
 
 /**
@@ -44,7 +44,7 @@ describe("buildFeedRegistryUpdate", () => {
 
   it("标题为空时回退到 url，并原样带上 description/siteUrl 与抓取时间", () => {
     const now = new Date("2026-10-10T13:00:00.000Z")
-    const update = buildFeedRegistryUpdate("https://x/feed", { ...parsed, title: undefined as any }, now)
+    const update = buildFeedRegistryUpdate("https://x/feed", { ...parsed, title: undefined as any }, {}, now)
     expect(update.title).toBe("https://x/feed")
     expect(update.description).toBe(parsed.description)
     expect(update.siteUrl).toBe(parsed.link)
@@ -59,5 +59,42 @@ describe("buildFeedRegistryUpdate", () => {
     const q = toSql(update)
     expect(q.sql).not.toContain('"description"')
     expect(q.sql).toContain('"last_fetched_at"')
+  })
+
+  it("条件请求验证器写进 3 列（以前存在 FeedDoc 里，会每轮复制进用户库）", () => {
+    const update = buildFeedRegistryUpdate("https://x/feed", parsed, {
+      validatorUrl: "https://x/feed?final=1",
+      etag: 'W/"abc"',
+      lastModified: "Wed, 01 Oct 2026 00:00:00 GMT",
+    })
+    expect(update.fetchValidatorUrl).toBe("https://x/feed?final=1")
+    expect(update.fetchEtag).toBe('W/"abc"')
+    expect(update.fetchLastModified).toBe("Wed, 01 Oct 2026 00:00:00 GMT")
+    const q = toSql(update)
+    expect(q.sql).toContain('"fetch_etag"')
+    expect(q.sql).toContain('"fetch_last_modified"')
+    expect(q.sql).toContain('"fetch_validator_url"')
+  })
+
+  it("本次响应没给验证器时保留旧值：undefined 的列不进 UPDATE", () => {
+    const update = buildFeedRegistryUpdate("https://x/feed", parsed, {})
+    const q = toSql(update)
+    expect(q.sql).not.toContain('"fetch_etag"')
+    expect(q.sql).not.toContain('"fetch_last_modified"')
+    expect(q.sql).not.toContain('"fetch_validator_url"')
+  })
+
+  it("validatorsFromFeedRow 把数据库的 null 归一成 undefined（= 没有验证器）", () => {
+    expect(validatorsFromFeedRow(null)).toEqual({ url: undefined, etag: undefined, lastModified: undefined })
+    expect(validatorsFromFeedRow({
+      fetchValidatorUrl: null,
+      fetchEtag: null,
+      fetchLastModified: null,
+    })).toEqual({ url: undefined, etag: undefined, lastModified: undefined })
+    expect(validatorsFromFeedRow({
+      fetchValidatorUrl: "https://x/feed",
+      fetchEtag: 'W/"e"',
+      fetchLastModified: "LM",
+    })).toEqual({ url: "https://x/feed", etag: 'W/"e"', lastModified: "LM" })
   })
 })

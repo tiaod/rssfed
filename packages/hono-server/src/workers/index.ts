@@ -19,7 +19,8 @@ import { connection, createWorkerConnection } from "./connection"
 import { isFeedDue, feedJitterMs, type FetchScheduleOptions } from "./fetch-schedule"
 import { selectNewestItems } from "./entry-selection"
 import { enqueueFetchJob } from "./enqueue"
-import { buildFeedRegistryUpdate } from "./feed-registry"
+import { buildFeedRegistryUpdate, validatorsFromFeedRow, type FeedFetchMeta } from "./feed-registry"
+import { buildFeedDoc, feedDocDisplayChanged, mergeFeedDocDisplay, shouldCacheFeedIcon, shouldWriteFeedDoc } from "./feed-doc"
 import { notifyTimelineStale, shutdownTimelineWorkers } from "./timeline"
 import { enqueueBotCopy, shutdownBotCopyWorkers } from "./bot-sync"
 import { shutdownTimelineMaintenance, startTimelineMaintenance } from "./maintenance"
@@ -40,15 +41,17 @@ const FETCH_CONCURRENCY = envInt("FETCH_CONCURRENCY", 4)
 /**
  * 抓取 job 的 payload。
  *
- * `couchDbName` / `imageOptions` 由调度器在同一个 SQL 里带出来：稳态下 worker 可以少查
- * 1–2 次 PostgreSQL（705 源 × 每轮 1 次已经不小）。手工「立即抓取」/ 首抓 / 老 Redis 里
- * 残留的 job 不带这两项，worker 回退到原来的查询路径。
+ * `couchDbName` / `imageOptions` / `validators` 由调度器在同一个 SQL 里带出来：稳态下
+ * worker 可以少查 1–2 次 PostgreSQL（705 源 × 每轮 1 次已经不小）。手工「立即抓取」/
+ * 首抓 / 老 Redis 里残留的 job 不带这些，worker 回退到原来的查询路径。
  */
 interface FetchJobData {
   feedId: string
   url: string
   couchDbName?: string | null
   imageOptions?: EntryImageOptions
+  /** 条件请求验证器：从 `feeds` 表带出来（不再存在 FeedDoc 里，见 workers/feed-doc.ts） */
+  validators?: FeedValidators
 }
 
 /**
@@ -62,23 +65,23 @@ interface FetchJobData {
 const isTestProcess = process.env.VITEST === "true" || process.env.NODE_ENV === "test"
 
 export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job) => {
-  const { feedId, url, couchDbName, imageOptions } = job.data as FetchJobData
+  const { feedId, url, couchDbName, imageOptions, validators: jobValidators } = job.data as FetchJobData
 
   try {
     // 调度器已带出库名时跳过「按 feedId 查 PG」（稳态路径）
     const feedDbName = await ensureFeedDatabase(feedId, couchDbName)
     const feedDb = createCouchDb(feedDbName)
 
-    // 先读 FeedDoc：拿上次响应头里的 ETag/Last-Modified（条件请求），
-    // 顺带省掉 updateFeedDoc 里再 get 一次。
-    const previous = await readFeedDoc(feedDb, feedId)
-    const fetched = await fetchParsedFeed(url, previous.validators)
+    // 条件请求验证器只在 PostgreSQL `feeds` 表（不写进 FeedDoc，理由见 workers/feed-doc.ts）。
+    // 稳态由调度器随 job 带过来；手工「立即抓取」/首抓/老 job 没有时回退一次查询。
+    const validators = jobValidators ?? await loadFeedValidators(feedId)
+    const fetched = await fetchParsedFeed(url, validators)
 
-    // 304：内容没变。只刷抓取时间、清掉上一轮错误，不写条目、不通知 Bot。
+    // 304：内容没变。只刷 PG 里的抓取时间/错误状态，**不写 CouchDB**（不产生新的 FeedDoc 修订）。
     // 这是省流量的关键路径 —— 绝大多数轮次都会走到这里，一个正文字节都不用传。
     // （唯一的例外是下面的补裁剪：上一轮没裁剪完时它仍可能产生删除并通知时间线。）
     if (fetched.notModified) {
-      await markFeedNotModified(feedDb, feedId, previous.doc)
+      await markFeedNotModified(feedId)
       // 自愈：上一轮可能「写入成功但裁剪没跑完/失败」，而 304 之后不再走写入分支，
       // 那条源会永远停在超限状态。这里补一次裁剪 —— 稳态下 total<=N，只是一次视图查询（几毫秒）。
       const trim = await trimSourceToLatestN(createTrimDb(feedDbName), { compact: false })
@@ -92,20 +95,23 @@ export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job)
 
     const parsed = fetched.feed
 
+    // 200 才需要读 FeedDoc（合并展示字段）；304 分支一次 CouchDB 读都不用发。
+    const existingDoc = await readFeedDoc(feedDb, feedId)
+
     // 依次更新 FeedDoc 元数据、PostgreSQL 注册表，再写入新条目并通知相关 Bot
-    const iconCached = await updateFeedDoc(feedDb, feedId, url, parsed, previous.doc, {
-      // 验证器必须连同来源 URL 一起存：重定向过的源（如 macworld、baoyu）最终资源在另一跳，
-      // 下一轮只有走到那一跳才会带条件头、拿到 304；少存 url 就等于每轮都全量重下。
-      url: fetched.validatorUrl,
-      etag: fetched.etag,
-      lastModified: fetched.lastModified,
+    const { iconCached, displayChanged } = await updateFeedDoc(feedDb, feedId, url, parsed, existingDoc)
+    // 本次响应没给验证器时保留上一轮能用的（validatorUrl 必须与验证器一起更新，
+    // 否则改了重定向目标后会拿旧资源的 ETag 去问新地址 —— 见 rss/parser.ts 的说明）。
+    await updateFeedRegistry(feedId, url, parsed, {
+      validatorUrl: fetched.validatorUrl ?? validators.url,
+      etag: fetched.etag ?? validators.etag,
+      lastModified: fetched.lastModified ?? validators.lastModified,
     })
-    await updateFeedRegistry(feedId, url, parsed)
     const newEntries = await insertNewEntries(feedDb, feedId, parsed.items ?? [], imageOptions)
     // 源库保留策略：每条源只留最新 N 条 —— 整个保留链路的唯一权威
     // （见 docs/notes/aggregation/source-side-retention-plan.md）。
     // 超限才动数据；拿不到边界时一条都不删。compact 不放在这里：删除只产生墓碑，
-    // 附件字节由 CouchDB 自身的 [compactions] 或定时 compact 回收。
+    // 附件字节由 CouchDB 的自动压缩（smoosh 的 ratio 通道，阈值见 deploy/couchdb-replicator.ini）回收。
     const trim = await trimSourceToLatestN(createTrimDb(feedDbName), { compact: false })
     // 两个时间戳语义不同，别混：
     //   lastNewEntryAt → "抓到新内容"（前端"最后更新"用）
@@ -122,7 +128,10 @@ export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job)
       hasFetchValidators: Boolean(fetched.etag || fetched.lastModified),
     }
     if (newEntries.length > 0 || iconCached) patch.lastNewEntryAt = now
-    if (newEntries.length > 0 || iconCached || trim.deleted > 0) patch.lastChangedAt = now
+    // FeedDoc 展示字段（标题/简介/站点/封面）变了也要触发一次同步，否则只改元信息、
+    // 不出新条目的源在用户库里永远看不到更新（以前靠"每轮都写 FeedDoc"掩盖了这一点）。
+    // 只清理遗留簿记的那种写入不算（客户端看不到变化，没必要叫醒每个订阅者）。
+    if (newEntries.length > 0 || iconCached || displayChanged || trim.deleted > 0) patch.lastChangedAt = now
     await db.update(feeds).set(patch).where(eq(feeds.id, feedId))
     // Bot 产出复制挪到独立队列（带 attempts 重试）：失败不再静默丢条，也不拖慢抓取。
     // 无新条目时也入队一次 —— Bot 库里的 FeedDoc 元信息（名字/头像）需要校正。
@@ -144,59 +153,47 @@ export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job)
 }, { connection: createWorkerConnection(), concurrency: FETCH_CONCURRENCY })
 
 /**
- * 从 FeedDoc 读出上次响应的 HTTP 验证器（ETag / Last-Modified），供条件请求使用。
+ * 从源库读出 FeedDoc（可能不存在）；只在 200 分支调用，用来合并展示字段。
  *
- * 验证器跟着 FeedDoc 走、而不是写进 PostgreSQL：FeedDoc 本来每轮抓取都要读/写一次，
- * 放这里不需要给 `feeds` 表加列（也就不用为一个纯抓取优化动生产库结构）。
- * 两者都是源码不变量里的"抓取中间状态"，不是用户数据。
+ * 抓取簿记（验证器/最后抓取时间/错误）不再从这份文档读 —— 那是 PostgreSQL `feeds` 表的事，
+ * 这份文档只装会复制进用户聚合库的展示字段（见 workers/feed-doc.ts）。
  */
-async function readFeedDoc(feedDb: FeedDb, feedId: string): Promise<{ doc: any | null, validators: FeedValidators }> {
+async function readFeedDoc(feedDb: FeedDb, feedId: string): Promise<any | null> {
   try {
-    const doc = await feedDb.get(feedDocId(feedId)) as any
-    // fetchValidatorUrl 是验证器来源的最终 URL（重定向链最后一跳）；老文档没有这个字段时
-    // 沿用「只对第一跳生效」的旧语义，下一次成功抓取后会被补上。
-    return {
-      doc,
-      validators: {
-        url: doc.fetchValidatorUrl,
-        etag: doc.fetchEtag,
-        lastModified: doc.fetchLastModified,
-      },
-    }
+    return await feedDb.get(feedDocId(feedId)) as any
   } catch {
-    // 首次抓取（FeedDoc 还没建）或读取失败：当作没有验证器，退化为普通全量抓取
-    return { doc: null, validators: {} }
+    // 首次抓取（FeedDoc 还没建）或读取失败：当作没有旧文档，走首次插入
+    return null
   }
 }
 
 /**
- * 304 之后刷新 FeedDoc 与注册表：只碰 lastFetchedAt / errorMessage。
+ * 从 PostgreSQL 读条件请求验证器（调度器没随 job 带过来时的回退路径）。
  *
- * 这里**不能**复用 updateFeedDoc：它写的是 title/description/image 等抓取结果，
- * 而 304 意味着这一轮根本没有新值；更重要的是别把上一轮残留的 errorMessage 带回来
- * （304 本身是成功响应，说明源是好的）。
- *
- * FeedDoc 的 `lastFetchedAt` 只给离线兜底展示用，不必每轮 304 都写一次
- * （约 6.6k 次写/天）：1 小时粒度足够，只有「上一轮有错误要清」或「上次写已是 1 小时前」才写。
- * PostgreSQL 的 lastFetchedAt 仍然每轮都更新 —— 调度器靠它算下一轮。
+ * 读失败不抛：退化成「没有验证器」只会多一次全量下载，不该让整轮抓取失败。
  */
-const FEED_DOC_TOUCH_INTERVAL_MS = 60 * 60 * 1000
-
-async function markFeedNotModified(feedDb: FeedDb, feedId: string, existing: any): Promise<void> {
-  const nowMs = Date.now()
-  const lastDocFetch = Date.parse(existing?.lastFetchedAt ?? "")
-  const docStale = !Number.isFinite(lastDocFetch) || nowMs - lastDocFetch >= FEED_DOC_TOUCH_INTERVAL_MS
-  if (existing && (existing.errorMessage || docStale)) {
-    try {
-      // errorMessage: undefined 会被 nano 的 JSON.stringify 丢掉，等效于从文档里清掉该字段
-      await feedDb.insert({ ...existing, lastFetchedAt: new Date(nowMs).toISOString(), errorMessage: undefined } as any)
-    } catch (err) {
-      // FeedDoc 写失败不影响这一轮：下一轮会带同样的验证器回来，304 之后还会再试一次
-      console.warn(`[Fetch] 304 后更新 FeedDoc 失败 ${feedId}:`, (err as any)?.message ?? err)
-    }
+async function loadFeedValidators(feedId: string): Promise<FeedValidators> {
+  try {
+    const [row] = await db.select({
+      fetchValidatorUrl: feeds.fetchValidatorUrl,
+      fetchEtag: feeds.fetchEtag,
+      fetchLastModified: feeds.fetchLastModified,
+    }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
+    return validatorsFromFeedRow(row)
+  } catch {
+    return {}
   }
+}
+
+/**
+ * 304 之后只刷新 PostgreSQL 的抓取状态：**不碰 CouchDB**。
+ *
+ * 以前这里会按 1 小时粒度重写一次 FeedDoc 的 `lastFetchedAt`，那份修订同样会复制进每个
+ * 用户库。现在 FeedDoc 只装展示字段，抓取时间/错误信息以 `feeds` 表为唯一权威。
+ */
+async function markFeedNotModified(feedId: string): Promise<void> {
   await db.update(feeds).set({
-    lastFetchedAt: new Date(nowMs),
+    lastFetchedAt: new Date(),
     errorMessage: null,
     // 304 说明条件请求验证器可用：错误清零，并标记为「有验证器」（调度器不提前降频）
     errorStreak: 0,
@@ -205,10 +202,14 @@ async function markFeedNotModified(feedDb: FeedDb, feedId: string, existing: any
 }
 
 /**
- * 更新（或首次创建）CouchDB 中的 FeedDoc 元数据；返回是否首次缓存了图标（用于触发前端同步）。
+ * 更新（或首次创建）CouchDB 中的 FeedDoc 元数据。
  *
- * @param existing 调用方在抓取**之前**读到的 FeedDoc（见 readFeedDoc），避免再 get 一次
- * @param validators 本次响应头里的 ETag / Last-Modified，随 FeedDoc 存下来供下一轮条件请求
+ * 只写**展示字段**（title/description/siteUrl/image）与图标缓存；抓取簿记一律留在 PG
+ * （理由见 workers/feed-doc.ts 顶部注释）。展示字段没变、文档里也没有遗留簿记时**不写**，
+ * 避免每轮抓取都产生一个会被复制进每个用户库的修订。
+ *
+ * @returns iconCached     本次是否新缓存了图标（要触发同步，客户端才能拉到附件）
+ * @returns displayChanged 展示字段是否真的变了（决定要不要 bump lastChangedAt 叫醒订阅者）
  */
 async function updateFeedDoc(
   feedDb: FeedDb,
@@ -216,82 +217,40 @@ async function updateFeedDoc(
   url: string,
   parsed: ParsedFeed,
   existing: any | null,
-  validators: FeedValidators,
-): Promise<boolean> {
-  const imageUrl = parsed.image?.url
+): Promise<{ iconCached: boolean, displayChanged: boolean }> {
   // 这个函数里所有 CouchDB 文档名（get / insert / multipart 附件）都必须用 docId：
-  // 下划线开头的 feedId 直接当文档 id 会被 CouchDB 拒（见 couchdb/doc-ids.ts），
-  // 带图标的源会因为图标附件那条 multipart 写入而整轮抓取失败。
+  // 下划线开头的 feedId 直接当文档 id 会被 CouchDB 拒（见 couchdb/doc-ids.ts）。
   const docId = feedDocId(feedId)
-  // 条件请求的验证器：本次没拿到（服务端不给了）就保留旧的。
-  // validatorUrl 必须与验证器一起更新：否则改了重定向目标后，会拿旧资源的 ETag 去问新地址。
-  const fetchMeta = {
-    fetchValidatorUrl: validators.url ?? existing?.fetchValidatorUrl,
-    fetchEtag: validators.etag ?? existing?.fetchEtag,
-    fetchLastModified: validators.lastModified ?? existing?.fetchLastModified,
-  }
+  const display = mergeFeedDocDisplay(existing, parsed, url)
+  const doc = buildFeedDoc(existing, display, docId, new Date().toISOString())
+  const displayChanged = feedDocDisplayChanged(existing, display)
 
-  if (existing) {
-    const doc = {
-      ...existing,
-      title: parsed.title ?? existing.title,
-      description: parsed.description ?? existing.description,
-      siteUrl: parsed.link ?? existing.siteUrl,
-      image: imageUrl ?? existing.image,
-      lastFetchedAt: new Date().toISOString(),
-      // CouchDB 文档这里用 undefined 是对的：nano 会 JSON.stringify，undefined 的键直接被丢掉，
-      // 新 revision 里不再有 errorMessage，等效于清空。（SQL 那边不能这么写，见 feed-registry.ts）
-      errorMessage: undefined,
-      ...fetchMeta,
-    }
-    // feed 图标缓存：URL 变化、或压缩参数版本升级（见 FEED_ICON_CACHE_VERSION）时
-    // 重新下载压缩为 AVIF 附件；失败静默跳过。
-    // 版本判断不能省：附件名固定为 feed-image.avif，光比 URL 发现不了参数变化。
-    const iconStale = !existing.imageCached
-      || imageUrl !== existing.imageCached.url
-      || existing.imageCached.v !== FEED_ICON_CACHE_VERSION
-    if (imageUrl && iconStale) {
-      const cached = await cacheSingleImage(imageUrl)
-      if (cached) {
-        await feedDb.multipart.insert({ ...doc, imageCached: cached.image } as any,
-          [{ name: cached.image.attachment, data: cached.data, content_type: "image/avif" }],
-          { docName: docId, rev: existing._rev })
-        return true // 图标首次缓存：touch lastNewEntryAt，触发前端同步拉取附件
-      }
-    }
-    await feedDb.insert(doc as any)
-    return false
-  }
-
-  // FeedDoc 不存在，首次插入
-  const doc: any = {
-    _id: docId,
-    type: "feed",
-    url,
-    title: parsed.title ?? url,
-    description: parsed.description,
-    siteUrl: parsed.link,
-    lastFetchedAt: new Date().toISOString(),
-    createdAt: new Date().toISOString(),
-    ...fetchMeta,
-  }
-  // 首次建库时也尝试缓存图标（用原 URL 作为 imageCached 判断基准：首次无缓存）
-  if (imageUrl) {
+  // feed 图标缓存：URL 变化、或压缩参数版本升级（见 FEED_ICON_CACHE_VERSION）时
+  // 重新下载压缩为 AVIF 附件；失败静默跳过（下一轮会再试）。
+  const imageUrl = display.image
+  if (shouldCacheFeedIcon(existing, imageUrl, FEED_ICON_CACHE_VERSION) && imageUrl) {
     const cached = await cacheSingleImage(imageUrl)
     if (cached) {
-      doc.image = imageUrl
-      doc.imageCached = cached.image
-      await feedDb.multipart.insert(doc, [{ name: cached.image.attachment, data: cached.data, content_type: "image/avif" }], { docName: docId })
-      return true
+      await feedDb.multipart.insert({ ...doc, imageCached: cached.image } as any,
+        [{ name: cached.image.attachment, data: cached.data, content_type: "image/avif" }],
+        { docName: docId, ...(existing?._rev ? { rev: existing._rev } : {}) })
+      return { iconCached: true, displayChanged: true }
     }
   }
-  await feedDb.insert(doc)
-  return false
+
+  if (!shouldWriteFeedDoc(existing, display)) return { iconCached: false, displayChanged: false }
+  await feedDb.insert(doc as any)
+  return { iconCached: false, displayChanged }
 }
 
-/** 更新 PostgreSQL feed 注册表 */
-async function updateFeedRegistry(feedId: string, url: string, parsed: ParsedFeed) {
-  await db.update(feeds).set(buildFeedRegistryUpdate(url, parsed)).where(eq(feeds.id, feedId))
+/** 更新 PostgreSQL feed 注册表（含条件请求验证器） */
+async function updateFeedRegistry(
+  feedId: string,
+  url: string,
+  parsed: ParsedFeed,
+  fetchMeta: FeedFetchMeta,
+) {
+  await db.update(feeds).set(buildFeedRegistryUpdate(url, parsed, fetchMeta)).where(eq(feeds.id, feedId))
 }
 
 /** 一次 `_all_docs` keys 查询的条数：CouchDB 对 POST body 有上限，500 足够且往返次数可忽略 */
@@ -521,6 +480,10 @@ export async function scheduleFeedFetches() {
     // 下面两列是自适应调度 / 错误退避的输入（见 fetch-schedule.ts）
     errorStreak: feeds.errorStreak,
     hasFetchValidators: feeds.hasFetchValidators,
+    // 条件请求验证器随 job 带给 worker（它们只存在 PG，不再写进 FeedDoc）
+    fetchValidatorUrl: feeds.fetchValidatorUrl,
+    fetchEtag: feeds.fetchEtag,
+    fetchLastModified: feeds.fetchLastModified,
     // 库名与图片策略随 job data 带给 worker，省掉稳态下每次抓取的 1–2 次 PG 查询
     couchDbName: feeds.couchDbName,
     ...feedImageColumns,
@@ -552,6 +515,7 @@ export async function scheduleFeedFetches() {
       url: f.url,
       couchDbName: f.couchDbName,
       imageOptions: imageOptionsFromFeedRow(f),
+      validators: validatorsFromFeedRow(f),
     } satisfies FetchJobData,
   }))
 

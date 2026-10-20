@@ -227,6 +227,8 @@ async function seedFeedDoc(feedId: string, url: string, parsed: ParsedFeed) {
   try {
     await feedDb.get(feedDocId(feedId))
   } catch {
+    // 只写展示字段：抓取簿记（lastFetchedAt/验证器/错误）在 PostgreSQL `feeds` 表，
+    // 不写进 FeedDoc —— 这份文档会复制进每个用户聚合库（见 workers/feed-doc.ts）。
     await feedDb.insert({
       _id: feedDocId(feedId),
       type: "feed",
@@ -234,7 +236,6 @@ async function seedFeedDoc(feedId: string, url: string, parsed: ParsedFeed) {
       title: parsed.title ?? url,
       description: parsed.description,
       siteUrl: parsed.link,
-      lastFetchedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
     } as any)
     // 首次发现，立即加入抓取队列（enqueueFetch 内含 jobId 去重与旧记录清理）

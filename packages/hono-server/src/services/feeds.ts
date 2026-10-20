@@ -89,6 +89,8 @@ export async function ensureFeedRegistered(
   try {
     await feedDb.get(feedDocId(feedId))
   } catch {
+    // 只写展示字段：抓取簿记（lastFetchedAt/验证器/错误）在 PostgreSQL `feeds` 表，
+    // 不写进 FeedDoc —— 这份文档会复制进每个用户聚合库（见 workers/feed-doc.ts）。
     await feedDb.insert({
       _id: feedDocId(feedId),
       type: "feed",
@@ -96,7 +98,6 @@ export async function ensureFeedRegistered(
       title,
       description: parsed?.description,
       siteUrl: parsed?.link,
-      lastFetchedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
     } as any)
   }

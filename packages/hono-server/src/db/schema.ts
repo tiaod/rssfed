@@ -274,6 +274,17 @@ export const timelineEvents = pgTable("timeline_events", {
    * null = 还没成功抓过（按有验证器处理，不提前降频，避免误伤新源）。
    */
   hasFetchValidators: boolean("has_fetch_validators"),
+  // ── 条件请求验证器（抓取中间状态，只给 worker 用）──────────────────────────
+  // 为什么不放 CouchDB 的 FeedDoc：FeedDoc 是**会复制进每个用户聚合库**的源元信息快照
+  // （客户端离线渲染用）。把 ETag 这类每轮都可能变的簿记放进去，等于每抓一次就给每个
+  // 订阅者的用户库写一版新修订（实测单源累计上千版），而这些字段客户端一个都不读。
+  // 现在 FeedDoc 只在 title/description/siteUrl/image 真的变化时才写，见 workers/feed-doc.ts。
+  /** 验证器来源的最终 URL（重定向链最后一跳） */
+  fetchValidatorUrl: text("fetch_validator_url"),
+  /** 上一次响应头里的 ETag（原样保存带引号的值） */
+  fetchEtag: text("fetch_etag"),
+  /** 上一次响应头里的 Last-Modified */
+  fetchLastModified: text("fetch_last_modified"),
   /** 连续抓取失败次数：调度器按它指数退避；成功抓取一次归零（见 markFeedError / markFeedNotModified） */
   errorStreak: integer("error_streak").notNull().default(0),
   lastFetchedAt: timestamp("last_fetched_at"),

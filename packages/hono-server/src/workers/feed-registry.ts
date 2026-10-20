@@ -1,4 +1,25 @@
-import type { ParsedFeed } from "../rss/parser"
+import type { FeedValidators, ParsedFeed } from "../rss/parser"
+
+/** 抓取时拿到的条件请求验证器来源信息（写回 `feeds` 的三列，见 db/schema.ts） */
+export interface FeedFetchMeta {
+  /** 验证器来源的最终 URL（重定向链最后一跳） */
+  validatorUrl?: string
+  etag?: string
+  lastModified?: string
+}
+
+/** 从 `feeds` 表的一行还原出条件请求验证器（缺值即"没有验证器"） */
+export function validatorsFromFeedRow(row: {
+  fetchValidatorUrl?: string | null
+  fetchEtag?: string | null
+  fetchLastModified?: string | null
+} | null | undefined): FeedValidators {
+  return {
+    url: row?.fetchValidatorUrl ?? undefined,
+    etag: row?.fetchEtag ?? undefined,
+    lastModified: row?.fetchLastModified ?? undefined,
+  }
+}
 
 /**
  * 抓取成功后要写回 PostgreSQL `feeds` 注册表的字段。
@@ -12,13 +33,24 @@ import type { ParsedFeed } from "../rss/parser"
  * 但 error_message 仍是旧的 Request timeout）。
  *
  * 其余字段仍用 undefined 表达「这次解析不到、不要动这一列」，与 null（明确清空）区分开。
+ *
+ * `fetchMeta` 里的字段为 undefined 时 Drizzle 不会写该列（保留旧验证器）——这正是
+ * 「这次响应没给验证器，就别把上一轮能用的弄丢」的语义，调用方负责先把新值并到旧值上。
  */
-export function buildFeedRegistryUpdate(url: string, parsed: ParsedFeed, now: Date = new Date()) {
+export function buildFeedRegistryUpdate(
+  url: string,
+  parsed: ParsedFeed,
+  fetchMeta: FeedFetchMeta = {},
+  now: Date = new Date(),
+) {
   return {
     title: parsed.title ?? url,
     description: parsed.description,
     siteUrl: parsed.link,
     errorMessage: null,
     lastFetchedAt: now,
+    fetchValidatorUrl: fetchMeta.validatorUrl,
+    fetchEtag: fetchMeta.etag,
+    fetchLastModified: fetchMeta.lastModified,
   }
 }
