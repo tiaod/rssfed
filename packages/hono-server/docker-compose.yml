@@ -32,8 +32,8 @@ services:
       # 副作用：跑过 compose 之后，仓库里这个文件的属主会变成 couchdb(5984)，
       # 要编辑它得用 sudo（内容不会变，git status 仍然干净）。
       - ../../deploy/couchdb-proxy-auth.ini:/opt/couchdb/etc/local.d/00-proxy-auth.ini
-      # 复制器调参（max_jobs / max_churn）见文件头注释；用 01- 前缀排在代理认证之后、
-      # config API 的 docker.ini 之前（docker.ini 必须是 local.d 里最后加载的那个）
+      # 复制器调参（max_jobs / max_churn）与自动压缩（smoosh ratio 阈值）见文件头注释；
+      # 用 01- 前缀排在代理认证之后、config API 的 docker.ini 之前（docker.ini 必须是 local.d 里最后加载的那个）
       - ../../deploy/couchdb-replicator.ini:/opt/couchdb/etc/local.d/01-replicator.ini
     # 容器默认 nofile=1024，对「700+ 个 feed 库 + 每个 (用户 × 源) 一条常驻复制」的拓扑太紧：
     # 实测 beam 已占 698 个 fd。CouchDB 的 JS 查询服务（couchjs）是 open_port 现起的，

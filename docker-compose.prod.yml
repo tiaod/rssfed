@@ -91,8 +91,8 @@ services:
         target: /opt/couchdb/etc/local.d/00-proxy-auth.ini
         bind:
           create_host_path: false
-      # 复制器调参（max_jobs / max_churn）：聚合搬运是「每 (用户 × 订阅源) 一条常驻复制」，
-      # 默认 max_jobs=500 在「几个账号 × 几百个源」时会被顶住。理由与取值见该文件头注释。
+      # 复制器调参（max_jobs / max_churn）与自动压缩（smoosh ratio 阈值）：前者兜住升级残留的
+      # 常驻复制，后者决定「文件里死空间到多少才 compact」。理由与取值见该文件头注释。
       - type: bind
         source: ${RSSFED_DEPLOY_DIR:-./deploy}/couchdb-replicator.ini
         target: /opt/couchdb/etc/local.d/01-replicator.ini
