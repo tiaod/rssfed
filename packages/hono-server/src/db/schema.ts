@@ -9,6 +9,7 @@ import {
   jsonb,
   primaryKey,
   serial,
+  doublePrecision,
 } from "drizzle-orm/pg-core"
 import { relations } from "drizzle-orm"
 import { user } from "./auth-schema"
@@ -299,6 +300,18 @@ export const timelineEvents = pgTable("timeline_events", {
    * 回填值 = `last_new_entry_at`；bot 库不裁剪，仍用 `lastNewEntryAt`。
    */
   lastChangedAt: timestamp("last_changed_at"),
+  // ── 自适应保留条数（见 services/feed-retention.ts）──────────────────────────
+  // 保留策略的唯一权威仍是「源库裁剪」；这里只是把固定的 N=50 换成按源活跃度算出来的 N。
+  // 用户库依旧由复制镜像，用户侧没有任何覆盖项。
+  /**
+   * 该源当前保留的条数（10/20/30/50 四档，由每日任务按近 14 天新增字节/天重算）。
+   * null = 还没算过（首次上线）或自适应关闭 → 裁剪回退到 SOURCE_RETENTION_ENTRIES（50）。
+   */
+  retentionEntries: integer("retention_entries"),
+  /** 近 14 天折算的日均新增字节（含附件；诊断用，也是分档的输入） */
+  activityBytesPerDay: doublePrecision("activity_bytes_per_day"),
+  /** 上次计算活跃度的时刻 */
+  activityComputedAt: timestamp("activity_computed_at"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
   /** 抓取状态：active 正常抓取 / paused 用户暂停（worker 跳过） */
   status: text("status").notNull().default("active"),

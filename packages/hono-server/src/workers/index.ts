@@ -39,6 +39,12 @@ type FeedDb = ReturnType<typeof createCouchDb>
 const FETCH_CONCURRENCY = envInt("FETCH_CONCURRENCY", 4)
 
 /**
+ * 自适应保留条数开关。关掉后**所有源回退固定 50 条**（已裁掉的历史不会恢复，只影响之后的
+ * 写入/裁剪）；保留条数的计算任务也由同一个环境变量停掉（见 workers/maintenance.ts）。
+ */
+const RETENTION_ADAPTIVE_ENABLED = process.env.FEED_RETENTION_ADAPTIVE !== "0"
+
+/**
  * 抓取 job 的 payload。
  *
  * `couchDbName` / `imageOptions` / `validators` 由调度器在同一个 SQL 里带出来：稳态下
@@ -52,6 +58,8 @@ interface FetchJobData {
   imageOptions?: EntryImageOptions
   /** 条件请求验证器：从 `feeds` 表带出来（不再存在 FeedDoc 里，见 workers/feed-doc.ts） */
   validators?: FeedValidators
+  /** 自适应保留条数：从 `feeds.retention_entries` 带出来（见 services/feed-retention.ts） */
+  retentionEntries?: number | null
 }
 
 /**
@@ -65,12 +73,18 @@ interface FetchJobData {
 const isTestProcess = process.env.VITEST === "true" || process.env.NODE_ENV === "test"
 
 export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job) => {
-  const { feedId, url, couchDbName, imageOptions, validators: jobValidators } = job.data as FetchJobData
+  const { feedId, url, couchDbName, imageOptions, validators: jobValidators, retentionEntries: jobRetentionEntries } = job.data as FetchJobData
 
   try {
     // 调度器已带出库名时跳过「按 feedId 查 PG」（稳态路径）
     const feedDbName = await ensureFeedDatabase(feedId, couchDbName)
     const feedDb = createCouchDb(feedDbName)
+
+    // 自适应保留条数（源活跃度算出，见 services/feed-retention.ts）：稳态由调度器随 job 带过来，
+    // 手工「立即抓取」/首抓/老 job 没有时回退一次查询。
+    const retentionEntries = RETENTION_ADAPTIVE_ENABLED
+      ? (jobRetentionEntries ?? await loadFeedRetentionEntries(feedId))
+      : DEFAULT_SOURCE_RETENTION_ENTRIES
 
     // 条件请求验证器只在 PostgreSQL `feeds` 表（不写进 FeedDoc，理由见 workers/feed-doc.ts）。
     // 稳态由调度器随 job 带过来；手工「立即抓取」/首抓/老 job 没有时回退一次查询。
@@ -84,7 +98,7 @@ export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job)
       await markFeedNotModified(feedId)
       // 自愈：上一轮可能「写入成功但裁剪没跑完/失败」，而 304 之后不再走写入分支，
       // 那条源会永远停在超限状态。这里补一次裁剪 —— 稳态下 total<=N，只是一次视图查询（几毫秒）。
-      const trim = await trimSourceToLatestN(createTrimDb(feedDbName), { compact: false })
+      const trim = await trimSourceToLatestN(createTrimDb(feedDbName), { n: retentionEntries, compact: false })
       if (trim.deleted > 0) {
         // 删除同样算「源内容变了」，否则只删不增的源永远触发不了用户库同步
         await db.update(feeds).set({ lastChangedAt: new Date() }).where(eq(feeds.id, feedId))
@@ -107,12 +121,12 @@ export const worker = isTestProcess ? null : new Worker("rss-fetch", async (job)
       etag: fetched.etag ?? validators.etag,
       lastModified: fetched.lastModified ?? validators.lastModified,
     })
-    const newEntries = await insertNewEntries(feedDb, feedId, parsed.items ?? [], imageOptions)
+    const newEntries = await insertNewEntries(feedDb, feedId, parsed.items ?? [], imageOptions, retentionEntries)
     // 源库保留策略：每条源只留最新 N 条 —— 整个保留链路的唯一权威
-    // （见 docs/notes/aggregation/source-side-retention-plan.md）。
+    // （N 由源活跃度自适应，见 services/feed-retention.ts）。
     // 超限才动数据；拿不到边界时一条都不删。compact 不放在这里：删除只产生墓碑，
     // 附件字节由 CouchDB 的自动压缩（smoosh 的 ratio 通道，阈值见 deploy/couchdb-replicator.ini）回收。
-    const trim = await trimSourceToLatestN(createTrimDb(feedDbName), { compact: false })
+    const trim = await trimSourceToLatestN(createTrimDb(feedDbName), { n: retentionEntries, compact: false })
     // 两个时间戳语义不同，别混：
     //   lastNewEntryAt → "抓到新内容"（前端"最后更新"用）
     //   lastChangedAt  → "源内容变了"（脏源判定用；**裁剪删除也算**，否则只删不增的源永不触发同步）
@@ -182,6 +196,17 @@ async function loadFeedValidators(feedId: string): Promise<FeedValidators> {
     return validatorsFromFeedRow(row)
   } catch {
     return {}
+  }
+}
+
+/** 当前该源的自适应保留条数（job data 没带时的回退路径；没算过就回退全局默认） */
+async function loadFeedRetentionEntries(feedId: string): Promise<number> {
+  try {
+    const [row] = await db.select({ retentionEntries: feeds.retentionEntries })
+      .from(feeds).where(eq(feeds.id, feedId)).limit(1)
+    return row?.retentionEntries ?? DEFAULT_SOURCE_RETENTION_ENTRIES
+  } catch {
+    return DEFAULT_SOURCE_RETENTION_ENTRIES
   }
 }
 
@@ -305,14 +330,15 @@ async function insertNewEntries(
   feedDb: FeedDb,
   feedId: string,
   items: ParsedItem[],
-  imageOptions?: EntryImageOptions,
+  imageOptions: EntryImageOptions | undefined,
+  retentionEntries: number,
 ) {
   const newEntries: EntryDoc[] = []
   // ① 只处理保留窗口内的最新 N 条：超出 N 的条目下一刻就会被裁掉，先写再删纯属写放大
   //   （首次订阅历史型源时尤其明显：实测一个源列 1982 条 → 1982 次写 + 1932 个墓碑）。
   const candidates: EntryCandidate[] = []
   const deduped = new Set<string>()
-  for (const item of selectNewestItems(items, DEFAULT_SOURCE_RETENTION_ENTRIES)) {
+  for (const item of selectNewestItems(items, retentionEntries)) {
     const guid = item.guid ?? item.link ?? item.title ?? ""
     const entryId = `entry:${feedId}:${crypto.createHash("sha256").update(guid).digest("hex").slice(0, 12)}`
     // 同一批里 guid 重复的条目只保留第一条：批量判存在后它们都会被当成新条目，写第二次会 409
@@ -480,6 +506,8 @@ export async function scheduleFeedFetches() {
     // 下面两列是自适应调度 / 错误退避的输入（见 fetch-schedule.ts）
     errorStreak: feeds.errorStreak,
     hasFetchValidators: feeds.hasFetchValidators,
+    // 自适应保留条数（每日任务算出，见 services/feed-retention.ts）
+    retentionEntries: feeds.retentionEntries,
     // 条件请求验证器随 job 带给 worker（它们只存在 PG，不再写进 FeedDoc）
     fetchValidatorUrl: feeds.fetchValidatorUrl,
     fetchEtag: feeds.fetchEtag,
@@ -516,6 +544,7 @@ export async function scheduleFeedFetches() {
       couchDbName: f.couchDbName,
       imageOptions: imageOptionsFromFeedRow(f),
       validators: validatorsFromFeedRow(f),
+      retentionEntries: f.retentionEntries,
     } satisfies FetchJobData,
   }))
 
