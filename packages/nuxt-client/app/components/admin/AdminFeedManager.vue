@@ -490,8 +490,9 @@ onMounted(load)
                 />
               </UFormField>
               <p class="text-xs text-muted sm:col-span-2">
-                主约束是「附件体积上限」：小图多存、大图少存（默认 {{ formatBytes(imageDefaults?.maxEntryImageBytes) || '1MB' }}）；
-                「最多张数」是请求数硬顶，只在图片数量异常多时兜底。
+                每篇默认最多缓存 {{ imageDefaults?.maxImageCount ?? 6 }} 张、附件总体积上限
+                {{ formatBytes(imageDefaults?.maxEntryImageBytes) || '1MB' }}；
+                按正文顺序取图，任一上限先到即停止缓存后续图片，首图必留。
               </p>
               <UFormField label="压缩最大宽度 (px)">
                 <UInput

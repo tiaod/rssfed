@@ -12,7 +12,7 @@ import { envInt } from "../env"
  * 条目图片缓存：**按源（feed）的策略**决定一篇正文里缓存哪些图、缓存成什么参数。
  *
  * 下载/压缩的原语与内容寻址缓存在 `images/` 下（见 images/fetch.ts 与 images/cache.ts）：
- * 这里只管「策略」—— 请求数硬顶、体积预算、封面选择、失败原因聚合。
+ * 这里只管「策略」—— 张数硬顶、体积预算、封面选择、失败原因聚合。
  * 同一张图在源库与各用户 timeline 库里用的是**同一份**压缩字节（cache 服务去重），
  * 所以这里改参数只会产生新的缓存对象，不会让已缓存的其他参数组合失效。
  */
@@ -23,19 +23,21 @@ import { envInt } from "../env"
 // 聚合只把成品搬进各用户库（见 services/timeline.ts），用户没有自己的图片参数。
 
 /**
- * 每篇 entry 最多尝试缓存的图片数。
+ * 每篇 entry 最多缓存的图片数（默认 6）。
  *
- * 主约束是「每篇附件总体积预算」（见 DEFAULT_MAX_ENTRY_IMAGE_BYTES），
- * 这个值退化为**请求数硬顶**：预算要压缩完才知道大小，一篇上万张 1KB 小图
- * 在填满预算之前会发出海量请求，必须有个上限兜住。
+ * 这是实际生效的**张数硬顶**：正文图按出现顺序只取前 N 张，超出的不再下载。
+ * 另有「每篇附件总体积预算」（见 DEFAULT_MAX_ENTRY_IMAGE_BYTES）兜住大图 ——
+ * 单张体积压完才知道，按批累计超预算即停止缓存后续图片。
+ *
+ * 图片密集的源可在「订阅源管理」里按源调高，或开启「缓存全部图片」跳过两道限制。
  */
-const DEFAULT_MAX_IMAGE_COUNT = envInt("MAX_IMAGE_COUNT", 200)
+const DEFAULT_MAX_IMAGE_COUNT = envInt("MAX_IMAGE_COUNT", 6)
 /**
- * 每篇 entry 缓存的附件**总体积**上限（压缩后字节）—— 主约束。
+ * 每篇 entry 缓存的附件**总体积**上限（压缩后字节，默认 1MB）。
  *
- * 相比「每篇 N 张」，体积预算更贴近真实成本：小图（p50 约 19KB）能存几十张，
- * 大图自然少存几 张。实测模拟（report/image-cache-diagnosis）：1MB 预算可覆盖
- * 93.4% 的正文图、被截断 140 条；同等覆盖率下比固定 20 张省约 110MB。
+ * 与张数硬顶互补：张数管住请求数与附件个数，体积兜住大图 —— 小图（p50 约 19KB）
+ * 6 张才约 110KB，大图 6 张就可能好几 MB。按正文顺序累计，超预算即停止缓存后续图片，
+ * 首图必留。实测 1MB 预算本身可覆盖 93.4% 的正文图（report/image-cache-diagnosis）。
  */
 const DEFAULT_MAX_ENTRY_IMAGE_BYTES = envInt("MAX_ENTRY_IMAGE_BYTES", 1024 * 1024)
 /** 下载并发上限 */
@@ -55,9 +57,9 @@ export const DEFAULT_IMAGE_OPTIONS = {
  * 未提供的字段回退到上方全局默认。
  */
 export interface EntryImageOptions {
-  /** 每篇最多尝试缓存的图片数（请求数硬顶）；cacheAll 时视为不限制 */
+  /** 每篇最多缓存的图片数（张数硬顶）；cacheAll 时视为不限制 */
   maxImageCount?: number
-  /** 每篇附件总体积上限（压缩后字节）——主约束；cacheAll 时视为不限制 */
+  /** 每篇附件总体积上限（压缩后字节）——大图兜底；cacheAll 时视为不限制 */
   maxEntryImageBytes?: number
   /** 压缩后最大宽度 px */
   maxImageWidth?: number
@@ -106,9 +108,9 @@ export type { ImageFailReason }
  * 单条目图片缓存的统计结果，由 worker 汇总后打一行日志
  */
 export interface EntryImageStats {
-  /** 正文图候选数（去重、绝对化、已按请求数硬顶截断） */
+  /** 正文图候选数（去重、绝对化、已按张数硬顶截断） */
   candidates: number
-  /** 因请求数硬顶（maxImageCount）未纳入缓存的张数 */
+  /** 因张数硬顶（maxImageCount）未纳入缓存的张数 */
   skippedByLimit: number
   /** 因附件总体积预算（maxEntryImageBytes）未纳入缓存的张数 */
   skippedByBudget: number
@@ -241,7 +243,7 @@ export async function cacheEntryImages(
   protocolCoverUrl?: string,
   options: EntryImageOptions = {},
 ): Promise<{ attachments: ImageAttachment[], images: CachedImage[], stats: EntryImageStats }> {
-  // 张数是请求数硬顶；cacheAll（漫画源全量离线）时数量与体积都不限
+  // 张数是硬顶；cacheAll（漫画源全量离线）时数量与体积都不限
   const maxImageCount = options.maxImageCount
     ?? (options.cacheAll ? Number.MAX_SAFE_INTEGER : DEFAULT_MAX_IMAGE_COUNT)
   const budget = options.maxEntryImageBytes

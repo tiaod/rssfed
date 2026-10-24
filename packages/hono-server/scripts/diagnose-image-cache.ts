@@ -1,7 +1,7 @@
 import "dotenv/config"
 import fs from "node:fs"
 import path from "node:path"
-import { extractImageUrls } from "../src/rss/entry-images"
+import { DEFAULT_IMAGE_OPTIONS, extractImageUrls } from "../src/rss/entry-images"
 
 /**
  * 正文图片缓存诊断（只读）。
@@ -12,10 +12,10 @@ import { extractImageUrls } from "../src/rss/entry-images"
  *   - 「正文图数」用后端同一函数 extractImageUrls 复算，保证与抓取时一致；
  *   - 「策略上限」来自 PostgreSQL feeds 表的 per-feed 配置（cacheImages / maxImageCount），
  *     未覆盖时回退全局默认；开了 cacheImages 且未设 maxImageCount 视为不限量；
- *   - 因此可以把「策略性截断」（正文 20 张、按策略只存 5 张）与「本该缓存却失败」
+ *   - 因此可以把「策略性截断」（正文 20 张、按策略只缓存其中一部分）与「本该缓存却失败」
  *     严格区分开 —— 后者才是要修的问题。
  *
- * 注意：现行策略已是「每篇附件总体积预算 + 张数硬顶 200」（见 entry-images.ts），
+ * 注意：现行策略已是「每篇附件总体积预算 + 张数硬顶 6（默认，见 entry-images.ts）」，
  * 本脚本按「张数上限」做的对照是**历史口径**；评估预算策略请加 `--simulate`，
  * 它用实测附件体积序列模拟不同预算下的覆盖率与存储量。
  *
@@ -36,8 +36,8 @@ const PAGE = 250
 const CONCURRENCY = 6
 /** 图片缓存功能上线日期（commit 7b1adaf），用于区分历史遗留与新增失败 */
 const CACHE_CUTOVER = "2026-08-12"
-/** 全局默认每篇张数硬顶，与 entry-images.ts 的 DEFAULT_MAX_IMAGE_COUNT 保持一致 */
-const DEFAULT_MAX_IMAGE_COUNT = 200
+/** 全局默认每篇张数硬顶，直接复用 entry-images.ts 的默认值（跟着环境变量走） */
+const DEFAULT_MAX_IMAGE_COUNT = DEFAULT_IMAGE_OPTIONS.maxImageCount
 /** 抽样展示的完全未命中条目数 */
 const SAMPLE_N = Number(process.argv.find((a) => a.startsWith("--sample="))?.split("=")[1] ?? 10)
 /** 抽样探测原图 URL 的条目数（0 = 关闭；开启后会向源站发轻量 HEAD 请求） */
@@ -508,7 +508,7 @@ function report(durationMs: number, cfgCount: number, cfgMap: Map<string, FeedCo
   log(`  上线后（>=${CACHE_CUTOVER}）：条目 ${ac.entries}，有图 ${acImg}，失败 ${ac.partial + ac.none}（${pct(ac.partial + ac.none, acImg)}）`)
   log()
 
-  log("【三、正文图数量 vs 命中情况】（验证「每篇 5 张上限」的影响）")
+  log("【三、正文图数量 vs 命中情况】（验证「每篇张数上限」的影响）")
   log("  正文图数   条目数    策略外截断   应缓存   实缓存   总命中率")
   const order = ["0", "1", "2", "3", "4", "5", "6-10", "11-20", ">20"]
   for (const key of order) {
@@ -591,7 +591,7 @@ function report(durationMs: number, cfgCount: number, cfgMap: Map<string, FeedCo
     }
     log("【八、按「每篇附件体积预算」策略模拟】")
     log("  口径：压缩后附件体积；按正文顺序累计，首图必留，累计超预算即停止缓存后续图片")
-    log(`  基线：当前「每篇 5 张」→ 缓存 ${baseImages} 张，覆盖率 ${pct(baseImages, totalExpected)}，被截断 ${stats.truncatedEntries} 条`)
+    log(`  基线：当前「每篇 ${DEFAULT_MAX_IMAGE_COUNT} 张」→ 缓存 ${baseImages} 张，覆盖率 ${pct(baseImages, totalExpected)}，被截断 ${stats.truncatedEntries} 条`)
     log()
     log("  每篇预算     可存张数   覆盖率    压缩后总量    被截断条目")
     for (const r of simRows) {

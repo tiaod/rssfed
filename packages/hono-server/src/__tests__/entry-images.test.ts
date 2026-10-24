@@ -315,12 +315,13 @@ describe("cacheEntryImages per-feed 配置", () => {
     }
   })
 
-  it("不传配置时走全局默认：体积预算 1MB 下少量小图全部缓存（不再卡在 5 张）", async () => {
+  it("不传配置时走全局默认：张数硬顶 6，7 张小图只缓存前 6 张", async () => {
     const { port, content, close } = await serveImages(7, "c")
     try {
       const { images, stats } = await cacheEntryImages(content, `http://127.0.0.1:${port}/post`)
-      expect(images.length).toBe(7) // 7 张小图远小于 1MB 预算
-      expect(stats.skippedByBudget).toBe(0)
+      expect(images.length).toBe(6) // 默认每篇 6 张
+      expect(stats.skippedByLimit).toBe(1)
+      expect(stats.skippedByBudget).toBe(0) // 6 张小图远小于 1MB 预算
     } finally {
       close()
     }
