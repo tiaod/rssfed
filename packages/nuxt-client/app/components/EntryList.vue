@@ -16,6 +16,7 @@ import {
   IMAGE_TILE_FALLBACK_ASPECT
 } from '~/utils/entryDisplay'
 // 显式导入：单测环境没有 Nuxt 组件清单，隐式解析会静默退化成「渲染不出来」
+import ListEndHint from '~/components/ListEndHint.vue'
 import EntryCardItem from '~/components/EntryCardItem.vue'
 import EntryBlogItem from '~/components/EntryBlogItem.vue'
 import EntryRowItem from '~/components/EntryRowItem.vue'
@@ -68,6 +69,13 @@ const props = defineProps<{
    * 地址与详情是同一件事的两面，谁先谁后不能各写一套：传了它就只走地址这一条路。
    */
   entryLink?: (entry: RssEntry) => string
+  /**
+   * 订阅源的站点地址（单源页传）：见底时收尾提示里多一条「去原网站看更多」。
+   *
+   * 本地的源库只保留该源最近的一段条目（按活跃度留 10~50 条），列表到底不等于这个源
+   * 没有更多内容 —— 得让用户知道还能回原网站接着看。聚合页没有单一的「原网站」，不传。
+   */
+  siteUrl?: string
 }>()
 
 /**
@@ -365,7 +373,9 @@ function socialEstimateHeight(entry: RssEntry | undefined): number {
  * 这样总高度和滚动条不会因为估算离谱而抖动。
  */
 function estimateHeight(item: ListItem | undefined): number {
-  if (!item || isEnd(item)) return 72
+  if (!item) return 72
+  // 收尾提示：带「去原网站看更多」时多一行链接（py-6 上下各 24 + 文字 16 + 间距 6 + 按钮 24 ≈ 96）
+  if (isEnd(item)) return props.siteUrl ? 96 : 72
   if (isHeader(item)) return 96
   if (isSkeleton(item)) {
     switch (view.value) {
@@ -962,11 +972,8 @@ function handleTableKeydown(event: KeyboardEvent) {
         </td>
       </tr>
       <tr v-else>
-        <td
-          :colspan="tableColumns.length"
-          class="py-6 text-center text-xs text-muted"
-        >
-          已加载全部条目
+        <td :colspan="tableColumns.length">
+          <ListEndHint :site-url="siteUrl" />
         </td>
       </tr>
     </template>
@@ -1053,13 +1060,11 @@ function handleTableKeydown(event: KeyboardEvent) {
         </div>
       </div>
 
-      <!-- 收尾提示 -->
-      <p
+      <!-- 收尾提示：本地条目到底了；单源页传了站点地址时再给一条「去原网站看更多」 -->
+      <ListEndHint
         v-else-if="isEnd(item)"
-        class="py-6 text-center text-xs text-muted"
-      >
-        已加载全部条目
-      </p>
+        :site-url="siteUrl"
+      />
 
       <EntrySocialItem
         v-else-if="isEntry(item) && view === 'social'"

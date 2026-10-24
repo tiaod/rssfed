@@ -30,9 +30,6 @@ const feedDisplayName = computed(() => subscriptionTitle.value || feed.value?.ti
 // 灰色小字 + 单行截断，悬停时用 title 给出完整内容
 const feedDescription = computed(() => feed.value?.description?.trim() || '')
 
-// 站点地址：只在加载到源信息后可用，作为 ⋮ 菜单里的「访问网站」
-const feedSiteUrl = computed(() => feed.value?.siteUrl || '')
-
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
 const {
@@ -44,6 +41,16 @@ const {
   // 「本订阅源多了几条」—— 别的源的新条目不该出现在这个页面上（见 usePouchDb.syncedEntryCount）
   syncedDocs: () => pouch.syncedEntryCount([feedId])
 })
+
+/**
+ * 站点地址：⋮ 菜单的「访问网站」与列表见底时的「去原网站看更多」共用（见 EntryList 的 siteUrl）。
+ *
+ * 优先用接口返回的源信息；接口没回来（离线 / 请求失败）时回退到条目自带的源元信息 ——
+ * FeedDoc 随条目一起同步到本地库，断网时同样拿得到这个地址。
+ */
+const feedSiteUrl = computed(() =>
+  feed.value?.siteUrl || entries.value.find(entry => entry.feed?.siteUrl)?.feed.siteUrl || ''
+)
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
 // 没缓存才等优先同步把内容拉回来再上屏 —— 见 useListFirstPaint
@@ -289,6 +296,7 @@ async function unsubscribe() {
             :load-more="loadMore"
             :has-more="visibleHasMore"
             :entry-link="entryLink"
+            :site-url="feedSiteUrl"
           />
         </template>
       </div>

@@ -50,8 +50,11 @@ testGlobals.usePouchDb = () => ({
   getEntryAttachment: H.getEntryAttachment
 })
 testGlobals.useToast = () => ({ add: H.toast })
-// 信息流的相册把附件 blob 转成 URL（happy-dom 不带 createObjectURL）
-vi.stubGlobal('URL', { ...URL, createObjectURL: vi.fn(() => 'blob:stub') })
+// 信息流的相册把附件 blob 转成 URL（happy-dom 不带 createObjectURL）。
+// 只补静态方法、保留 URL 构造函数：收尾提示用 `new URL(...)` 校验站点地址的协议
+vi.stubGlobal('URL', class extends URL {
+  static override createObjectURL = vi.fn(() => 'blob:stub')
+})
 
 /**
  * 表格视图的 UTable 退化成「按 columns 渲染列头 + 按 data 渲染行」：
@@ -293,6 +296,70 @@ describe('EntryList 页尾加载骨架', () => {
     })
 
     expect(wrapper.find('.skeleton').exists()).toBe(false)
+  })
+})
+
+/**
+ * 单源页滚到底时的「去原网站看更多」。
+ *
+ * 判据三条：本地还有没有更多（hasMore）+ 有没有合法站点地址 + 是不是真的到底了。
+ * 聚合页不传 siteUrl，就只剩一句收尾文字；地址来自抓取的源元信息，协议不合法时不能当 href。
+ */
+describe('EntryList 收尾提示：去原网站看更多', () => {
+  function mountEnd(props: Record<string, unknown> = {}) {
+    return mount(EntryList, {
+      props: { entries: [makeEntry()], loadMore: vi.fn(), hasMore: () => false, ...props },
+      global: { stubs: STUBS }
+    })
+  }
+
+  it('到底且传了站点地址：给出新标签页打开的「去原网站看更多」', () => {
+    const wrapper = mountEnd({ siteUrl: 'https://a.example/' })
+
+    expect(wrapper.text()).toContain('已加载全部条目')
+    const link = wrapper.get('a.ubtn')
+    expect(link.text()).toContain('去原网站看更多')
+    expect(link.attributes('href')).toBe('https://a.example/')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toContain('noopener')
+  })
+
+  it('聚合页（不传 siteUrl）：只显示收尾文字，不给外链', () => {
+    const wrapper = mountEnd()
+
+    expect(wrapper.text()).toContain('已加载全部条目')
+    expect(wrapper.find('a.ubtn').exists()).toBe(false)
+  })
+
+  it('还有更多时不出现收尾提示，也不给外链', () => {
+    const wrapper = mountEnd({ siteUrl: 'https://a.example/', hasMore: () => true })
+
+    expect(wrapper.text()).not.toContain('已加载全部条目')
+    expect(wrapper.find('a.ubtn').exists()).toBe(false)
+  })
+
+  it('站点地址协议不合法（javascript:）时不渲染外链', () => {
+    const wrapper = mountEnd({ siteUrl: 'javascript:alert(1)' })
+
+    expect(wrapper.text()).toContain('已加载全部条目')
+    expect(wrapper.find('a.ubtn').exists()).toBe(false)
+  })
+
+  it('表格视图的收尾行同样带外链（与虚拟化列表共用同一份提示）', () => {
+    const wrapper = mount(EntryList, {
+      props: {
+        entries: [makeEntry()],
+        view: 'table',
+        loadMore: vi.fn(),
+        hasMore: () => false,
+        siteUrl: 'https://a.example/'
+      },
+      global: { stubs: STUBS }
+    })
+
+    const link = wrapper.get('tbody a.ubtn')
+    expect(link.text()).toContain('去原网站看更多')
+    expect(link.attributes('href')).toBe('https://a.example/')
   })
 })
 
