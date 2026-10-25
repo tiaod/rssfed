@@ -192,7 +192,7 @@ describe('sanitizeEntryHtml：正文图片的本地占位', () => {
     expect(img.getAttribute('height')).toBe('608')
   })
 
-  it('不在缓存里的图保持原样（该走网络就走网络）', () => {
+  it('不在缓存里的图保持原样（该走网络就走网络），但会铺骨架占位', () => {
     const out = sanitizeEntryHtml(
       '<img src="https://other.example/x.png">',
       { entryUrl: 'https://blog.example/post/1' },
@@ -200,6 +200,23 @@ describe('sanitizeEntryHtml：正文图片的本地占位', () => {
     )
     expect(out).toContain('src="https://other.example/x.png"')
     expect(out).not.toContain('data-orig-src')
+    expect(out).toContain('data-img-skeleton')
+  })
+
+  it('占位表为空（这篇一张图都没缓存）也铺骨架，关掉图片时不留空白', () => {
+    const out = sanitizeEntryHtml(
+      '<img src="https://other.example/x.png">',
+      { entryUrl: 'https://blog.example/post/1' },
+      { baseUrl: 'https://blog.example/post/1', map: buildPlaceholderMap(undefined) }
+    )
+    const img = new DOMParser().parseFromString(out, 'text/html').querySelector('img')!
+    expect(img.getAttribute('data-img-skeleton')).toBeTruthy()
+    // 用的是 Nuxt UI USkeleton 的观感（不带动画：正文一屏几十个骨架不该一起呼吸）
+    expect(img.classList.contains('rounded-md')).toBe(true)
+    expect(img.classList.contains('bg-elevated')).toBe(true)
+    expect(img.classList.contains('animate-pulse')).toBe(false)
+    // 无尺寸信息的图先按 16:9 占住一行
+    expect(img.getAttribute('style')).toContain('aspect-ratio')
   })
 
   it('不传占位表时行为与原来完全一致', () => {
@@ -207,6 +224,7 @@ describe('sanitizeEntryHtml：正文图片的本地占位', () => {
     const img = new DOMParser().parseFromString(out, 'text/html').querySelector('img')!
     expect(img.getAttribute('src')).toBe('https://cdn.example/a.jpg')
     expect(img.hasAttribute('data-orig-src')).toBe(false)
+    expect(img.hasAttribute('data-img-skeleton')).toBe(false)
     expect(img.getAttribute('loading')).toBe('lazy')
   })
 

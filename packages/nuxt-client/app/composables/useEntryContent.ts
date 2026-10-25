@@ -2,7 +2,7 @@ import { nextTick, onScopeDispose, ref, toValue, watch, type MaybeRefOrGetter, t
 import type { RssEntry } from '~/types/rss'
 import { usePouchDb } from '~/composables/usePouchDb'
 import { highlightCodeBlocks } from '~/composables/useCodeHighlight'
-import { ORIGINAL_SRC_ATTR, restoreOriginalSrc } from '~/utils/entryImagePlaceholders'
+import { clearImageSkeleton, IMAGE_SKELETON_ATTR, ORIGINAL_SRC_ATTR, restoreOriginalSrc, revealImageSkeleton } from '~/utils/entryImagePlaceholders'
 
 /** 管线完成后挂载/清理附加交互（如图片点击放大）的钩子 */
 export interface EntryContentHooks {
@@ -18,10 +18,11 @@ export interface EntryContentHooks {
  *
  *   1. 把**已占位**的图（本地有 AVIF 附件）换成本地 blob URL —— 离线可用；
  *      附件缺失时回填原始地址（占位与回填的约定见 utils/entryImagePlaceholders.ts）
- *   2. 给 `<pre><code class="language-xxx">` 做 shiki 高亮
- *   3. 调用 hooks.onReady（EntryDetail 用它挂图片点击放大）
+ *   2. 摘掉加载成功的图的骨架占位（没缓存的图/老条目透明占位，注入前铺的）
+ *   3. 给 `<pre><code class="language-xxx">` 做 shiki 高亮
+ *   4. 调用 hooks.onReady（EntryDetail 用它挂图片点击放大）
  *
- * 三步必须串行：放大要基于第 1 步改写后的最终 src。
+ * 前两步必须串行：放大要基于第 1 步改写后的最终 src；骨架要在最终 src 确定后再挂 load 监听。
  * 内容切换/组件卸载时用递增的 runToken 作废进行中的异步任务，避免给旧 DOM 白做功。
  * blob URL 在切换和卸载时统一回收。
  *
@@ -68,6 +69,9 @@ export function useEntryContent(
     resolving.value = true
     try {
       await replaceWithCachedImages(entry, el)
+      if (token !== runToken) return
+
+      settleImageSkeletons(el)
       if (token !== runToken) return
 
       await highlightCodeBlocks(el, () => token !== runToken)
@@ -120,6 +124,31 @@ export function useEntryContent(
         // 附件尚未同步或缺失：回填原始地址；没有原始地址（未占位）就保持原样
         restoreOriginalSrc(img)
       }
+    }
+  }
+
+  /**
+   * 骨架占位的收尾：图加载成功后摘掉骨架（失败就留着）。
+   *
+   * 骨架是净化阶段铺的（见 entryImagePlaceholders 的 applyImageSkeleton），覆盖两类图：
+   * 本地没缓存、只能走网络的图，以及老条目「占位是 1×1 透明」的图。必须在第 1 步换完
+   * blob 之后再挂监听 —— 那时 src 才是最终地址；已经加载完的图（内存缓存）直接摘。
+   *
+   * 骨架默认是隐藏的（opacity 0 + 150ms 延迟过渡）：这里只负责"放行"淡入 ——
+   * 加载很快的图在淡入开始前就被摘掉，全程不闪灰块；真的要等的图才淡出来。
+   */
+  function settleImageSkeletons(el: HTMLElement) {
+    for (const node of el.querySelectorAll(`img[${IMAGE_SKELETON_ATTR}]`)) {
+      const img = node as HTMLImageElement
+      if (img.complete) {
+        // complete 且 naturalWidth > 0 = 已有像素；否则是加载失败（离线/关图/源站 404），
+        // 骨架留着当占位 —— 正是这个功能要的效果（失败图直接显示，不必等淡入）
+        if (img.naturalWidth > 0) clearImageSkeleton(img)
+        else revealImageSkeleton(img)
+        continue
+      }
+      img.addEventListener('load', () => clearImageSkeleton(img), { once: true })
+      revealImageSkeleton(img)
     }
   }
 

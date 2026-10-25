@@ -4,7 +4,7 @@ import { defineComponent, h, nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import { useEntryContent } from '../../composables/useEntryContent'
 import { sanitizeEntryHtml } from '../../composables/useSafeHtml'
-import { buildPlaceholderMap } from '../../utils/entryImagePlaceholders'
+import { buildPlaceholderMap, IMAGE_SKELETON_ATTR } from '../../utils/entryImagePlaceholders'
 import type { RssCachedImage, RssEntry } from '../../types/rss'
 
 /** 附件读取：占位图换成 blob 的唯一异步依赖 */
@@ -163,6 +163,55 @@ describe('useEntryContent', () => {
 
       expect(H.getEntryAttachment).not.toHaveBeenCalled()
       expect(wrapper.element.querySelector('img')!.getAttribute('src')).toBe('https://other.example/x.png')
+    })
+  })
+
+  /**
+   * 骨架占位（没缓存的图 / 老条目透明占位）：注入前铺好，加载成功后摘掉；
+   * 加载失败就一直留着 —— 离线/关图时是一块灰占位，而不是空白。
+   */
+  describe('骨架占位的收尾', () => {
+    const html = sanitizeEntryHtml(
+      '<img src="https://other.example/a.png"><img src="https://other.example/b.png">',
+      { entryUrl: 'https://example.com/article' },
+      { baseUrl: 'https://example.com/article', map: buildPlaceholderMap(undefined) }
+    )
+
+    function mountWithHtml(entry: RssEntry, raw: string) {
+      const htmlRef = ref(raw)
+      const Probe = defineComponent({
+        setup() {
+          const el = ref<HTMLElement | null>(null)
+          useEntryContent(() => entry, el, {}, htmlRef)
+          return () => h('div', { ref: el, innerHTML: htmlRef.value })
+        }
+      })
+      return mount(Probe)
+    }
+
+    it('加载成功后摘掉骨架，加载失败的保留骨架', async () => {
+      const entry = makeEntry('<img src="https://other.example/a.png">')
+      // jsdom 不会真的取图，complete 的默认值对"还没加载完"不可靠 —— 这里强制成 false，
+      // 让管线走"挂 load 监听"这条路
+      const original = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'complete')
+      Object.defineProperty(HTMLImageElement.prototype, 'complete', { configurable: true, get: () => false })
+      try {
+        const wrapper = mountWithHtml(entry, html)
+        await settle()
+
+        const [ok, failed] = Array.from(wrapper.element.querySelectorAll('img')) as HTMLImageElement[]
+        expect(ok!.hasAttribute(IMAGE_SKELETON_ATTR)).toBe(true)
+        expect(failed!.hasAttribute(IMAGE_SKELETON_ATTR)).toBe(true)
+
+        ok!.dispatchEvent(new Event('load'))
+        failed!.dispatchEvent(new Event('error'))
+
+        expect(ok!.hasAttribute(IMAGE_SKELETON_ATTR)).toBe(false)
+        expect(failed!.hasAttribute(IMAGE_SKELETON_ATTR)).toBe(true)
+      } finally {
+        if (original) Object.defineProperty(HTMLImageElement.prototype, 'complete', original)
+        else delete (HTMLImageElement.prototype as { complete?: boolean }).complete
+      }
     })
   })
 })

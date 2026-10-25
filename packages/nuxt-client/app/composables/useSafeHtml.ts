@@ -107,9 +107,10 @@ function installHooks() {
       el.setAttribute('loading', 'lazy')
       el.setAttribute('decoding', 'async')
       el.setAttribute('referrerpolicy', 'no-referrer')
-      // 命中本地缓存就换成本地占位（原始地址留在 data-orig-src），见 entryImagePlaceholders
+      // 命中本地缓存就换成本地占位（原始地址留在 data-orig-src）；没命中的铺骨架占位。
+      // 两者都必须在注入前做完，见 entryImagePlaceholders
       const placeholders = (config as IframeAwareConfig).imagePlaceholders
-      if (placeholders) applyImagePlaceholder(el, placeholders.baseUrl, placeholders.map)
+      if (placeholders) applyImagePlaceholder(el, placeholders.baseUrl, placeholders.map, placeholders.skeletonClasses)
     } else if (el.tagName === 'IFRAME') {
       el.setAttribute('loading', 'lazy')
     }
@@ -117,12 +118,18 @@ function installHooks() {
 }
 
 /**
- * 正文图片的本地占位策略：命中表里的图在注入前被换成占位 data URL。
+ * 正文图片的本地占位策略：命中表里的图在注入前被换成占位 data URL；
+ * 没命中的图（本地没缓存）铺骨架占位，关掉图片加载 / 离线时不会剩一块空白。
  * `baseUrl` 是相对地址的解析基准（entry.url），与抓取端解析图片地址的口径一致。
  */
 export interface ImagePlaceholderPolicy {
   baseUrl?: string
   map: PlaceholderMap
+  /**
+   * 骨架用的 class；默认取 Nuxt UI `USkeleton` 的观感类（静态、不带 animate-pulse，
+   * 见 entryImagePlaceholders 的 IMAGE_SKELETON_CLASSES）
+   */
+  skeletonClasses?: string
 }
 
 /**
@@ -134,6 +141,7 @@ export interface ImagePlaceholderPolicy {
  * `imagePlaceholders` 是「已缓存到本地附件的图片」表：**在输出字符串里**就把这些图的
  * `src` 换成占位（blurhash / 透明像素），原始地址存进 `data-orig-src`，由 useEntryContent
  * 注入后再异步换成 blob URL —— 顺序不能反，见 utils/entryImagePlaceholders.ts 的文件头。
+ * 表里没有的图（本地没缓存、服务端没算 blurhash）会铺一层骨架占位，等图加载成功后摘掉。
  *
  * 只在浏览器里真正工作；服务端返回空串（正文不参与 SSR，见文件头注释）。
  */
@@ -154,7 +162,8 @@ export function sanitizeEntryHtml(
   const config: IframeAwareConfig = {
     ...SANITIZE_CONFIG,
     ...(policy ? { iframePolicy: policy } : {}),
-    ...(imagePlaceholders && imagePlaceholders.map.size > 0 ? { imagePlaceholders } : {})
+    // 表可以是空的（这篇一张图都没缓存）：骨架不依赖缓存，照样要铺
+    ...(imagePlaceholders ? { imagePlaceholders } : {})
   }
 
   return DOMPurify.sanitize(raw, config)
