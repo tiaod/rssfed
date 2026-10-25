@@ -55,11 +55,19 @@ describe('EntryDetail', () => {
     expect(mountEntry(mockEntry).find('h1').text()).toBe('测试文章标题')
   })
 
-  it('显示作者和订阅源信息', () => {
-    const wrapper = mountEntry(mockEntry)
+  it('有作者时只署作者名，不再重复订阅源名（源名已在详情顶栏）', () => {
+    const meta = mountEntry(mockEntry).find('header > div')
 
-    expect(wrapper.text()).toContain('测试作者')
-    expect(wrapper.text()).toContain('测试订阅源')
+    expect(meta.text()).toContain('测试作者')
+    expect(meta.text()).not.toContain('测试订阅源')
+    // 元信息之间只靠 flex 间距分隔，不再用「·」
+    expect(meta.text()).not.toContain('·')
+  })
+
+  it('没有作者时用订阅源名代替', () => {
+    const meta = mountEntry({ ...mockEntry, author: undefined }).find('header > div')
+
+    expect(meta.text()).toContain('测试订阅源')
   })
 
   it('渲染文章内容', () => {

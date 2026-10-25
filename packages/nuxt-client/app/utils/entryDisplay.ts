@@ -48,7 +48,8 @@ export function entryFeedName(entry: Pick<RssEntry, 'feed'>): string {
 
 /**
  * 署名文本：聚合视图署「所属订阅源」，单源页署「条目作者」（源已经写在页面标题里，
- * 作者名更有信息量）。列表行、表格行、社交动态的作者行共用这一份口径，不再各写一遍三元表达式。
+ * 作者名更有信息量）；详情页同理署作者、无作者才回退源名。列表行、表格行、社交动态的
+ * 作者行与详情正文头部共用这一份口径，不再各写一遍三元表达式。
  */
 export function entryByline(
   entry: Pick<RssEntry, 'feed' | 'author'>,

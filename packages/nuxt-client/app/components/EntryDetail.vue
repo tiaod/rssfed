@@ -6,6 +6,7 @@ import { useEntryContent } from '~/composables/useEntryContent'
 import { useImageLightbox } from '~/composables/useImageLightbox'
 import { useSafeHtml } from '~/composables/useSafeHtml'
 import { useSiteSettings } from '~/composables/useSiteSettings'
+import { entryByline } from '~/utils/entryDisplay'
 import { buildPlaceholderMap } from '~/utils/entryImagePlaceholders'
 
 const props = defineProps<{
@@ -13,6 +14,12 @@ const props = defineProps<{
 }>()
 
 const { settings } = useSiteSettings()
+
+/**
+ * 署名：详情顶栏（弹窗标题 / 阅读栏顶栏）已经显示订阅源名，正文头部再写一遍是重复信息。
+ * 所以有作者名就只署作者，没有作者才退回订阅源名（与列表署名同一口径，见 entryByline）。
+ */
+const byline = computed(() => entryByline(props.entry))
 
 /**
  * 已缓存到本地附件的正文图片（绝对 URL → 占位图 + 附件名）。
@@ -80,10 +87,9 @@ function formatDate(dateStr: string): string {
         {{ entry.title }}
       </h1>
       <div class="flex flex-wrap items-center gap-3 text-sm text-muted mb-6">
-        <span v-if="entry.author">{{ entry.author }}</span>
-        <span v-if="entry.feed?.title">&middot; {{ entry.feed.title }}</span>
-        <span>&middot; {{ formatDate(entry.publishedAt) }}</span>
-        <span v-if="entry.readingTime">&middot; {{ entry.readingTime }} 分钟阅读</span>
+        <span>{{ byline }}</span>
+        <span>{{ formatDate(entry.publishedAt) }}</span>
+        <span v-if="entry.readingTime">{{ entry.readingTime }} 分钟阅读</span>
       </div>
     </header>
 
