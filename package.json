@@ -10,6 +10,7 @@
     "build": "pnpm -r run build",
     "test": "pnpm -r run test",
     "typecheck": "pnpm -r run typecheck",
+    "lint": "pnpm -r run lint",
     "db:push": "pnpm --filter @rssfed/hono-server push",
     "scripts:create-users": "pnpm --filter @rssfed/hono-server exec tsx scripts/create-test-users.ts",
     "scripts:test-redis": "pnpm --filter @rssfed/hono-server exec tsx scripts/test-redis.ts"
