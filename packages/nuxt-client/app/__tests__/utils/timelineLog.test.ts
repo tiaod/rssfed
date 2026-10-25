@@ -103,7 +103,7 @@ describe('summarizeTimelineSources', () => {
       source({ sourceId: 'a', syncedAt: '2026-10-17T06:00:00.000Z' }),
       source({ sourceId: 'b', syncedAt: '2026-10-17T06:04:31.000Z' }),
       source({ sourceId: 'c', status: 'error', syncedAt: '2026-10-17T05:00:00.000Z' }),
-      source({ sourceId: 'd', status: 'syncing' }),
+      source({ sourceId: 'd', status: 'syncing' })
     ])
     expect(summary.total).toBe(4)
     expect(summary.errors).toBe(1)

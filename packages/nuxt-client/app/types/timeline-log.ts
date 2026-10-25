@@ -11,9 +11,9 @@
  */
 
 /** 流水类型（服务端还会写别的 kind，客户端一律按未知处理而不是崩掉） */
-export type TimelineEventKind = "reconcile" | "rebuild" | "source-sync" | "error"
+export type TimelineEventKind = 'reconcile' | 'rebuild' | 'source-sync' | 'error'
 
-export type TimelineEventLevel = "info" | "warn" | "error"
+export type TimelineEventLevel = 'info' | 'warn' | 'error'
 
 export interface TimelineEvent {
   id: number
@@ -30,7 +30,7 @@ export interface TimelineEvent {
 export interface TimelineSourceState {
   /** 源 id：feedId 或 `bot:{botId}` */
   sourceId: string
-  kind: "feed" | "bot"
+  kind: 'feed' | 'bot'
   /** 展示名；源被删掉时是 null */
   title: string | null
   /** ISO 时间；null = 还没同步成功过 */

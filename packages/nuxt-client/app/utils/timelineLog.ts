@@ -1,4 +1,4 @@
-import type { TimelineEvent, TimelineSourceState } from '~/types/timeline-log'
+import type { TimelineSourceState } from '~/types/timeline-log'
 
 /**
  * 同步日志面板的纯展示逻辑（格式化 / 徽标映射 / 汇总）。
@@ -9,10 +9,10 @@ import type { TimelineEvent, TimelineSourceState } from '~/types/timeline-log'
 
 /** kind → 徽标文案（服务端新增 kind 时这里没命中就原样显示） */
 const EVENT_LABELS: Record<string, string> = {
-  reconcile: '汇聚',
-  rebuild: '重建',
+  'reconcile': '汇聚',
+  'rebuild': '重建',
   'source-sync': '首搬',
-  error: '失败'
+  'error': '失败'
 }
 
 export function timelineEventLabel(kind: string): string {
