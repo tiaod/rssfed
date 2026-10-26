@@ -12,7 +12,7 @@ import {
  * 保留策略**不再是用户设置**：它是源库裁剪（每源最新 50 条），全局一个值、跟着复制传播到
  * 用户库，所以设置对象里只剩 AI 摘要开关。真正的 CouchDB 读写（复制拓扑、重建、退订清理）
  * 需要真库，见 timeline-replication.test.ts / timeline-rebuild.test.ts 与
- * scripts/verify-timeline-sync.mjs。
+ * packages/nuxt-client/integration/timeline-sync.test.ts。
  */
 
 describe("normalizeTimelineSettings", () => {

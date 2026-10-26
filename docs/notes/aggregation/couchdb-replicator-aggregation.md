@@ -199,6 +199,7 @@ return typeof doc.publishedAt === 'string' && doc.publishedAt >= req.query.minPu
 
 * 单元用例：`packages/hono-server` 201 项、`packages/nuxt-client` 516 项全绿（含"换库重搬保留用户状态"、
   "并发建库只留一个赢家"、"重建后客户端丢本地缓存重拉"）。
-* 真栈端到端：`packages/nuxt-client/scripts/verify-timeline-sync.mjs`（隔离实例 + 独立 PG 库 + 独立 Redis）
-  **44 项全过、连跑两次稳定**：单库下发 → 复制器搬运（JS filter / 窗口 / 附件字节一致）→ 删除跟随 →
+* 真栈端到端：`packages/nuxt-client/integration/timeline-sync.test.ts`（真 Hono + 真 CouchDB + 真 PG + 真 Redis 的 dev 栈）
+  **55 项断言全过**：单库下发 → 复制器搬运（JS filter / 窗口 / 附件字节一致）→ 删除跟随 →
   写方向闸门 → 退订清理 → 重建换库（内容重搬 + 订阅/已读收藏跟着走 + 旧库删除 + 客户端缓存失效）。
+  跑法：`pnpm --filter @rssfed/nuxt-client test:integration`；迁移前是与本文件同期的 `scripts/verify-timeline-sync.mjs`。

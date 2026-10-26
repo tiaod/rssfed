@@ -96,5 +96,6 @@ CouchDB 复制器（那一步的结论 —— 二进制走 multipart、按源库
 - 单测：`packages/hono-server/src/__tests__/timeline-source-sync.test.ts`（脏源真值表、开始时刻竞态、
   换窗口重算、退订跳过、失败清空水位）。
 - 端到端（真 CouchDB + 真 PG + 真 PouchDB）：
-  `pnpm --filter @nuxt-client verify:timeline-sync` —— 现覆盖"稳态 `queued: 0` 一个复制请求都不发"、
+  `pnpm --filter @rssfed/nuxt-client test:integration`（`integration/timeline-sync.test.ts`）——
+  现覆盖"稳态 `queued: 0` 一个复制请求都不发"、
   "同参数复用同一个 checkpoint"、"换库重搬后水位作废重扫"、"退订清理且强制重扫也不复活"。

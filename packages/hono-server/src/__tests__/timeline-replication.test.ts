@@ -12,7 +12,7 @@ import { REPLICATION_FILTER_PATH, TIMELINE_REPLICATION_FILTER } from "../couchdb
  *      每天都从 0 重扫源库。保留策略的唯一权威是源库裁剪。
  *
  * 真库行为（删除跟随、附件二进制到端、退订取消、重扫收敛）都在
- * scripts/verify-timeline-sync.mjs 里对着真 CouchDB 验。
+ * packages/nuxt-client/integration/timeline-sync.test.ts 里对着真 CouchDB 验。
  */
 
 describe("replicationDocId / parseReplicationDocId", () => {

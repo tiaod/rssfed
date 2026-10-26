@@ -232,4 +232,4 @@
 - 快速 smoke：`BENCH_N=100 BENCH_REPS=1 BENCH_MESSAGING_REPS=1 node report/worker-pouch-bench/bench.mjs`
 - 只按现有 `raw.json` 重渲染报告（改文案不用重跑浏览器）：`node report/worker-pouch-bench/bench.mjs --report-only`
 - 度量口径能力对照（headless shell vs 完整 Chromium）：`node report/worker-pouch-bench/bench.mjs --check-longtask`
-- 脚本自带环境自举（`PLAYWRIGHT_BROWSERS_PATH` / `LD_LIBRARY_PATH` / `FONTCONFIG_FILE`，逻辑复制自 `packages/nuxt-client/scripts/verify-lightbox.mjs`），并把 `/pouchdb.js` 与页面资源用本地 `http://127.0.0.1:8899` 静态服务器提供，避免 `file://` 下 IndexedDB / Worker 的限制。
+- 脚本自带环境自举（`PLAYWRIGHT_BROWSERS_PATH` / `LD_LIBRARY_PATH` / `FONTCONFIG_FILE`，逻辑复制自 `packages/nuxt-client/e2e/support/playwright-env.mjs`），并把 `/pouchdb.js` 与页面资源用本地 `http://127.0.0.1:8899` 静态服务器提供，避免 `file://` 下 IndexedDB / Worker 的限制。

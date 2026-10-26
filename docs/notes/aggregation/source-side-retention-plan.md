@@ -222,7 +222,7 @@ function(doc) {
 
 - 单测：裁剪的边界（≤N 不删、恰好 N、并列时间戳）、`sourceNeedsSync` 新真值表、
   "只删不增也判脏源"（场景 B 的回归钉子）。
-- 端到端：扩 `packages/nuxt-client/scripts/verify-timeline-sync.mjs` ——
+- 端到端：扩 `packages/nuxt-client/integration/timeline-sync.test.ts` ——
   源库裁剪 → 删除跟随到用户库 → 浏览器跟随删；
   **稳态下 `queued: 0`**（原断言保留）；
   **不再有剪枝扫描**（断言 reconcile 不查用户库视图）；

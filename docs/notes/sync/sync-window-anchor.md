@@ -31,10 +31,10 @@ id/rev 在服务端就被丢掉，正文与附件更不会进浏览器。
 ## 端到端验证
 
 ```
-pnpm --filter @rssfed/nuxt-client verify:timeline-sync    # 现行等价脚本：真 CouchDB + 真 PouchDB
+pnpm --filter @rssfed/nuxt-client test:integration    # 现行等价测试：真 CouchDB + 真 PouchDB
 # 当时的两个命令已失效：verify:sync-window 已从 package.json 移除（客户端不再逐源按窗口复制，
-# 聚合改在服务端完成，该链路现由 verify:timeline-sync 覆盖）；report/sync-window/verify.mjs
-# 已随 report/ 清理删除。
+# 聚合改在服务端完成，该链路现由 packages/nuxt-client/integration/timeline-sync.test.ts 覆盖）；
+# report/sync-window/verify.mjs 已随 report/ 清理删除。
 ```
 
 ### 1. 真 CouchDB 上的过滤复制
