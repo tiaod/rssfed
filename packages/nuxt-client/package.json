@@ -10,11 +10,9 @@
     "postinstall": "nuxt prepare",
     "lint": "eslint .",
     "typecheck": "nuxt typecheck",
-    "verify:lightbox": "node scripts/verify-lightbox.mjs",
-    "verify:entry-route": "node scripts/verify-entry-route.mjs",
-    "verify:entry-reveal": "node scripts/verify-entry-reveal.mjs",
-    "verify:timeline-sync": "node scripts/verify-timeline-sync.mjs",
-    "verify:entry-images": "node scripts/verify-entry-images.mjs"
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "verify:timeline-sync": "node scripts/verify-timeline-sync.mjs"
   },
   "dependencies": {
     "@iconify-json/lucide": "^1.2.111",

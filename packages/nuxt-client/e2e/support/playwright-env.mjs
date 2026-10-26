@@ -1,5 +1,5 @@
 /**
- * Playwright 运行环境自举（`scripts/verify-*.mjs` 共用）。
+ * Playwright 运行环境自举（`e2e/` 与 `playwright.config.ts` 共用）。
  *
  * 本机是容器：系统没有 Chromium，且缺 libnspr4 / libnss3 / libasound2，而 NoNewPrivs=1 +
  * 非 root 意味着装不了系统包。浏览器正常走 playwright 的默认缓存
@@ -9,7 +9,7 @@
  * 用法 —— **必须在 import('playwright') 之前调用**：playwright 在加载时就会确定浏览器查找目录。
  *
  * ```js
- * import { preparePlaywrightEnv } from './lib/playwright-env.mjs'
+ * import { preparePlaywrightEnv } from './support/playwright-env.mjs'
  * await preparePlaywrightEnv()
  * const { chromium } = await import('playwright')
  * ```
