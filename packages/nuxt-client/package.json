@@ -12,7 +12,7 @@
     "typecheck": "nuxt typecheck",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "verify:timeline-sync": "node scripts/verify-timeline-sync.mjs"
+    "test:integration": "vitest run --config vitest.integration.config.ts"
   },
   "dependencies": {
     "@iconify-json/lucide": "^1.2.111",
