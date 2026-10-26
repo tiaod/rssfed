@@ -84,6 +84,7 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
+  lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   lastTimelineUrlKey: (uid: string | null) => `rssfed-test-url-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []

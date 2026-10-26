@@ -27,6 +27,7 @@ vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `/tmp/rssfed-test-${uid ?? 'guest'}`,
   syncedFeedsKey: (uid: string | null) => `rssfed-test-synced-${uid ?? 'guest'}`,
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
+  lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []
 }))

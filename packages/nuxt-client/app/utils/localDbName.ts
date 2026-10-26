@@ -17,13 +17,19 @@
  * 都由 cleanupLegacyDbs 清理。
  */
 
-function dbSuffix(userId: string | null | undefined): string {
+/**
+ * 本地库名里的「账号段」（未登录为 guest）。
+ *
+ * 导出给库名解析/清理用（见 utils/localDbCleanup）：「一个库属于哪个账号」只有这一处定义，
+ * 否则清理逻辑与建库逻辑各写一份，改名时必然漂移。
+ */
+export function localDbAccountKey(userId: string | null | undefined): string {
   return userId && userId.length > 0 ? userId : 'guest'
 }
 
 /** 本地 PouchDB 库名，如 rssfed-timeline-<userId>（每账号一个，装整个用户库） */
 export function localDbName(userId: string | null | undefined): string {
-  return `rssfed-timeline-${dbSuffix(userId)}`
+  return `rssfed-timeline-${localDbAccountKey(userId)}`
 }
 
 /**
@@ -34,7 +40,7 @@ export function localDbName(userId: string | null | undefined): string {
  * 所以不需要任何一致性保证。
  */
 export function lastTimelineRefreshKey(userId: string | null | undefined): string {
-  return `rssfed-timeline-refresh-${dbSuffix(userId)}`
+  return `rssfed-timeline-refresh-${localDbAccountKey(userId)}`
 }
 
 /**
@@ -45,7 +51,19 @@ export function lastTimelineRefreshKey(userId: string | null | undefined): strin
  * 上次同步的地址，一变就把本地镜像丢掉重拉（见 usePouchDb 的 startTimelineLiveSync）。
  */
 export function lastTimelineUrlKey(userId: string | null | undefined): string {
-  return `rssfed-timeline-url-${dbSuffix(userId)}`
+  return `rssfed-timeline-url-${localDbAccountKey(userId)}`
+}
+
+/**
+ * 「上次压缩本地库」的时间戳（localStorage，按账号隔离）。
+ *
+ * PouchDB 不压缩的话，旧修订正文与已删除条目的附件会一直留在 IndexedDB 里 ——
+ * 云端那份会 compact，本地这份不会，于是本地只会比云端大、而且只增不减。
+ * 压缩是重活（要把整个库扫一遍），所以只在同步空闲后做、并按天节流；
+ * 这个键就是节流记录，丢了大不了多压一次。
+ */
+export function lastTimelineCompactKey(userId: string | null | undefined): string {
+  return `rssfed-timeline-compacted-${localDbAccountKey(userId)}`
 }
 
 /** 账号隔离之前使用的固定库名（升级时清理，见 usePouchDb 的 cleanupLegacyDbs） */

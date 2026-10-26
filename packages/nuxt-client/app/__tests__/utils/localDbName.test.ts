@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LEGACY_LOCAL_DB_NAMES, LEGACY_LOCAL_DB_PREFIXES, lastTimelineRefreshKey, localDbName, isLegacyLocalDbName, isLegacyLocalStorageKey, stripPouchNamePrefix } from '~/utils/localDbName'
+import { LEGACY_LOCAL_DB_NAMES, LEGACY_LOCAL_DB_PREFIXES, lastTimelineCompactKey, lastTimelineRefreshKey, localDbAccountKey, localDbName, isLegacyLocalDbName, isLegacyLocalStorageKey, stripPouchNamePrefix } from '~/utils/localDbName'
 
 describe('localDbName', () => {
   it('按账号隔离：不同账号的本地库名不同（单库方案下每账号只有一个库）', () => {
@@ -38,6 +38,22 @@ describe('lastTimelineRefreshKey', () => {
     expect(lastTimelineRefreshKey('user-a')).toBe('rssfed-timeline-refresh-user-a')
     expect(lastTimelineRefreshKey('user-a')).not.toBe(lastTimelineRefreshKey('user-b'))
     expect(lastTimelineRefreshKey(null)).toBe('rssfed-timeline-refresh-guest')
+  })
+})
+
+describe('lastTimelineCompactKey', () => {
+  it('压缩节流同样按账号隔离（否则 A 压过之后 B 一天内都不压）', () => {
+    expect(lastTimelineCompactKey('user-a')).toBe('rssfed-timeline-compacted-user-a')
+    expect(lastTimelineCompactKey('user-a')).not.toBe(lastTimelineCompactKey('user-b'))
+    expect(lastTimelineCompactKey(null)).toBe('rssfed-timeline-compacted-guest')
+  })
+})
+
+describe('localDbAccountKey', () => {
+  it('与库名里的账号段是同一个定义（清理逻辑据此判断「这是不是当前账号的库」）', () => {
+    expect(localDbAccountKey('user-a')).toBe('user-a')
+    expect(localDbAccountKey(null)).toBe('guest')
+    expect(localDbName('user-a')).toBe(`rssfed-timeline-${localDbAccountKey('user-a')}`)
   })
 })
 

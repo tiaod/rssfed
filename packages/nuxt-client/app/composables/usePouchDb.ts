@@ -12,6 +12,7 @@ import { isStorageFailure } from '~/utils/storageFailure'
 import { computeRemainingMs } from '~/utils/syncEta'
 import type { EtaBase } from '~/utils/syncEta'
 import {
+  lastTimelineCompactKey,
   lastTimelineUrlKey,
   localDbName,
   lastTimelineRefreshKey,
@@ -20,6 +21,7 @@ import {
   isLegacyLocalStorageKey,
   stripPouchNamePrefix
 } from '~/utils/localDbName'
+import { COMPACT_IDLE_DELAY_MS, shouldCompactNow } from '~/utils/localCompact'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 import { isListView, type ListView } from '~/utils/listViews'
 
@@ -301,6 +303,13 @@ interface PouchDbState {
    * 此时唯一有效动作是重置本地缓存。会话级状态，刷新页面即清空。
    */
   storageBroken: Ref<string | null>
+  /**
+   * 「同步空闲后压缩本地库」的定时器（普通字段，不需要响应式）。
+   *
+   * 放在共享状态里而不是闭包变量：多个组件各构造一份 usePouchDb 闭包，闭包变量挡不住
+   * 「两个组件各排一个压缩」—— 压缩是重活，同一天内不该跑两遍。
+   */
+  compactTimer: ReturnType<typeof setTimeout> | null
 }
 
 /**
@@ -444,7 +453,8 @@ function createPouchState(): PouchDbState {
     userWatchReady: false,
     syncedDocsByTarget: reactive<Record<string, number>>({}),
     syncedEntryDocsByFeed: reactive<Record<string, number>>({}),
-    storageBroken: ref<string | null>(null)
+    storageBroken: ref<string | null>(null),
+    compactTimer: null
   }
 }
 
@@ -512,6 +522,8 @@ export function usePouchDb() {
   function pauseSync() {
     pouchState.paused.value = true
     stopPullSync()
+    // 用户明确要求「先别动」：把已经排上的空闲压缩也取消，等恢复后的下一轮空闲再排
+    cancelIdleCompact()
     const status = syncStatuses[TIMELINE_ID]
     if (status && (status.status === 'syncing' || status.status === 'queued')) {
       syncStatuses[TIMELINE_ID] = { ...status, status: 'idle' }
@@ -541,6 +553,8 @@ export function usePouchDb() {
     }
     syncHandles.clear()
     pouchState.timelineSyncPromise = null
+    // 压缩定时器属于上一个账号的库：不取消的话它会在切号后压一个已经关掉/换掉的库
+    cancelIdleCompact()
     if (pouchState.entriesDb) {
       pouchState.entriesDb.close()
       pouchState.entriesDb = null
@@ -679,6 +693,79 @@ export function usePouchDb() {
   function setStorageBroken(detail: string) {
     if (pouchState.storageBroken.value) return
     pouchState.storageBroken.value = detail
+    // 库已经写不进去了，压缩也只会白砸一次；等重置本地库后重新排
+    cancelIdleCompact()
+  }
+
+  // ── 空闲压缩：回收「云端已经回收、本地却一直留着」的字节 ──
+  //
+  // PouchDB 只有 compact 才会删除旧修订正文与不再被引用的附件（见 utils/localCompact 的说明）。
+  // 服务端裁剪/清墓碑之后会 compact，本地这份没人压：删掉的条目的正文与图片会一直占着
+  // IndexedDB —— 本地占用只增不减、比云端大一截，主要就是这些已经不在云端的字节。
+  //
+  // 触发时机：live 复制 paused（已跟上服务端）之后再等 COMPACT_IDLE_DELAY_MS，避开
+  // 「刚同步完用户正在翻列表」那段时间；每次 paused 都重置计时（真正安静下来才算空闲）。
+  // 按天节流（lastTimelineCompactKey），压缩失败只是这轮白跑，下次空闲再试。
+
+  /** 上次压缩完成的时间戳（localStorage，按账号隔离） */
+  function loadLastCompactedAt(): number {
+    try {
+      return Number(localStorage.getItem(lastTimelineCompactKey(pouchState.dbUserId))) || 0
+    } catch {
+      return 0
+    }
+  }
+
+  function saveLastCompactedAt(at: number): void {
+    try {
+      localStorage.setItem(lastTimelineCompactKey(pouchState.dbUserId), String(at))
+    } catch {
+      // localStorage 不可用时忽略：最坏结果是每次空闲都压一遍（数据量小时代价可接受）
+    }
+  }
+
+  /** 取消已排上的空闲压缩（暂停 / 换账号 / 重置 / 存储故障时） */
+  function cancelIdleCompact(): void {
+    if (!pouchState.compactTimer) return
+    clearTimeout(pouchState.compactTimer)
+    pouchState.compactTimer = null
+  }
+
+  /** 排一次「空闲后压缩」：已排上的先取消再重排，保证计时从最后一次复制活动算起 */
+  function scheduleIdleCompact(): void {
+    cancelIdleCompact()
+    pouchState.compactTimer = setTimeout(() => {
+      pouchState.compactTimer = null
+      void runIdleCompact()
+    }, COMPACT_IDLE_DELAY_MS)
+  }
+
+  /**
+   * 真正执行压缩。
+   *
+   * 只做本地库维护：不碰同步状态、不递增 version（压缩不改变任何文档内容，
+   * 列表没有重查的必要），失败也只是记一条 warn。
+   */
+  async function runIdleCompact(): Promise<void> {
+    try {
+      const db = pouchState.entriesDb
+      const status = syncStatuses[TIMELINE_ID]
+      const should = shouldCompactNow({
+        now: Date.now(),
+        lastCompactedAt: loadLastCompactedAt(),
+        syncing: status?.status === 'syncing' || status?.status === 'queued',
+        paused: pouchState.paused.value,
+        storageBroken: pouchState.storageBroken.value !== null,
+        hasDb: db !== null
+      })
+      if (!should || !db) return
+      await db.compact()
+      saveLastCompactedAt(Date.now())
+      console.info('[PouchDB] 本地库已压缩：回收了已删除条目的旧修订与附件')
+    } catch (e: unknown) {
+      // 压缩失败不影响使用（下一次空闲会再试），不打扰用户
+      console.warn('[PouchDB] 本地库压缩失败，稍后再试：', errorMessage(e))
+    }
   }
 
   // ── 同步引擎：同一个库上的两条 live 通道（拉取全量 / 回写状态） ──
@@ -989,6 +1076,9 @@ export function usePouchDb() {
           version: (current?.version ?? 0) + (delta > 0 ? 1 : 0),
           lastSyncedAt: new Date().toISOString()
         }
+        // 已跟上服务端 → 从这一刻起算「空闲」；再来一次 paused 会重新计时。
+        // 压缩排队在这里，而不是每个 change 都排：复制进行中压缩只会抢 IO。
+        scheduleIdleCompact()
       }
 
       const onError = (err: unknown) => {
@@ -1499,6 +1589,8 @@ export function usePouchDb() {
    * 只清本地：服务端的派生库不动（那是「再拉一次」的来源）。
    */
   async function resetLocalData() {
+    // 压缩定时器指向的是即将被销毁的库，先取消
+    cancelIdleCompact()
     // 停掉两条通道再删库：否则在途的写入会砸在一个已被销毁的实例上
     // 注意：单库之后重置会连同**未推送**的状态改动一起丢掉（订阅/已读）。重置是用户显式操作，
     // 服务端那份才是权威，重建后整库重新拉下来即可。
