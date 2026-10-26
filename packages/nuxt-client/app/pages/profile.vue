@@ -5,6 +5,7 @@ import AdminFeedManager from '~/components/admin/AdminFeedManager.vue'
 import SiteSettingsManager from '~/components/admin/SiteSettingsManager.vue'
 import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimate'
+import { useLocalDbCleanup } from '~/composables/useLocalDbCleanup'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 import {
@@ -252,6 +253,62 @@ const confirmReset = async () => {
     resetting.value = false
   }
 }
+
+/**
+ * 其它账号的本地缓存清理。
+ *
+ * 本地库按账号隔离且「换回来还能离线读」（见 utils/localDbName），所以每登录过一个账号
+ * 这个浏览器就多留一份整库副本。这里只负责扫描/清理的状态，名字判断与 IndexedDB 操作在
+ * useLocalDbCleanup / utils/localDbCleanup。
+ *
+ * 销毁的是**别的账号**的离线副本：当前账号与服务器数据都不动；被清的账号下次登录会
+ * 整库重新同步（这正是删它的代价，弹窗里写清楚）。
+ */
+const localDbCleanup = useLocalDbCleanup()
+const cleanupOpen = ref(false)
+/** 弹窗内的失败原因（非空时在弹窗里显示，不关弹窗） */
+const cleanupError = ref<string | null>(null)
+
+/** 打开确认弹窗：顺手清掉上一次的错误，否则重开后还挂着旧报错 */
+function openCleanupConfirm() {
+  cleanupError.value = null
+  cleanupOpen.value = true
+}
+
+/**
+ * 会话是异步恢复的：user id 一到就扫一遍（immediate 覆盖「挂载时已登录」）。
+ * 每次重扫都只挑「别的账号」的库 —— 当前账号的库永远不在名单里。
+ */
+watch(
+  () => userStore.user?.id ?? null,
+  (id) => {
+    // 会话就绪前 user id 是 null：这时候扫描会把「当前账号的库」当成「其它账号」列出来，
+    // 点下去就删了自己的离线数据。因此拿不到账号时先不扫，等会话恢复再看。
+    if (id) void localDbCleanup.scan(id)
+  },
+  { immediate: true }
+)
+
+/**
+ * 确认清理：删完重新扫（被别的标签页占住的库会原样留着），并立刻重算整站占用，
+ * 让用户在上方那张卡里看到数字回落。
+ */
+const confirmCleanup = async () => {
+  if (localDbCleanup.cleaning.value) return
+  const userId = userStore.user?.id
+  if (!userId) return
+  cleanupError.value = null
+  const result = await localDbCleanup.clean(userId)
+  void storageEstimate.refresh()
+  if (result.deleted > 0) {
+    toast.add({ title: `已清理 ${result.accounts} 个账号的本地缓存`, color: 'success' })
+  }
+  if (result.failed > 0) {
+    cleanupError.value = localDbCleanup.error.value ?? `${result.failed} 个本地库未能删除`
+    return
+  }
+  cleanupOpen.value = false
+}
 </script>
 
 <template>
@@ -487,6 +544,50 @@ const confirmReset = async () => {
                     </div>
                   </UCard>
 
+                  <!--
+                    其它账号的本地缓存：本地库按账号隔离且「换回来还能离线读」，所以每个登录过的
+                    账号各留一份整库副本。这里只报「检测到几个账号」——浏览器没有按库统计体积的
+                    接口（见上面占用卡的说明），清理后让用户看「本地存储占用」的回落。
+                  -->
+                  <UCard v-if="localDbCleanup.supported.value">
+                    <p class="text-sm font-medium">
+                      其它账号的本地缓存
+                    </p>
+                    <p class="mt-1 text-xs text-muted">
+                      <template v-if="localDbCleanup.scanning.value">
+                        正在检查本机的离线副本…
+                      </template>
+                      <template v-else-if="localDbCleanup.accountCount.value > 0">
+                        检测到 {{ localDbCleanup.accountCount.value }} 个其它账号的离线副本。本浏览器会为每个登录过的账号各保留一份，清理后这些账号下次登录需要重新同步；当前账号的缓存与服务器数据不受影响。
+                      </template>
+                      <template v-else>
+                        没有其它账号的离线副本。
+                      </template>
+                    </p>
+                    <div class="mt-3 flex items-center gap-2">
+                      <UButton
+                        v-if="localDbCleanup.canClean.value"
+                        color="error"
+                        variant="outline"
+                        size="sm"
+                        icon="i-lucide-trash-2"
+                        label="清理"
+                        :disabled="localDbCleanup.cleaning.value"
+                        @click="openCleanupConfirm"
+                      />
+                      <UButton
+                        v-else
+                        color="neutral"
+                        variant="ghost"
+                        size="sm"
+                        icon="i-lucide-refresh-cw"
+                        label="重新检测"
+                        :loading="localDbCleanup.scanning.value"
+                        @click="localDbCleanup.scan(userStore.user?.id ?? null)"
+                      />
+                    </div>
+                  </UCard>
+
                   <UCard>
                     <p class="text-sm font-medium">
                       重置本地缓存
@@ -668,6 +769,57 @@ const confirmReset = async () => {
           </template>
         </UTabs>
       </div>
+
+      <!-- 清理其它账号本地缓存的确认弹窗：删的是其它账号的整库副本，当前账号不受影响 -->
+      <UModal
+        v-model:open="cleanupOpen"
+        title="清理其它账号的本地缓存？"
+        :ui="{ footer: 'justify-end' }"
+      >
+        <template #body>
+          <div class="space-y-3">
+            <UAlert
+              color="warning"
+              variant="soft"
+              icon="i-lucide-triangle-alert"
+              title="会删除本机上其它账号的离线副本"
+            >
+              <template #description>
+                <ul class="list-disc pl-4 space-y-1 text-sm">
+                  <li>{{ localDbCleanup.accountCount.value }} 个其它账号在本机缓存的条目、图片与状态会被删除</li>
+                  <li>这些账号下次登录会重新全量同步，首次打开会慢一些</li>
+                  <li>当前账号的缓存与服务器上的数据都不受影响</li>
+                </ul>
+              </template>
+            </UAlert>
+            <UAlert
+              v-if="cleanupError"
+              color="error"
+              variant="soft"
+              icon="i-lucide-circle-alert"
+              :title="cleanupError"
+            />
+          </div>
+        </template>
+        <template #footer="{ close }">
+          <UButton
+            variant="outline"
+            color="neutral"
+            :disabled="localDbCleanup.cleaning.value"
+            @click="close"
+          >
+            取消
+          </UButton>
+          <UButton
+            color="error"
+            icon="i-lucide-trash-2"
+            :loading="localDbCleanup.cleaning.value"
+            @click="confirmCleanup"
+          >
+            确认清理
+          </UButton>
+        </template>
+      </UModal>
 
       <!-- 重置本地缓存的确认弹窗：破坏性操作一律二次确认，并把后果写在正文里 -->
       <UModal
