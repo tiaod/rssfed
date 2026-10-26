@@ -8,6 +8,9 @@
 
 @theme static {
   --font-sans: 'Public Sans', sans-serif;
+  /* 正文（.entry-prose）的字体。默认跟随应用字体；用户在设置里选了别的字体时，
+   * 客户端插件把选择写成 <html> 上的内联变量覆盖它（见 app/plugins/reader-font.client.ts）。 */
+  --font-reading: var(--font-sans);
 
   --color-green-50: #EFFDF5;
   --color-green-100: #D9FBE8;
@@ -39,6 +42,10 @@
  * 所以比 .prose-neutral / dark:prose-invert 的默认值优先级更高。
  * ============================================================ */
 .entry-prose {
+  /* 正文字体：--font-reading 由「阅读字体」偏好决定（清单见 app/utils/readerFonts.ts）。
+   * 放在 .entry-prose 而不是 html 上是刻意的 —— 这是「阅读字体」，不是全站 UI 字体。 */
+  font-family: var(--font-reading);
+
   --tw-prose-body: var(--ui-text);
   --tw-prose-headings: var(--ui-text-highlighted);
   --tw-prose-lead: var(--ui-text-toned);

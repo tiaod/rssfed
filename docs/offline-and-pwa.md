@@ -13,7 +13,7 @@
 
 | 请求类型 | 策略 | 说明 |
 | --- | --- | --- |
-| 构建产物 `/_nuxt/**`、静态文件 | 缓存优先 | 文件名带内容哈希，内容永不变化；构建期由钩子扫描 `.output/public` 生成 `/sw-manifest.json`，SW 安装时整份预缓存 |
+| 构建产物 `/_nuxt/**`、静态文件 | 缓存优先 | 文件名带内容哈希，内容永不变化；构建期由钩子扫描 `.output/public` 生成 `/sw-manifest.json`，SW 安装时整份预缓存（**字体 woff2 例外**，见下） |
 | 页面导航 | 网络优先 → 同路径 HTML 缓存 → `/offline` 外壳 | 访问过的页面离线可原样打开；没访问过的路径回退到预渲染的离线外壳，客户端接管后按地址栏 URL 渲染真实路由 |
 | 只读接口（条目、站点配置、文件、会话） | 网络优先 + 落缓存 | 断网时读缓存；写操作不拦截，让调用方拿到真实失败 |
 | 其它（PouchDB 复制 `/api/couchdb/proxy/*` 等） | 不拦截 | 同步语义必须由 PouchDB 自己处理重试与 checkpoint |
@@ -27,6 +27,9 @@
 - **开发环境不注册**：缓存优先会挡住 Vite 的 HMR 请求，`app/plugins/service-worker.client.ts`
   里用 `import.meta.dev` 短路。
 - **路由中间件在离线时放行**：拿不到会话不该把用户赶去登录页（`app/middleware/auth.ts`）。
+- **字体分片不进预缓存**：正文可选的霞鹜文楷是 259 个 woff2（整套约 15MB），预缓存会让每个用户
+  装 SW 时全量下载。`build/generate-sw-manifest.ts` 的 `shouldSkip` 排除 `.woff2`，它们首次被
+  读到时才走 cache-first 落缓存；没读到的分片离线时回退系统字体（见 `app/utils/readerFonts.ts`）。
 
 ## PWA（安装到手机）
 

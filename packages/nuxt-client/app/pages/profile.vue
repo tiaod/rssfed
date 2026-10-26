@@ -9,6 +9,12 @@ import { useLocalDbCleanup } from '~/composables/useLocalDbCleanup'
 import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 import {
+  READER_FONTS,
+  loadReaderFontCss,
+  normalizeReaderFontId,
+  resolveReaderFont
+} from '~/utils/readerFonts'
+import {
   formatSince,
   formatTimelineEventData,
   formatTimelineEventTime,
@@ -121,6 +127,35 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
   { label: '很宽', value: 'sm:max-w-6xl' },
   { label: '全屏', value: 'fullscreen' }
 ]
+
+/**
+ * 「正文字体」选项：系统字体栈 + 一款自带字体（霞鹜文楷屏幕阅读版）。
+ *
+ * 只影响文章正文（.entry-prose），不动列表与界面文字；清单与字体栈见 utils/readerFonts。
+ * 'inherit' 本身就是合法选项值，不需要像 draftView 那样用哨兵字符串区分「未配置」。
+ */
+const readerFontOptions = READER_FONTS.map(font => ({ label: font.label, value: font.id }))
+
+const draftReaderFont = computed({
+  get: () => normalizeReaderFontId(draftSettings.value.readerFont),
+  set: (value: string) => {
+    draftSettings.value = {
+      ...draftSettings.value,
+      readerFont: normalizeReaderFontId(value)
+    }
+  }
+})
+
+// 预览区用它自己的字体渲染；选到自带字体时先把样式拉下来，
+// 否则预览会显示回退后的系统字体，等于没预览
+watch(draftReaderFont, (id) => {
+  void loadReaderFontCss(id)
+})
+
+const readerFontPreviewStyle = computed(() => {
+  const stack = resolveReaderFont(draftReaderFont.value).stack
+  return stack ? { fontFamily: stack } : undefined
+})
 
 /**
  * 「默认列表视图」里的「跟随内置默认」项：选中它 = 不写设置（view 为 undefined）。
@@ -446,6 +481,26 @@ const confirmCleanup = async () => {
                   >
                     <USwitch v-model="draftSettings.fixedBars" />
                   </UFormField>
+
+                  <UFormField
+                    label="正文字体"
+                    description="只影响文章正文（条目详情与右侧阅读栏）。系统字体取决于本机已安装的字体，缺失时自动回退；霞鹜文楷（屏幕阅读版，SIL OFL 1.1）为内置字体，首次选择时按需下载用到的字形分片"
+                  >
+                    <USelect
+                      v-model="draftReaderFont"
+                      :items="readerFontOptions"
+                      value-key="value"
+                      class="w-64"
+                    />
+                  </UFormField>
+
+                  <!-- 预览：用它自己的字体渲染当前草稿选择，省得保存后再回正文对比 -->
+                  <p
+                    class="rounded-md border border-default px-3 py-2 text-sm text-muted"
+                    :style="readerFontPreviewStyle"
+                  >
+                    字体预览：这是一段示例文字，用来看字形的疏密与笔画。
+                  </p>
                 </section>
 
                 <USeparator />

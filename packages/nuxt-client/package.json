@@ -25,6 +25,7 @@
     "@vueuse/nuxt": "^14.4.0",
     "better-auth": "^1.7.2",
     "dompurify": "^3.4.15",
+    "lxgw-wenkai-screen-web": "1.530.0",
     "nuxt": "^4.4.6",
     "pinia": "^3.0.4",
     "pouchdb": "^9.0.0",

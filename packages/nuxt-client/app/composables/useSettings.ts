@@ -1,4 +1,5 @@
 import { isListView, type ListView } from '~/utils/listViews'
+import { isReaderFontId, type ReaderFontId } from '~/utils/readerFonts'
 
 export type EntryModalSize = 'sm:max-w-xl' | 'sm:max-w-2xl' | 'sm:max-w-4xl' | 'sm:max-w-6xl' | 'fullscreen'
 
@@ -18,6 +19,13 @@ export interface AppSettings {
    * 默认值只由显式配置入口修改。
    */
   view?: ListView
+  /**
+   * 阅读字体（只作用于文章正文，清单见 utils/readerFonts）。
+   *
+   * **可选**：undefined = 跟随应用默认字体，与显式选「跟随系统」等价 ——
+   * 两者都归一化成 inherit，所以老版本存下来的设置不需要迁移。
+   */
+  readerFont?: ReaderFontId
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -50,6 +58,10 @@ export function useSettings() {
         // 视图值只接受枚举内的字符串（老版本 / 手改 localStorage 都可能带来非法值）
         if (!isListView(parsed.view)) {
           delete parsed.view
+        }
+        // 阅读字体同理：清单删过某个 id 后，旧设置不能让它变成一个认不出的字体
+        if (!isReaderFontId(parsed.readerFont)) {
+          delete parsed.readerFont
         }
         // 同步窗口等聚合设置已移到服务端（每用户一份，见 useTimelineSettings），
         // 存量 localStorage 里的 syncWindowDays 直接丢弃即可（不迁移：它已经没有消费者）

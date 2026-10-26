@@ -6,9 +6,19 @@ export const SW_MANIFEST_FILE = 'sw-manifest.json'
 /** sw.js 里等待被替换成真实构建号的占位符 */
 export const SW_BUILD_ID_PLACEHOLDER = '__BUILD_ID__'
 
-/** 不预缓存的产物：体积大且只供调试，或是清单/脚本自身 */
+/**
+ * 不预缓存的产物：体积大且只供调试、清单/脚本自身，以及**按需加载的字体分片**。
+ *
+ * 字体（正文可选的霞鹜文楷，见 app/utils/readerFonts.ts）是几百个 woff2 分片、全套十几 MB，
+ * 只下载用户真正选中的那套、真正读到的那几片。放进预缓存清单会让**每个**用户在装 SW 时
+ * 全量下载一遍。排除后仍可离线：sw.js 的 STATIC_FILE_RE 含 woff2，首次用到时走 cacheFirst
+ * 落缓存，之后断网可用（没读到的分片离线时回退系统字体，这是 CJK 按需加载的固有取舍）。
+ */
 function shouldSkip(name: string) {
-  return name.endsWith('.map') || name === SW_MANIFEST_FILE || name === 'sw.js'
+  return name.endsWith('.map')
+    || name.endsWith('.woff2')
+    || name === SW_MANIFEST_FILE
+    || name === 'sw.js'
 }
 
 /**
