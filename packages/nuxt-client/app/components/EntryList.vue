@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { TableColumn } from '@nuxt/ui'
+import VueEasyLightbox from 'vue-easy-lightbox/external-css'
 import type { RssEntry } from '~/types/rss'
+import type { LightboxImage } from '~/composables/useImageLightbox'
 import { DEFAULT_LIST_VIEW, type ListView } from '~/utils/listViews'
 import {
   entryByline,
@@ -475,6 +477,28 @@ function handleOpen(entry: RssEntry) {
     // 列表支持分页才注入加载上下文；否则保持纯静态快照行为
     props.loadMore ? { loadMore: props.loadMore, hasMore: props.hasMore ?? (() => true) } : undefined
   )
+}
+
+// ── 社交动态的图片放大 ──────────────────────────────────────────────────
+
+/**
+ * 点图片看大图：lightbox 只在这一层渲染**一个**，由 EntrySocialItem 把「本条全部图片 + 起点
+ * index」发上来。
+ *
+ * 不在每个条目里各挂一个 lightbox：虚拟化同屏十几条，每条都会 teleport 一层全屏遮罩、各自带
+ * document 键盘监听与 body 滚动锁，而同一时刻只可能看一张图；列表这一层的实例本来就是唯一的。
+ *
+ * 地址是 useEntryImages 换好的本地 blob URL（离线也能放大），lightbox 只展示、不做净化 ——
+ * 与详情正文同一口径（见 useImageLightbox 的文件头）。
+ */
+const previewVisible = ref(false)
+const previewIndex = ref(0)
+const previewImages = ref<LightboxImage[]>([])
+
+function handlePreview(payload: { images: LightboxImage[], index: number }) {
+  previewImages.value = payload.images
+  previewIndex.value = payload.index
+  previewVisible.value = true
 }
 
 // ── 关闭详情后把「刚刚在读的那一条」拉回视野 ──────────────────────────────
@@ -1074,6 +1098,7 @@ function handleTableKeydown(event: KeyboardEvent) {
         :selected="item.id === selectedId"
         :show-feed="showFeed"
         @open="handleOpen"
+        @preview="handlePreview"
       />
 
       <EntryBlogItem
@@ -1117,4 +1142,19 @@ function handleTableKeydown(event: KeyboardEvent) {
       />
     </template>
   </UScrollArea>
+
+  <!--
+    社交动态的图片放大（见 handlePreview）。teleport 到 body：ScrollArea 是带 overflow 的滚动
+    容器，留在里面会被裁切；它也必须在页面任何容器之上。
+
+    ESC / 点遮罩关闭由 lightbox 自己处理（不设 esc-disabled）：列表页上没有它嵌套在弹窗里的场景，
+    不像 EntryDetail 那样需要抢 ESC。渲染与表格分支无关 —— 表格不触发 preview，状态恒为 false。
+  -->
+  <VueEasyLightbox
+    :visible="previewVisible"
+    :imgs="previewImages"
+    :index="previewIndex"
+    teleport="body"
+    @hide="previewVisible = false"
+  />
 </template>

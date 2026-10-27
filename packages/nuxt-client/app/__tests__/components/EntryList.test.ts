@@ -125,6 +125,30 @@ const STUBS = {
     template: '<span class="user">{{ name }}</span>'
   },
   /**
+   * 图片放大组件：真的那个会 teleport 到 body，单测里换成把「可见 / 起点 / 图片组」挂成
+   * data-* 的桩，这样不用去 body 里翻 DOM。点桩本身等价于组件的 hide 事件（EntryList 据此复位）。
+   */
+  VueEasyLightbox: defineComponent({
+    name: 'VueEasyLightbox',
+    props: {
+      visible: Boolean,
+      imgs: { type: Array as PropType<Array<{ src: string }>>, default: () => [] },
+      index: { type: Number, default: 0 }
+    },
+    emits: ['hide'],
+    setup(props, { emit }) {
+      return () =>
+        h('div', {
+          'class': 'lightbox-stub',
+          'data-visible': String(props.visible),
+          'data-index': String(props.index),
+          'data-count': String(props.imgs.length),
+          'data-srcs': props.imgs.map(img => img.src).join(','),
+          'onClick': () => emit('hide')
+        })
+    }
+  }),
+  /**
    * UButton：按有没有 `to` 渲染成链接或按钮，并把图标/配色/无障碍名挂成 data-*，
    * 信息流操作栏的断言就是读这几个属性（与 EntryReaderPane.test 同一套桩）。
    *
@@ -550,10 +574,12 @@ describe('EntryList 社交动态视图', () => {
     expect(article.get('header').text()).toContain('3 小时前')
     expect(article.get('.avatar').attributes('data-size')).toBe('md')
 
-    // 只有正文是打开详情的热区：标题 + 摘要 + 图片都在按钮里
+    // 一条两块热区：标题 + 摘要打开详情；图片在按钮外，是「看大图」的独立热区
     const body = article.get('button')
     expect(body.get('h3').text()).toBe('文章标题')
     expect(body.text()).toContain('这是摘要')
+    expect(body.find('img').exists()).toBe(false)
+    expect(article.get('img').attributes('role')).toBe('button')
 
     // 单列、零间距（条与条靠分隔线划分）
     expect(virtualizeOf(wrapper).lanes).toBe(1)
@@ -569,7 +595,7 @@ describe('EntryList 社交动态视图', () => {
     const wrapper = mountList([entry], undefined, 'social')
     await flushPromises()
 
-    const img = wrapper.get('article button img')
+    const img = wrapper.get('article img')
     expect(img.attributes('src')).toBe('blob:cover')
     // 比例来自压缩后的尺寸，图片没加载时高度就是对的
     expect(img.attributes('style')).toContain('aspect-ratio: 1.777')
@@ -591,7 +617,7 @@ describe('EntryList 社交动态视图', () => {
     const wrapper = mountList([entry], undefined, 'social')
     await flushPromises()
 
-    const grid = wrapper.get('article button .grid')
+    const grid = wrapper.get('article .grid')
     expect(grid.classes()).toContain('grid-cols-6')
     const cells = grid.findAll('div')
     expect(cells).toHaveLength(4)
@@ -606,6 +632,11 @@ describe('EntryList 社交动态视图', () => {
     expect(cells[3]!.attributes('style')).toContain('aspect-ratio: 3')
     // 格子里的图一律裁成格子比例
     expect(cells[0]!.get('img').classes()).toContain('object-cover')
+    // 每个格子都是看大图的热区
+    for (const cell of cells) {
+      expect(cell.attributes('role')).toBe('button')
+      expect(cell.attributes('tabindex')).toBe('0')
+    }
   })
 
   it('超过 6 张只铺前 6 张', async () => {
@@ -621,7 +652,7 @@ describe('EntryList 社交动态视图', () => {
     const wrapper = mountList([entry], undefined, 'social')
     await flushPromises()
 
-    expect(wrapper.get('article button .grid').findAll('div')).toHaveLength(6)
+    expect(wrapper.get('article .grid').findAll('div')).toHaveLength(6)
   })
 
   it('附件没同步下来的图片不占格子（没有空框）', async () => {
@@ -641,7 +672,81 @@ describe('EntryList 社交动态视图', () => {
     const wrapper = mountList([entry], undefined, 'social')
     await flushPromises()
 
-    expect(wrapper.get('article button .grid').findAll('div')).toHaveLength(2)
+    expect(wrapper.get('article .grid').findAll('div')).toHaveLength(2)
+  })
+
+  it('点单图打开大图（lightbox 从第 0 张起），不打开详情', async () => {
+    const entry = makeEntry({
+      id: 'social-preview',
+      coverUrl: 'blob:cover',
+      images: [{ url: 'https://a.example/c.png', attachment: 'preview-0.avif', width: 1600, height: 900, cover: true }]
+    })
+    const wrapper = mountList([entry], undefined, 'social')
+    await flushPromises()
+
+    const img = wrapper.get('article img')
+    expect(img.classes()).toContain('cursor-zoom-in')
+    expect(img.attributes('aria-label')).toBe('查看大图：文章标题')
+    expect(wrapper.get('.lightbox-stub').attributes('data-visible')).toBe('false')
+
+    await img.trigger('click')
+    await flushPromises()
+
+    const stub = wrapper.get('.lightbox-stub')
+    expect(stub.attributes('data-visible')).toBe('true')
+    expect(stub.attributes('data-index')).toBe('0')
+    expect(stub.attributes('data-count')).toBe('1')
+    expect(stub.attributes('data-srcs')).toBe('blob:cover')
+    // 看大图不是打开详情：两块热区各管一件事
+    expect(openEntryMock).not.toHaveBeenCalled()
+  })
+
+  it('相册点第 3 张从第 3 张开始看，并带上这一条的全部图片', async () => {
+    const image = (name: string, cover = false) => ({
+      url: `https://a.example/${name}`, attachment: name, width: 400, height: 400, cover
+    })
+    const entry = makeEntry({
+      id: 'social-preview-grid',
+      coverUrl: 'blob:cover',
+      images: [image('g-cover.avif', true), image('g-1.avif'), image('g-2.avif'), image('g-3.avif')]
+    })
+    const wrapper = mountList([entry], undefined, 'social')
+    await flushPromises()
+
+    const cells = wrapper.get('article .grid').findAll('[role="button"]')
+    expect(cells).toHaveLength(4)
+    expect(cells[2]!.attributes('aria-label')).toBe('查看第 3 张大图：文章标题')
+
+    await cells[2]!.trigger('click')
+    await flushPromises()
+
+    const stub = wrapper.get('.lightbox-stub')
+    expect(stub.attributes('data-visible')).toBe('true')
+    expect(stub.attributes('data-index')).toBe('2')
+    expect(stub.attributes('data-count')).toBe('4')
+    // 第一张是已经解好的封面，其余几张是懒取的附件（测试里 createObjectURL 统一给 blob:stub）
+    expect(stub.attributes('data-srcs')?.startsWith('blob:cover')).toBe(true)
+    expect(openEntryMock).not.toHaveBeenCalled()
+  })
+
+  it('键盘 Enter / Space 也能打开大图，hide 后复位', async () => {
+    const entry = makeEntry({
+      id: 'social-preview-keyboard',
+      coverUrl: 'blob:cover',
+      images: [{ url: 'https://a.example/c.png', attachment: 'kbd-0.avif', width: 1600, height: 900, cover: true }]
+    })
+    const wrapper = mountList([entry], undefined, 'social')
+    await flushPromises()
+
+    await wrapper.get('article img').trigger('keydown', { key: 'Enter' })
+    expect(wrapper.get('.lightbox-stub').attributes('data-visible')).toBe('true')
+
+    // 关闭（lightbox 的 hide 事件）
+    await wrapper.get('.lightbox-stub').trigger('click')
+    expect(wrapper.get('.lightbox-stub').attributes('data-visible')).toBe('false')
+
+    await wrapper.get('article img').trigger('keydown', { key: ' ' })
+    expect(wrapper.get('.lightbox-stub').attributes('data-visible')).toBe('true')
   })
 
   it('单源页的署名换成作者（头像仍是源图标 —— 条目数据里没有作者头像）', () => {

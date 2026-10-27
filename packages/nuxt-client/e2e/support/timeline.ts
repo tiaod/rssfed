@@ -18,6 +18,15 @@ export const NEXT_CLICKS = 22
 
 const BASE = process.env.BASE_URL ?? 'http://localhost:3000'
 
+/**
+ * 「已同步 N 条 查看」提示条上的按钮。
+ *
+ * **必须 exact**：社交动态条目里的图片热区无障碍名是「查看大图：…」「查看第 N 张大图：…」，
+ * `getByRole` 的 name 默认按子串匹配，不收紧就会点到图片热区上 —— 打开的是 lightbox，
+ * 提示条根本没被点掉（waitForSyncIdle 于是每 2s 点一次、直到超时）。
+ */
+const APPLY_BUTTON = { name: '查看', exact: true } as const
+
 export async function ensureLoggedIn(page: Page) {
   // 直接去登录页（和老脚本一致）：冷启动时 Nuxt 首次编译/导航可能超过几秒，
   // 先 goto /timeline 再判断「在不在登录页」会误判成已登录，然后空等列表。
@@ -52,7 +61,7 @@ export async function waitForList(page: Page, timeout: number) {
   while (Date.now() - start < timeout) {
     if ((await page.locator('[data-entry-id]').count()) > 0) return true
     // 本地库还空着：同步拿到的新条目会折叠进「已同步 N 条」提示条，点「查看」才上屏
-    const apply = page.getByRole('button', { name: '查看' })
+    const apply = page.getByRole('button', APPLY_BUTTON)
     if ((await apply.count()) > 0 && await apply.first().isVisible().catch(() => false)) {
       await apply.first().click().catch(() => {})
       applies += 1
@@ -146,7 +155,7 @@ export async function waitForSyncIdle(page: Page, timeout = 90_000) {
   const start = Date.now()
   while (Date.now() - start < timeout) {
     const syncing = await page.evaluate(() => /正在同步/.test(document.body.innerText)).catch(() => true)
-    const apply = page.getByRole('button', { name: '查看' })
+    const apply = page.getByRole('button', APPLY_BUTTON)
     const pending = (await apply.count()) > 0 && await apply.first().isVisible().catch(() => false)
     if (!syncing && !pending) return true
     if (pending) await apply.first().click({ timeout: 3_000 }).catch(() => {})
@@ -167,7 +176,7 @@ export async function ensureEnoughItems(page: Page, timeout: number): Promise<Li
   let state = await listState(page)
   while (Date.now() - start < timeout) {
     if (state.items >= 8 && state.clientHeight > 0 && state.scrollHeight >= state.clientHeight * 2) return state
-    const apply = page.getByRole('button', { name: '查看' })
+    const apply = page.getByRole('button', APPLY_BUTTON)
     if ((await apply.count()) > 0 && await apply.first().isVisible().catch(() => false)) {
       await apply.first().click().catch(() => {})
       await page.waitForTimeout(1_500)

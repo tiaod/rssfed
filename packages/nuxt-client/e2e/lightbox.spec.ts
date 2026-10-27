@@ -1,11 +1,12 @@
 import fs from 'node:fs'
 import path from 'node:path'
-import type { Page } from 'playwright/test'
+import type { Locator, Page } from 'playwright/test'
 import { REPO_ROOT } from './support/playwright-env.mjs'
 import { expect, test } from './fixtures'
 import {
   ensureListView,
   ensureLoggedIn,
+  MODAL,
   SYNC_WAIT_MS,
   waitForList,
   waitForSyncIdle
@@ -14,12 +15,13 @@ import {
 /**
  * 图片放大（vue-easy-lightbox）端到端验证（从 scripts/verify-lightbox.mjs 迁到 Playwright Test）。
  *
- * 覆盖 4 件事：
+ * 覆盖 5 件事：
  *   1. 点击放大     —— 点正文图片后 lightbox 打开，且展示的正是被点的那张（含换一张点、index 传递）
  *   2. 滚轮缩放     —— 滚轮后 .vel-img-wrapper 的 scale 变大/变小（vue-easy-lightbox 把缩放放在
  *                      wrapper 的 transform 上）
  *   3. 嵌套模态框   —— lightbox 从 body teleport，点它自己的按钮不能让条目弹窗（UModal）跟着关掉
  *   4. 暗色         —— 暗色主题下遮罩/图片/工具栏仍然正常
+ *   5. 社交动态列表 —— 点信息流里的图直接看大图（不打开详情），相册验证 index 传递
  *
  * 另外顺带验证 useEntryContent 的图片替换（远程 URL -> 本地 blob）与 attach 时机，
  * 以及 ESC 只关 lightbox、不关条目弹窗。
@@ -229,6 +231,36 @@ async function collectStyle(page: Page) {
   }) as Promise<StyleState | null>
 }
 
+/**
+ * 社交动态列表里的「看大图」热区（列表虚拟化，只渲染视口附近，所以要往下滚着找）。
+ *
+ * 优先找**相册格子**（≥2 张的条目）：点第 2 张能验证「点第几张就打开第几张」；没有相册再退回
+ * 单图（单图热区就是 img 本身，相册是格子的 div）。找不到时返回 null，由调用方给出失败信息。
+ */
+async function findSocialListImage(page: Page, maxScrolls = 20) {
+  // 滚轮落在列表上（页面左侧是订阅源侧边栏，鼠标在 (0,0) 上滚会把滚轮喂给它）
+  await page.mouse.move(900, 500)
+  for (let i = 0; i < maxScrolls; i++) {
+    const gridCells = page.locator('[data-entry-id] .grid [title="查看大图"]')
+    if (await gridCells.count() > 1) return { locator: gridCells.nth(1), grid: true }
+    const singles = page.locator('[data-entry-id] img[title="查看大图"]')
+    if (await singles.count() > 0) return { locator: singles.first(), grid: false }
+    await page.mouse.wheel(0, 640)
+    await page.waitForTimeout(400)
+  }
+  return null
+}
+
+/** 热区对应的图片地址：单图是 img 自己，相册是格子里的那张 img（lightbox 展示同一个 blob URL） */
+async function imageSrcOf(locator: Locator) {
+  return locator.evaluate((el) => {
+    const img = el.tagName === 'IMG'
+      ? el as HTMLImageElement
+      : el.querySelector('img') as HTMLImageElement | null
+    return img ? (img.currentSrc || img.src || '') : ''
+  })
+}
+
 /** 一个主题下的完整验证流程（断言用 expect.soft，一次运行拿完整失败清单） */
 async function runTheme(page: Page, theme: 'light' | 'dark') {
   test.setTimeout(240_000)
@@ -435,6 +467,59 @@ test.describe('图片放大（vue-easy-lightbox）', () => {
 
   test('暗色主题：遮罩与图片仍然正常', async ({ appPage }) => {
     await runTheme(appPage, 'dark')
+  })
+
+  /**
+   * 社交动态列表的图片热区（与上面「正文里的图」是两条独立路径）。
+   *
+   * 这里验证三件事：点列表里的图直接开 lightbox、展示的正是被点的那张（相册验证 index 传递）、
+   * 以及**不会顺手打开条目详情**（两块热区各管一件事，这是本次行为与旧版的分界）。
+   */
+  test('社交动态列表：点图片看大图，不打开详情', async ({ appPage }) => {
+    test.setTimeout(120_000)
+    const page = appPage
+    await page.goto(`${BASE}/timeline`, { waitUntil: 'domcontentloaded' })
+    expect(await waitForList(page, SYNC_WAIT_MS), '时间线加载出条目').toBe(true)
+    await ensureListView(page, '社交动态')
+    await waitForSyncIdle(page)
+    await page.waitForTimeout(800)
+
+    const found = await findSocialListImage(page)
+    expect.soft(!!found, '社交动态里找到带「看大图」热区的条目').toBe(true)
+    if (!found) return
+
+    await found.locator.scrollIntoViewIfNeeded().catch(() => {})
+    const clickedSrc = await imageSrcOf(found.locator)
+    expect.soft(clickedSrc !== '', `被点的图片有地址（${clickedSrc.slice(0, 46)}）`).toBe(true)
+    fs.mkdirSync(OUT_DIR, { recursive: true })
+    await page.screenshot({ path: path.join(OUT_DIR, 'social-list-image-before.png') }).catch(() => {})
+    await found.locator.click()
+
+    const opened = await page.waitForSelector('.vel-modal', { state: 'visible', timeout: 8_000 })
+      .then(() => true).catch(() => false)
+    expect.soft(opened, `点社交动态里的图打开 lightbox（${found.grid ? '相册格子' : '单图'}）`).toBe(true)
+    if (!opened) return
+    await page.waitForTimeout(900) // 等 lightbox 里图片加载
+
+    const shown = await currentImageState(page)
+    expect.soft(
+      shown.found && shown.src === clickedSrc,
+      `lightbox 展示的正是被点的那张（点=${clickedSrc.slice(0, 46)} 显示=${shown.src.slice(0, 46)}）`
+    ).toBe(true)
+    expect.soft(
+      await page.locator(MODAL).count() === 0,
+      '点图片没有顺手打开条目详情（标题摘要才是详情热区）'
+    ).toBe(true)
+    expect.soft(page.url()).toContain('/timeline')
+    await page.screenshot({ path: path.join(OUT_DIR, 'social-list-image-open.png') }).catch(() => {})
+
+    await page.keyboard.press('Escape')
+    const closed = await page.waitForSelector('.vel-modal', { state: 'detached', timeout: 6_000 })
+      .then(() => true).catch(() => false)
+    expect.soft(closed, 'ESC 关掉 lightbox').toBe(true)
+
+    // 复原成瀑布流：整套跑时后面的用例默认按「弹窗 + 正文图」这条路径验证
+    await ensureListView(page, '瀑布流')
   })
 
   test('复原设置且无新增 JS 错误', async ({ appPage, jsErrors }) => {
