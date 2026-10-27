@@ -1,5 +1,4 @@
-import PouchDB from 'pouchdb'
-import * as PouchDBFindNS from 'pouchdb-find'
+import type PouchDBBrowser from 'pouchdb-browser'
 import { computed, reactive, ref, watch } from 'vue'
 import type { Ref } from 'vue'
 import type { RssCachedImage, RssEntry, SubscriptionItem } from '~/types/rss'
@@ -25,10 +24,46 @@ import { COMPACT_IDLE_DELAY_MS, shouldCompactNow } from '~/utils/localCompact'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 import { isListView, type ListView } from '~/utils/listViews'
 
-// 注册 Mango 查询插件（db.find / createIndex）。
-// pouchdb-find 是 CJS 模块，兼容 Vite 的 default interop 嵌套
-const PouchDBFind = (PouchDBFindNS as { default?: typeof PouchDBFindNS }).default ?? PouchDBFindNS
-PouchDB.plugin(PouchDBFind)
+/** 浏览器版 PouchDB 的构造函数类型（`import type` 只取类型，不产生运行时 import） */
+type PouchDBConstructor = typeof PouchDBBrowser
+
+/**
+ * 本地库用的 PouchDB 构造函数（`pouchdb-browser`：core + idb/http 适配器，**不含 leveldb**）。
+ * 第一次真正访问本地库时加载，整个进程只加载并注册一次。
+ *
+ * 为什么不用顶层 `import PouchDB from 'pouchdb-browser'`：
+ *   1. PouchDB 只在浏览器里用 —— 服务端是 Hono 通过 nano 直连 CouchDB，SSR 渲染不碰本地库；
+ *   2. `pouchdb-browser` 是纯浏览器构建，模块顶层会读 `self`（setImmediate shim），
+ *      在 Node 里 import 会直接 `ReferenceError: self is not defined`，SSR 进程整个起不来。
+ * 放进动态 import 之后，服务端构建里 `import.meta.server` 是编译期常量 `true`，这段
+ * `import()` 会被摇掉 —— SSR 产物里不再出现 pouchdb / leveldb 这条依赖链。
+ *
+ * 单测 / 集成测试在 Node 里需要真 PouchDB（leveldb 适配器）建 /tmp 下的临时库，所以 Node 版
+ * `pouchdb` 仍作为 devDependency 保留，测试里把 `pouchdb-browser` 的 specifier 指回它
+ * （见 vitest.config.ts 的 alias）。
+ */
+let pouchDbConstructor: Promise<PouchDBConstructor> | null = null
+
+function loadPouchDb(): Promise<PouchDBConstructor> {
+  pouchDbConstructor ??= (async () => {
+    // 走到这里说明有代码在 SSR 里访问本地库：明确报错，而不是抛一个看不懂的 self is not defined
+    if (import.meta.server) throw new Error('PouchDB 只在浏览器里可用：SSR 不访问本地库')
+    const [{ default: PouchDB }, pouchdbFind] = await Promise.all([
+      import('pouchdb-browser'),
+      import('pouchdb-find')
+    ])
+    // pouchdb-find 是 CJS 模块，兼容 Vite 的 default interop 嵌套
+    const plugin = (pouchdbFind as { default?: typeof pouchdbFind }).default ?? pouchdbFind
+    // 注册 Mango 查询插件（db.find / createIndex），只需要注册一次
+    PouchDB.plugin(plugin)
+    return PouchDB
+  })().catch((e: unknown) => {
+    // 加载失败不缓存失败结果（离线首屏 / 浏览器不支持时，下次访问可以重试）
+    pouchDbConstructor = null
+    throw e
+  })
+  return pouchDbConstructor
+}
 
 export interface SyncStatus {
   feedId: string
@@ -423,7 +458,7 @@ async function destroyLegacyLocalDbs(): Promise<void> {
       return
     }
     // 回退：PouchDB 的静态方法（allDbs / destroy）不在类型定义里，按实际签名断言
-    const pouchStatic = PouchDB as unknown as {
+    const pouchStatic = await loadPouchDb() as unknown as {
       allDbs: () => Promise<string[]>
       destroy: (name: string) => Promise<void>
     }
@@ -598,18 +633,22 @@ export function usePouchDb() {
    *
    * 与 getEntriesDb 分开是为了避开递归：ensureTimelineLiveSync 要用库实例去挂复制，
    * 而 getEntriesDb 又要确保 live 复制在跑。这里只做「拿到实例」这一件事。
+   *
+   * 异步是因为 PouchDB 构造函数按需加载（见 loadPouchDb）：加载期间可能已经有另一路
+   * 并发调用建好实例，所以 await 之后要再判一次，不能对同一个库开两个实例。
    */
-  function openEntriesDb(): PouchDB.Database {
+  async function openEntriesDb(): Promise<PouchDB.Database> {
     syncDbUser()
     if (!pouchState.entriesDb) {
-      pouchState.entriesDb = new PouchDB(localDbName(pouchState.dbUserId))
+      const PouchDB = await loadPouchDb()
+      if (!pouchState.entriesDb) pouchState.entriesDb = new PouchDB(localDbName(pouchState.dbUserId))
     }
     return pouchState.entriesDb
   }
 
   /** 获取本地时间线库（惰性创建，顺带清理历史本地库并确保 live 复制在跑） */
-  function getEntriesDb(): PouchDB.Database {
-    const db = openEntriesDb()
+  async function getEntriesDb(): Promise<PouchDB.Database> {
+    const db = await openEntriesDb()
     void ensureCleanup()
     // 任何一次「拿到条目库」的时刻都该确保 live 复制已挂上：查询方不必各自记得先起同步
     void ensureTimelineLiveSync()
@@ -624,7 +663,7 @@ export function usePouchDb() {
    */
   async function ensureLocalViews() {
     if (pouchState.entriesIndexed) return
-    const db = getEntriesDb()
+    const db = await getEntriesDb()
     await db.put(LOCAL_VIEWS).catch((e: unknown) => {
       // 409 说明设计文档已存在（幂等），其余错误如实抛出方便排查
       if ((e as { status?: number })?.status !== 409) throw e
@@ -675,6 +714,7 @@ export function usePouchDb() {
       }
 
       // 账号隔离前的固定库名：无条件清理（库不存在时 destroy 会报错，忽略即可）
+      const PouchDB = await loadPouchDb()
       await Promise.race([
         Promise.all(LEGACY_LOCAL_DB_NAMES.map(name => new PouchDB(name).destroy().catch(() => {}))),
         new Promise(resolve => setTimeout(resolve, 3000))
@@ -918,7 +958,7 @@ export function usePouchDb() {
     // 先打开本地库对齐账号：openEntriesDb 内部会 syncDbUser（会话未就绪→guest、登录后切到该账号）。
     // ownerUserId 必须取对齐**之后**的值 —— 否则第一次挂载时它还是 null，回调里的 isCurrent()
     // 永远为假，整条通道变成哑巴：同步状态不更新、存储故障也不熔断。
-    const db = openEntriesDb()
+    const db = await openEntriesDb()
     /** 本次挂载归属的账号：期间换账号则结果一律作废，不能写进新账号的同步状态 */
     const ownerUserId = pouchState.dbUserId
     const generation = ++pouchState.timelineSyncGeneration
@@ -1326,7 +1366,7 @@ export function usePouchDb() {
       const hit = feedIconBlobs.get(feedDoc._id)
       if (hit && hit.rev === feedDoc._rev) return hit.url
       try {
-        const blob = await getEntriesDb().getAttachment(feedDoc._id, cached.attachment) as unknown as Blob
+        const blob = await (await getEntriesDb()).getAttachment(feedDoc._id, cached.attachment) as unknown as Blob
         const url = URL.createObjectURL(blob)
         if (hit) URL.revokeObjectURL(hit.url) // 附件更新后回收旧 blob
         feedIconBlobs.set(feedDoc._id, { rev: feedDoc._rev, url })
@@ -1353,7 +1393,7 @@ export function usePouchDb() {
     const titles = new Map<string, string>()
     if (feedIds.length === 0) return titles
     try {
-      const res = await getUserDb().allDocs({
+      const res = await (await getUserDb()).allDocs({
         include_docs: true,
         keys: feedIds.map(id => `subscription:${id}`)
       })
@@ -1390,7 +1430,7 @@ export function usePouchDb() {
   async function attachReadState(entries: RssEntry[]): Promise<void> {
     if (entries.length === 0) return
     try {
-      const res = await getUserDb().allDocs({
+      const res = await (await getUserDb()).allDocs({
         include_docs: true,
         keys: entries.map(e => `entry-state:${e.id}`)
       })
@@ -1421,7 +1461,7 @@ export function usePouchDb() {
     read = true
   ): Promise<number> {
     if (entries.length === 0) return 0
-    const stateDb = getUserDb()
+    const stateDb = await getUserDb()
     const now = new Date().toISOString()
     const existing = new Map<string, StateDoc>()
     try {
@@ -1468,7 +1508,7 @@ export function usePouchDb() {
   async function querySavedEntries(limit = 50): Promise<RssEntry[]> {
     let states: StateDoc[] = []
     try {
-      const res = await getUserDb().allDocs({
+      const res = await (await getUserDb()).allDocs({
         include_docs: true,
         startkey: 'entry-state:',
         endkey: 'entry-state:\uffff'
@@ -1494,7 +1534,7 @@ export function usePouchDb() {
       const chunk = stateIds.slice(i, i + CHUNK_SIZE)
       let docs: EntryDoc[] = []
       try {
-        const res = await getEntriesDb().allDocs({ include_docs: true, keys: chunk })
+        const res = await (await getEntriesDb()).allDocs({ include_docs: true, keys: chunk })
         docs = (res.rows as Array<{ doc?: EntryDoc }>)
           .map(row => row.doc)
           .filter((doc): doc is EntryDoc => Boolean(doc))
@@ -1531,7 +1571,7 @@ export function usePouchDb() {
     let docs: FeedDoc[] = []
     try {
       // FeedDoc 的 id 规则见 utils/feedDocId（下划线开头的 feedId 后端加了前缀）
-      const res = await getEntriesDb().allDocs({ include_docs: true, keys: feedIds.map(feedDocId) })
+      const res = await (await getEntriesDb()).allDocs({ include_docs: true, keys: feedIds.map(feedDocId) })
       docs = (res.rows as Array<{ doc?: FeedDoc }>)
         .map(r => r.doc)
         .filter((d): d is FeedDoc => Boolean(d))
@@ -1551,7 +1591,7 @@ export function usePouchDb() {
           entry.coverUrl = hit
         } else {
           try {
-            const blob = await getEntriesDb().getAttachment(entry.id, cover.attachment) as unknown as Blob
+            const blob = await (await getEntriesDb()).getAttachment(entry.id, cover.attachment) as unknown as Blob
             const url = URL.createObjectURL(blob)
             entryCoverBlobs.set(cacheKey, url)
             entry.coverUrl = url
@@ -1635,7 +1675,7 @@ export function usePouchDb() {
    */
   async function getFeedImageUrl(feedId: string, fallback?: string): Promise<string | null> {
     try {
-      const doc = await getEntriesDb().get(feedDocId(feedId)) as unknown as FeedDoc
+      const doc = await (await getEntriesDb()).get(feedDocId(feedId)) as unknown as FeedDoc
       if (doc?.type === 'feed') {
         const url = await resolveFeedImage(doc)
         if (url) return url
@@ -1654,7 +1694,7 @@ export function usePouchDb() {
    */
   async function getFeedUrl(feedId: string): Promise<string | null> {
     try {
-      const doc = await getEntriesDb().get(feedDocId(feedId)) as unknown as FeedDoc
+      const doc = await (await getEntriesDb()).get(feedDocId(feedId)) as unknown as FeedDoc
       return doc?.type === 'feed' ? doc.url?.trim() || null : null
     } catch {
       // FeedDoc 尚未同步 / 源不存在：不阻塞弹窗打开
@@ -1724,7 +1764,7 @@ export function usePouchDb() {
     after: ScanCursor | null,
     limit: number
   ): Promise<RssEntry[]> {
-    const db = getEntriesDb()
+    const db = await getEntriesDb()
     await ensureLocalViews()
     const opts: Record<string, unknown> = { descending: true, include_docs: false, reduce: false, limit }
     // 限定到 feed 桶内：desc 起点取该 feed 最新的一条（未传游标时是 [feedId, MAX, '']）。
@@ -1912,7 +1952,7 @@ export function usePouchDb() {
    */
   async function getEntry(entryId: string): Promise<RssEntry | null> {
     try {
-      const doc = await getEntriesDb().get(entryId) as unknown as EntryDoc
+      const doc = await (await getEntriesDb()).get(entryId) as unknown as EntryDoc
       if (doc && doc.type === 'entry') {
         const entry = docToEntry(doc)
         return (await enrichEntries([entry]))[0] ?? entry
@@ -1929,7 +1969,7 @@ export function usePouchDb() {
    * 注：PouchDB 类型声明为 Blob | Buffer，浏览器环境实际为 Blob，这里按 Blob 处理。
    */
   async function getEntryAttachment(entryId: string, attachmentName: string): Promise<Blob> {
-    return await getEntriesDb().getAttachment(entryId, attachmentName) as Blob
+    return await (await getEntriesDb()).getAttachment(entryId, attachmentName) as Blob
   }
 
   // ── 用户库（同一个本地库：条目只读，状态可写） ──
@@ -1942,7 +1982,7 @@ export function usePouchDb() {
    * （见 startTimelineLiveSync 里的 push 复制）。保留一个独立入口是为了让「写状态」的调用点
    * 读起来仍然是在操作状态，而不是顺手写条目库。
    */
-  function getUserDb(): PouchDB.Database {
+  async function getUserDb(): Promise<PouchDB.Database> {
     return getEntriesDb()
   }
 
@@ -1960,7 +2000,7 @@ export function usePouchDb() {
     feedId: string,
     mutate: (prev: StateDoc | null) => Partial<StateDoc>
   ): Promise<StateDoc> {
-    const stateDb = getUserDb()
+    const stateDb = await getUserDb()
     const docId = `entry-state:${entryId}`
     const maxAttempts = 3
 
@@ -2032,7 +2072,7 @@ export function usePouchDb() {
    * 获取本地订阅列表（离线可用，从 PouchDB 读取）
    */
   async function listSubscriptions(): Promise<SubscriptionItem[]> {
-    const stateDb = getUserDb()
+    const stateDb = await getUserDb()
     const result = await stateDb.allDocs({
       include_docs: true,
       startkey: 'subscription:',
@@ -2060,7 +2100,7 @@ export function usePouchDb() {
    * 添加订阅（写入本地 PouchDB，自动同步到远端 CouchDB）
    */
   async function addSubscription(feedId: string, info: { title: string, siteUrl?: string, description?: string, image?: string }, category?: string) {
-    const stateDb = getUserDb()
+    const stateDb = await getUserDb()
     await stateDb.put({
       _id: `subscription:${feedId}`,
       type: 'subscription',
@@ -2080,7 +2120,7 @@ export function usePouchDb() {
    * 删除订阅（移除本地文档，自动同步删除到远端）
    */
   async function removeSubscription(feedId: string) {
-    const stateDb = getUserDb()
+    const stateDb = await getUserDb()
     const docId = `subscription:${feedId}`
     try {
       const doc = await stateDb.get(docId)
@@ -2098,7 +2138,7 @@ export function usePouchDb() {
    * 与 feed 订阅共用 `subscription:` 前缀，但 _id 带 `bot:` 避免与真实 feed 撞 key。
    */
   async function addBotSubscription(botId: string, info: { title: string, description?: string, image?: string }) {
-    const stateDb = getUserDb()
+    const stateDb = await getUserDb()
     await stateDb.put({
       _id: `subscription:bot:${botId}`,
       type: 'subscription',
@@ -2123,7 +2163,7 @@ export function usePouchDb() {
     feedId: string,
     patch: { title?: string, category?: string, view?: ListView | null }
   ) {
-    const stateDb = getUserDb()
+    const stateDb = await getUserDb()
     const docId = `subscription:${feedId}`
     const doc = await stateDb.get(docId) as unknown as StateDoc
     const next: StateDoc = {
@@ -2160,7 +2200,7 @@ export function usePouchDb() {
     feedId: string
   ): Promise<{ view: ListView | null, category: string | null }> {
     try {
-      const doc = await getUserDb().get(`subscription:${feedId}`) as unknown as StateDoc
+      const doc = await (await getUserDb()).get(`subscription:${feedId}`) as unknown as StateDoc
       return {
         view: isListView(doc.view) ? doc.view : null,
         category: doc.category?.trim() || null
@@ -2174,7 +2214,7 @@ export function usePouchDb() {
   async function getGroupView(name: string): Promise<ListView | null> {
     if (!name) return null
     try {
-      const doc = await getUserDb().get(groupPrefId(name)) as unknown as StateDoc
+      const doc = await (await getUserDb()).get(groupPrefId(name)) as unknown as StateDoc
       return isListView(doc.view) ? doc.view : null
     } catch {
       return null
@@ -2190,7 +2230,7 @@ export function usePouchDb() {
   async function listGroupViews(): Promise<Record<string, ListView>> {
     const out: Record<string, ListView> = {}
     try {
-      const res = await getUserDb().allDocs({
+      const res = await (await getUserDb()).allDocs({
         include_docs: true,
         startkey: GROUP_PREF_PREFIX,
         endkey: `${GROUP_PREF_PREFIX}\uffff`
@@ -2210,7 +2250,7 @@ export function usePouchDb() {
   /** 写入 / 清除某个分组的默认视图（null = 清除，回退到全局默认） */
   async function setGroupView(name: string, view: ListView | null) {
     if (!name) return
-    const db = getUserDb()
+    const db = await getUserDb()
     const docId = groupPrefId(name)
     let existing: (StateDoc & { _rev: string }) | null = null
     try {

@@ -100,7 +100,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await pouch.getUserDb().close().catch(() => {})
+  await (await pouch.getUserDb()).close().catch(() => {})
   await destroyDbs()
 })
 
@@ -148,7 +148,7 @@ describe('markManyRead 批量标记', () => {
 
 /** 直接读一条状态文档（断言字段级行为用） */
 async function stateDoc(entryId: string) {
-  return await pouch.getUserDb().get(`entry-state:${entryId}`) as unknown as {
+  return await (await pouch.getUserDb()).get(`entry-state:${entryId}`) as unknown as {
     read?: boolean
     readAt?: string
     saved?: boolean
@@ -159,7 +159,7 @@ async function stateDoc(entryId: string) {
 
 /** 把某条状态文档标成「已收藏 + 指定收藏时间」，用于给收藏列表造序 */
 async function setSavedAt(entryId: string, savedAt: string) {
-  const db = pouch.getUserDb()
+  const db = await pouch.getUserDb()
   const existing = await db.get(`entry-state:${entryId}`) as unknown as Record<string, unknown>
   await db.put({ ...existing, saved: true, savedAt })
 }
@@ -205,7 +205,7 @@ describe('querySavedEntries 收藏列表', () => {
     await setSavedAt('entry-a', '2026-07-01T00:00:00.000Z')
     await setSavedAt('entry-b', '2026-07-03T00:00:00.000Z')
     // 收藏了一条本地根本没有的条目（别的设备收藏、条目还没同步过来）
-    await pouch.getUserDb().put({
+    await (await pouch.getUserDb()).put({
       _id: 'entry-state:entry-missing',
       type: 'entry-state',
       entryId: 'entry-missing',
@@ -227,7 +227,7 @@ describe('querySavedEntries 收藏列表', () => {
   })
 
   it('没有收藏时返回空数组', async () => {
-    const db = pouch.getUserDb()
+    const db = await pouch.getUserDb()
     for (const id of ['entry-a', 'entry-b']) {
       const doc = await db.get(`entry-state:${id}`) as unknown as Record<string, unknown>
       await db.put({ ...doc, saved: false })

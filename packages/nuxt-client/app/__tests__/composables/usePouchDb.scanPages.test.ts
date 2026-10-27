@@ -110,7 +110,7 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await pouch.getUserDb().close().catch(() => {})
+  await (await pouch.getUserDb()).close().catch(() => {})
   await destroyDbs()
 })
 

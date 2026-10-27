@@ -139,7 +139,7 @@ function pullTask(): FakeTask {
 }
 let pouch: ReturnType<typeof usePouchDb>
 
-beforeEach(() => {
+beforeEach(async () => {
   H.tasks.length = 0
   H.refreshCalls = 0
   H.pushCancels = 0
@@ -151,7 +151,7 @@ beforeEach(() => {
   }
   Reflect.deleteProperty(sharedApp, '$pouchDbState')
   pouch = usePouchDb()
-  pouch.getUserDb()
+  await pouch.getUserDb()
 })
 
 describe('暂停同步（usePouchDb）', () => {

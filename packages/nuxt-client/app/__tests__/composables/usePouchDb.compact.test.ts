@@ -140,7 +140,7 @@ async function flush(): Promise<void> {
 
 let pouch: ReturnType<typeof usePouchDb>
 
-beforeEach(() => {
+beforeEach(async () => {
   H.tasks.length = 0
   H.compactCalls = 0
   H.compactImpl = async () => {}
@@ -153,7 +153,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   Reflect.deleteProperty(sharedApp, '$pouchDbState')
   pouch = usePouchDb()
-  pouch.getUserDb()
+  await pouch.getUserDb()
 })
 
 afterEach(() => {

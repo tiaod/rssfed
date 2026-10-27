@@ -147,7 +147,7 @@ async function startLive() {
   await pouch.syncFeedsIfChanged([{ feedId: 'feed-a' }])
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   H.tasks.length = 0
   H.refreshCalls = 0
   H.refresh = async () => ({ accepted: true, completed: true, added: 0 })
@@ -159,7 +159,7 @@ beforeEach(() => {
   }
   Reflect.deleteProperty(sharedApp, '$pouchDbState')
   pouch = usePouchDb()
-  pouch.getUserDb()
+  await pouch.getUserDb()
 })
 
 describe('时间线 live 复制：进度与状态', () => {
