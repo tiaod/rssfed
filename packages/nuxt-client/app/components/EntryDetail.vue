@@ -84,7 +84,23 @@ function formatDate(dateStr: string): string {
   <article class="prose entry-prose max-w-none dark:prose-invert">
     <header>
       <h1 class="text-2xl font-bold mb-2">
-        {{ entry.title }}
+        <!--
+          标题即原文链接：读到一半想跳到源站，不用再去摸顶栏/底栏的「阅读原文」。
+          新窗口打开，别把正在读的这篇从阅读栏/弹窗里顶掉（与工具栏的阅读原文同一去处）。
+          url 为空的老条目（RSS 条目没有 <link>，服务端落成 ""，见 workers/index.ts）退回纯文本，
+          不然会渲染出一个点了没反应的链接。
+        -->
+        <a
+          v-if="entry.url"
+          :href="entry.url"
+          target="_blank"
+          rel="noopener noreferrer"
+          class="entry-title-link"
+          title="打开原文"
+        >{{ entry.title }}</a>
+        <template v-else>
+          {{ entry.title }}
+        </template>
       </h1>
       <div class="flex flex-wrap items-center gap-3 text-sm text-muted mb-6">
         <span>{{ byline }}</span>
@@ -151,3 +167,20 @@ function formatDate(dateStr: string): string {
     />
   </article>
 </template>
+
+<style scoped>
+/*
+ * 标题是原文链接，但外观仍必须是标题：prose 会把 <a> 染成链接色、加下划线、压成 500 字重，
+ * 整篇文章的标题看起来就和正文里的外链没区别了。颜色/字重跟随外层 h1，只在悬停时补下划线
+ * 作为「可点」的提示。
+ */
+.entry-title-link {
+  color: inherit;
+  font-weight: inherit;
+  text-decoration: none;
+}
+
+.entry-title-link:hover {
+  text-decoration: underline;
+}
+</style>

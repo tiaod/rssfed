@@ -55,6 +55,23 @@ describe('EntryDetail', () => {
     expect(mountEntry(mockEntry).find('h1').text()).toBe('测试文章标题')
   })
 
+  it('标题是指向原文的链接，新窗口打开且带 noopener', () => {
+    const link = mountEntry(mockEntry).find('h1 a')
+
+    expect(link.exists()).toBe(true)
+    expect(link.text()).toBe('测试文章标题')
+    expect(link.attributes('href')).toBe('https://example.com/article')
+    expect(link.attributes('target')).toBe('_blank')
+    expect(link.attributes('rel')).toBe('noopener noreferrer')
+  })
+
+  it('没有原文地址时标题退回纯文本，不渲染点了没反应的链接', () => {
+    const wrapper = mountEntry({ ...mockEntry, url: '' })
+
+    expect(wrapper.find('h1').text()).toBe('测试文章标题')
+    expect(wrapper.find('h1 a').exists()).toBe(false)
+  })
+
   it('有作者时只署作者名，不再重复订阅源名（源名已在详情顶栏）', () => {
     const meta = mountEntry(mockEntry).find('header > div')
 
