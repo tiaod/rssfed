@@ -11,6 +11,11 @@
   /* 正文（.entry-prose）的字体。默认跟随应用字体；用户在设置里选了别的字体时，
    * 客户端插件把选择写成 <html> 上的内联变量覆盖它（见 app/plugins/reader-font.client.ts）。 */
   --font-reading: var(--font-sans);
+  /* 正文（.entry-prose）的字号。默认 1rem = 应用原本的字号；用户在设置里把滑块拖离 100% 时，
+   * 客户端插件把百分比换算成 rem 写成 <html> 上的内联变量覆盖它
+   * （见 app/plugins/reader-font-size.client.ts）。
+   * 用 rem 而不是 px：浏览器/系统调大默认字号时正文要跟着变大。 */
+  --reading-font-size: 1rem;
 
   --color-green-50: #EFFDF5;
   --color-green-100: #D9FBE8;
@@ -45,6 +50,9 @@
   /* 正文字体：--font-reading 由「阅读字体」偏好决定（清单见 app/utils/readerFonts.ts）。
    * 放在 .entry-prose 而不是 html 上是刻意的 —— 这是「阅读字体」，不是全站 UI 字体。 */
   font-family: var(--font-reading);
+  /* 正文字号：--reading-font-size 由「正文字号」偏好决定（百分比口径见 app/utils/readerFontSize.ts）。
+   * 只改这一处：typography 的正文、列表、代码块都用 em，会按比例一起缩放。 */
+  font-size: var(--reading-font-size);
 
   --tw-prose-body: var(--ui-text);
   --tw-prose-headings: var(--ui-text-highlighted);
@@ -65,6 +73,18 @@
 
   /* 正文宽度：留空即跟随外层布局（弹窗自适应）；想固定阅读宽度可解开下面一行 */
   /* max-width: 72ch; */
+}
+
+/*
+ * 文章标题跟着正文字号缩放。
+ *
+ * h1 上挂的是固定 rem 的 text-2xl，不会随 `.entry-prose` 的 font-size 走 —— 拖到 160% 时
+ * 正文会和标题一样高，拖到 80% 时标题反而更抢眼，滑块一动就断档。1.5em 在 100% 下正好
+ * 等于原来的 1.5rem（24px）。只作用于详情自己的标题（> header > h1），
+ * 正文里（.entry-content）的 h1 仍按 typography 的比例。
+ */
+.entry-prose > header > h1 {
+  font-size: 1.5em;
 }
 
 .entry-content {

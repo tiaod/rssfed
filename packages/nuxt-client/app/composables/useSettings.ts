@@ -1,5 +1,6 @@
 import { isListView, type ListView } from '~/utils/listViews'
 import { isReaderFontId, type ReaderFontId } from '~/utils/readerFonts'
+import { isReaderFontScale } from '~/utils/readerFontSize'
 
 export type EntryModalSize = 'sm:max-w-xl' | 'sm:max-w-2xl' | 'sm:max-w-4xl' | 'sm:max-w-6xl' | 'fullscreen'
 
@@ -26,6 +27,13 @@ export interface AppSettings {
    * 两者都归一化成 inherit，所以老版本存下来的设置不需要迁移。
    */
   readerFont?: ReaderFontId
+  /**
+   * 正文字号（只作用于文章正文，百分比口径见 utils/readerFontSize）。
+   *
+   * **可选**：undefined = 100%（应用原本的字号），与显式停在 100% 等价 ——
+   * 两者都归一化成 100，所以老版本存下来的设置不需要迁移。
+   */
+  readerFontScale?: number
 }
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -62,6 +70,10 @@ export function useSettings() {
         // 阅读字体同理：清单删过某个 id 后，旧设置不能让它变成一个认不出的字体
         if (!isReaderFontId(parsed.readerFont)) {
           delete parsed.readerFont
+        }
+        // 正文字号同理：区间外的值 / 手改成字符串，都不能让字号变成「拖了但没效果」
+        if (!isReaderFontScale(parsed.readerFontScale)) {
+          delete parsed.readerFontScale
         }
         // 同步窗口等聚合设置已移到服务端（每用户一份，见 useTimelineSettings），
         // 存量 localStorage 里的 syncWindowDays 直接丢弃即可（不迁移：它已经没有消费者）

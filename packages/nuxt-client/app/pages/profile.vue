@@ -15,6 +15,13 @@ import {
   resolveReaderFont
 } from '~/utils/readerFonts'
 import {
+  READER_FONT_SCALE_MAX,
+  READER_FONT_SCALE_MIN,
+  READER_FONT_SCALE_STEP,
+  normalizeReaderFontScale,
+  readerFontSizeCss
+} from '~/utils/readerFontSize'
+import {
   formatSince,
   formatTimelineEventData,
   formatTimelineEventTime,
@@ -129,10 +136,9 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
 ]
 
 /**
- * 「正文字体」选项：系统字体栈 + 一款自带字体（霞鹜文楷屏幕阅读版）。
- *
- * 只影响文章正文（.entry-prose），不动列表与界面文字；清单与字体栈见 utils/readerFonts。
- * 'inherit' 本身就是合法选项值，不需要像 draftView 那样用哨兵字符串区分「未配置」。
+ * 「正文字体」与「正文字号」：都只影响文章正文（.entry-prose），不动列表与界面文字；
+ * 清单见 utils/readerFonts，字号百分比口径见 utils/readerFontSize。
+ * 'inherit' / 100 本身就是合法选项值，不需要像 draftView 那样用哨兵字符串区分「未配置」。
  */
 const readerFontOptions = READER_FONTS.map(font => ({ label: font.label, value: font.id }))
 
@@ -146,6 +152,17 @@ const draftReaderFont = computed({
   }
 })
 
+const draftReaderFontScale = computed({
+  get: () => normalizeReaderFontScale(draftSettings.value.readerFontScale),
+  set: (value: number | number[] | undefined) => {
+    // USlider 单滑块回传 number；类型上还允许数组，统一取第一个就够
+    draftSettings.value = {
+      ...draftSettings.value,
+      readerFontScale: normalizeReaderFontScale(Array.isArray(value) ? value[0] : value)
+    }
+  }
+})
+
 // 预览区用它自己的字体渲染；选到自带字体时先把样式拉下来，
 // 否则预览会显示回退后的系统字体，等于没预览
 watch(draftReaderFont, (id) => {
@@ -154,7 +171,12 @@ watch(draftReaderFont, (id) => {
 
 const readerFontPreviewStyle = computed(() => {
   const stack = resolveReaderFont(draftReaderFont.value).stack
-  return stack ? { fontFamily: stack } : undefined
+  return {
+    fontFamily: stack ?? undefined,
+    // 预览块本身是 1rem 的界面字号，不显式写字号就看不出拖动滑块的效果；
+    // 100% 在 CSS 里也是 1rem，这里补上同一个值
+    fontSize: readerFontSizeCss(draftReaderFontScale.value) ?? '1rem'
+  }
 })
 
 /**
@@ -494,12 +516,29 @@ const confirmCleanup = async () => {
                     />
                   </UFormField>
 
-                  <!-- 预览：用它自己的字体渲染当前草稿选择，省得保存后再回正文对比 -->
+                  <UFormField
+                    label="正文字号"
+                    description="只影响文章正文（条目详情与右侧阅读栏），标题与代码块按比例缩放。100% 为应用原本的字号；用 rem 计，系统/浏览器调大默认字号时正文会一起变大"
+                  >
+                    <div class="flex w-72 items-center gap-3">
+                      <USlider
+                        v-model="draftReaderFontScale"
+                        :min="READER_FONT_SCALE_MIN"
+                        :max="READER_FONT_SCALE_MAX"
+                        :step="READER_FONT_SCALE_STEP"
+                        class="flex-1"
+                        tooltip
+                      />
+                      <span class="w-12 shrink-0 text-right text-sm tabular-nums text-muted">{{ draftReaderFontScale }}%</span>
+                    </div>
+                  </UFormField>
+
+                  <!-- 预览：用它自己的字体与字号渲染当前草稿选择，省得保存后再回正文对比 -->
                   <p
-                    class="rounded-md border border-default px-3 py-2 text-sm text-muted"
+                    class="rounded-md border border-default px-3 py-2 text-muted"
                     :style="readerFontPreviewStyle"
                   >
-                    字体预览：这是一段示例文字，用来看字形的疏密与笔画。
+                    字体与字号预览：这是一段示例文字，用来看字形的疏密、笔画与字号大小。
                   </p>
                 </section>
 
