@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { SubscriptionItem, FeedSubscriptionItem } from '~/types/rss'
+import type { SubscriptionItem } from '~/types/rss'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
 import ListActionsBar from '~/components/ListActionsBar.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
@@ -54,45 +54,55 @@ const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnch
 // 列表视图：默认取全局设置（默认瀑布流）；切换按钮只改本次会话，不落盘
 const { view, overridden, setView, resetView } = useTimelineView()
 
+/**
+ * 远端订阅集合校正 + 催一次聚合（后台执行，不参与首屏）。
+ *
+ * 订阅文档本地已经有一份（`subscription:{feedId}`，见 usePouchDb.listSubscriptions），
+ * 打开列表时不必再等 `/api/feeds/subscriptions` 的往返：它只在本地滞后时（别的设备刚
+ * 订阅/取消、回写还没同步到）才有校正价值。`lastNewEntryAt` 也不再参与增量判断
+ * （服务端一次聚合全部订阅，见 syncFeedsIfChanged），这次请求因此可以整个让到后台。
+ */
+async function syncSubscriptionsInBackground(): Promise<void> {
+  const beforeCount = feedIds.value.length
+  try {
+    const remoteSubs = await api.feeds.subscriptions()
+    subs.value = remoteSubs.map(s => ({
+      id: s.feedId,
+      title: s.title,
+      siteUrl: s.siteUrl,
+      description: s.description,
+      image: s.image,
+      category: s.category,
+      createdAt: s.createdAt
+    }))
+    // 自动同步：服务端按它读到的订阅集合做增量聚合，客户端只负责「确保 live 复制在跑 +
+    // 带节流地催一次」
+    await pouch.syncFeedsIfChanged(remoteSubs.map(s => ({
+      feedId: s.feedId,
+      lastNewEntryAt: s.lastNewEntryAt
+    })))
+  } catch {
+    // 离线：沿用本地订阅，仍然催一次（live 复制会在有网后自己补上）
+    pouch.syncFeed()
+    return
+  }
+
+  // 本地订阅此前是空的（还没从远端同步下来）：远端集合补上后补查一次，
+  // 否则页面会一直停在「暂无条目」
+  if (entries.value.length === 0 && feedIds.value.length > beforeCount) {
+    await load()
+    loading.value = false
+  }
+}
+
 onMounted(async () => {
   try {
-    // 获取订阅列表：优先远端（含 lastNewEntryAt，用于增量同步判断），失败回退本地
-    let remoteSubs: FeedSubscriptionItem[] | null = null
-    try {
-      remoteSubs = await api.feeds.subscriptions()
-    } catch {
-      // 离线：回退本地订阅列表
-    }
+    // 订阅列表先读本地（离线可用，且随 live 复制已经就绪）：首屏不该等一次 HTTP
+    subs.value = await pouch.listSubscriptions()
+    // 远端校正与聚合催促让到后台：有缓存时一个请求都不等
+    void syncSubscriptionsInBackground()
 
-    if (remoteSubs) {
-      subs.value = remoteSubs.map(s => ({
-        id: s.feedId,
-        title: s.title,
-        siteUrl: s.siteUrl,
-        description: s.description,
-        image: s.image,
-        category: s.category,
-        createdAt: s.createdAt
-      }))
-    } else {
-      subs.value = await pouch.listSubscriptions()
-    }
-
-    if (feedIds.value.length === 0) {
-      loading.value = false
-      return
-    }
-
-    // 自动同步：服务端按它读到的订阅集合做增量聚合，客户端只负责「确保 live 复制在跑 +
-    // 带节流地催一次」；离线时同样催一次（live 复制会在有网后自己补上）
-    if (remoteSubs) {
-      await pouch.syncFeedsIfChanged(remoteSubs.map(s => ({
-        feedId: s.feedId,
-        lastNewEntryAt: s.lastNewEntryAt
-      })))
-    } else {
-      pouch.syncFeed()
-    }
+    if (feedIds.value.length === 0) return
     await load()
   } catch (e: unknown) {
     error.value = errorMessage(e, '加载失败')

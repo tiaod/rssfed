@@ -114,24 +114,33 @@ async function applyNewEntries() {
   attachListContext()
 }
 
-onMounted(async () => {
-  // 订阅名先从本地订阅文档取（离线可用，也是侧边栏显示的名字），取不到再回退接口标题
-  subscriptionTitle.value = await pouch.getSubscriptionTitle(feedId).catch(() => null) ?? ''
-
+/**
+ * 注册表抓来的源信息：只给标题 / 描述做兜底，失败也不影响列表。
+ *
+ * 它不参与首屏：这个请求曾经被 `await` 在 `renderFirstPaint()` 之前，等于把「有缓存就先
+ * 上屏」降级成「等一次 HTTP 再上屏」（见 useListFirstPaint），移到首次渲染之后。
+ */
+async function loadFeedInfo(): Promise<void> {
   try {
-    // 加载订阅源信息
     feed.value = await api.feeds.get(feedId)
   } catch {
     // feed 信息不要求强依赖
   } finally {
     feedLoading.value = false
   }
+}
+
+onMounted(async () => {
+  // 订阅名先从本地订阅文档取（离线可用，也是侧边栏显示的名字），取不到再回退接口标题
+  subscriptionTitle.value = await pouch.getSubscriptionTitle(feedId).catch(() => null) ?? ''
 
   // 先上屏、再优先同步这个源：有缓存时一个请求都不等，新条目折叠进「已同步 N 条」提示条
   // （见 useListFirstPaint）；没缓存时才等它跑完（最多 5s）再渲染。
   await renderFirstPaint()
   // 深链进来时详情先按 id 取了全文（列表还没加载完，没有上/下篇可翻）：列表就绪后补挂上下文
   attachListContext()
+  // 源的完整信息晚一步补：它只影响顶栏标题 / 描述的兜底，不该挡在列表前面
+  void loadFeedInfo()
 })
 
 // 时间线库有新批次落库时累计「已同步 N 条」；列表不动，等用户点提示条
