@@ -41,6 +41,10 @@ export const siteSettings = pgTable("site_settings", {
   logoUrl: text("logo_url"),
   /** logo 附件外键（定位 attachments 行以删除旧 S3 文件） */
   logoAttachmentId: text("logo_attachment_id").references(() => attachments.id, { onDelete: "set null" }),
+  /** 深色模式专用 logo 公开 URL；未设置时深色模式继续使用 logoUrl */
+  logoDarkUrl: text("logo_dark_url"),
+  /** 深色模式 logo 附件外键（定位 attachments 行以删除旧 S3 文件） */
+  logoDarkAttachmentId: text("logo_dark_attachment_id").references(() => attachments.id, { onDelete: "set null" }),
   /** 主题主色（hex，如 #10b981）；未设置时前端回退内置默认主题 */
   primaryColor: text("primary_color"),
   /** 皮肤标识（占位：皮肤体系尚未定义枚举，先存自由字符串） */

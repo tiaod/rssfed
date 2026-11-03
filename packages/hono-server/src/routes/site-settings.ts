@@ -1,4 +1,4 @@
-import { Hono } from "hono"
+import { Hono, type Context } from "hono"
 import { eq } from "drizzle-orm"
 import { db, siteSettings, type SiteSettings } from "../db"
 import { requireAdmin } from "../middleware/require-admin"
@@ -129,6 +129,7 @@ function serialize(row: SiteSettings) {
     siteTitle: row.siteTitle,
     description: row.description,
     logoUrl: row.logoUrl,
+    logoDarkUrl: row.logoDarkUrl,
     primaryColor: row.primaryColor,
     skin: row.skin,
     pwaShortName: row.pwaShortName,
@@ -161,6 +162,7 @@ siteSettingsPublicRouter.get("/", async (c) => {
       siteTitle: siteSettings.siteTitle,
       description: siteSettings.description,
       logoUrl: siteSettings.logoUrl,
+      logoDarkUrl: siteSettings.logoDarkUrl,
       primaryColor: siteSettings.primaryColor,
       skin: siteSettings.skin,
       pwaShortName: siteSettings.pwaShortName,
@@ -308,22 +310,49 @@ siteSettingsAdminRouter.put("/", requireAdmin, async (c) => {
   }
 })
 
-/** 上传站点 logo（multipart: file 字段），S3 存储 + attachments 表外键，复用头像上传流程 */
+/** 站点 logo 的两套配置：浅色（必选）与深色（可选，缺失时前端沿用浅色） */
+type SiteLogoField = {
+  url: "logoUrl" | "logoDarkUrl"
+  attachment: "logoAttachmentId" | "logoDarkAttachmentId"
+}
+
+/** 上传站点 logo 的公共流程（复用头像上传）：S3 写文件 → attachments 行 → 更新对应列 → 清理旧附件 */
+async function uploadSiteLogo(
+  c: Context<{ Variables: SiteSettingsVariables }>,
+  field: SiteLogoField,
+) {
+  return handleAvatarUpload(c, SITE_ID, async (newAttachmentId, url) => {
+    // 先读旧外键再写：RETURNING 返回更新后值，不能用来定位旧附件
+    const [before] = await db.select({ oldAttachmentId: siteSettings[field.attachment] })
+      .from(siteSettings).where(eq(siteSettings.id, SITE_ID)).limit(1)
+    const patch = field.url === "logoUrl"
+      ? { logoUrl: url, logoAttachmentId: newAttachmentId }
+      : { logoDarkUrl: url, logoDarkAttachmentId: newAttachmentId }
+    if (before) {
+      await db.update(siteSettings).set(patch).where(eq(siteSettings.id, SITE_ID))
+    } else {
+      await db.insert(siteSettings).values({ id: SITE_ID, ...patch })
+    }
+    return { oldAttachmentId: before?.oldAttachmentId ?? null }
+  })
+}
+
+/** 删除站点 logo 的公共流程（连同 S3 文件与附件元数据） */
+async function deleteSiteLogo(field: SiteLogoField) {
+  const [row] = await db.select({ attachmentId: siteSettings[field.attachment] })
+    .from(siteSettings).where(eq(siteSettings.id, SITE_ID)).limit(1)
+  if (!row) return
+  await cleanupAttachment(row.attachmentId)
+  const patch = field.url === "logoUrl"
+    ? { logoUrl: null, logoAttachmentId: null }
+    : { logoDarkUrl: null, logoDarkAttachmentId: null }
+  await db.update(siteSettings).set(patch).where(eq(siteSettings.id, SITE_ID))
+}
+
+/** 上传浅色站点 logo（multipart: file 字段） */
 siteSettingsAdminRouter.post("/logo", requireAdmin, async (c) => {
   try {
-    const attachment = await handleAvatarUpload(c, SITE_ID, async (newAttachmentId, url) => {
-      // 先读旧外键再写：RETURNING 返回更新后值，不能用来定位旧附件
-      const [before] = await db.select({ oldAttachmentId: siteSettings.logoAttachmentId })
-        .from(siteSettings).where(eq(siteSettings.id, SITE_ID)).limit(1)
-      if (before) {
-        await db.update(siteSettings)
-          .set({ logoUrl: url, logoAttachmentId: newAttachmentId })
-          .where(eq(siteSettings.id, SITE_ID))
-      } else {
-        await db.insert(siteSettings).values({ id: SITE_ID, logoUrl: url, logoAttachmentId: newAttachmentId })
-      }
-      return { oldAttachmentId: before?.oldAttachmentId ?? null }
-    })
+    const attachment = await uploadSiteLogo(c, { url: "logoUrl", attachment: "logoAttachmentId" })
     return c.json({ success: true, logoUrl: attachment.url })
   } catch (err) {
     if (err instanceof ApiError) return c.json({ error: err.message }, err.status)
@@ -331,16 +360,32 @@ siteSettingsAdminRouter.post("/logo", requireAdmin, async (c) => {
   }
 })
 
-/** 删除站点 logo（连同 S3 文件与附件元数据），恢复默认品牌 */
+/** 删除浅色站点 logo，恢复默认品牌 */
 siteSettingsAdminRouter.delete("/logo", requireAdmin, async (c) => {
   try {
-    const [row] = await db.select().from(siteSettings).where(eq(siteSettings.id, SITE_ID)).limit(1)
-    if (row) {
-      await cleanupAttachment(row.logoAttachmentId)
-      await db.update(siteSettings)
-        .set({ logoUrl: null, logoAttachmentId: null })
-        .where(eq(siteSettings.id, SITE_ID))
-    }
+    await deleteSiteLogo({ url: "logoUrl", attachment: "logoAttachmentId" })
+    return c.json({ success: true })
+  } catch (err) {
+    if (err instanceof ApiError) return c.json({ error: err.message }, err.status)
+    throw err
+  }
+})
+
+/** 上传深色模式专用站点 logo；深色模式优先使用它，未配置时回退浅色 logo */
+siteSettingsAdminRouter.post("/logo-dark", requireAdmin, async (c) => {
+  try {
+    const attachment = await uploadSiteLogo(c, { url: "logoDarkUrl", attachment: "logoDarkAttachmentId" })
+    return c.json({ success: true, logoDarkUrl: attachment.url })
+  } catch (err) {
+    if (err instanceof ApiError) return c.json({ error: err.message }, err.status)
+    throw err
+  }
+})
+
+/** 删除深色 logo：深色模式回退到浅色 logo */
+siteSettingsAdminRouter.delete("/logo-dark", requireAdmin, async (c) => {
+  try {
+    await deleteSiteLogo({ url: "logoDarkUrl", attachment: "logoDarkAttachmentId" })
     return c.json({ success: true })
   } catch (err) {
     if (err instanceof ApiError) return c.json({ error: err.message }, err.status)

@@ -51,7 +51,16 @@ app.get("/api/files/*", async (c) => {
   if (!key) return c.json({ error: "missing key" }, 400)
   try {
     const { content, contentType } = await storage.readWithMeta(key)
-    return c.body(new Uint8Array(content), 200, { "Content-Type": contentType })
+    return c.body(new Uint8Array(content), 200, {
+      "Content-Type": contentType,
+      "X-Content-Type-Options": "nosniff",
+      // 允许上传 SVG（logo/头像）后，同源直接打开该文件会作为文档执行其中的脚本，
+      // 等于一个存储型 XSS 入口。CSP sandbox 禁用脚本与外部资源加载；
+      // 作为 <img> 引用时浏览器不做脚本执行，正常显示不受影响。
+      ...(contentType.toLowerCase().includes("svg")
+        ? { "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:" }
+        : {}),
+    })
   } catch {
     return c.json({ error: "not found" }, 404)
   }

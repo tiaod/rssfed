@@ -24,14 +24,17 @@ const form = ref({
   iframeWhitelist: [] as string[]
 })
 const logoUrl = ref<string | null>(null)
+const logoDarkUrl = ref<string | null>(null)
 const iconUrl = ref<string | null>(null)
 
 /** 正文 iframe 白名单的内置默认（后端下发）：用于「恢复默认」与「是否仍是默认」判断 */
 const whitelistDefaults = ref<string[]>([])
 
 const logoInput = ref<HTMLInputElement | null>(null)
+const darkLogoInput = ref<HTMLInputElement | null>(null)
 const iconInput = ref<HTMLInputElement | null>(null)
 const uploading = ref(false)
+const uploadingDarkLogo = ref(false)
 const uploadingIcon = ref(false)
 
 /** 图标预览的防缓存计数：上传/删除后递增，强制浏览器重新取图 */
@@ -94,6 +97,7 @@ async function load() {
     }
     whitelistDefaults.value = s.iframeWhitelistDefaults ?? []
     logoUrl.value = s.logoUrl ?? null
+    logoDarkUrl.value = s.logoDarkUrl ?? null
     iconUrl.value = s.pwaIconUrl ?? null
   } catch (e) {
     error.value = errorMessage(e)
@@ -157,6 +161,36 @@ async function removeLogo() {
     toast.add({ title: '已恢复默认 Logo', color: 'success' })
     void siteSettings.refresh()
     previewBust.value++
+  } catch (err) {
+    toast.add({ title: '删除失败', description: errorMessage(err), color: 'error' })
+  }
+}
+
+/** 深色模式 Logo 同样选择后立即上传，无需等「保存」 */
+async function handleDarkLogoChange(e: Event) {
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  uploadingDarkLogo.value = true
+  try {
+    const r = await api.admin.siteSettings.uploadLogoDark(file)
+    logoDarkUrl.value = r.logoDarkUrl
+    toast.add({ title: '深色模式 Logo 已更新', color: 'success' })
+    void siteSettings.refresh()
+  } catch (err) {
+    toast.add({ title: '上传失败', description: errorMessage(err), color: 'error' })
+  } finally {
+    uploadingDarkLogo.value = false
+    input.value = ''
+  }
+}
+
+async function removeDarkLogo() {
+  try {
+    await api.admin.siteSettings.deleteLogoDark()
+    logoDarkUrl.value = null
+    toast.add({ title: '深色模式将沿用浅色 Logo', color: 'success' })
+    void siteSettings.refresh()
   } catch (err) {
     toast.add({ title: '删除失败', description: errorMessage(err), color: 'error' })
   }
@@ -229,21 +263,24 @@ onMounted(load)
       <!-- Logo -->
       <UFormField
         label="站点 Logo"
-        description="上传后在站点各处展示站长设定的图形（离线时由 Service Worker 缓存可用）"
+        description="显示在左上角页头。支持 PNG / JPG / WebP / SVG，建议横版（≤5MB）；留空使用内置 RSSFed 图形"
       >
         <div class="flex items-center gap-3">
-          <UAvatar
-            v-if="logoUrl"
-            :src="logoUrl"
-            alt="站点 Logo"
-            size="xl"
-          />
-          <UAvatar
-            v-else
-            text="R"
-            size="xl"
-            color="primary"
-          />
+          <!-- 横版预览：用 img 而不是方形 UAvatar，避免自定 Logo 被裁成方图 -->
+          <div class="flex h-14 max-w-48 items-center justify-center rounded-lg bg-elevated px-2 ring-1 ring-default">
+            <img
+              v-if="logoUrl"
+              :src="logoUrl"
+              alt="站点 Logo"
+              class="max-h-full max-w-full object-contain"
+            >
+            <UAvatar
+              v-else
+              text="R"
+              size="xl"
+              color="primary"
+            />
+          </div>
           <div class="flex flex-col gap-2 sm:flex-row">
             <UButton
               icon="i-lucide-upload"
@@ -256,7 +293,7 @@ onMounted(load)
             <input
               ref="logoInput"
               type="file"
-              accept="image/*"
+              accept="image/*,.svg"
               class="hidden"
               @change="handleLogoChange"
             >
@@ -266,6 +303,54 @@ onMounted(load)
               variant="ghost"
               color="error"
               @click="removeLogo"
+            >
+              移除
+            </UButton>
+          </div>
+        </div>
+      </UFormField>
+
+      <!-- 深色模式 Logo（可选）：不传则深色模式沿用上面那张 -->
+      <UFormField
+        label="深色模式 Logo（可选）"
+        description="深色模式下显示。不传则深色模式沿用上面的浅色 Logo"
+      >
+        <div class="flex items-center gap-3">
+          <!-- 固定深色底预览，便于确认深色版在暗背景下的可见性 -->
+          <div class="flex h-14 max-w-48 items-center justify-center rounded-lg bg-neutral-900 px-2 ring-1 ring-default">
+            <img
+              v-if="logoDarkUrl"
+              :src="logoDarkUrl"
+              alt="深色模式 Logo"
+              class="max-h-full max-w-full object-contain"
+            >
+            <span
+              v-else
+              class="text-xs text-neutral-400"
+            >沿用浅色 Logo</span>
+          </div>
+          <div class="flex flex-col gap-2 sm:flex-row">
+            <UButton
+              icon="i-lucide-upload"
+              variant="outline"
+              :loading="uploadingDarkLogo"
+              @click="darkLogoInput?.click()"
+            >
+              上传
+            </UButton>
+            <input
+              ref="darkLogoInput"
+              type="file"
+              accept="image/*,.svg"
+              class="hidden"
+              @change="handleDarkLogoChange"
+            >
+            <UButton
+              v-if="logoDarkUrl"
+              icon="i-lucide-trash"
+              variant="ghost"
+              color="error"
+              @click="removeDarkLogo"
             >
               移除
             </UButton>

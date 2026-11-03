@@ -35,6 +35,8 @@ export interface SiteSettingsPublic {
   siteTitle?: string | null
   description?: string | null
   logoUrl?: string | null
+  /** 深色模式专用 Logo；未配置时深色模式沿用 logoUrl */
+  logoDarkUrl?: string | null
   primaryColor?: string | null
   skin?: string | null
   pwaShortName?: string | null
