@@ -34,9 +34,9 @@ const addError = ref<string | null>(null)
 /**
  * 从本地用户状态库加载订阅列表。
  *
- * 增量：用户库同时承载订阅与已读/收藏，标记一次已读就会让同步版本递增并触发本函数；
- * 内容没变就直接跳过赋值，否则 feeds 换成新数组会让 menuItems 重算、整棵导航菜单重渲染
- * （300 项实测约 30ms），而这类触发绝大多数与订阅无关。
+ * 触发源是 `subscriptionsVersion`（只随订阅文档变化递增），标记已读 / 收藏不会走到这里；
+ * 订阅内容没变仍然跳过赋值，否则 feeds 换成新数组会让 menuItems 重算、整棵导航菜单重渲染
+ * （300 项实测约 30ms）。
  */
 async function loadFeeds() {
   try {
@@ -61,13 +61,15 @@ onMounted(() => {
   void loadFeeds()
 })
 
-// 用户状态库（订阅列表）同步版本递增时重新加载侧边栏。
-// syncNow 会先暂停用户状态库的 live 同步、一次性复制后恢复，期间拉取的远端订阅
-// 变化（新增/改名/分类）不会实时推给侧边栏，这里在同步完成后重新读取订阅列表。
-// 防抖：恢复 live 同步会再次触发版本变化，合并为一次刷新。
+// 订阅文档变化时重新加载侧边栏。
+//
+// `subscriptionsVersion` 只在订阅文档（"subscription:*"）随 live 复制落库、或本地增删改订阅时
+// 递增（见 usePouchDb 的 onChange / addSubscription）：别的设备改了订阅，这里跟着刷新；
+// 普通新条目落库不会触发，免得为每一批内容都重读订阅列表。
+// 防抖：同一个复制批次可能带来多条订阅文档，合并为一次刷新。
 let feedsTimer: ReturnType<typeof setTimeout> | null = null
 watch(
-  () => pouch.syncStatuses['__user_state__']?.version ?? 0,
+  pouch.subscriptionsVersion,
   () => {
     if (feedsTimer) clearTimeout(feedsTimer)
     feedsTimer = setTimeout(() => {

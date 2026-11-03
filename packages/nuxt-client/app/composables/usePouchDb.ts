@@ -332,6 +332,14 @@ interface PouchDbState {
    */
   syncedEntryDocsByFeed: Record<string, number>
   /**
+   * 订阅文档（`subscription:*`）变化后递增的版本号。
+   *
+   * 侧边栏要感知「别的设备新增 / 改名 / 取消订阅」，但不该为每条新条目都重读订阅列表：
+   * 拉取通道的 change 事件里只要出现订阅文档（含删除后的墓碑）就 +1；
+   * 本地增删订阅也直接 +1（见 addSubscription / removeSubscription）。
+   */
+  subscriptionsVersion: Ref<number>
+  /**
    * 本地存储故障（IndexedDB 配额耗尽 / 库进入 global failure）的说明文案。
    *
    * 非 null 表示本轮同步已熔断：不再入队新复制，也不再发起在途复制 ——
@@ -488,6 +496,7 @@ function createPouchState(): PouchDbState {
     userWatchReady: false,
     syncedDocsByTarget: reactive<Record<string, number>>({}),
     syncedEntryDocsByFeed: reactive<Record<string, number>>({}),
+    subscriptionsVersion: ref(0),
     storageBroken: ref<string | null>(null),
     compactTimer: null
   }
@@ -496,10 +505,13 @@ function createPouchState(): PouchDbState {
 /**
  * 只订阅同步状态，不构造整套 PouchDB 操作闭包。
  *
- * 给侧边栏图标这类「实例多、只需要知道某个源同步完没有」的小组件用：
+ * 给侧边栏图标这类「实例多、只需要知道同步有没有推进」的小组件用：
  *   1. 几百个菜单项若各自调 usePouchDb()，会各构造一份闭包（含库管理、复制队列等）；
  *   2. 若改由侧边栏组件读取 syncStatuses 再透传下去，侧边栏的渲染就依赖了它，
- *      任何源同步完成都会让整棵导航菜单重新 patch —— 依赖留在小组件内部才不会外溢。
+ *      任何同步批次都会让整棵导航菜单重新 patch —— 依赖留在小组件内部才不会外溢。
+ *
+ * 现在只有一个同步目标（时间线库），图标重试应 watch `syncStatuses[TIMELINE_ID]`，
+ * 而不是旧版逐源复制留下的 per-feed key（那个 key 已经不会再被写入）。
  */
 export function usePouchSyncStatus(): Readonly<Record<string, SyncStatus>> {
   const nuxtApp = useNuxtApp() as NuxtAppWithPouchState
@@ -524,7 +536,8 @@ export function usePouchSyncStatus(): Readonly<Record<string, SyncStatus>> {
 export function usePouchDb() {
   // 代理地址里的库名由后端下发（随机库名，无法推导），见 useCouchTargets
   const { remoteUrlForId, invalidate: invalidateTargets } = useCouchTargets()
-  // 订阅列表接口（含 feeds.lastNewEntryAt）：手动同步 syncNow 的增量判断依据
+  // 只用于「催一次服务端聚合」（api.timeline.refresh）：订阅集合不再由客户端逐个比对，
+  // 所以这里不读订阅列表，也不存在按 feeds.lastNewEntryAt 判断增量这回事
   const api = useApi()
   // 本地库按账号隔离，需要当前登录用户（惰性取 store：usePouchDb 也可能在异步回调里被调用）
   const currentUserId = () => useUserStore().user?.id ?? null
@@ -1050,7 +1063,7 @@ export function usePouchDb() {
 
       const onChange = (info: unknown) => {
         const i = info as {
-          docs?: Array<{ type?: string, feedId?: string }>
+          docs?: Array<{ _id?: string, type?: string, feedId?: string }>
           docs_written?: number
           pending?: number
         }
@@ -1061,6 +1074,12 @@ export function usePouchDb() {
         for (const doc of i.docs ?? []) {
           if (doc?.type !== 'entry' || typeof doc.feedId !== 'string' || !doc.feedId) continue
           pouchState.syncedEntryDocsByFeed[doc.feedId] = (pouchState.syncedEntryDocsByFeed[doc.feedId] ?? 0) + 1
+        }
+
+        // 订阅文档变化 → 侧边栏需要重读订阅列表。只认 `_id` 前缀：删除后的文档只剩
+        // `_id` 与 `_deleted`，没有 type，按 type 判断会漏掉「别的设备取消订阅」。
+        if ((i.docs ?? []).some(doc => typeof doc?._id === 'string' && doc._id.startsWith('subscription:'))) {
+          pouchState.subscriptionsVersion.value += 1
         }
 
         // ── 剩余时间估算（见 utils/syncEta） ──
@@ -1182,9 +1201,12 @@ export function usePouchDb() {
    *
    * 以前这里按 feeds.lastNewEntryAt 逐个源判断「要不要复制」（还要读水位表与退避表），
    * 现在这个判断在服务端（reconcile 内部一条 SQL 比完），客户端只做两件事：
-   * 确保 live 复制在跑、带节流地催一次聚合。`feeds` 参数保留用于「没有订阅就短路」。
+   * 确保 live 复制在跑、带节流地催一次聚合。
+   *
+   * `feeds` 只剩「没有订阅就短路」这一个用途（以及返回值里的订阅数）：
+   * 逐个源的字段一律不再读，调用方不必传 `lastNewEntryAt`。
    */
-  async function syncFeedsIfChanged(feeds: Array<{ feedId: string, lastNewEntryAt?: string }> = []): Promise<number> {
+  async function syncFeedsIfChanged(feeds: ReadonlyArray<{ feedId: string }> = []): Promise<number> {
     if (pouchState.paused.value) return 0
     // 等迁移清理完成：旧本地库（rssfed-entries-*）还占着空间，且结构与新版不兼容
     await ensureCleanup()
@@ -2112,6 +2134,7 @@ export function usePouchDb() {
       category,
       createdAt: new Date().toISOString()
     })
+    pouchState.subscriptionsVersion.value += 1
     // 新订阅的库名还不在代理寻址缓存里，失效后下次同步重新取
     invalidateTargets()
   }
@@ -2128,6 +2151,7 @@ export function usePouchDb() {
     } catch {
       // 文档不存在，忽略
     }
+    pouchState.subscriptionsVersion.value += 1
     // 订阅集合变了，下次同步重新取寻址信息（服务端已删掉对应库名映射）
     invalidateTargets()
   }
@@ -2149,6 +2173,7 @@ export function usePouchDb() {
       image: info.image,
       createdAt: new Date().toISOString()
     })
+    pouchState.subscriptionsVersion.value += 1
     // 新订阅的库名还不在代理寻址缓存里，失效后下次同步重新取
     invalidateTargets()
   }
@@ -2176,6 +2201,7 @@ export function usePouchDb() {
       else next.view = patch.view
     }
     await stateDb.put(next)
+    pouchState.subscriptionsVersion.value += 1
   }
 
   // ── 分组（文件夹）默认视图 ──
@@ -2289,6 +2315,11 @@ export function usePouchDb() {
      * 列表页 watch 它来累计「已同步 N 条」（见 useSyncedEntryList 的 refreshFromSync）。
      */
     timelineVersion: computed(() => syncStatuses[TIMELINE_ID]?.version ?? 0),
+    /**
+     * 订阅文档变化版本（响应式）：别的设备的增删改随 live 复制落库、或本地增删订阅后 +1。
+     * 侧边栏 watch 它来重读订阅列表，避免为每条新条目都重载（见 FeedNavigation）。
+     */
+    subscriptionsVersion: computed(() => pouchState.subscriptionsVersion.value),
     /**
      * 「已同步 N 条」的响应式计数源：本次会话已写入本地的**条目**数。
      *

@@ -82,8 +82,8 @@ describe('FeedIcon', () => {
 
     await vi.waitFor(() => expect(loadIcon).toHaveBeenCalledTimes(1))
 
-    // 模拟该源复制完成：syncStatuses 版本递增
-    H.statuses!['feed-1'] = { version: 1 }
+    // 模拟复制批次完成：时间线库（唯一同步目标）的版本递增
+    H.statuses!['__timeline__'] = { version: 1 }
 
     await vi.waitFor(() => expect(wrapper.find('.avatar').attributes('data-src')).toBe('blob:icon-late'))
     expect(loadIcon).toHaveBeenCalledTimes(2)

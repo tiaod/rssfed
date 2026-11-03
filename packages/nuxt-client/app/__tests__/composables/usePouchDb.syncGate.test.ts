@@ -120,7 +120,8 @@ const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => sharedApp
 
 const TIMELINE_ID = '__timeline__'
-const FEEDS = [{ feedId: 'feed-a', lastNewEntryAt: '2026-01-01T00:00:00.000Z' }]
+// 只有 feedId 有意义：syncFeedsIfChanged 现在只用数组长度判空（见 usePouchDb）
+const FEEDS = [{ feedId: 'feed-a' }]
 let pouch: ReturnType<typeof usePouchDb>
 
 beforeEach(() => {

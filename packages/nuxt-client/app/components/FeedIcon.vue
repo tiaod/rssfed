@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from 'vue'
 import { usePouchSyncStatus } from '~/composables/usePouchDb'
+import { TIMELINE_ID } from '~/composables/useCouchTargets'
 
 /**
  * 侧边栏订阅源图标（进入视口才加载）。
@@ -13,8 +14,9 @@ import { usePouchSyncStatus } from '~/composables/usePouchDb'
  * 做法：
  *   1. 只有进入视口（含 200px 余量）的项才请求图标，未命中的显示首字母占位；
  *   2. 全侧边栏共用一个 IntersectionObserver —— 每个菜单项一个实例本身就是开销；
- *   3. 该源同步到新数据后（图标附件此时才落到本地）由 syncStatuses 精确重试一次，
- *      不需要侧边栏整体重新加载。
+ *   3. 时间线库同步到新数据后（图标附件此时才落到本地）由 syncStatuses 重试一次，
+ *      不需要侧边栏整体重新加载。现在只有一个同步目标，所以 watch 的是 TIMELINE_ID；
+ *      旧版逐源复制的 per-feed key 已经不再被写入，按 feedId 查找会永远不触发。
  */
 
 const props = defineProps<{
@@ -107,15 +109,16 @@ function startObserving() {
 onMounted(startObserving)
 onBeforeUnmount(stopObserving)
 
-// 该源同步完成后重试：首次打开时 FeedDoc 与图标附件可能还没复制到本地
+// 时间线库有批次落库后重试：首次打开时 FeedDoc 与图标附件可能还没复制到本地。
+// load() 对已加载（src 已存在）或请求中的项直接返回，几百个图标不会因这个 watch 产生额外读盘。
 watch(
-  () => syncStatuses[props.feedId ?? '']?.version ?? 0,
+  () => syncStatuses[TIMELINE_ID]?.version ?? 0,
   () => {
     void load()
   }
 )
 
-// 菜单项按 index 复用，feedId 变了要换回占位并重新观察（同步版本 watch 也随之切换依赖）
+// 菜单项按 index 复用，feedId 变了要换回占位并重新观察
 watch(() => props.feedId, () => {
   src.value = null
   stopObserving()
