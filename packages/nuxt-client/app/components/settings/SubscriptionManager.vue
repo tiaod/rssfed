@@ -148,11 +148,37 @@ async function load() {
   loading.value = true
   error.value = null
   try {
-    // 1. 从本地 PouchDB 读取订阅（离线可用）
+    // 1. 本地订阅与分组偏好先读（离线可用）：列表先上屏，不等抓取状态接口
     const localSubs = await pouch.listSubscriptions()
+    groupViews.value = await pouch.listGroupViews()
 
-    // 2. 在线时从服务端获取抓取状态（active/paused/error）与订阅源地址，合并到本地数据
-    const statusMap = new Map<string, { status: FeedStatus, errorMessage?: string, lastFetchedAt?: string, feedUrl?: string }>()
+    type RemoteStatus = { status: FeedStatus, errorMessage?: string, lastFetchedAt?: string, feedUrl?: string }
+    const applyStatuses = (statusMap: Map<string, RemoteStatus>) => {
+      subscriptions.value = localSubs.map((sub) => {
+        const st = statusMap.get(sub.id)
+        return {
+          feedId: sub.id,
+          title: sub.title,
+          siteUrl: sub.siteUrl,
+          image: sub.image,
+          description: sub.description,
+          category: sub.category,
+          createdAt: sub.createdAt,
+          status: st?.status ?? 'active',
+          errorMessage: st?.errorMessage,
+          lastFetchedAt: st?.lastFetchedAt,
+          view: sub.view,
+          feedUrl: st?.feedUrl
+        } as FeedSubscriptionItem
+      })
+    }
+
+    // 2. 先用「无状态」的本地版本上屏：抓取状态只是附加信息，弱网下不该拖着整个列表
+    applyStatuses(new Map())
+    loading.value = false
+
+    // 3. 在线时再把服务端抓取状态（active/paused/error）与订阅源地址合并进来，失败则保持默认值
+    const statusMap = new Map<string, RemoteStatus>()
     try {
       const remote = await api.feeds.subscriptions()
       for (const r of remote) {
@@ -167,28 +193,7 @@ async function load() {
     } catch {
       // 离线时忽略，状态使用默认值
     }
-
-    // 3. 合并：本地订阅数据 + 服务端抓取状态（只读）
-    subscriptions.value = localSubs.map((sub) => {
-      const st = statusMap.get(sub.id)
-      return {
-        feedId: sub.id,
-        title: sub.title,
-        siteUrl: sub.siteUrl,
-        image: sub.image,
-        description: sub.description,
-        category: sub.category,
-        createdAt: sub.createdAt,
-        status: st?.status ?? 'active',
-        errorMessage: st?.errorMessage,
-        lastFetchedAt: st?.lastFetchedAt,
-        view: sub.view,
-        feedUrl: st?.feedUrl
-      } as FeedSubscriptionItem
-    })
-
-    // 分组偏好与订阅一起读：分组行的菜单要显示当前配置的是哪个视图
-    groupViews.value = await pouch.listGroupViews()
+    if (statusMap.size > 0) applyStatuses(statusMap)
   } catch (e) {
     error.value = errorMessage(e)
   } finally {

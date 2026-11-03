@@ -9,7 +9,6 @@ definePageMeta({
   layout: 'default'
 })
 
-const api = useApi()
 const pouch = usePouchDb()
 const subs = ref<SubscriptionItem[]>([])
 const feedIds = computed(() => subs.value.map(s => s.id))
@@ -27,8 +26,17 @@ const {
   syncedDocs: () => pouch.syncedEntryCount()
 })
 
-// 首屏要等本地库重查一次
-const loading = ref(true)
+// 首屏策略：有本地缓存先上屏；没有才等优先同步（最多 5s），与单源 / 分组 / bot 页一致
+// （见 useListFirstPaint）。时间线没有「本列表范围」，sync 只按本地订阅判空。
+const { loading, renderFirstPaint } = useListFirstPaint({
+  load,
+  hasEntries: () => entries.value.length > 0,
+  sync: async () => {
+    // 没有订阅就没有可聚合的内容：别为一个空列表白等 5s
+    if (feedIds.value.length === 0) return
+    await pouch.syncPriority()
+  }
+})
 
 // 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
 // 凑够一屏才 enrich 上屏（见 useUnreadFilter）。「全部标记为已读」作用在可见的那批上。
@@ -54,59 +62,14 @@ const { visible: bannerVisible } = useEntriesBannerVisibility(newCount, listAnch
 // 列表视图：默认取全局设置（默认瀑布流）；切换按钮只改本次会话，不落盘
 const { view, overridden, setView, resetView } = useTimelineView()
 
-/**
- * 远端订阅集合校正 + 催一次聚合（后台执行，不参与首屏）。
- *
- * 订阅文档本地已经有一份（`subscription:{feedId}`，见 usePouchDb.listSubscriptions），
- * 打开列表时不必再等 `/api/feeds/subscriptions` 的往返：它只在本地滞后时（别的设备刚
- * 订阅/取消、回写还没同步到）才有校正价值。`lastNewEntryAt` 也不再参与增量判断
- * （服务端一次聚合全部订阅，见 syncFeedsIfChanged），这次请求因此可以整个让到后台。
- */
-async function syncSubscriptionsInBackground(): Promise<void> {
-  const beforeCount = feedIds.value.length
-  try {
-    const remoteSubs = await api.feeds.subscriptions()
-    subs.value = remoteSubs.map(s => ({
-      id: s.feedId,
-      title: s.title,
-      siteUrl: s.siteUrl,
-      description: s.description,
-      image: s.image,
-      category: s.category,
-      createdAt: s.createdAt
-    }))
-    // 自动同步：服务端按它读到的订阅集合做增量聚合，客户端只负责「确保 live 复制在跑 +
-    // 带节流地催一次」
-    await pouch.syncFeedsIfChanged(remoteSubs.map(s => ({
-      feedId: s.feedId,
-      lastNewEntryAt: s.lastNewEntryAt
-    })))
-  } catch {
-    // 离线：沿用本地订阅，仍然催一次（live 复制会在有网后自己补上）
-    pouch.syncFeed()
-    return
-  }
-
-  // 本地订阅此前是空的（还没从远端同步下来）：远端集合补上后补查一次，
-  // 否则页面会一直停在「暂无条目」
-  if (entries.value.length === 0 && feedIds.value.length > beforeCount) {
-    await load()
-    loading.value = false
-  }
-}
-
 onMounted(async () => {
   try {
-    // 订阅列表先读本地（离线可用，且随 live 复制已经就绪）：首屏不该等一次 HTTP
+    // 订阅列表只读本地（`subscription:*` 随 live 复制一起同步，离线也可用）；
+    // 别的设备的增删改会由复制写进本地库，不需要在这里再问一次远端
     subs.value = await pouch.listSubscriptions()
-    // 远端校正与聚合催促让到后台：有缓存时一个请求都不等
-    void syncSubscriptionsInBackground()
-
-    if (feedIds.value.length === 0) return
-    await load()
+    await renderFirstPaint()
   } catch (e: unknown) {
     error.value = errorMessage(e, '加载失败')
-  } finally {
     loading.value = false
   }
 })
