@@ -13,7 +13,7 @@ import type { ListView } from '~/utils/listViews'
 export const READER_PANE_MIN_WIDTH = 1024
 
 /**
- * 会用到阅读栏的页面（四个列表页 + 收藏页）。路由是布局判断「这一页有没有第三栏」的第二把锁：
+ * 会用到阅读栏的页面（四个列表页 + 收藏页 + 历史页）。路由是布局判断「这一页有没有第三栏」的第二把锁：
  * 页面卸载时不去清共享状态（页面切换在 Suspense 下的挂载 / 卸载顺序不保证，
  * 谁清谁写会互相打架），改成「不在列表页就一律不算」。
  *
@@ -23,6 +23,7 @@ export const READER_PANE_MIN_WIDTH = 1024
 const READER_ROUTE_PATTERNS: readonly RegExp[] = [
   /^\/timeline$/,
   /^\/saved$/,
+  /^\/history$/,
   /^\/rss\/feed\/[^/]+$/,
   /^\/rss\/feed\/[^/]+\/entry\/[^/]+$/,
   /^\/rss\/group\/[^/]+$/,

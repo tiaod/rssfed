@@ -1521,13 +1521,21 @@ export function usePouchDb() {
   }
 
   /**
-   * 收藏列表：状态与条目本体现在同库，但状态文档不带发布时间，map view 没法 join，只能分两步查。
+   * 按状态文档的时间戳倒序取条目（收藏 / 历史共用）。
    *
-   * 窗口按**收藏时间**切（savedAt 倒序），分块回查窗口内的条目。窗口只在「本地真的存在」
-   * 的条目上计数：状态文档可能指向本机还没有的条目（别的设备刚收藏、条目还没同步过来），
-   * 那种 id 直接跳过，否则一页可能全是查不到的 id、收藏夹看起来是空的。
+   * 状态与条目本体现同库，但状态文档不带发布时间，map view 没法 join，只能分两步查。
+   * 窗口按**时间戳**切（倒序），分块回查窗口内的条目。窗口只在「本地真的存在」
+   * 的条目上计数：状态文档可能指向本机还没有的条目（别的设备刚标记、条目还没同步过来），
+   * 那种 id 直接跳过，否则一页可能全是查不到的 id、列表看起来是空的。
+   *
+   * @param match 从状态文档里挑出属于这个列表的那些
+   * @param timeOf 取排序用的时间戳字段（老文档可能没写，用空串参与比较、自然排在最后）
    */
-  async function querySavedEntries(limit = 50): Promise<RssEntry[]> {
+  async function queryEntriesByState(
+    match: (state: StateDoc) => boolean,
+    timeOf: (state: StateDoc) => string | undefined,
+    limit: number
+  ): Promise<RssEntry[]> {
     let states: StateDoc[] = []
     try {
       const res = await (await getUserDb()).allDocs({
@@ -1538,18 +1546,17 @@ export function usePouchDb() {
       states = (res.rows as Array<{ doc?: StateDoc }>)
         .map(row => row.doc)
         .filter((doc): doc is StateDoc =>
-          doc?.type === 'entry-state' && doc.saved === true && Boolean(doc.entryId))
+          doc?.type === 'entry-state' && Boolean(doc.entryId) && match(doc))
     } catch {
       // 状态库不可用：当空列表，页面给空态
       return []
     }
     if (states.length === 0) return []
 
-    // 收藏时间倒序；老文档可能没写 savedAt，用空串参与字典序比较，自然排在最后
-    states.sort((a, b) => (b.savedAt ?? '').localeCompare(a.savedAt ?? ''))
+    states.sort((a, b) => (timeOf(b) ?? '').localeCompare(timeOf(a) ?? ''))
     const stateIds = states.map(state => state.entryId).filter((id): id is string => Boolean(id))
 
-    // 分块回查：一次 allDocs 带全部 keys 会让请求体随收藏数线性增长
+    // 分块回查：一次 allDocs 带全部 keys 会让请求体随条数线性增长
     const CHUNK_SIZE = 200
     const entries: RssEntry[] = []
     for (let i = 0; i < stateIds.length && entries.length < limit; i += CHUNK_SIZE) {
@@ -1565,7 +1572,7 @@ export function usePouchDb() {
         break
       }
       const byId = new Map(docs.map(doc => [doc._id, doc]))
-      // 按 chunk（= 收藏时间顺序）逐个收，不能按 allDocs 的返回顺序重排
+      // 按 chunk（= 时间戳顺序）逐个收，不能按 allDocs 的返回顺序重排
       for (const id of chunk) {
         const doc = byId.get(id)
         if (!doc) continue
@@ -1576,6 +1583,19 @@ export function usePouchDb() {
 
     // 已读/收藏状态与源元信息由 enrichEntries 统一补全（attachReadState 会再合一次 read/starred）
     return enrichEntries(entries)
+  }
+
+  /** 收藏列表：按 savedAt 倒序 */
+  async function querySavedEntries(limit = 50): Promise<RssEntry[]> {
+    return queryEntriesByState(state => state.saved === true, state => state.savedAt, limit)
+  }
+
+  /**
+   * 历史记录：按 readAt 倒序 —— 「看过什么」的先后顺序，而不是文章发布时间。
+   * 没写 readAt 的老状态文档照样算读过（用空串参与排序，排在最后）。
+   */
+  async function queryHistoryEntries(limit = 50): Promise<RssEntry[]> {
+    return queryEntriesByState(state => state.read === true, state => state.readAt, limit)
   }
 
   /**
@@ -2348,6 +2368,7 @@ export function usePouchDb() {
     queryFeedEntries,
     queryGroupEntries,
     querySavedEntries,
+    queryHistoryEntries,
     /**
      * 把「投影行」补成可上屏的条目（源名 / 站点 / 图标 / 封面 blob URL）。
      * 只有真要上屏的条目才该走它 —— 扫描阶段一律不调用（见 scanTimelinePage 的说明）。

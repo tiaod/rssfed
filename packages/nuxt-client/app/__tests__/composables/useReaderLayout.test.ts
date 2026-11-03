@@ -13,10 +13,11 @@ import {
  * 靠「不在列表页就一律不算」兜底，所以这里的边界要钉住。
  */
 describe('isReaderRoute', () => {
-  it('四个列表页 + 收藏页命中', () => {
+  it('四个列表页 + 收藏页 + 历史页命中', () => {
     for (const path of [
       '/timeline',
       '/saved',
+      '/history',
       '/rss/feed/-EGH98Uu-bNGGYJj',
       '/rss/group/%E6%96%B0%E9%97%BB',
       '/bots/6qtpuepzbtc4m8xdv3wpkntj/posts'

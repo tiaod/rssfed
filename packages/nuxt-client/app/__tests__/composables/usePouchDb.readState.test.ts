@@ -164,6 +164,13 @@ async function setSavedAt(entryId: string, savedAt: string) {
   await db.put({ ...existing, saved: true, savedAt })
 }
 
+/** 把某条状态文档标成「已读 + 指定阅读时间」，用于给历史列表造序（传 undefined 即清掉 readAt） */
+async function setReadAt(entryId: string, readAt?: string) {
+  const db = await pouch.getUserDb()
+  const existing = await db.get(`entry-state:${entryId}`) as unknown as Record<string, unknown>
+  await db.put({ ...existing, read: true, readAt })
+}
+
 describe('单条标记：markRead / toggleSaved', () => {
   it('markRead 新建状态文档：只碰 read，收藏位给默认 false', async () => {
     await pouch.markRead('entry-c', 'feed-a', true)
@@ -233,5 +240,39 @@ describe('querySavedEntries 收藏列表', () => {
       await db.put({ ...doc, saved: false })
     }
     expect(await pouch.querySavedEntries()).toEqual([])
+  })
+})
+
+describe('queryHistoryEntries 历史列表', () => {
+  it('按阅读时间倒序，只返回已读且本地存在的条目', async () => {
+    await setReadAt('entry-a', '2026-07-01T00:00:00.000Z')
+    await setReadAt('entry-b', '2026-07-03T00:00:00.000Z')
+    // 读过但本机还没有这条（别的设备读的、条目还没同步过来）
+    await (await pouch.getUserDb()).put({
+      _id: 'entry-state:entry-history-missing',
+      type: 'entry-state',
+      entryId: 'entry-history-missing',
+      feedId: 'feed-a',
+      read: true,
+      readAt: '2026-07-04T00:00:00.000Z',
+      saved: false
+    })
+    // 未读条目不进历史（entry-c 在前面的用例里已被标回未读）
+    await pouch.markRead('entry-c', 'feed-a', false)
+
+    const list = await pouch.queryHistoryEntries()
+    expect(list.map(e => e.id)).toEqual(['entry-b', 'entry-a'])
+    expect(list.every(e => e.read)).toBe(true)
+    expect(list.some(e => e.id === 'entry-c')).toBe(false)
+  })
+
+  it('窗口按「本地存在的条目」计数：查不到的 id 不占名额', async () => {
+    // entry-history-missing 最新，但它不在本地；limit=1 仍应给出下一条真实存在的
+    expect((await pouch.queryHistoryEntries(1)).map(e => e.id)).toEqual(['entry-b'])
+  })
+
+  it('没写 readAt 的老状态文档仍算读过，排在最后', async () => {
+    await setReadAt('entry-a')
+    expect((await pouch.queryHistoryEntries()).map(e => e.id)).toEqual(['entry-b', 'entry-a'])
   })
 })
