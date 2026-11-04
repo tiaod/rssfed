@@ -73,7 +73,7 @@ const items = computed<DropdownMenuItem[][]>(() => [
     to="/login"
     variant="ghost"
     :size="collapsed ? 'xs' : 'sm'"
-    class="w-full justify-start"
+    :class="collapsed ? 'w-full justify-center' : 'w-full justify-start'"
   >
     <UIcon
       name="i-lucide-log-in"
@@ -99,7 +99,7 @@ const items = computed<DropdownMenuItem[][]>(() => [
       <UButton
         variant="ghost"
         :size="collapsed ? 'xs' : 'sm'"
-        class="min-w-0 flex-1 justify-start"
+        :class="collapsed ? 'min-w-0 flex-1 justify-center' : 'min-w-0 flex-1 justify-start'"
       >
         <UAvatar
           v-if="user?.image"

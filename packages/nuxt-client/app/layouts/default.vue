@@ -3,6 +3,7 @@ import type { NavigationMenuItem } from '@nuxt/ui'
 import { useUserStore } from '~/stores/user'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import EntryReaderPane from '~/components/EntryReaderPane.vue'
+import AppIcon from '~/components/AppIcon.vue'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -123,7 +124,26 @@ const isBottomNavActive = (to: string) => {
       :ui="sidebarUi"
     >
       <template #header="{ collapsed }">
-        <AppLogo :class="collapsed ? 'w-8 h-8' : 'w-28 h-8'" />
+        <!-- 折叠后只剩 4rem（min-w-16 + 两侧 px-4），只放得下 Logo：
+             悬停时 Logo 淡出、展开按钮在同一位置淡入（参考 DeepSeek 侧边栏）。
+             ghost + neutral 默认是 text-default，比导航图标的 text-muted 深，这里覆盖成同一档浅灰 -->
+        <div
+          v-if="collapsed"
+          class="group relative mx-auto size-8 shrink-0"
+        >
+          <AppIcon class="absolute inset-0 size-8 transition-opacity group-hover:opacity-0 group-focus-within:opacity-0" />
+          <UTooltip text="打开侧边栏">
+            <UDashboardSidebarCollapse
+              class="absolute inset-0 text-muted opacity-0 transition-opacity hover:text-default group-hover:opacity-100 focus-visible:opacity-100"
+            />
+          </UTooltip>
+        </div>
+        <template v-else>
+          <!-- Logo 宽度受限渲染（默认 SVG 宽高比约 5:1，高度随之缩放），因此加宽比单纯加高更见效 -->
+          <AppLogo class="w-36 h-10" />
+          <!-- 收起按钮自带 hidden lg:flex：只在桌面侧边栏出现，移动端抽屉用自带的 toggle -->
+          <UDashboardSidebarCollapse class="ms-auto text-muted hover:text-default" />
+        </template>
       </template>
 
       <template #default="{ collapsed }">

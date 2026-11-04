@@ -270,7 +270,7 @@ async function addFeed() {
               </UNavigationMenu>
 
               <div
-                v-if="!hasFeeds"
+                v-if="!hasFeeds && !collapsed"
                 class="px-2"
               >
                 <p class="text-xs text-muted">
