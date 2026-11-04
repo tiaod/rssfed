@@ -42,9 +42,16 @@ const previewBust = ref(0)
 
 /**
  * 预览直接指向后端实际渲染的图标端点，所见即手机上装出来的样子。
- * 不拼 manifest 里的 `?v=`（那是版本化长缓存），改用自增参数保证改完立刻可见。
+ * t 是上传/删除后的自增计数（改完立刻可见）；v 是配置版本号，保证刷新页面后
+ * 不会命中端点 max-age=300 的旧缓存（第一次实现就踩过这个坑）。
+ * 注意 v 为空时不能带 `?v=`：空值同样命中 immutable 长缓存分支。
  */
-const iconPreviewUrl = computed(() => `/api/site-settings/icon/192.png?t=${previewBust.value}`)
+const iconPreviewUrl = computed(() => {
+  const version = siteSettings.settings.value.version
+  const params = new URLSearchParams({ t: String(previewBust.value) })
+  if (version) params.set('v', version)
+  return `/api/site-settings/icon/192.png?${params.toString()}`
+})
 
 /** 显示模式选项：空值表示跟随后端默认（standalone） */
 const displayItems = [
@@ -358,6 +365,49 @@ onMounted(load)
         </div>
       </UFormField>
 
+      <!-- 站点图标（方形）：折叠侧边栏与主屏幕用，和横版 Logo 分开维护 -->
+      <UFormField
+        label="站点图标（方形）"
+        description="折叠侧边栏与手机主屏幕使用。留空时用上面的 Logo 裁成方形；两者都没有时使用内置图形（底色跟随主题色）"
+      >
+        <div class="flex items-center gap-3">
+          <img
+            :src="iconPreviewUrl"
+            alt="站点图标预览"
+            class="size-16 rounded-xl object-contain ring-1 ring-default"
+          >
+          <div class="flex flex-col gap-2 sm:flex-row">
+            <UButton
+              icon="i-lucide-upload"
+              variant="outline"
+              :loading="uploadingIcon"
+              @click="iconInput?.click()"
+            >
+              上传
+            </UButton>
+            <input
+              ref="iconInput"
+              type="file"
+              accept="image/*"
+              class="hidden"
+              @change="handleIconChange"
+            >
+            <UButton
+              v-if="iconUrl"
+              icon="i-lucide-trash"
+              variant="ghost"
+              color="error"
+              @click="removeIcon"
+            >
+              移除
+            </UButton>
+          </div>
+          <p class="text-xs text-muted">
+            {{ iconUrl ? '当前使用上传的方形图标' : (logoUrl ? '当前使用站点 Logo 裁剪' : '当前使用内置默认图形') }}
+          </p>
+        </div>
+      </UFormField>
+
       <!-- 品牌 -->
       <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
         品牌
@@ -412,50 +462,8 @@ onMounted(load)
         variant="soft"
         icon="i-lucide-info"
         title="站点已支持安装到手机主屏幕"
-        description="浏览器读取 /api/site-settings/manifest.webmanifest 自动生成安装信息，名称、图标与配色均取自下方配置。改动后手机上需重新「添加到主屏幕」才会更新已安装图标。"
+        description="浏览器读取 /api/site-settings/manifest.webmanifest 自动生成安装信息，名称、图标与配色均取自本页配置。改动后手机上需重新「添加到主屏幕」才会更新已安装图标。"
       />
-
-      <UFormField
-        label="PWA 方形图标"
-        description="主屏幕图标。留空时使用站点 Logo 裁剪；两者都没有时使用内置默认图形（底色跟随主题色）。建议上传方形图片"
-      >
-        <div class="flex items-center gap-3">
-          <img
-            :src="iconPreviewUrl"
-            alt="PWA 图标预览"
-            class="size-16 rounded-xl object-contain ring-1 ring-default"
-          >
-          <div class="flex flex-col gap-2 sm:flex-row">
-            <UButton
-              icon="i-lucide-upload"
-              variant="outline"
-              :loading="uploadingIcon"
-              @click="iconInput?.click()"
-            >
-              上传
-            </UButton>
-            <input
-              ref="iconInput"
-              type="file"
-              accept="image/*"
-              class="hidden"
-              @change="handleIconChange"
-            >
-            <UButton
-              v-if="iconUrl"
-              icon="i-lucide-trash"
-              variant="ghost"
-              color="error"
-              @click="removeIcon"
-            >
-              移除
-            </UButton>
-          </div>
-          <p class="text-xs text-muted">
-            {{ iconUrl ? '当前使用上传的方形图标' : (logoUrl ? '当前使用站点 Logo 裁剪' : '当前使用内置默认图形') }}
-          </p>
-        </div>
-      </UFormField>
 
       <UFormField
         label="主屏幕名称"

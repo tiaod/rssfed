@@ -171,12 +171,34 @@ siteSettingsPublicRouter.get("/", async (c) => {
       pwaBackgroundColor: siteSettings.pwaBackgroundColor,
       pwaIconUrl: siteSettings.pwaIconUrl,
       iframeWhitelist: siteSettings.iframeWhitelist,
+      // 以下三个只用于计算图标缓存版本号，不对外下发
+      pwaIconAttachmentId: siteSettings.pwaIconAttachmentId,
+      logoAttachmentId: siteSettings.logoAttachmentId,
+      updatedAt: siteSettings.updatedAt,
     })
     .from(siteSettings).where(eq(siteSettings.id, SITE_ID)).limit(1)
   // 白名单是渲染层做 iframe 过滤的依据，必须随公开配置一起下发；
   // 未配置时也返回内置默认，否则管理员保存前视频嵌入全部消失
   const iframeWhitelist = resolveIframeWhitelist(row?.iframeWhitelist)
-  return c.json(row ? { ...row, iframeWhitelist } : { iframeWhitelist })
+  if (!row) return c.json({ iframeWhitelist })
+
+  return c.json({
+    siteTitle: row.siteTitle,
+    description: row.description,
+    logoUrl: row.logoUrl,
+    logoDarkUrl: row.logoDarkUrl,
+    primaryColor: row.primaryColor,
+    skin: row.skin,
+    pwaShortName: row.pwaShortName,
+    pwaDisplay: row.pwaDisplay,
+    pwaThemeColor: row.pwaThemeColor,
+    pwaBackgroundColor: row.pwaBackgroundColor,
+    pwaIconUrl: row.pwaIconUrl,
+    iframeWhitelist,
+    // 版本号与 manifest 的 ?v= 同源：前端拿它给图标 URL 打版本，换图标/改底色后
+    // URL 立即变化，避免浏览器在 /icon/192.png 的 max-age=300 里继续用旧图
+    version: settingsVersion(row)
+  })
 })
 
 /** 配置行尚不存在（管理员从未保存过）时的空值兜底：全部走内置默认 */

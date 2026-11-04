@@ -45,6 +45,8 @@ export interface SiteSettingsPublic {
   pwaBackgroundColor?: string | null
   /** PWA 方形图标 URL；为空时图标由站点 logo 裁剪或内置默认图形生成 */
   pwaIconUrl?: string | null
+  /** 品牌配置版本号：换图标或改主题色后变化，前端用它给图标 URL 打 ?v= 破除短缓存 */
+  version?: string | null
   /**
    * 生效的正文 iframe 白名单（未配置时为内置默认）。
    * 渲染层据此过滤第三方嵌入，见 utils/iframePolicy.ts。
