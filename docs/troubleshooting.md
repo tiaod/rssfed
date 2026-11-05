@@ -248,6 +248,12 @@
   改完 `caddy reload`，用 `curl -s -o /dev/null -w '%{http_code}\n' 'https://<域名>/api/_nuxt_icon/lucide.json?icons=refresh-cw'` 验证：返回 200 且是 `application/json` 才算修好；只改前端重新构建没用。
 - **另**：前端已开 `icon.clientBundle`（`nuxt.config.ts`），图标数据编译期内联进 bundle，客户端不再请求这个接口；上面的放行规则仍建议保留，将来有没进 bundle 的图标名时还会回退到它。
 
+### 大部分图标显示、个别不显示：图标名写在 `.ts` 里，没进 client bundle
+
+- **现象**：线上「切换视图」菜单只有「博客文章」一项有图标，其余五项空白；同一个菜单里其余 UI 图标都正常。
+- **原因**：`clientBundle.scan: true` 的默认 glob 是 `**/*.{vue,jsx,tsx,md,mdc,mdx,yml,yaml}`，**不含 `.ts`**。六个版式图标的定义在 [listViews.ts](../packages/nuxt-client/app/utils/listViews.ts)（.ts 文件），扫描不到；只有 `i-lucide-newspaper` 恰好也写在 .vue 里才进了 bundle。线上客户端再回退请求 `/api/_nuxt_icon/lucide.json`，被反代分流给后端 404，于是只有这一项有图标。
+- **解法**：`scan` 改成显式 glob，补上 ts/mts/js/mjs（见 [nuxt.config.ts](../packages/nuxt-client/nuxt.config.ts)）。`nuxi prepare` 后确认 `.nuxt/nuxt-icon-client-bundle.mjs` 里有这些名字即可，无需起浏览器。
+
 ### 两个「创建机器人」按钮的图标一直不显示：图标名在 lucide 里不存在
 
 - **现象**：[bots/index.vue](../packages/nuxt-client/app/pages/bots/index.vue)、[bots/explore.vue](../packages/nuxt-client/app/pages/bots/explore.vue) 的按钮图标空白，与网络、反代、离线状态都无关。

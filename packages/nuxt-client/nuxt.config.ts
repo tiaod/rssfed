@@ -111,10 +111,18 @@ export default defineNuxtConfig({
   // /api/_nuxt_icon —— 断网可用，也不再依赖反代放行该路径。
   icon: {
     clientBundle: {
-      // 扫描源码里写死的 i-lucide-xxx（去重后约 70 个，未压缩 20KB 左右）
-      scan: true,
+      // 扫描源码里写死的 i-lucide-xxx（去重后约 70 个，未压缩 20KB 左右）。
+      //
+      // ⚠️ 不能只写 scan: true：它的默认 glob 只含 `vue/jsx/tsx/md/yml`，**不含 .ts**，
+      // 于是写在 .ts 里的图标名（如 utils/listViews.ts 的六个版式图标）不会进 bundle，
+      // 线上又没有可用的 /api/_nuxt_icon 兜底（被反代分流给后端），图标就整片空白——
+      // 只有同名图标恰好也出现在某个 .vue 里时才看得见（博客视图的 newspaper 就是这样）。
+      // 故显式补上 ts/mts/js/mjs。
+      scan: {
+        globInclude: ['**/*.{vue,ts,mts,js,mjs,jsx,tsx,md,mdc,mdx,yml,yaml}']
+      },
       // Nuxt UI 组件内部的默认图标不写在项目源码里，scan 也扫不到
-      // （默认排除 node_modules，且只收 .vue/.ts 等后缀，收不到 @nuxt/ui 的 dist/*.mjs），
+      // （默认排除 node_modules，扫描也进不到 @nuxt/ui 的 dist/*.mjs），
       // 必须显式列出，否则模态框关闭、主题切换、下拉箭头这类图标在离线时会空白。
       // 清单取自 @nuxt/ui 的默认 ui.icons 表；与扫描结果重复的部分内部用 Set 去重，不额外占体积。
       icons: [
