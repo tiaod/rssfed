@@ -724,7 +724,7 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
                       class="mx-auto size-8 text-dimmed"
                     />
                     <p class="text-sm text-muted">
-                      正文加载失败，可能还没同步到这台设备
+                      正文加载失败：这篇文章可能尚未同步到本机，或已被源端清理（超出保留范围）
                     </p>
                     <UButton
                       size="xs"

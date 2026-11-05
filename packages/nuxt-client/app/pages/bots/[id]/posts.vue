@@ -30,7 +30,9 @@ const {
   query: limit => pouch.queryFeedEntries(virtualFeedId, limit),
   // 计数限定在这个虚拟源：同步是全局的，但提示条要回答「这个 bot 多了几条」
   // （见 usePouchDb.syncedEntryCount）
-  syncedDocs: () => pouch.syncedEntryCount([virtualFeedId])
+  syncedDocs: () => pouch.syncedEntryCount([virtualFeedId]),
+  // 同步也会带来删除（源库裁剪随复制传播）：列表现场剔除已失效的行，避免点开 404
+  removedIds: () => pouch.removedEntryIds
 })
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），

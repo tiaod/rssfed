@@ -23,7 +23,9 @@ const {
   applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   query: limit => pouch.queryTimeline(limit),
-  syncedDocs: () => pouch.syncedEntryCount()
+  syncedDocs: () => pouch.syncedEntryCount(),
+  // 同步也会带来删除（源库裁剪随复制传播）：列表现场剔除已失效的行，避免点开 404
+  removedIds: () => pouch.removedEntryIds
 })
 
 // 首屏策略：有本地缓存先上屏；没有才等优先同步（最多 5s），与单源 / 分组 / bot 页一致

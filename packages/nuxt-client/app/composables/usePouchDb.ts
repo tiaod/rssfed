@@ -332,6 +332,23 @@ interface PouchDbState {
    */
   syncedEntryDocsByFeed: Record<string, number>
   /**
+   * 本次会话里随 live 拉取**删除**的条目 id（只增不减）。
+   *
+   * 同步不只会新增：源库按自适应保留裁到每条源最新 N 条，删除随复制链传到用户库、再删掉
+   * 浏览器本地的文档。列表是快照（见 useSyncedEntryList），不把删除剔掉的话这些行还挂在
+   * 界面上，点开时本地文档已 404 —— 表现就是「正文加载失败」。
+   *
+   * 同一 id 被重新写回（删了又被抓回来）时会从集合里撤销。
+   */
+  removedEntryIds: Set<string>
+  /**
+   * 条目删除批次的版本号：每收到一批条目删除就 +1。
+   *
+   * 纯删除批次不会让 `syncedDocsByTarget` 增长，因此需要单独一个版本号来触发列表校正
+   * （合并进对外暴露的 `timelineVersion`，见 usePouchDb 的返回值）。
+   */
+  entryRemovalsVersion: Ref<number>
+  /**
    * 订阅文档（`subscription:*`）变化后递增的版本号。
    *
    * 侧边栏要感知「别的设备新增 / 改名 / 取消订阅」，但不该为每条新条目都重读订阅列表：
@@ -496,6 +513,8 @@ function createPouchState(): PouchDbState {
     userWatchReady: false,
     syncedDocsByTarget: reactive<Record<string, number>>({}),
     syncedEntryDocsByFeed: reactive<Record<string, number>>({}),
+    removedEntryIds: new Set<string>(),
+    entryRemovalsVersion: ref(0),
     subscriptionsVersion: ref(0),
     storageBroken: ref<string | null>(null),
     compactTimer: null
@@ -619,6 +638,9 @@ export function usePouchDb() {
     for (const key of Object.keys(pouchState.syncedEntryDocsByFeed)) {
       Reflect.deleteProperty(pouchState.syncedEntryDocsByFeed, key)
     }
+    // 删除记录属于上一个账号 / 上一个本地库：换库后旧 id 不该再让新列表剔除条目
+    pouchState.removedEntryIds.clear()
+    pouchState.entryRemovalsVersion.value = 0
     pouchState.dbUserId = uid
     // 换账号后重新开始同步，不继承上一个账号的暂停状态；
     // 存储故障也一并清掉 —— 新账号可能对应另一套（更小的）本地库，值得重新尝试
@@ -1076,7 +1098,7 @@ export function usePouchDb() {
 
       const onChange = (info: unknown) => {
         const i = info as {
-          docs?: Array<{ _id?: string, type?: string, feedId?: string }>
+          docs?: Array<{ _id?: string, type?: string, feedId?: string, _deleted?: boolean }>
           docs_written?: number
           pending?: number
         }
@@ -1084,10 +1106,25 @@ export function usePouchDb() {
         // 全库一个数字会把别的源的新条目也算进来（见 syncedEntryDocsByFeed）。
         // `docs` 是 PouchDB 复制 change 事件里本批写入成功的文档（`docs_written` 只是累计计数，
         // 拆不出源），批次之外还有 FeedDoc / 状态文档，所以只认 entry。
+        //
+        // 同一批里还可能有条目**删除**（源库按保留 N 条裁剪，删除随复制传播）：删除文档只剩
+        // `_id` 与 `_deleted`，没有 type，按 type 判断会漏掉。它们不计入「已同步 N 条」，
+        // 但要记进 removedEntryIds，供列表快照剔除已经失效的行（见 useSyncedEntryList）。
+        let removedInBatch = false
         for (const doc of i.docs ?? []) {
+          if (typeof doc?._id === 'string' && doc._id.startsWith('entry:')) {
+            if (doc._deleted) {
+              pouchState.removedEntryIds.add(doc._id)
+              removedInBatch = true
+            } else {
+              // 删了又被重新抓回来（同一 id 写回）：撤销待剔除标记，避免误删活着的条目
+              pouchState.removedEntryIds.delete(doc._id)
+            }
+          }
           if (doc?.type !== 'entry' || typeof doc.feedId !== 'string' || !doc.feedId) continue
           pouchState.syncedEntryDocsByFeed[doc.feedId] = (pouchState.syncedEntryDocsByFeed[doc.feedId] ?? 0) + 1
         }
+        if (removedInBatch) pouchState.entryRemovalsVersion.value += 1
 
         // 订阅文档变化 → 侧边栏需要重读订阅列表。只认 `_id` 前缀：删除后的文档只剩
         // `_id` 与 `_deleted`，没有 type，按 type 判断会漏掉「别的设备取消订阅」。
@@ -1717,6 +1754,9 @@ export function usePouchDb() {
     for (const key of Object.keys(pouchState.syncedEntryDocsByFeed)) {
       Reflect.deleteProperty(pouchState.syncedEntryDocsByFeed, key)
     }
+    // 删除记录属于上一个账号 / 上一个本地库：换库后旧 id 不该再让新列表剔除条目
+    pouchState.removedEntryIds.clear()
+    pouchState.entryRemovalsVersion.value = 0
     // 代理寻址信息一并失效：服务端库重建后库名可能已变
     invalidateTargets()
     // 重新挂上 live 复制（新库是空的，会从头全量拉一次）。
@@ -2354,10 +2394,19 @@ export function usePouchDb() {
      */
     syncedDocsByTarget: pouchState.syncedDocsByTarget,
     /**
-     * 时间线库的同步版本号（响应式）：每批新内容落库后 +1。
-     * 列表页 watch 它来累计「已同步 N 条」（见 useSyncedEntryList 的 refreshFromSync）。
+     * 时间线库的同步版本号（响应式）：每批新内容落库、或收到一批条目删除后 +1。
+     * 列表页 watch 它来累计「已同步 N 条」并剔除已被删除的行（见 useSyncedEntryList 的 refreshFromSync）。
      */
-    timelineVersion: computed(() => syncStatuses[TIMELINE_ID]?.version ?? 0),
+    timelineVersion: computed(() =>
+      (syncStatuses[TIMELINE_ID]?.version ?? 0) + pouchState.entryRemovalsVersion.value
+    ),
+    /**
+     * 本次会话被同步删除的条目 id 集合（响应式版本走 timelineVersion）。
+     *
+     * 列表是快照，同步只报数不动它；删除必须单独剔除，否则已失效的条目会一直挂在界面上，
+     * 点开时本地文档已 404（见 useSyncedEntryList 的 refreshFromSync）。
+     */
+    removedEntryIds: pouchState.removedEntryIds,
     /**
      * 订阅文档变化版本（响应式）：别的设备的增删改随 live 复制落库、或本地增删订阅后 +1。
      * 侧边栏 watch 它来重读订阅列表，避免为每条新条目都重载（见 FeedNavigation）。

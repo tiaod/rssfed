@@ -66,6 +66,24 @@ describe('useSyncedEntryList', () => {
     expect(query.mock.calls.length).toBe(queriesAfterLoad) // 同步不触发查询
   })
 
+  it('同步删除的条目从列表快照中剔除，其余条目与待查看计数不受影响', async () => {
+    // 源库裁剪后随复制删除的条目：本地文档已 404，列表必须把它们剔掉
+    const removed = new Set<string>(['b'])
+    const docs = syncedCounter(0)
+    const list = useSyncedEntryList({
+      query: async () => [makeEntry('c'), makeEntry('b'), makeEntry('a')],
+      syncedDocs: docs.docs,
+      removedIds: () => removed
+    })
+    await list.load()
+
+    docs.count.value = 2
+    list.refreshFromSync()
+
+    expect(ids(list)).toEqual(['c', 'a'])
+    expect(list.newCount.value).toBe(2)
+  })
+
   it('用户点「查看」才整体换成最新内容并归零', async () => {
     let rows = [makeEntry('b'), makeEntry('a')]
     const docs = syncedCounter(0)

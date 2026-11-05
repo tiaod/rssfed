@@ -39,7 +39,9 @@ const {
   query: limit => pouch.queryFeedEntries(feedId, limit),
   // 计数限定在这个源：同步是全局的（服务端一次聚合全部订阅），但提示条要回答的是
   // 「本订阅源多了几条」—— 别的源的新条目不该出现在这个页面上（见 usePouchDb.syncedEntryCount）
-  syncedDocs: () => pouch.syncedEntryCount([feedId])
+  syncedDocs: () => pouch.syncedEntryCount([feedId]),
+  // 同步也会带来删除（源库裁剪随复制传播）：列表现场剔除已失效的行，避免点开 404
+  removedIds: () => pouch.removedEntryIds
 })
 
 /**

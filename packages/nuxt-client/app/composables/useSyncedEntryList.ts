@@ -19,6 +19,14 @@ export interface UseSyncedEntryListOptions {
    * 报出别的源的新增。
    */
   syncedDocs?: () => number
+  /**
+   * 本次会话中被同步**删除**的条目 id（来自 usePouchDb.removedEntryIds）。
+   *
+   * 同步不只新增：源库按保留 N 条裁剪，删除会随复制传播、把浏览器本地的文档也删掉。
+   * 列表是快照，若不剔除这些行，它们会一直留在界面上，点开时本地已 404（正文加载失败）。
+   * 只剔除「已经被删掉」的行，不会推走正在读的内容。
+   */
+  removedIds?: () => ReadonlySet<string>
 }
 
 /**
@@ -132,9 +140,15 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
   /**
    * 同步完成后的入口（页面 watch syncStatuses 的 version 时调用）。
    *
-   * 只更新「已同步 N 条」，一个字都不动列表——同步永远不打断用户正在读的位置。
+   * 「已同步 N 条」只更新计数，不推走正在读的位置；唯一的例外是**已被同步删除**的条目：
+   * 它们在本地已不存在，留在列表里只会是一个点开就报「正文加载失败」的死行，直接剔除。
    */
   function refreshFromSync(): void {
+    const removed = options.removedIds?.()
+    if (removed && removed.size > 0) {
+      const kept = entries.value.filter(entry => !removed.has(entry.id))
+      if (kept.length !== entries.value.length) entries.value = kept
+    }
     const delta = syncedDocs() - seenDocs
     if (delta > 0) newCount.value = delta
   }

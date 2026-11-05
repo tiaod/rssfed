@@ -44,7 +44,9 @@ const {
   },
   // 计数限定在组内这些源：同步是全局的，但提示条要回答「本分组多了几条」
   // （见 usePouchDb.syncedEntryCount）—— 别的分组/单源的新条目不该让它涨
-  syncedDocs: () => pouch.syncedEntryCount(groupFeedIds.value)
+  syncedDocs: () => pouch.syncedEntryCount(groupFeedIds.value),
+  // 同步也会带来删除（源库裁剪随复制传播）：列表现场剔除已失效的行，避免点开 404
+  removedIds: () => pouch.removedEntryIds
 })
 
 // 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
