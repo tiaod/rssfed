@@ -63,7 +63,7 @@ const navItems = computed<NavigationMenuItem[]>(() => {
   const items: NavigationMenuItem[] = [
     {
       label: '主页',
-      icon: 'i-lucide-house',
+      icon: 'i-lucide-rabbit',
       to: '/',
       onSelect: () => { open.value = false }
     },
