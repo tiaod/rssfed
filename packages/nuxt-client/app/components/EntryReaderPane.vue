@@ -28,8 +28,10 @@ const {
   toggleStar,
   detailEntry,
   detailLoading,
+  detailFailed,
   detailViewKey,
   loadDetail,
+  retryDetail,
   navWithHint
 } = useEntryDetail()
 
@@ -279,6 +281,29 @@ const paneUi = {
         <Transition name="entry-fade">
           <div :key="detailViewKey">
             <EntryDetailSkeleton v-if="detailLoading" />
+            <!-- 全文取不到时给出明确的重试入口：不能退回只有标题的投影（正文会是一块空白） -->
+            <div
+              v-else-if="detailFailed"
+              class="grid min-h-60 place-items-center text-center"
+            >
+              <div class="space-y-2">
+                <UIcon
+                  name="i-lucide-triangle-alert"
+                  class="mx-auto size-8 text-dimmed"
+                />
+                <p class="text-sm text-muted">
+                  正文加载失败，可能还没同步到这台设备
+                </p>
+                <UButton
+                  size="xs"
+                  variant="outline"
+                  color="neutral"
+                  @click="retryDetail"
+                >
+                  重试
+                </UButton>
+              </div>
+            </div>
             <EntryDetail
               v-else-if="detailEntry"
               :entry="detailEntry"

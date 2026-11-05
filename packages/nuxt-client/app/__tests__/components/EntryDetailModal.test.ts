@@ -9,7 +9,13 @@ import type { RssEntry } from '../../types/rss'
 /** Nuxt 自动导入的 composable 与 swiper 实例桩都挂在 globalThis 上，这里统一做类型化访问 */
 const testGlobals = globalThis as unknown as Record<string, unknown>
 
-function makeEntry(n: number): RssEntry {
+/**
+ * 构造条目。
+ *
+ * 默认为「列表投影」：没有 content（map view 刻意不携带正文）。
+ * 需要模拟本地库返回的全文时传第二个参数。
+ */
+function makeEntry(n: number, content = ''): RssEntry {
   return {
     id: `entry-${n}`,
     feedId: 'feed-1',
@@ -21,7 +27,7 @@ function makeEntry(n: number): RssEntry {
     starred: false,
     read: false,
     readingTime: 0,
-    content: `<p>正文 ${n}</p>`
+    content
   }
 }
 
@@ -95,7 +101,7 @@ testGlobals.useToast = () => ({ add: toastAdd })
 
 /** 用户状态库的写入桩：自动标已读与工具栏的两个切换都走这里 */
 const H = vi.hoisted(() => ({
-  getEntry: vi.fn(async () => null as unknown),
+  getEntry: vi.fn(async (_id: string): Promise<unknown> => null),
   markRead: vi.fn(async () => {}),
   toggleSaved: vi.fn(async () => true)
 }))
@@ -115,7 +121,11 @@ beforeEach(() => {
   modalSize = 'sm:max-w-6xl'
   fixedBars = true
   H.getEntry.mockReset()
-  H.getEntry.mockResolvedValue(null)
+  // 默认模拟本地库里的全文：列表侧传进来的是无正文的投影，全文由 getEntry 补齐
+  H.getEntry.mockImplementation(async (id) => {
+    const n = Number(String(id).replace('entry-', '')) || 1
+    return makeEntry(n, `<p>正文 ${n}</p>`)
+  })
   H.markRead.mockReset()
   H.markRead.mockResolvedValue(undefined)
   H.toggleSaved.mockReset()
@@ -251,6 +261,76 @@ describe('EntryDetailModal', () => {
     } finally {
       testGlobals.usePouchDb = realPouch
     }
+  })
+
+  it('全屏（手机）全文取不到 → 显示「加载失败 + 重试」，不再把无正文的投影当正文上屏', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(1) // 列表投影：没有 content
+    g.entries.value = [makeEntry(1)]
+    modalSize = 'fullscreen'
+    fixedBars = true
+    // 404：本地库暂时没有这篇（例如正文还没同步下来）
+    H.getEntry.mockResolvedValue(null)
+
+    const wrapper = await mountFullscreenModal()
+
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('正文加载失败')
+    })
+    expect(wrapper.find('.entry-detail').exists()).toBe(false)
+  })
+
+  it('全屏失败后点「重试」取到全文 → 正文恢复显示', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(1)
+    g.entries.value = [makeEntry(1)]
+    modalSize = 'fullscreen'
+    fixedBars = true
+    H.getEntry.mockResolvedValue(null)
+
+    const wrapper = await mountFullscreenModal()
+    await vi.waitFor(() => {
+      expect(wrapper.text()).toContain('正文加载失败')
+    })
+
+    // 同步完成后再点重试：这次能取到全文
+    H.getEntry.mockResolvedValue(makeEntry(1, '<p>正文 1</p>'))
+    const retry = wrapper.findAll('button.ubtn').find(b => b.text().includes('重试'))
+    expect(retry).toBeTruthy()
+    await retry!.trigger('click')
+
+    await vi.waitFor(() => {
+      expect(wrapper.find('.entry-detail').exists()).toBe(true)
+    })
+  })
+
+  it('非全屏全文取不到 → 同样显示重试入口，而不是一块空正文', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(1)
+    g.entries.value = [makeEntry(1)]
+    H.getEntry.mockResolvedValue(null)
+
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('正文加载失败')
+    expect(wrapper.find('.entry-detail').exists()).toBe(false)
+  })
+
+  it('瞬时读取失败会自动重试（本地库切号/抖动）→ 无需用户手动重试', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(1)
+    g.entries.value = [makeEntry(1)]
+    // 第一次读取报错，随后默认 mock 命中全文
+    H.getEntry.mockRejectedValueOnce(new Error('数据库暂时不可用'))
+
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    // 重试间隔 300ms，第二次即成功；断言正文出现而不是停在失败态
+    await vi.waitFor(() => {
+      expect(wrapper.find('.entry-detail').exists()).toBe(true)
+    }, { timeout: 2000 })
   })
 
   it('全屏第一篇 → 左侧不铺空槽占位，也不出现「已经是第一篇了」提示页', async () => {

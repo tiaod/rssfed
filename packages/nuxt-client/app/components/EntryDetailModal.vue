@@ -35,8 +35,12 @@ const {
   loadingIds,
   detailEntry,
   detailLoading,
+  detailFailed,
+  detailFailures,
   detailViewKey,
   loadDetail,
+  retryDetail,
+  fetchFullEntry,
   displayOf,
   isLoading,
   navWithHint: navEntryWithHint
@@ -325,23 +329,50 @@ const slots = computed<Slot[]>(() => {
   return arr
 })
 
-// 槽内全文懒取：给三槽的每个条目补齐全文（命中缓存的跳过），未命中先展示投影 + 骨架。
+// 槽内全文懒取：给三槽的每个条目补齐全文（命中缓存的跳过），未命中先展示骨架。
 // 三槽预取是划卡全屏档特有的（阅读栏一次只显示一篇），所以这里自己读本地库
-const pouch = usePouchDb()
-
 function hydrateSlots() {
   if (!isOpen.value) return
   for (const s of slots.value) {
     const raw = s.raw
     if (!raw || details.has(raw.id) || loadingIds.has(raw.id)) continue
+    // 深链打开时 currentEntry 本身就是全文（openEntry(full)），不必再读一遍库
+    if (raw.content?.trim()) continue
     loadingIds.add(raw.id)
-    const prj = raw
-    pouch
-      .getEntry(raw.id)
-      .then((full) => { if (full) details.set(raw.id, full) })
-      .catch(() => details.set(raw.id, prj)) // 取不到全文就保住投影，至少能看标题
-      .finally(() => loadingIds.delete(raw.id))
+    void hydrateOne(raw)
   }
+}
+
+/**
+ * 取单个槽的全文。
+ *
+ * 失败（读取错误或本地库暂无这条）只记进 detailFailures，**不把投影塞进 details**：
+ * 投影没有 content，一旦当成全文缓存下来，这个槽就会永久显示空白正文（之前就是这样，
+ * 只能刷新页面才恢复）。失败态由模板给出重试入口。
+ */
+async function hydrateOne(raw: RssEntry) {
+  detailFailures.delete(raw.id)
+  try {
+    const full = await fetchFullEntry(raw.id)
+    if (full) details.set(raw.id, full)
+    else detailFailures.add(raw.id)
+  } catch {
+    detailFailures.add(raw.id)
+  } finally {
+    loadingIds.delete(raw.id)
+  }
+}
+
+/** 某个槽的全文是否取不到（模板据此显示「加载失败 + 重试」而不是空正文） */
+function isDetailFailed(raw: RssEntry | null): boolean {
+  return !!raw && detailFailures.has(raw.id)
+}
+
+/** 失败槽的重试：重新取这一篇的全文 */
+function retrySlot(raw: RssEntry | null) {
+  if (!raw || loadingIds.has(raw.id)) return
+  loadingIds.add(raw.id)
+  void hydrateOne(raw)
 }
 
 // 当前位置/总数（右上角页码）
@@ -676,6 +707,29 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
                 class="px-4 sm:px-6 py-4 sm:py-6"
               >
                 <EntryDetailSkeleton v-if="isLoading(slot.raw)" />
+                <!-- 全文取不到时给出明确的重试入口：不能退回只有标题的投影（正文会是一块空白） -->
+                <div
+                  v-else-if="isDetailFailed(slot.raw)"
+                  class="grid min-h-60 place-items-center text-center"
+                >
+                  <div class="space-y-2">
+                    <UIcon
+                      name="i-lucide-triangle-alert"
+                      class="mx-auto size-8 text-dimmed"
+                    />
+                    <p class="text-sm text-muted">
+                      正文加载失败，可能还没同步到这台设备
+                    </p>
+                    <UButton
+                      size="xs"
+                      variant="outline"
+                      color="neutral"
+                      @click="retrySlot(slot.raw)"
+                    >
+                      重试
+                    </UButton>
+                  </div>
+                </div>
                 <EntryDetail
                   v-else
                   :entry="displayOf(slot.raw)!"
@@ -714,6 +768,29 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
               v-if="detailLoading"
               :height="detailSkeletonHeight"
             />
+            <!-- 全文取不到时显示「加载失败 + 重试」，不再把无正文的投影当正文上屏 -->
+            <div
+              v-else-if="detailFailed"
+              class="grid min-h-60 place-items-center text-center"
+            >
+              <div class="space-y-2">
+                <UIcon
+                  name="i-lucide-triangle-alert"
+                  class="mx-auto size-8 text-dimmed"
+                />
+                <p class="text-sm text-muted">
+                  正文加载失败，可能还没同步到这台设备
+                </p>
+                <UButton
+                  size="xs"
+                  variant="outline"
+                  color="neutral"
+                  @click="retryDetail"
+                >
+                  重试
+                </UButton>
+              </div>
+            </div>
             <EntryDetail
               v-else-if="detailEntry"
               :entry="detailEntry"

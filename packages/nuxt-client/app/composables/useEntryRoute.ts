@@ -122,7 +122,20 @@ export function useEntryRoute(options: UseEntryRouteOptions) {
     }
 
     // 列表里没有（深链到尚未上屏的旧条目）：直接取本地库全文，此时没有上/下篇可翻
-    const full = await options.getEntry(urlId)
+    let full: RssEntry | null = null
+    try {
+      full = await options.getEntry(urlId)
+    } catch {
+      if (routeEntryId.value !== urlId) return // 等待期间地址又变了，旧结果作废
+      // 读取失败（本地库瞬时报错 / 库正在切换）与「本地确实没有这篇」要分开说
+      toast.add({
+        title: '文章加载失败',
+        description: '本地库暂时读不到这篇，请稍后重试',
+        color: 'error'
+      })
+      void router.replace(options.listPath())
+      return
+    }
     if (routeEntryId.value !== urlId) return // 等待期间地址又变了，旧结果作废
     if (full && (options.belongs ? options.belongs(full) : true)) {
       openEntry(full)

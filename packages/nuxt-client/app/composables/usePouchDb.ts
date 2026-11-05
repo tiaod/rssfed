@@ -627,9 +627,21 @@ export function usePouchDb() {
     // 「上次催促时间」按账号存：新账号的节流窗口要从它自己的记录起算（loadLastRefreshAt 会读）
   }
 
+  /**
+   * 会话校验期间（isPending）「暂时读不到用户」不等于登出：此时不能按 null 切到 guest 库。
+   *
+   * 手机切后台再回来、网络抖动时，better-auth 会重新拉一次会话；这期间若把正在用的账号库
+   * close() 掉，随后打开的任何详情都会在 guest 库里 404 —— 表现就是正文空白、刷新才恢复。
+   * 已有库时先保持不动，等会话有结论；真正登出（isPending 结束且仍为 null）再切。
+   */
+  function shouldKeepDbWhileSessionPending(uid: string | null): boolean {
+    return uid === null && pouchState.dbUserId !== null && useUserStore().isPending
+  }
+
   /** 把本地实例对齐到当前账号（会话就绪前是 null → guest 库，登录后再切到该账号的库） */
   function syncDbUser() {
     const uid = currentUserId()
+    if (shouldKeepDbWhileSessionPending(uid)) return
     if (pouchState.dbUserId !== uid) switchUser(uid)
   }
 
@@ -637,6 +649,7 @@ export function usePouchDb() {
   if (!pouchState.userWatchReady) {
     pouchState.userWatchReady = true
     watch(currentUserId, (uid) => {
+      if (shouldKeepDbWhileSessionPending(uid)) return
       if (pouchState.dbUserId !== uid) switchUser(uid)
     })
   }
@@ -1990,19 +2003,29 @@ export function usePouchDb() {
   }
 
   /**
-   * 获取单条条目的完整内容
+   * 获取单条条目的完整内容。
+   *
+   * 只有 404（本地库确实没有这条，例如尚未同步过来）才返回 null；其余读取错误一律抛出，
+   * 由调用方重试/提示。以前这里把所有异常都吞成 null，调用方只能看到「没有全文」，
+   * 一次瞬时的库故障（切号期间库被关闭、IndexedDB 抖动）就会让正文永久空白 ——
+   * 界面会退回只有标题的投影，且不会自动重试（见 useEntryDetail 与 EntryDetailModal）。
    */
   async function getEntry(entryId: string): Promise<RssEntry | null> {
+    let doc: EntryDoc
     try {
-      const doc = await (await getEntriesDb()).get(entryId) as unknown as EntryDoc
-      if (doc && doc.type === 'entry') {
-        const entry = docToEntry(doc)
-        return (await enrichEntries([entry]))[0] ?? entry
-      }
-    } catch {
-      // 条目不存在
+      doc = await (await getEntriesDb()).get(entryId) as unknown as EntryDoc
+    } catch (e) {
+      if ((e as { status?: number })?.status === 404) return null
+      throw e
     }
-    return null
+    if (doc?.type !== 'entry') return null
+    const entry = docToEntry(doc)
+    // 源元信息补全只是锦上添花：它失败不该连正文一起作废
+    try {
+      return (await enrichEntries([entry]))[0] ?? entry
+    } catch {
+      return entry
+    }
   }
 
   /**

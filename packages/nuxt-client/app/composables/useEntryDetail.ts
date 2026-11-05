@@ -73,6 +73,34 @@ export function useEntryDetail() {
   const detailEntry = ref<RssEntry | null>(null)
   /** 全文是否还在取：true 时正文区渲染骨架屏 */
   const detailLoading = ref(false)
+  /** 单篇展示面的全文读取最终失败（404 或重试后仍报错）：模板据此显示重试入口 */
+  const detailFailed = ref(false)
+  /** 三槽划卡路径各槽的读取失败集合（手机全屏档用，见 EntryDetailModal） */
+  const detailFailures = reactive(new Set<string>())
+
+  /** 全文读取失败后的重试间隔（毫秒）：本地库短暂不可用（切库、IndexedDB 抖动）时重试两次 */
+  const DETAIL_RETRY_DELAYS_MS = [300, 900]
+
+  function delay(ms: number) {
+    return new Promise<void>(resolve => setTimeout(resolve, ms))
+  }
+
+  /**
+   * 按 id 取全文：404 返回 null（本地确实没有这篇），其余读取错误重试后仍失败则抛出。
+   *
+   * 不能把「读失败」当成「没有这篇」——那会让界面退回只有标题的投影（正文空白），
+   * 而且一次瞬时故障之后就再也不重试。失败要交给调用方显示重试入口。
+   */
+  async function fetchFullEntry(id: string): Promise<RssEntry | null> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await pouch.getEntry(id)
+      } catch (err) {
+        if (attempt >= DETAIL_RETRY_DELAYS_MS.length) throw err
+        await delay(DETAIL_RETRY_DELAYS_MS[attempt]!)
+      }
+    }
+  }
 
   async function loadDetail(id: string | undefined) {
     const cached = id ? details.get(id) : null
@@ -80,20 +108,43 @@ export function useEntryDetail() {
       // 预取命中：整篇直接切换，不经过「只有标题的投影」那一帧
       detailEntry.value = cached
       detailLoading.value = false
+      detailFailed.value = false
       return
     }
     detailEntry.value = null
     detailLoading.value = !!id
+    detailFailed.value = false
     if (!id) return
-    const full = await pouch.getEntry(id)
+
+    let full: RssEntry | null = null
+    let failed = false
+    try {
+      full = await fetchFullEntry(id)
+      failed = !full
+    } catch {
+      failed = true
+    }
     if (currentEntry.value?.id !== id) return // 竞态：已切到别的条目，旧结果作废
-    // 取不到全文时退回投影（至少能看标题），其余情况用全文
-    detailEntry.value = full ?? currentEntry.value
+    detailEntry.value = failed ? null : full
+    detailFailed.value = failed
     detailLoading.value = false
+    if (failed) detailFailures.add(id)
+    else detailFailures.delete(id)
   }
 
-  /** 正文区的渲染态：加载中是骨架屏，否则是条目 id；变化即触发淡入淡出 */
-  const detailViewKey = computed(() => (detailLoading.value ? 'loading' : detailEntry.value?.id ?? 'empty'))
+  /** 单篇展示面的「重试」：重新按当前条目取一次全文 */
+  function retryDetail() {
+    const id = currentEntry.value?.id
+    if (!id) return
+    void loadDetail(id)
+  }
+
+  /** 正文区的渲染态：加载中是骨架屏，失败是重试块，否则是条目 id；变化即触发淡入淡出 */
+  const detailViewKey = computed(() => {
+    if (detailLoading.value) return 'loading'
+    if (detailFailed.value) return `failed:${currentEntry.value?.id ?? ''}`
+    return detailEntry.value?.id ?? 'empty'
+  })
 
   /** 展示用条目：全文取到后换全文，否则先用列表投影的标题/元信息顶着（弹窗的三槽预取用它） */
   function displayOf(raw: RssEntry | null): RssEntry | null {
@@ -131,8 +182,12 @@ export function useEntryDetail() {
     loadingIds,
     detailEntry,
     detailLoading,
+    detailFailed,
+    detailFailures,
     detailViewKey,
     loadDetail,
+    retryDetail,
+    fetchFullEntry,
     displayOf,
     isLoading,
     navWithHint
