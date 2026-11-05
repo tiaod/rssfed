@@ -57,3 +57,12 @@ nuxtGlobals.useRuntimeConfig = () => ({
     authBaseUrl: 'http://localhost:3001/api/auth'
   }
 })
+// Nuxt UI 的 useClipboard：详情组件挂载时 useEntryShare 会立即取用（分享的复制回退分支），
+// 这里给一个可用的默认桩，关心复制行为的测试文件可以自行覆盖。
+nuxtGlobals.useClipboard = vi.fn(() => ({ copy: vi.fn(async () => true) }))
+// 应用设置：分享等 composable 在组件挂载时读取；默认值与 useSettings 的默认一致，
+// 需要改偏好的测试文件可以自行覆盖。updateSettings 只给个空实现。
+nuxtGlobals.useSettings = vi.fn(() => ({
+  settings: ref({ entryModalSize: 'sm:max-w-6xl', fixedBars: true, shareMethod: 'auto' }),
+  updateSettings: vi.fn()
+}))

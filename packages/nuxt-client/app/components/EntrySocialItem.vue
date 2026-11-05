@@ -36,6 +36,8 @@ import {
 // 显式导入：单测环境没有 Nuxt 自动导入，裸调 composable 会直接 ReferenceError
 import { useEntryActions } from '~/composables/useEntryActions'
 import { useEntryImages } from '~/composables/useEntryImages'
+// 分享：Web Share API 优先，桌面端退回复制原文链接（与详情面同一份口径）
+import { useEntryShare } from '~/composables/useEntryShare'
 import type { LightboxImage } from '~/composables/useImageLightbox'
 
 const props = defineProps<{
@@ -92,6 +94,9 @@ function openImagePreview(index: number) {
  * 结果就地写回 `props.entry`（列表数组里的那个对象），列表立刻淡显 / 换圆点，不重查。
  */
 const { readBusy, savedBusy, toggleRead, toggleStar } = useEntryActions(() => props.entry)
+
+/** 分享本条：分享的是原文链接，直接作用到列表里的这个条目对象上 */
+const { shareBusy, share } = useEntryShare(() => props.entry)
 </script>
 
 <template>
@@ -253,6 +258,18 @@ const { readBusy, savedBusy, toggleRead, toggleStar } = useEntryActions(() => pr
               variant="ghost"
               color="neutral"
               size="sm"
+            />
+
+            <!-- 分享：不必打开详情，直接在信息流里把原文链接发出去 -->
+            <UButton
+              icon="i-lucide-share-2"
+              :aria-label="`分享文章：${entry.title}`"
+              title="分享文章"
+              variant="ghost"
+              color="neutral"
+              size="sm"
+              :loading="shareBusy"
+              @click="share"
             />
           </footer>
         </div>

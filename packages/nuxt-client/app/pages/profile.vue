@@ -6,7 +6,7 @@ import SiteSettingsManager from '~/components/admin/SiteSettingsManager.vue'
 import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimate'
 import { useLocalDbCleanup } from '~/composables/useLocalDbCleanup'
-import type { AppSettings, EntryModalSize } from '~/composables/useSettings'
+import type { AppSettings, EntryModalSize, ShareMethod } from '~/composables/useSettings'
 import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
 import {
   READER_FONTS,
@@ -133,6 +133,13 @@ const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
   { label: '宽', value: 'sm:max-w-4xl' },
   { label: '很宽', value: 'sm:max-w-6xl' },
   { label: '全屏', value: 'fullscreen' }
+]
+
+// 分享方式：桌面端的系统分享面板往往不如复制顺手，所以让用户自己定
+const shareMethodOptions: { label: string, value: ShareMethod }[] = [
+  { label: '自动（手机用系统面板，电脑复制）', value: 'auto' },
+  { label: '系统分享面板', value: 'system' },
+  { label: '复制链接', value: 'clipboard' }
 ]
 
 /**
@@ -502,6 +509,18 @@ const confirmCleanup = async () => {
                     description="全屏时固定顶栏与底栏、仅正文滚动；关闭后随文章一起滚动"
                   >
                     <USwitch v-model="draftSettings.fixedBars" />
+                  </UFormField>
+
+                  <UFormField
+                    label="分享方式"
+                    description="分享文章时用系统分享面板还是复制原文链接。「自动」按设备选择：手机 / 平板（触屏）弹系统面板，电脑复制链接；浏览器没有系统面板时一律回退复制"
+                  >
+                    <USelect
+                      v-model="draftSettings.shareMethod"
+                      :items="shareMethodOptions"
+                      value-key="value"
+                      class="w-64"
+                    />
                   </UFormField>
 
                   <UFormField

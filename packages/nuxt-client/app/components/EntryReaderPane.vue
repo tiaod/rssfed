@@ -16,6 +16,8 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import EntryDetail from '~/components/EntryDetail.vue'
 import EntryDetailSkeleton from '~/components/EntryDetailSkeleton.vue'
 import { useEntryDetail } from '~/composables/useEntryDetail'
+// 分享：Web Share API 优先，桌面端退回复制原文链接，与详情弹窗共用同一份口径
+import { useEntryShare } from '~/composables/useEntryShare'
 import { READER_PANE_MIN_REM, readerPaneMaxSizeRem } from '~/composables/useReaderLayout'
 
 const { isOpen, currentEntry, entries, closeEntry, canGoPrev, canGoNext } = useEntryModal()
@@ -54,6 +56,9 @@ watch(
  * 空态下就会显示上一篇的源名与页码，星标 / 阅读原文还会作用到那篇上。所以顶栏一律认 active。
  */
 const active = computed(() => (isOpen.value ? currentEntry.value : null))
+
+// 分享当前这篇：分享的是原文链接，翻篇后自动跟着 active 走
+const { shareBusy, share } = useEntryShare(() => active.value)
 
 /** 顶栏标题与弹窗同口径：显示订阅源名字，源名缺失时回退文章标题，避免顶栏空白 */
 const title = computed(() => active.value?.feed?.title || active.value?.title || '')
@@ -232,6 +237,18 @@ const paneUi = {
         size="xs"
         aria-label="阅读原文"
         title="阅读原文"
+      />
+      <!-- 分享：系统分享面板（Web Share API），桌面端退回复制原文链接 -->
+      <UButton
+        v-if="active"
+        icon="i-lucide-share-2"
+        variant="ghost"
+        color="neutral"
+        size="xs"
+        aria-label="分享文章"
+        title="分享文章"
+        :loading="shareBusy"
+        @click="share"
       />
       <UButton
         icon="i-lucide-x"

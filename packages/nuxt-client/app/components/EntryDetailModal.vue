@@ -3,6 +3,8 @@ import { nextTick, ref, computed, watch, reactive, onBeforeUnmount, defineAsyncC
 import type { RssEntry } from '~/types/rss'
 // 打开即已读、全文懒取、上一篇/下一篇、工具栏的已读与收藏：与宽屏阅读栏共用同一份口径
 import { useEntryDetail } from '~/composables/useEntryDetail'
+// 分享：Web Share API 优先，桌面端退回复制原文链接，与阅读栏共用同一份口径
+import { useEntryShare } from '~/composables/useEntryShare'
 import 'swiper/css'
 
 // Swiper 仅在前端按需加载（ClientOnly 包裹 + 异步组件），避免拖慢首屏与 SSR 水合差异
@@ -39,6 +41,9 @@ const {
   isLoading,
   navWithHint: navEntryWithHint
 } = useEntryDetail()
+
+// 分享当前这篇：分享的是原文链接，翻篇后自动跟着 currentEntry 走
+const { shareBusy, share } = useEntryShare(() => currentEntry.value)
 
 /** 翻页：尽头提示由共享 composable 发，弹窗这边额外把页码亮回来（正文滚动时它会被隐去） */
 function navWithHint(dir: -1 | 1) {
@@ -802,6 +807,18 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
             icon="i-lucide-external-link"
             variant="outline"
             size="sm"
+          />
+          <!-- 分享：系统分享面板（Web Share API），桌面端退回复制原文链接 -->
+          <UButton
+            v-if="currentEntry"
+            icon="i-lucide-share-2"
+            variant="ghost"
+            color="neutral"
+            size="sm"
+            aria-label="分享文章"
+            title="分享文章"
+            :loading="shareBusy"
+            @click="share"
           />
         </div>
         <UButton

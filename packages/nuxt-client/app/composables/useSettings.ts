@@ -6,11 +6,28 @@ export type EntryModalSize = 'sm:max-w-xl' | 'sm:max-w-2xl' | 'sm:max-w-4xl' | '
 
 const VALID_MODAL_SIZES: EntryModalSize[] = ['sm:max-w-xl', 'sm:max-w-2xl', 'sm:max-w-4xl', 'sm:max-w-6xl', 'fullscreen']
 
+/**
+ * 分享文章的方式。
+ *
+ * - auto：触屏设备（手机 / 平板）用系统分享面板，桌面直接用复制链接
+ * - system：始终尝试系统分享面板（不区分设备，不支持时仍回退复制）
+ * - clipboard：始终复制原文链接 —— 桌面端的系统分享面板往往不如复制顺手
+ */
+export type ShareMethod = 'auto' | 'system' | 'clipboard'
+
+const VALID_SHARE_METHODS: ShareMethod[] = ['auto', 'system', 'clipboard']
+
+export function isShareMethod(value: unknown): value is ShareMethod {
+  return typeof value === 'string' && (VALID_SHARE_METHODS as string[]).includes(value)
+}
+
 export interface AppSettings {
   /** 条目详情模态弹窗宽度（Tailwind max-w 类） */
   entryModalSize: EntryModalSize
   /** 全屏时固定顶部栏和底部栏（关闭后随正文一起滚动） */
   fixedBars: boolean
+  /** 分享文章的方式（见 ShareMethod；默认 auto，老设置没有该字段时也按 auto 处理） */
+  shareMethod: ShareMethod
   /**
    * 列表页默认视图（全局那一层）。
    *
@@ -38,7 +55,8 @@ export interface AppSettings {
 
 const DEFAULT_SETTINGS: AppSettings = {
   entryModalSize: 'sm:max-w-6xl',
-  fixedBars: true
+  fixedBars: true,
+  shareMethod: 'auto'
   // view 刻意不给默认值：undefined = 用户没配过，各页回退到自己的内置默认（时间线是社交动态）
 }
 
@@ -74,6 +92,10 @@ export function useSettings() {
         // 正文字号同理：区间外的值 / 手改成字符串，都不能让字号变成「拖了但没效果」
         if (!isReaderFontScale(parsed.readerFontScale)) {
           delete parsed.readerFontScale
+        }
+        // 分享方式同理：只接受枚举内的字符串，非法值 / 老版本缺字段都回落到 auto
+        if (!isShareMethod(parsed.shareMethod)) {
+          delete parsed.shareMethod
         }
         // 同步窗口等聚合设置已移到服务端（每用户一份，见 useTimelineSettings），
         // 存量 localStorage 里的 syncWindowDays 直接丢弃即可（不迁移：它已经没有消费者）

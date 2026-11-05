@@ -829,13 +829,13 @@ describe('EntryList 社交动态视图', () => {
     expect(column.classes()).toContain('mx-auto')
   })
 
-  it('操作栏：标为已读 / 收藏 / 新窗口打开原文，记号沿用详情工具栏那一套', () => {
+  it('操作栏：标为已读 / 收藏 / 新窗口打开原文 / 分享，记号沿用详情工具栏那一套', () => {
     const wrapper = mountList([makeEntry()], undefined, 'social')
     const footer = wrapper.get('footer')
 
-    // 三个动作连排靠左（原文不单独甩到右边、也不套分组容器）
+    // 四个动作连排靠左（原文不单独甩到右边、也不套分组容器）
     expect(footer.classes()).not.toContain('justify-between')
-    expect([...footer.element.children].map(el => el.tagName)).toEqual(['BUTTON', 'BUTTON', 'A'])
+    expect([...footer.element.children].map(el => el.tagName)).toEqual(['BUTTON', 'BUTTON', 'A', 'BUTTON'])
 
     expect(footer.get('[aria-label="标为已读"]').attributes('data-icon')).toBe('i-lucide-circle-dot')
     expect(footer.get('[aria-label="收藏"]').attributes('data-icon')).toBe('i-lucide-star')
@@ -845,6 +845,9 @@ describe('EntryList 社交动态视图', () => {
     expect(external.attributes('href')).toBe('https://a.example/1')
     expect(external.attributes('target')).toBe('_blank')
     expect(external.attributes('rel')).toBe('noopener noreferrer')
+
+    // 分享：不必打开详情，直接在信息流里把原文链接发出去（与详情面同一套动作）
+    expect(footer.get('[aria-label^="分享文章"]').attributes('data-icon')).toBe('i-lucide-share-2')
   })
 
   it('点收藏与标为已读：写本地库并把结果就地写回这条，界面跟着变（不重查列表）', async () => {
