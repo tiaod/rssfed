@@ -54,6 +54,10 @@ app.get("/api/files/*", async (c) => {
     return c.body(new Uint8Array(content), 200, {
       "Content-Type": contentType,
       "X-Content-Type-Options": "nosniff",
+      // 每次上传都会生成新的存储 key（随机文件名），同一 URL 的内容永不变化，
+      // 因此可以长缓存。这层缓存是跨源 CDN 地址断网时唯一的兜底 —— Service Worker
+      // 只处理同源请求（见 nuxt-client/public/sw.js），同源代理地址则由 SW 另存一份。
+      "Cache-Control": "public, max-age=31536000, immutable",
       // 允许上传 SVG（logo/头像）后，同源直接打开该文件会作为文档执行其中的脚本，
       // 等于一个存储型 XSS 入口。CSP sandbox 禁用脚本与外部资源加载；
       // 作为 <img> 引用时浏览器不做脚本执行，正常显示不受影响。

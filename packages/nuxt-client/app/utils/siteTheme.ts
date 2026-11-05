@@ -1,3 +1,5 @@
+import { SITE_SETTINGS_SNAPSHOT_KEY } from '~/utils/siteSettingsSnapshot'
+
 /**
  * 站点主题色（管理员在「站点设置」里配置的 hex）到 Nuxt UI 主色变量的映射。
  *
@@ -75,6 +77,10 @@ export const SITE_PRIMARY_STYLE_ID = 'site-primary-color'
  * 传入 doc 便于单测（happy-dom）。
  */
 export function applyPrimaryColor(doc: Document, primaryColor?: string | null): void {
+  // undefined = 配置尚未拉取完成：保留现有覆写。插件在 hydration 前会以
+  // immediate watch 调用一次，此时若按「未配置」移除样式，就会把首屏内联脚本
+  // 按本地快照写入的主题色清掉，重新闪一次默认绿。
+  if (primaryColor === undefined) return
   const css = primaryColor ? buildPrimaryColorCss(primaryColor) : null
   const existing = doc.getElementById(SITE_PRIMARY_STYLE_ID)
 
@@ -91,3 +97,31 @@ export function applyPrimaryColor(doc: Document, primaryColor?: string | null): 
   }
   style.textContent = css
 }
+
+/**
+ * 首屏主题色引导脚本（由 app.vue 注入到 <head>，随 SSR 输出）。
+ *
+ * 站点配置平时是客户端拉取后异步应用的，SSR 首帧只有内置绿；断网时若 SW 缓存也被
+ * 换掉，连拉取都拿不到。把 localStorage 快照里的 `primaryColor` 在 HTML 解析阶段
+ * 同步写成 `<style>`，首帧就是站长配置的颜色，既消掉闪烁，也扛住「升级后首次离线」。
+ *
+ * 色阶表与混合比例必须与上面的 `SHADE_MIX` / `PRIMARY_SHADES` 一致 —— 脚本不能
+ * import 模块，只能内联一份，故用单测比对它生成的 CSS 与 `buildPrimaryColorCss`
+ * 完全相同来防止漂移。
+ */
+export const SITE_THEME_BOOTSTRAP_SCRIPT = `(function(){try{
+var raw=window.localStorage.getItem(${JSON.stringify(SITE_SETTINGS_SNAPSHOT_KEY)});
+if(!raw)return;
+var c=(JSON.parse(raw)||{}).primaryColor;
+if(typeof c!=='string')return;
+c=c.trim();
+if(!/^#([0-9a-f]{3}|[0-9a-f]{6})$/i.test(c))return;
+if(c.length===4){var r=c[1],g=c[2],b=c[3];c='#'+r+r+g+g+b+b}
+c=c.toLowerCase();
+var m={50:['white',7],100:['white',14],200:['white',28],300:['white',45],400:['white',70],500:['white',100],600:['black',88],700:['black',76],800:['black',64],900:['black',52],950:['black',40]};
+var d='';
+for(var s in m){var x=m[s];d+='  --ui-color-primary-'+s+': '+(x[1]>=100?c:'color-mix(in oklab, '+c+' '+x[1]+'%, '+x[0]+')')+';\\n'}
+var el=document.getElementById(${JSON.stringify(SITE_PRIMARY_STYLE_ID)});
+if(!el){el=document.createElement('style');el.id=${JSON.stringify(SITE_PRIMARY_STYLE_ID)};document.head.appendChild(el)}
+el.textContent=':root, :host, .light, .dark {\\n'+d+'}';
+}catch(e){}})();`

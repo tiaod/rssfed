@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { normalizeHexColor } from '~/utils/siteTheme'
+import { SITE_THEME_BOOTSTRAP_SCRIPT, normalizeHexColor } from '~/utils/siteTheme'
 
 const { settings } = useSiteSettings()
 
@@ -49,6 +49,11 @@ useHead({
     { rel: 'manifest', href: MANIFEST_URL },
     // iOS 不读 manifest 的 icons，主屏幕图标只认这条（对应后端 sharp 生成的不透明 180 图）
     { rel: 'apple-touch-icon', sizes: '180x180', href: APPLE_TOUCH_ICON_URL }
+  ],
+  // 首屏主题色：站点配置是客户端拉取的，SSR 首帧只有内置绿；这里在 head 里同步读取
+  // localStorage 快照并写入主色色阶，避免「先绿后变色」的闪烁，也让断网首屏保持站长配色
+  script: [
+    { innerHTML: SITE_THEME_BOOTSTRAP_SCRIPT, tagPosition: 'head' }
   ],
   htmlAttrs: {
     lang: 'zh-CN'

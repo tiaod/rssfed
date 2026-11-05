@@ -1,11 +1,27 @@
 <script setup lang="ts">
 import { useSiteSettings } from '~/composables/useSiteSettings'
+import { sameOriginAssetUrl } from '~/utils/siteAssetUrl'
 
 const { settings } = useSiteSettings()
 
-/** 浅色与深色两套 Logo；深色版可选，缺失时深色模式沿用浅色版 */
-const lightLogoUrl = computed(() => settings.value.logoUrl?.trim() || null)
-const darkLogoUrl = computed(() => settings.value.logoDarkUrl?.trim() || null)
+/**
+ * 首帧（SSR 与 hydration）固定渲染内置 SVG：站点配置在客户端才可用，若它在
+ * hydration 期间已经就绪（异步渲染边界里配置可能先于组件 hydrate），img 与
+ * SSR 输出的 svg 之间会出现元素级 mismatch。组件挂载后再接管配置的 logo。
+ */
+const mounted = ref(false)
+onMounted(() => {
+  mounted.value = true
+})
+
+/**
+ * 浅色与深色两套 Logo；深色版可选，缺失时深色模式沿用浅色版。
+ *
+ * 一律取同源文件代理地址：配置了存储公开域名时 logoUrl 是跨源 CDN 地址，
+ * Service Worker 拦不到，断网时只能靠浏览器 HTTP 缓存（见 utils/siteAssetUrl）。
+ */
+const lightLogoUrl = computed(() => (mounted.value ? sameOriginAssetUrl(settings.value.logoUrl) : null))
+const darkLogoUrl = computed(() => (mounted.value ? sameOriginAssetUrl(settings.value.logoDarkUrl) : null))
 
 /**
  * 加载失败（离线且 Service Worker 无缓存、附件已被删除）时回退，避免页头空一块。

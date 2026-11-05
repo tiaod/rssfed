@@ -1,11 +1,13 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, beforeEach } from 'vitest'
 import {
   PRIMARY_SHADES,
   SITE_PRIMARY_STYLE_ID,
+  SITE_THEME_BOOTSTRAP_SCRIPT,
   applyPrimaryColor,
   buildPrimaryColorCss,
   normalizeHexColor
 } from '../utils/siteTheme'
+import { SITE_SETTINGS_SNAPSHOT_KEY } from '../utils/siteSettingsSnapshot'
 
 describe('normalizeHexColor', () => {
   it('保留 #rrggbb 并统一为小写', () => {
@@ -80,6 +82,38 @@ describe('applyPrimaryColor', () => {
 
     applyPrimaryColor(document, '#c4fe58')
     applyPrimaryColor(document, 'not-a-color')
+    expect(document.getElementById(SITE_PRIMARY_STYLE_ID)).toBeNull()
+  })
+
+  it('undefined（配置尚未拉取）不清除现有覆写，避免清掉首屏内联脚本的颜色', () => {
+    applyPrimaryColor(document, '#c4fe58')
+    applyPrimaryColor(document, undefined)
+    expect(document.getElementById(SITE_PRIMARY_STYLE_ID)?.textContent)
+      .toBe(buildPrimaryColorCss('#c4fe58'))
+  })
+})
+
+describe('SITE_THEME_BOOTSTRAP_SCRIPT', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    document.getElementById(SITE_PRIMARY_STYLE_ID)?.remove()
+  })
+
+  it('从本地快照写出的色阶与 buildPrimaryColorCss 完全一致（防止两份逻辑漂移）', () => {
+    localStorage.setItem(SITE_SETTINGS_SNAPSHOT_KEY, JSON.stringify({ primaryColor: '#C4FE58' }))
+    new Function(SITE_THEME_BOOTSTRAP_SCRIPT)()
+
+    const style = document.getElementById(SITE_PRIMARY_STYLE_ID) as HTMLStyleElement
+    expect(style).toBeTruthy()
+    expect(style.textContent).toBe(buildPrimaryColorCss('#c4fe58'))
+  })
+
+  it('没有快照或颜色非法时不写样式（回退内置主题）', () => {
+    new Function(SITE_THEME_BOOTSTRAP_SCRIPT)()
+    expect(document.getElementById(SITE_PRIMARY_STYLE_ID)).toBeNull()
+
+    localStorage.setItem(SITE_SETTINGS_SNAPSHOT_KEY, JSON.stringify({ primaryColor: 'green' }))
+    new Function(SITE_THEME_BOOTSTRAP_SCRIPT)()
     expect(document.getElementById(SITE_PRIMARY_STYLE_ID)).toBeNull()
   })
 })
