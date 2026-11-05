@@ -6,7 +6,6 @@ import EntryReaderPane from '~/components/EntryReaderPane.vue'
 import AppIcon from '~/components/AppIcon.vue'
 
 const userStore = useUserStore()
-const route = useRoute()
 
 // 侧边栏搜索框：目前只占位，未接入任何搜索逻辑（后续做搜索时在这里接线）
 const sidebarSearch = ref('')
@@ -102,20 +101,54 @@ const navItems = computed<NavigationMenuItem[]>(() => {
   return items
 })
 
-const bottomNavItems = computed(() => navItems.value.map(item => ({
-  label: item.label as string,
-  icon: item.icon as string,
-  to: item.to as string
-})))
+/**
+ * 移动端底部导航（lg 以下）：侧边栏在这里收成抽屉，主导航入口需要多点一次才够得着，
+ * 所以把三个高频入口钉在屏幕底部。只做这三项，其余入口仍走抽屉。
+ */
+const mobileNavItems = computed<NavigationMenuItem[]>(() => [
+  {
+    label: '首页',
+    icon: 'i-lucide-house',
+    to: '/'
+  },
+  {
+    label: '时间线',
+    icon: 'i-lucide-activity',
+    to: '/timeline'
+  },
+  {
+    label: '机器人',
+    icon: 'i-lucide-bot',
+    to: '/bots/explore'
+  }
+])
 
-const isBottomNavActive = (to: string) => {
-  if (to === '/') return route.path === '/'
-  return route.path === to || route.path.startsWith(to + '/')
+/**
+ * 底栏：图标与文字左右排、三格等分。
+ * 水平导航默认是横向 `flex items-center` 的 pill 列表，这里只做合并覆盖：
+ * 列表铺满整行、每项 flex-1 平分，并用 link variant 去掉 pill 的选中底色——
+ * 底栏选中态靠主色图标与文字区分，整块底色太重。横排因此只需 2.5rem 高。
+ * 图标取 size-4、文字 text-sm：40px 高的横排里比 size-3/text-xs 更饱满、留白更少。
+ * 注意组件内部把列表包在一个无类名的 div 里（nav > div > ul），只给 ul 设
+ * w-full 没用——外层 div 没有宽度、会按内容收缩，所以由根节点把子 div 也撑满。
+ */
+const mobileNavUi = {
+  root: 'h-full w-full [&>div]:w-full',
+  list: 'flex w-full h-full',
+  item: 'flex-1 min-w-0 h-full list-none',
+  link: 'flex-row justify-center gap-1 h-full px-1 py-0',
+  linkLeadingIcon: 'size-4',
+  linkLabel: 'text-sm'
 }
 </script>
 
 <template>
-  <UDashboardGroup unit="rem">
+  <!-- 移动端底部留出底栏高度（2.5rem + 安全区），面板内容因此止于底栏上沿而不被盖住；
+       与下面 UNavigationMenu 的高度必须成对改。lg 以上没有底栏，恢复原样 -->
+  <UDashboardGroup
+    unit="rem"
+    class="pb-[calc(2.5rem_+_env(safe-area-inset-bottom))] lg:pb-0"
+  >
     <UDashboardSidebar
       id="default"
       v-model:open="open"
@@ -206,27 +239,19 @@ const isBottomNavActive = (to: string) => {
     <!-- 第三栏：与 <slot />（页面面板）同级，构成「侧边栏 | 列表 | 正文」三栏 -->
     <EntryReaderPane v-if="readerPane" />
 
-    <nav class="fixed bottom-0 left-0 right-0 z-50 border-t border-default bg-background/95 backdrop-blur sm:hidden">
-      <div class="flex items-center justify-around py-1.5">
-        <NuxtLink
-          v-for="item in bottomNavItems"
-          :key="item.to"
-          :to="item.to"
-          class="flex flex-row gap-1 items-center rounded-lg px-3 py-1.5 transition-colors"
-          :class="isBottomNavActive(item.to) ? 'text-primary' : 'text-muted'"
-        >
-          <UIcon
-            :name="item.icon"
-            class="size-4"
-          />
-          <span class="text-xs font-normal">{{ item.label }}</span>
-        </NuxtLink>
-      </div>
-    </nav>
-
     <!-- 通知面板暂时下线，与底部通知按钮一起恢复
     <NotificationsSlideover v-model:open="notificationsOpen" />
     -->
     <EntryDetailModal v-if="!readerPane" />
+
+    <!-- 移动端底部导航：固定贴屏幕底边，三格等分；高度与上面 UDashboardGroup 的 pb 成对 -->
+    <UNavigationMenu
+      class="fixed inset-x-0 bottom-0 z-40 h-[calc(2.5rem_+_env(safe-area-inset-bottom))] border-t border-default bg-default px-2 pb-[env(safe-area-inset-bottom)] lg:hidden"
+      orientation="horizontal"
+      variant="link"
+      color="primary"
+      :items="mobileNavItems"
+      :ui="mobileNavUi"
+    />
   </UDashboardGroup>
 </template>
