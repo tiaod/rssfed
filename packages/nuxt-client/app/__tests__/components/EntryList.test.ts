@@ -1266,17 +1266,17 @@ describe('EntryList 关闭详情后回到刚才读的那条', () => {
     root.scrollTop = 300
     stubRect(root, 0, 600)
     // 锚点行（entry-1）的内容位置在 300：scrollTop = 300 时它正好贴视口顶部（矩形随滚动移动）
-    stubMovingRect(wrapper.findAll('.table-row')[0]!.element, root, 300, 53)
+    stubMovingRect(wrapper.findAll('.table-row')[0]!.element, root, 300, 37)
 
     const frames = controlFrames()
     await openThenClose(entries[2]!)
 
-    // 外推：300 + (300 − 300 − 0) + (2 − 0) × 53 − (600 − 53) / 2 = 132.5
+    // 外推：300 + (300 − 300 − 0) + (2 − 0) × 37 − (600 − 37) / 2 = 92.5
     frames.step()
     expect(root.scrollTop).toBeLessThan(300) // 往上滑，而且是先走一小步
-    expect(root.scrollTop).toBeGreaterThan(132.5)
+    expect(root.scrollTop).toBeGreaterThan(92.5)
     frames.steps(40)
-    expect(root.scrollTop).toBeCloseTo(132.5, 0)
+    expect(root.scrollTop).toBeCloseTo(92.5, 0)
   })
 })
 
@@ -1289,11 +1289,16 @@ describe('EntryList 表格视图', () => {
     return wrapper.getComponent({ name: 'Table' })
   }
 
-  it('一行一条：来源 / 标题 / 日期三列，摘要浅灰跟在标题后面，且不再走 ScrollArea', () => {
-    const wrapper = mountList([makeEntry({ description: '这是摘要' })], true, 'table')
+  it('一行一条：来源 / 标题 / 时间三列，摘要浅灰跟在标题后面，且不再走 ScrollArea', () => {
+    // 造「3 小时前」的条目：时间是相对文案，不受跑测试的日期影响
+    const wrapper = mountList(
+      [makeEntry({ description: '这是摘要', publishedAt: new Date(Date.now() - 3 * 3600_000).toISOString() })],
+      true,
+      'table'
+    )
 
     expect(wrapper.find('.scroll-area').exists()).toBe(false)
-    expect(wrapper.findAll('th').map(th => th.text())).toEqual(['来源', '标题', '日期'])
+    expect(wrapper.findAll('th').map(th => th.text())).toEqual(['来源', '标题', '时间'])
 
     const row = wrapper.get('.table-row')
     expect(row.get('.col-source').text()).toContain('某科技周刊')
@@ -1304,7 +1309,9 @@ describe('EntryList 表格视图', () => {
     expect(titleCell.get('.text-muted').text()).toContain('这是摘要')
     expect(titleCell.html().indexOf('文章标题')).toBeLessThan(titleCell.html().indexOf('这是摘要'))
 
-    expect(row.get('.col-date').text()).toMatch(/^\d{4}\/\d{1,2}\/\d{1,2}$/)
+    // 时间列与社交动态同一口径：相对时间在前，绝对日期放在 title 里
+    expect(row.get('.col-date').text()).toBe('3 小时前')
+    expect(row.get('.col-date').get('time').attributes('title')).toMatch(/^\d{4}\/\d{1,2}\/\d{1,2}$/)
   })
 
   it('署名列：聚合视图显示源名，单源页显示条目作者', () => {
@@ -1323,14 +1330,14 @@ describe('EntryList 表格视图', () => {
     const table = tableOf(mountList([makeEntry()], undefined, 'table'))
 
     expect(table.props('sticky')).toBe('header')
-    // w-full 是硬要求：只给 min-w-full 时表格按内容最小宽度撑开，日期列会被挤出可视区
+    // w-full 是硬要求：只给 min-w-full 时表格按内容最小宽度撑开，时间列会被挤出可视区
     const base = (table.props('ui') as { base: string }).base
     expect(base).toContain('table-fixed')
     expect(base).toContain('w-full')
 
     const virtualize = table.props('virtualize') as { estimateSize: number, overscan: number }
-    // 行高必须和 td 主题默认的 p-4 + 一行 text-sm + 1px 分隔线对齐，否则滚动总高对不上
-    expect(virtualize.estimateSize).toBe(53)
+    // 行高必须和 td 主题默认 p-4 收窄成 py-2 + 一行 text-sm + 1px 分隔线对齐，否则滚动总高对不上
+    expect(virtualize.estimateSize).toBe(37)
     expect(virtualize.overscan).toBe(8)
   })
 

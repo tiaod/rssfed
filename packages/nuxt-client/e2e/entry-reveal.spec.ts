@@ -147,7 +147,7 @@ test.describe('关闭详情后回到刚读的那一条', () => {
     const moved = await activeTitle(appPage)
     expect(moved && moved !== first, `表格视图：连点「下一篇」翻到了别的篇目 → ${moved.slice(0, 24)}`).toBe(true)
     // 表格行没有选中高亮（只有已读淡显），前置条件改用「翻页期间列表一寸没动」来钉：
-    // 行高固定 53，翻 22 行 ≈ 1166px，已经远超一屏
+    // 行高固定 37，翻 22 行 ≈ 814px，已超过一屏
     expect(
       (await listState(appPage)).scrollTop,
       `表格视图：翻页期间列表没有被推走（刚读的那条在视口外，scrollTop ${tableTop}）`

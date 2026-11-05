@@ -12,6 +12,7 @@ import {
   entryExcerpt,
   entryFeedImages,
   entryFeedName,
+  entryRelativeTime,
   feedImagesHeight,
   FEED_COLUMN_MAX,
   FEED_CONTENT_INDENT,
@@ -826,11 +827,14 @@ watch([isOpen, () => currentEntry.value?.id], ([open]) => {
  * 等于自己把 table 布局复刻一遍，而 UTable 自带 virtualize（同样是 @tanstack/vue-virtual），
  * 「只渲染视口附近的行」这条性能口径不变 —— 它的根节点就是滚动容器，页面给的
  * `flex-1 min-h-0` 落在根上（见模板）。一行一条、行高固定，也就不需要逐条测量。
+ *
+ * 行高 = 一行 text-sm（20px）+ 上下内边距（见模板 ui 把 td 的 p-4 收成 py-2）+ 1px 分隔线。
+ * 53 是主题默认 p-4 下的高度，偏松；表格一行只有标题 + 摘要，收窄后信息密度更接近邮件列表。
  */
-const TABLE_ROW_HEIGHT = 53
+const TABLE_ROW_HEIGHT = 37
 
 /**
- * 表格列：来源 / 标题（标题后紧跟浅灰摘要，同一行）/ 日期。
+ * 表格列：来源 / 标题（标题后紧跟浅灰摘要，同一行）/ 时间。
  *
  * 列宽只写在 th 上：表格是 table-fixed（见模板的 ui 覆盖），首行即列宽；标题列不写宽度，
  * 于是吃掉剩余空间、由 truncate 收尾 —— 一行一条的前提。
@@ -845,9 +849,9 @@ const tableColumns = computed<TableColumn<RssEntry>[]>(() => [
   { id: 'title', header: '标题' },
   {
     id: 'date',
-    header: '日期',
-    // 主题的 th / td 都是左对齐，日期列单独靠右（两处都要写，th 与 td 是两套类）
-    meta: { class: { th: 'w-24 sm:w-28 text-right', td: 'text-right' } }
+    header: '时间',
+    // 与其它两列一样左对齐：表头落在时间内容的起始处，不会出现「时间」贴在右端、内容也贴右端
+    meta: { class: { th: 'w-24 sm:w-28' } }
   }
 ])
 
@@ -902,14 +906,14 @@ function handleTableKeydown(event: KeyboardEvent) {
 <template>
   <!--
     表格视图：Nuxt UI 的 Table（自带 virtualize）。一行一条，标题后面紧跟浅灰摘要 —— 版式参考
-    邮件列表那种「一行扫完」的排布（来源 / 标题+摘要 / 日期）。
+    邮件列表那种「一行扫完」的排布（来源 / 标题+摘要 / 时间）。
 
     它和下面 ScrollArea 分支共用同一套「只渲染视口附近 + 页尾骨架触底加载」的口径，但容器
     不同：UTable 的根节点就是滚动容器，所以页面给的 `flex-1 min-h-0` 必须落在它的根上
     （$attrs 透传，见 defineOptions 的说明），而不能像 ScrollArea 那样套一层 h-full。
     `table-fixed` + `w-full` 是为了让标题列的 truncate 真正生效：固定布局下首行列宽即列宽，
     而**宽度必须是确定值** —— 只给 `min-w-full` 时表格自己算出来的宽度是「内容最小宽度」，
-    表头那几个 `whitespace-nowrap` 的单元格会把它撑到几千像素，日期列当场被挤出可视区。
+    表头那几个 `whitespace-nowrap` 的单元格会把它撑到几千像素，时间列当场被挤出可视区。
   -->
   <UTable
     v-if="view === 'table'"
@@ -919,7 +923,7 @@ function handleTableKeydown(event: KeyboardEvent) {
     :columns="tableColumns"
     :meta="tableMeta"
     :virtualize="{ estimateSize: TABLE_ROW_HEIGHT, overscan: overscan ?? 8 }"
-    :ui="{ base: 'table-fixed w-full' }"
+    :ui="{ base: 'table-fixed w-full', th: 'py-2', td: 'py-2' }"
     sticky="header"
     :on-select="handleTableSelect"
     empty="暂无条目"
@@ -969,16 +973,18 @@ function handleTableKeydown(event: KeyboardEvent) {
         <span class="font-medium text-highlighted">{{ row.original.title }}</span>
         <span
           v-if="tableExcerpt(row.original)"
-          class="text-muted"
-        > {{ tableExcerpt(row.original) }}</span>
+          class="ms-1 text-muted"
+        >{{ tableExcerpt(row.original) }}</span>
       </div>
     </template>
 
     <template #date-cell="{ row }">
+      <!-- 与社交动态同一口径（entryRelativeTime）：刚刚 / N 分钟前 / …，精确日期放在 title 里 -->
       <time
         :datetime="row.original.publishedAt"
         class="text-dimmed"
-      >{{ entryDate(row.original) }}</time>
+        :title="entryDate(row.original)"
+      >{{ entryRelativeTime(row.original) }}</time>
     </template>
 
     <!-- 页尾加载骨架 = 触底信号：骨架进视口就加载下一批（与其它视图同一套 observer） -->
