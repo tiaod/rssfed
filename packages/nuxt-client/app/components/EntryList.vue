@@ -979,7 +979,7 @@ function handleTableKeydown(event: KeyboardEvent) {
     </template>
 
     <template #date-cell="{ row }">
-      <!-- 与社交动态同一口径（entryRelativeTime）：刚刚 / N 分钟前 / …，精确日期放在 title 里 -->
+      <!-- 与社交动态同一口径（entryRelativeTime）：几秒前 / N 分钟前 / …，精确日期放在 title 里 -->
       <time
         :datetime="row.original.publishedAt"
         class="text-dimmed"

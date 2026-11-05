@@ -99,16 +99,16 @@ describe('entryByline（列表行 / 表格行 / 社交动态共用的署名口�
   })
 })
 
-describe('entryRelativeTime（社交动态作者行的相对时间）', () => {
+describe('entryRelativeTime（社交动态作者行，dayjs relativeTime 口径）', () => {
   const now = Date.parse('2026-07-01T12:00:00.000Z')
   const at = (publishedAt: string) => entryRelativeTime({ publishedAt }, now)
 
-  it('一分钟以内是「刚刚」，未来时间（时钟偏差）也按刚刚处理', () => {
-    expect(at('2026-07-01T11:59:30.000Z')).toBe('刚刚')
-    expect(at('2026-07-01T12:05:00.000Z')).toBe('刚刚')
+  it('一分钟以内显示「几秒前」，未来时间显示 dayjs 的「内」文案', () => {
+    expect(at('2026-07-01T11:59:30.000Z')).toBe('几秒前')
+    expect(at('2026-07-01T12:05:00.000Z')).toBe('5 分钟内')
   })
 
-  it('分钟 / 小时 / 天三档向下取整', () => {
+  it('分钟 / 小时 / 天各档与 dayjs 的阈值一致', () => {
     expect(at('2026-07-01T11:58:00.000Z')).toBe('2 分钟前')
     expect(at('2026-07-01T09:00:00.000Z')).toBe('3 小时前')
     expect(at('2026-06-29T12:00:00.000Z')).toBe('2 天前')
@@ -120,9 +120,9 @@ describe('entryRelativeTime（社交动态作者行的相对时间）', () => {
     expect(at('2026-06-30T12:00:00.000Z')).toBe('1 天前')
   })
 
-  it('满一周回到绝对日期（与 entryDate 同一口径）', () => {
-    expect(at('2026-06-24T12:00:00.000Z')).toMatch(/^2026\/6\/24$/)
-    expect(at('2026-01-02T12:00:00.000Z')).toMatch(/^2026\/1\/2$/)
+  it('超过一周继续用相对时间（周 / 月），不再回退绝对日期', () => {
+    expect(at('2026-06-24T12:00:00.000Z')).toBe('7 天前')
+    expect(at('2026-01-02T12:00:00.000Z')).toBe('6 个月前')
   })
 
   it('时间缺失 / 非法时返回空串，由调用方省略这一段', () => {

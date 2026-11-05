@@ -4,7 +4,15 @@
  * 纯函数、无 Nuxt / 浏览器依赖，方便单测；组件只负责把它们摆进各自的版式。
  */
 
+import dayjs from 'dayjs'
+import relativeTime from 'dayjs/plugin/relativeTime'
+import 'dayjs/locale/zh-cn'
 import type { RssCachedImage, RssEntry } from '~/types/rss'
+
+// 相对时间的阈值与中文文案交给 dayjs（「几秒前 / N 分钟前 / N 小时前 / N 天前 …」），
+// 不再自己维护取整分支；locale 是 dayjs 的全局设置，目前全站只有这里用到 dayjs。
+dayjs.extend(relativeTime)
+dayjs.locale('zh-cn')
 
 /**
  * 摘要文本。
@@ -76,29 +84,21 @@ export function entryDate(entry: Pick<RssEntry, 'publishedAt'>): string {
 export const IMAGE_TILE_FALLBACK_ASPECT = 4 / 3
 
 /**
- * 相对时间（社交动态的作者行用）：刚刚 / N 分钟前 / N 小时前 / N 天前，超过一周回到绝对日期。
+ * 相对时间（社交动态的作者行用）：由 dayjs 的 relativeTime 插件给出
+ * 「几秒前 / N 分钟前 / N 小时前 / N 天前 / N 周前 / N 个月前 …」。
  *
  * 只给一个「多新」的观感，精确值由调用方放进 `<time>` 的 title（见 EntrySocialItem）；
- * `now` 显式传入是为了单测能钉住边界，默认取调用那一刻。
- * 解析失败返回空串（与 entryDate 同口径）；未来时间（时钟偏差、定时发布的源）按「刚刚」处理。
+ * `now` 显式传入是为了单测能钉住边界，默认取调用那一刻（`dayjs.fromNow()` 固定取当前时间，
+ * 这里用 `from(dayjs(now))` 得到同样的文案）。
+ * 时间缺失 / 解析失败返回空串（与 entryDate 同口径）；未来时间由 dayjs 显示为「N 分钟内」。
  */
 export function entryRelativeTime(
   entry: Pick<RssEntry, 'publishedAt'>,
   now: number = Date.now()
 ): string {
-  const time = new Date(entry.publishedAt).getTime()
-  if (Number.isNaN(time)) return ''
-
-  const diff = now - time
-  const minute = 60_000
-  const hour = 60 * minute
-  const day = 24 * hour
-
-  if (diff < minute) return '刚刚' // 含未来时间（diff 为负）
-  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`
-  if (diff < day) return `${Math.floor(diff / hour)} 小时前`
-  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`
-  return entryDate(entry)
+  if (!entry.publishedAt) return ''
+  const time = dayjs(entry.publishedAt)
+  return time.isValid() ? time.from(dayjs(now)) : ''
 }
 
 /**

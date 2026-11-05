@@ -24,6 +24,7 @@
     "@shikijs/themes": "^4.4.3",
     "@vueuse/nuxt": "^14.4.0",
     "better-auth": "^1.7.2",
+    "dayjs": "^1.11.23",
     "dompurify": "^3.4.15",
     "lxgw-wenkai-screen-web": "1.530.0",
     "nuxt": "^4.4.6",
