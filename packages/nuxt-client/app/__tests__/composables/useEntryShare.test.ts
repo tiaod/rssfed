@@ -12,7 +12,7 @@ import { useEntryShare } from '../../composables/useEntryShare'
  */
 
 const H = vi.hoisted(() => ({
-  copy: vi.fn(async () => true),
+  copy: vi.fn(async () => {}),
   toast: vi.fn()
 }))
 
@@ -74,7 +74,7 @@ function stubCoarsePointer(coarse: boolean) {
 
 beforeEach(() => {
   vi.clearAllMocks()
-  H.copy.mockResolvedValue(true)
+  H.copy.mockResolvedValue(undefined)
   shareSettings.value = { shareMethod: 'auto' }
   stubShare(undefined)
   // 默认按桌面处理，触屏用例自己声明
@@ -178,8 +178,8 @@ describe('useEntryShare', () => {
     expect(H.toast).toHaveBeenCalledWith(expect.objectContaining({ title: '链接已复制' }))
   })
 
-  it('剪贴板不可用（copy 返回 false）：提示复制失败', async () => {
-    H.copy.mockResolvedValue(false)
+  it('剪贴板不可用（copy 抛错）：提示复制失败', async () => {
+    H.copy.mockRejectedValue(new Error('剪贴板不可用'))
 
     await useEntryShare(() => makeEntry()).share()
 

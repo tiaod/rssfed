@@ -46,9 +46,8 @@ export function useEntryShare(getEntry: () => RssEntry | null | undefined) {
   /** 复制链接：Web Share API 缺席时的回退，也是分享面板调用失败后的保底 */
   async function copyLink(url: string) {
     try {
-      // useClipboard 的 copy 在剪贴板不可用时返回 false（不抛错），两种失败都要兜住
-      const copied = await copy(url)
-      if (copied === false) throw new Error('剪贴板不可用')
+      // useClipboard 的 copy 返回 void，失败时抛错（不再用返回值判断）
+      await copy(url)
       toast.add({ title: '链接已复制', description: '可以粘贴到任意地方分享', color: 'success' })
     } catch (e: unknown) {
       toast.add({ title: '复制失败', description: errorMessage(e, '无法写入剪贴板'), color: 'error' })
