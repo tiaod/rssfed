@@ -34,6 +34,24 @@ const appTitle = computed(() =>
   || 'RSSFed'
 )
 
+/** 浏览器标签页标题：站点标题 → 应用名（回退链与后端 manifest 的 name 一致） */
+const siteTitle = computed(() => settings.value.siteTitle?.trim() || 'RSSFed')
+const siteDescription = computed(() =>
+  settings.value.description?.trim() || '支持 ActivityPub 的 RSS 阅读器'
+)
+
+/**
+ * favicon 复用 PWA 图标路由：内容由后端按「上传的方形图标 → 站点 Logo 裁剪 → 内置图形」
+ * 实时生成，管理员换图标后无需重新构建。
+ * 带 `?v=` 版本号：浏览器对 favicon 的缓存非常顽固，URL 不变会一直显示旧图。
+ */
+const FAVICON_URL = '/api/site-settings/icon/192.png'
+const faviconUrl = computed(() =>
+  settings.value.version
+    ? `${FAVICON_URL}?v=${encodeURIComponent(settings.value.version)}`
+    : FAVICON_URL
+)
+
 useHead({
   meta: [
     { name: 'viewport', content: 'width=device-width, initial-scale=1' },
@@ -45,7 +63,8 @@ useHead({
     { name: 'apple-mobile-web-app-status-bar-style', content: 'default' }
   ],
   link: [
-    { rel: 'icon', href: '/favicon.ico' },
+    // favicon 走动态图标路由，换图标后地址随版本号变化（不再使用静态 public/favicon.ico）
+    { rel: 'icon', type: 'image/png', sizes: '192x192', href: faviconUrl },
     { rel: 'manifest', href: MANIFEST_URL },
     // iOS 不读 manifest 的 icons，主屏幕图标只认这条（对应后端 sharp 生成的不透明 180 图）
     { rel: 'apple-touch-icon', sizes: '180x180', href: APPLE_TOUCH_ICON_URL }
@@ -61,8 +80,8 @@ useHead({
 })
 
 useSeoMeta({
-  title: 'RSSFed',
-  description: '支持 ActivityPub 的 RSS 阅读器'
+  title: () => siteTitle.value,
+  description: () => siteDescription.value
 })
 </script>
 

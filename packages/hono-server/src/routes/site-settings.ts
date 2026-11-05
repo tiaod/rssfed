@@ -246,8 +246,10 @@ const EMPTY_PWA_ROW: PwaSettingsRow = {
  * 降级成默认 manifest 让「装得上」不受影响，比整个端点 500 更有价值。
  *
  * 只降级读路径：管理员的写入照常报错，避免配置静默丢失却无人察觉。
+ *
+ * 导出给 `/favicon.ico` 路由复用：动态 favicon 与 manifest / 图标走同一份配置与回退。
  */
-async function loadPwaRow(): Promise<PwaSettingsRow> {
+export async function loadPwaRow(): Promise<PwaSettingsRow> {
   try {
     const [row] = await db
       .select({

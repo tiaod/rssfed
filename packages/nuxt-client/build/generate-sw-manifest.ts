@@ -19,6 +19,10 @@ function shouldSkip(name: string) {
     || name.endsWith('.woff2')
     || name === SW_MANIFEST_FILE
     || name === 'sw.js'
+    // favicon 由后端按站点配置动态生成（public 下已不放静态文件）；这条是防护：
+    // 万一将来有人放回静态图，也不要预缓存，否则 SW 安装后会一直拿构建期的那张
+    // （sw.js 里同样放行了该路径）。
+    || name === 'favicon.ico'
 }
 
 /**

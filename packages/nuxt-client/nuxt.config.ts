@@ -72,6 +72,9 @@ export default defineNuxtConfig({
       ...(isDev
         ? {
             '/api/site-settings/**': { proxy: `${backendBaseUrl}/api/site-settings/**` },
+            // 动态 favicon 的后端实现（内容按站点配置生成）：dev 下不代理时请求会落到
+            // Nuxt（没有这条路由），浏览器拿不到按配置生成的 ICO。
+            '/favicon.ico': { proxy: `${backendBaseUrl}/favicon.ico` },
             // 站点 logo / 图标的上传文件：服务端下发时已统一改写为同源 /api/files/*
             // （见 app/utils/siteAssetUrl.ts）。生产由 Caddy 把 /api/* 分流到 Hono；
             // dev 缺这条代理时请求打在本服务上 404，AppLogo 会静默回退到内置 logo

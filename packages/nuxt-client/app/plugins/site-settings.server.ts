@@ -11,7 +11,7 @@ import { useSiteSettings } from '~/composables/useSiteSettings'
  */
 const CACHE_TTL_MS = 10_000
 
-let cached: { settings: SiteSettingsPublic; fetchedAt: number } | null = null
+let cached: { settings: SiteSettingsPublic, fetchedAt: number } | null = null
 
 /**
  * SSR 首屏的站点品牌配置。

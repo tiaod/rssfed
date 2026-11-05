@@ -109,7 +109,9 @@
 	@nuxt_icon path /api/_nuxt_icon /api/_nuxt_icon/*
 	reverse_proxy @nuxt_icon web:3000
 
-	@backend path /api/* /mcp /mcp/* /.well-known/* /nodeinfo/* /ap/* /@* /users/* /inbox /inbox/* /admin/*
+	# /favicon.ico 走后端动态生成（内容取自站点设置，见 hono-server 的 routes/favicon.ts），
+	# Nuxt 下没有这条路由，不转发会 404。
+	@backend path /api/* /mcp /mcp/* /.well-known/* /nodeinfo/* /ap/* /@* /users/* /inbox /inbox/* /admin/* /favicon.ico
 	reverse_proxy @backend server:3001
 
 	# ── 其余全部交给 Nuxt SSR ───────────────────────────────────────────────

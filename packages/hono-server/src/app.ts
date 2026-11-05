@@ -9,6 +9,7 @@ import { userTokensRouter } from "./routes/user-tokens"
 import { couchdbRouter, COUCHDB_ROUTE_PREFIX } from "./routes/couchdb"
 import { timelineRouter, TIMELINE_ROUTE_PREFIX } from "./routes/timeline"
 import { siteSettingsPublicRouter, siteSettingsAdminRouter } from "./routes/site-settings"
+import { faviconRouter } from "./routes/favicon"
 import { mcpRouter } from "./routes/mcp"
 import { instance } from "./bots"
 import { storage } from "./storage"
@@ -36,6 +37,9 @@ app.route(COUCHDB_ROUTE_PREFIX, couchdbRouter)
 app.route(TIMELINE_ROUTE_PREFIX, timelineRouter)
 app.route("/api/site-settings", siteSettingsPublicRouter)
 app.route("/api/admin/site-settings", siteSettingsAdminRouter)
+// 动态 favicon：根路径固定（浏览器/第三方默认探测点），内容按站点配置实时生成。
+// 必须注册在 BotKit 的 app.all("*") 兜底之前。
+app.route("/", faviconRouter)
 
 // MCP server（订阅管理 AI 工具）：须在 BotKit 兜底 app.all("*") 之前注册
 app.route("/mcp", mcpRouter)

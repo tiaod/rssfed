@@ -13,7 +13,7 @@
 
 | 请求类型 | 策略 | 说明 |
 | --- | --- | --- |
-| 构建产物 `/_nuxt/**`、静态文件 | 缓存优先 | 文件名带内容哈希，内容永不变化；构建期由钩子扫描 `.output/public` 生成 `/sw-manifest.json`，SW 安装时整份预缓存（**字体 woff2 例外**，见下） |
+| 构建产物 `/_nuxt/**`、静态文件 | 缓存优先 | 文件名带内容哈希，内容永不变化；构建期由钩子扫描 `.output/public` 生成 `/sw-manifest.json`，SW 安装时整份预缓存（**字体 woff2 与 favicon.ico 例外**，见下） |
 | 页面导航 | 网络优先 → 同路径 HTML 缓存 → `/offline` 外壳 | 访问过的页面离线可原样打开；没访问过的路径回退到预渲染的离线外壳，客户端接管后按地址栏 URL 渲染真实路由 |
 | 只读接口（条目、站点配置、文件、会话） | 网络优先 + 落缓存 | 断网时读缓存；写操作不拦截，让调用方拿到真实失败 |
 | 其它（PouchDB 复制 `/api/couchdb/proxy/*` 等） | 不拦截 | 同步语义必须由 PouchDB 自己处理重试与 checkpoint |
@@ -30,6 +30,8 @@
 - **字体分片不进预缓存**：正文可选的霞鹜文楷是 259 个 woff2（整套约 15MB），预缓存会让每个用户
   装 SW 时全量下载。`build/generate-sw-manifest.ts` 的 `shouldSkip` 排除 `.woff2`，它们首次被
   读到时才走 cache-first 落缓存；没读到的分片离线时回退系统字体（见 `app/utils/readerFonts.ts`）。
+- **favicon 不进预缓存、也不走缓存优先**：`/favicon.ico` 由后端按站点配置动态生成（见下），
+  SW 对该路径直接放行，否则换图标后永远读到构建期的静态图。
 
 ## PWA（安装到手机）
 
@@ -54,6 +56,7 @@
 | `GET /icon/192.png`、`/icon/512.png` | 普通图标：透明底、保持宽高比居中 |
 | `GET /icon/maskable-512.png` | Android 自适应图标：缩进中心 80% 安全区 + 不透明底 |
 | `GET /icon/apple-touch-180.png` | iOS 主屏幕图标（`<link rel="apple-touch-icon">`）：强制不透明 |
+| `GET /favicon.ico` | 动态 ICO（16/32/48），供浏览器默认探测与第三方抓取；`no-cache` + ETag，配置改完即生效 |
 
 ### 图标由 sharp 在服务端实时生成
 

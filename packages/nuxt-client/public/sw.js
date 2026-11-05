@@ -183,6 +183,11 @@ self.addEventListener('fetch', (event) => {
   if (url.origin !== self.location.origin) return
   if (url.pathname === MANIFEST_URL) return
 
+  // favicon 由后端按站点配置动态生成（见 hono-server 的 routes/favicon.ts），
+  // 不能交给下面的静态后缀规则 cache-first：/favicon.ico 固定不变，命中旧缓存后
+  // 管理员换图标永远不会生效。响应自身带 no-cache + ETag，放行给浏览器验证即可。
+  if (url.pathname === '/favicon.ico') return
+
   if (request.mode === 'navigate') {
     event.respondWith(handleNavigation(request))
     return
