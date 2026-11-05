@@ -675,12 +675,18 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
             preventDefault，桌面端鼠标拖选正文因此被吃掉。关掉它，鼠标拖动恢复成正常的文本选中；
             桌面翻页走浮钮与 ←/→ 键（触屏滑动不受影响），grabCursor 也随之失效，不再设置。
           -->
+          <!--
+            longSwipesRatio：Swiper 默认 0.5，慢速拖动要滑过半个屏宽才翻页，手机上太重；
+            压到 0.2（约五分之一屏宽）后短距离拖动即可切篇。快速轻扫仍走 shortSwipes，
+            只要超过 threshold 就翻页，手感保持灵敏。
+          -->
           <SwiperView
             :slides-per-view="1"
             :space-between="0"
             :speed="SWIPE_SPEED"
             :simulate-touch="false"
             :threshold="12"
+            :long-swipes-ratio="0.2"
             class="h-full"
             @swiper="onSwiperReady"
             @transition-end="onTransitionEnd"
