@@ -1,22 +1,13 @@
 <script setup lang="ts">
 import type { RssEntry } from '~/types/rss'
-// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
-import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
-import { useListViewState } from '~/composables/useListView'
-import { DEFAULT_LIST_VIEW } from '~/utils/listViews'
+// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
+import HistoryEntryList from '~/components/HistoryEntryList.vue'
 
 definePageMeta({
   layout: 'default'
 })
 
 const pouch = usePouchDb()
-const { settings } = useSettings()
-
-// 历史页不属于任何订阅源，视图默认值只取全局那一层；会话内切换同样不落盘（见 useListView）
-const { view, overridden, setView, resetView } = useListViewState(
-  'history',
-  () => settings.value.view ?? DEFAULT_LIST_VIEW
-)
 
 const entries = ref<RssEntry[]>([])
 const loading = ref(true)
@@ -38,7 +29,7 @@ async function load() {
     hasMore.value = next.length >= displayLimit.value && displayLimit.value < MAX_ENTRIES
     error.value = null
   } catch (e: unknown) {
-    error.value = errorMessage(e, '加载历史失败')
+    error.value = errorMessage(e, '加载最近阅读失败')
   } finally {
     loading.value = false
   }
@@ -53,11 +44,19 @@ async function grow(): Promise<boolean> {
 }
 
 // 滚动到底部附近时加载下一批；loadMore 同样供文章弹窗尾部的自动预加载复用（单飞防重入）
-const { loadMore } = useInfiniteList(() => grow())
-// EntryList 的 hasMore 需要取值函数；hasMore 是 ref，在模板里已被解包，故在脚本侧包一层
+const { loadMore, loading: loadingMore } = useInfiniteList(() => grow())
+// 弹窗的列表上下文要的是取值函数：hasMore 是 ref，在模板里会被解包，脚本侧包一层
 const hasMoreGetter = () => hasMore.value
 
-const { isOpen, currentEntry } = useEntryModal()
+const { isOpen, currentEntry, openEntry } = useEntryModal()
+
+/**
+ * 历史页用专用视图（按阅读日期分组，见 HistoryEntryList），打开详情的列表上下文仍是
+ * 「过滤后的历史」：弹窗里的上一篇/下一篇要沿当前看到的那一段走，而不是穿到已被隐藏的行。
+ */
+function handleOpen(entry: RssEntry) {
+  openEntry(entry, () => visibleEntries.value, { loadMore, hasMore: hasMoreGetter })
+}
 
 /**
  * 历史是「读过什么」，所以条目被标为未读时应当当场从历史里消失（列表与详情共用同一个
@@ -77,9 +76,9 @@ onMounted(load)
 <template>
   <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
-      <UDashboardNavbar title="历史">
+      <UDashboardNavbar title="最近阅读">
         <template #right>
-          <!-- 页面状态排在动作之前（切换视图按钮的左边） -->
+          <!-- 页面状态 -->
           <UButton
             v-if="loading"
             loading
@@ -89,13 +88,6 @@ onMounted(load)
           >
             加载中…
           </UButton>
-
-          <ListViewSwitcher
-            :view="view"
-            :overridden="overridden"
-            @update:view="setView"
-            @reset="resetView"
-          />
         </template>
       </UDashboardNavbar>
     </template>
@@ -133,19 +125,18 @@ onMounted(load)
             还没有阅读记录
           </p>
           <p class="text-xs text-dimmed">
-            打开任意条目后会自动记入历史
+            打开任意条目后会自动记入最近阅读
           </p>
         </div>
 
-        <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
-        <EntryList
+        <!-- 历史页专用视图：按阅读日期分组、带日期分割线与具体阅读时刻（见 HistoryEntryList） -->
+        <HistoryEntryList
           v-else
           class="min-h-0 flex-1"
-          :view="view"
           :entries="visibleEntries"
           :load-more="loadMore"
-          :has-more="hasMoreGetter"
-          show-feed
+          :loading-more="loadingMore"
+          @open="handleOpen"
         />
       </div>
     </template>

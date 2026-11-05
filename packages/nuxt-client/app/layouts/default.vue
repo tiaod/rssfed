@@ -86,7 +86,7 @@ const navItems = computed<NavigationMenuItem[]>(() => {
       onSelect: () => { open.value = false }
     },
     {
-      label: '历史',
+      label: '最近阅读',
       icon: 'i-lucide-history',
       to: '/history',
       onSelect: () => { open.value = false }

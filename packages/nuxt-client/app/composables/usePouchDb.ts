@@ -1515,6 +1515,8 @@ export function usePouchDb() {
         if (!state) continue
         entry.read = state.read === true
         entry.starred = state.saved === true
+        // 历史页要按「什么时候读的」分组 / 显示时刻；标未读时这个字段会被清掉（见 markRead）
+        entry.readAt = state.readAt
       }
     } catch {
       // 状态文档读不到：保持未读，不影响列表

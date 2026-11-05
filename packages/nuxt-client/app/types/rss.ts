@@ -26,6 +26,11 @@ export interface RssEntry {
   feed: RssFeed
   starred: boolean
   read: boolean
+  /**
+   * 已读时间（ISO）：来自 entry-state 文档，历史页按它分组与展示。
+   * 未读、以及没有 readAt 的老状态文档都为 undefined。
+   */
+  readAt?: string
   readingTime: number
   enclosures?: RssEnclosure[]
   /** 已缓存为本地附件的正文图片（AVIF），渲染时替换 <img src> */

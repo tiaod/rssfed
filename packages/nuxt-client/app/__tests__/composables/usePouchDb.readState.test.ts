@@ -105,14 +105,18 @@ afterAll(async () => {
 })
 
 describe('列表查询合并已读状态', () => {
-  it('有 entry-state 的条目带上 read / starred', async () => {
+  it('有 entry-state 的条目带上 read / starred / readAt（历史页按阅读时间分组）', async () => {
     const [entryA] = (await pouch.queryFeedEntries('feed-a')).filter(e => e.id === 'entry-a')
     expect(entryA?.read).toBe(true)
     expect(entryA?.starred).toBe(true)
+    expect(entryA?.readAt).toBe('2026-07-03T00:00:00.000Z')
   })
 
-  it('没有 entry-state 的条目保持未读', async () => {
-    expect(await readOf('entry-b')).toBe(false)
+  it('没有 entry-state 的条目保持未读，也没有阅读时间', async () => {
+    const entries = await pouch.queryFeedEntries('feed-a')
+    const entryB = entries.find(e => e.id === 'entry-b')
+    expect(entryB?.read).toBe(false)
+    expect(entryB?.readAt).toBeUndefined()
   })
 })
 
