@@ -319,3 +319,35 @@ describe('useUnreadFilter：扫描未读', () => {
     expect(filter.probing.value).toBe(false)
   })
 })
+
+describe('useUnreadFilter：页面往返', () => {
+  it('重新挂载时开关仍是未读模式：页面调用 resumeUnreadScan 补扫，不会误报「没有未读条目」', async () => {
+    // 上一次会话把开关留在了未读模式（useState 是会话级的，页面卸载不会关掉它）
+    stateCache.set('entries-unread-only', ref(true))
+
+    const world = Array.from({ length: 3 }, (_, i) => makeEntry(i))
+    const { filter, scan } = setup({ entries: world, world, readIds: new Set(['e0']) })
+
+    // 新实例：扫描结果还是空的，页面挂载后补扫这一下
+    expect(filter.visibleEntries.value).toEqual([])
+    filter.resumeUnreadScan()
+    await settle()
+
+    expect(filter.unreadOnly.value).toBe(true)
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e1', 'e2'])
+    expect(scan).toHaveBeenCalledTimes(1)
+    expect(filter.probing.value).toBe(false)
+  })
+
+  it('重新挂载时开关是「显示全部」：resumeUnreadScan 不扫描，直接用原始列表', async () => {
+    const world = Array.from({ length: 3 }, (_, i) => makeEntry(i))
+    const { filter, scan } = setup({ entries: world, world })
+
+    filter.resumeUnreadScan()
+    await settle()
+
+    expect(filter.unreadOnly.value).toBe(false)
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e1', 'e2'])
+    expect(scan).not.toHaveBeenCalled()
+  })
+})

@@ -41,7 +41,8 @@ const { loading, renderFirstPaint } = useListFirstPaint({
 // 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
 // 凑够一屏才 enrich 上屏（见 useUnreadFilter）。「全部标记为已读」作用在可见的那批上。
 const {
-  unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, toggleUnreadOnly, probing, scannedCount
+  unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, resumeUnreadScan, toggleUnreadOnly,
+  probing, scannedCount
 } = useUnreadFilter({
   entries,
   hasMore: () => hasMore.value,
@@ -67,6 +68,8 @@ onMounted(async () => {
     // 订阅列表只读本地（`subscription:*` 随 live 复制一起同步，离线也可用）；
     // 别的设备的增删改会由复制写进本地库，不需要在这里再问一次远端
     subs.value = await pouch.listSubscriptions()
+    // 页面往返后「只看未读」开关可能仍是开的，补扫一轮，避免空态误报没有未读
+    resumeUnreadScan()
     await renderFirstPaint()
   } catch (e: unknown) {
     error.value = errorMessage(e, '加载失败')

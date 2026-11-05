@@ -164,11 +164,22 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
     if (unreadOnly.value) void probeRound()
   }
 
+  // 页面（重新）挂载后补扫：开关是会话级（useState），页面往返不会关掉它，但扫描结果
+  // （unreadEntries / 游标 / 缓冲区）是组件实例本地的，卸载即丢。重新挂载时若已经处在未读
+  // 模式，必须补扫一轮，否则列表为空，空态会误报「这个列表里没有未读条目」。
+  //
+  // 由页面在 scan 回调可用的时机调用，不在 setup 里自动跑：分组页的扫描范围依赖订阅列表，
+  // 那时 feedIds 还是空的，扫出来的「已到底」是假结论。
+  function resumeUnreadScan() {
+    if (unreadOnly.value) void probeRound()
+  }
+
   return {
     unreadOnly,
     visibleEntries,
     visibleHasMore,
     loadMoreVisible,
+    resumeUnreadScan,
     toggleUnreadOnly,
     /** 正在扫描未读 */
     probing,

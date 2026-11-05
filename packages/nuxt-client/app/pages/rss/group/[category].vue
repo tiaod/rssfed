@@ -58,7 +58,8 @@ const { loading, renderFirstPaint } = useListFirstPaint({
 // 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
 // 凑够一屏才 enrich 上屏（见 useUnreadFilter）。「全部标记为已读」作用在可见的那批上。
 const {
-  unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, toggleUnreadOnly, probing, scannedCount
+  unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, resumeUnreadScan, toggleUnreadOnly,
+  probing, scannedCount
 } = useUnreadFilter<GroupScanCursor>({
   entries,
   hasMore: () => hasMore.value,
@@ -94,6 +95,10 @@ onMounted(async () => {
     loading.value = false
     return
   }
+
+  // 页面往返后「只看未读」开关可能仍是开的，补扫一轮，避免空态误报没有未读。
+  // 必须在 feeds 加载之后：扫描范围就是 groupFeedIds，早了会按空范围扫出「已到底」的假结论
+  resumeUnreadScan()
 
   // 先上屏、再优先同步组内所有源：有缓存时一个请求都不等，新条目折叠进提示条
   // （见 useListFirstPaint）；没缓存时才等它们跑完（最多 5s）再渲染。
