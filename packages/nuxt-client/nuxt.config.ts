@@ -2,8 +2,8 @@
 import { generateServiceWorkerManifest } from './build/generate-sw-manifest'
 
 /**
- * 只有开发环境需要把 /api/site-settings/** 代理到后端（见下方 routeRules）：
- * dev 前后端分端口，而 PWA 的 manifest 与图标必须同源。
+ * 只有开发环境需要把 /api/site-settings/**、/api/files/** 代理到后端（见下方 routeRules）：
+ * dev 前后端分端口，而 PWA 的 manifest / 图标必须同源，站点 logo 图片也被改写成同源路径。
  *
  * 判据是 NODE_ENV，且这个保证来自 nuxi 本身而不是 Dockerfile：`nuxi build` 会在加载
  * 本配置**之前**强制 `process.env.NODE_ENV = 'production'`（`nuxi dev` 则设 development，
@@ -70,7 +70,14 @@ export default defineNuxtConfig({
       // ⚠️ 必须是精确前缀，不能写成 /api/**:那会连着 /api/_nuxt_icon/* 一起转给 Hono，
       // 于是线上图标整片空白（见下方注释与 deploy/Caddyfile）。
       ...(isDev
-        ? { '/api/site-settings/**': { proxy: `${backendBaseUrl}/api/site-settings/**` } }
+        ? {
+            '/api/site-settings/**': { proxy: `${backendBaseUrl}/api/site-settings/**` },
+            // 站点 logo / 图标的上传文件：服务端下发时已统一改写为同源 /api/files/*
+            // （见 app/utils/siteAssetUrl.ts）。生产由 Caddy 把 /api/* 分流到 Hono；
+            // dev 缺这条代理时请求打在本服务上 404，AppLogo 会静默回退到内置 logo
+            // （外观上像是「设置了 logo 却不生效」）。
+            '/api/files/**': { proxy: `${backendBaseUrl}/api/files/**` }
+          }
         : {})
       // 注意：不要在这里添加 /api/** 的全局代理规则，
       // 否则会覆盖 @nuxt/icon 等模块的服务端路由。

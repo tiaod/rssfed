@@ -5,23 +5,18 @@ import { sameOriginAssetUrl } from '~/utils/siteAssetUrl'
 const { settings } = useSiteSettings()
 
 /**
- * 首帧（SSR 与 hydration）固定渲染内置 SVG：站点配置在客户端才可用，若它在
- * hydration 期间已经就绪（异步渲染边界里配置可能先于组件 hydrate），img 与
- * SSR 输出的 svg 之间会出现元素级 mismatch。组件挂载后再接管配置的 logo。
- */
-const mounted = ref(false)
-onMounted(() => {
-  mounted.value = true
-})
-
-/**
  * 浅色与深色两套 Logo；深色版可选，缺失时深色模式沿用浅色版。
  *
- * 一律取同源文件代理地址：配置了存储公开域名时 logoUrl 是跨源 CDN 地址，
- * Service Worker 拦不到，断网时只能靠浏览器 HTTP 缓存（见 utils/siteAssetUrl）。
+ * 配置由 SSR 预取（plugins/site-settings.server.ts）随首帧一起下发，服务端与
+ * 客户端 hydration 拿到的是同一份数据，所以这里可以直接渲染 img，不用等挂载 ——
+ * 否则每次刷新都会先看到内置 logo 再被替换。
+ *
+ * 服务端下发的 logoUrl 已经是同源 /api/files/* 路径（见 hono-server 的
+ * routes/site-settings.ts），这里的归一化只兜住旧版本 localStorage 快照里
+ * 残留的绝对地址 —— 离线首屏会先读快照（见 utils/siteAssetUrl）。
  */
-const lightLogoUrl = computed(() => (mounted.value ? sameOriginAssetUrl(settings.value.logoUrl) : null))
-const darkLogoUrl = computed(() => (mounted.value ? sameOriginAssetUrl(settings.value.logoDarkUrl) : null))
+const lightLogoUrl = computed(() => sameOriginAssetUrl(settings.value.logoUrl))
+const darkLogoUrl = computed(() => sameOriginAssetUrl(settings.value.logoDarkUrl))
 
 /**
  * 加载失败（离线且 Service Worker 无缓存、附件已被删除）时回退，避免页头空一块。

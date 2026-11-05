@@ -12,21 +12,10 @@
 const { settings } = useSiteSettings()
 
 /**
- * 版本号只在组件挂载后才参与渲染：SSR 没有站点配置，首帧必须是无 `?v=` 的 URL。
- * 站点配置在 hydration 期间可能已经就绪（异步渲染边界），直接把版本号算进首帧
- * 会让 img 的 src 属性与服务端输出不一致（hydration attribute mismatch）。
+ * 版本号直接取配置：SSR 预取后服务端与客户端首帧拿到的是同一份数据（见
+ * plugins/site-settings.server.ts），URL 天然一致，不需要等挂载再补 `?v=`。
  */
-const version = ref('')
-onMounted(() => {
-  version.value = settings.value.version ?? ''
-})
-watch(
-  () => settings.value.version,
-  (next) => {
-    version.value = next ?? ''
-  },
-  { flush: 'post' }
-)
+const version = computed(() => settings.value.version ?? '')
 
 const iconUrl = computed(() =>
   `/api/site-settings/icon/192.png${version.value ? `?v=${encodeURIComponent(version.value)}` : ''}`

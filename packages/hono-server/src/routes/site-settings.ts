@@ -123,20 +123,40 @@ function normalizeUpdate(body: unknown): NormalizedUpdate {
   return result
 }
 
+/** 本服务的文件代理前缀：所有上传资源（logo / PWA 图标）最终都由它对外提供 */
+const FILE_PROXY_MARKER = "/api/files/"
+
+/**
+ * 把上传资源的绝对地址改写成同源 `/api/files/*` 路径后再下发。
+ *
+ * 上传接口默认返回 `${对外域名}/api/files/<key>`，配置了 STORAGE_*_PUBLIC_DOMAIN
+ * 时则是 CDN 的绝对地址。前端 <img> 用同源地址才能被 Service Worker 缓存、断网
+ * 时继续显示站点 logo；这个「同源」约定收口在服务端，避免每个客户端各自改写。
+ *
+ * 已经是相对路径的不动；不是文件代理的外链（管理员手工填的 URL）原样返回。
+ */
+function sameOriginFileUrl(url: string | null): string | null {
+  if (!url) return null
+  // 只处理绝对地址 / 协议相对地址
+  if (!/^([a-z][a-z0-9+.-]*:)?\/\//i.test(url)) return url
+  const index = url.indexOf(FILE_PROXY_MARKER)
+  return index === -1 ? url : url.slice(index)
+}
+
 /** 序列化为接口 JSON（时间戳转 ISO 字符串，去掉内部字段） */
 function serialize(row: SiteSettings) {
   return {
     siteTitle: row.siteTitle,
     description: row.description,
-    logoUrl: row.logoUrl,
-    logoDarkUrl: row.logoDarkUrl,
+    logoUrl: sameOriginFileUrl(row.logoUrl),
+    logoDarkUrl: sameOriginFileUrl(row.logoDarkUrl),
     primaryColor: row.primaryColor,
     skin: row.skin,
     pwaShortName: row.pwaShortName,
     pwaDisplay: row.pwaDisplay,
     pwaThemeColor: row.pwaThemeColor,
     pwaBackgroundColor: row.pwaBackgroundColor,
-    pwaIconUrl: row.pwaIconUrl,
+    pwaIconUrl: sameOriginFileUrl(row.pwaIconUrl),
     /** 生效的白名单（未配置时为内置默认）；管理员界面直接编辑这一份 */
     iframeWhitelist: resolveIframeWhitelist(row.iframeWhitelist),
     /** 内置默认列表：管理员界面用它做「恢复默认」与「是否仍是默认」的判断 */
@@ -185,15 +205,15 @@ siteSettingsPublicRouter.get("/", async (c) => {
   return c.json({
     siteTitle: row.siteTitle,
     description: row.description,
-    logoUrl: row.logoUrl,
-    logoDarkUrl: row.logoDarkUrl,
+    logoUrl: sameOriginFileUrl(row.logoUrl),
+    logoDarkUrl: sameOriginFileUrl(row.logoDarkUrl),
     primaryColor: row.primaryColor,
     skin: row.skin,
     pwaShortName: row.pwaShortName,
     pwaDisplay: row.pwaDisplay,
     pwaThemeColor: row.pwaThemeColor,
     pwaBackgroundColor: row.pwaBackgroundColor,
-    pwaIconUrl: row.pwaIconUrl,
+    pwaIconUrl: sameOriginFileUrl(row.pwaIconUrl),
     iframeWhitelist,
     // 版本号与 manifest 的 ?v= 同源：前端拿它给图标 URL 打版本，换图标/改底色后
     // URL 立即变化，避免浏览器在 /icon/192.png 的 max-age=300 里继续用旧图
@@ -375,7 +395,7 @@ async function deleteSiteLogo(field: SiteLogoField) {
 siteSettingsAdminRouter.post("/logo", requireAdmin, async (c) => {
   try {
     const attachment = await uploadSiteLogo(c, { url: "logoUrl", attachment: "logoAttachmentId" })
-    return c.json({ success: true, logoUrl: attachment.url })
+    return c.json({ success: true, logoUrl: sameOriginFileUrl(attachment.url) })
   } catch (err) {
     if (err instanceof ApiError) return c.json({ error: err.message }, err.status)
     throw err
@@ -397,7 +417,7 @@ siteSettingsAdminRouter.delete("/logo", requireAdmin, async (c) => {
 siteSettingsAdminRouter.post("/logo-dark", requireAdmin, async (c) => {
   try {
     const attachment = await uploadSiteLogo(c, { url: "logoDarkUrl", attachment: "logoDarkAttachmentId" })
-    return c.json({ success: true, logoDarkUrl: attachment.url })
+    return c.json({ success: true, logoDarkUrl: sameOriginFileUrl(attachment.url) })
   } catch (err) {
     if (err instanceof ApiError) return c.json({ error: err.message }, err.status)
     throw err
@@ -435,7 +455,7 @@ siteSettingsAdminRouter.post("/icon", requireAdmin, async (c) => {
       }
       return { oldAttachmentId: before?.oldAttachmentId ?? null }
     })
-    return c.json({ success: true, pwaIconUrl: attachment.url })
+    return c.json({ success: true, pwaIconUrl: sameOriginFileUrl(attachment.url) })
   } catch (err) {
     if (err instanceof ApiError) return c.json({ error: err.message }, err.status)
     throw err

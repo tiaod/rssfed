@@ -6,8 +6,11 @@ import { readSiteSettingsSnapshot, writeSiteSettingsSnapshot } from '~/utils/sit
 let bootstrapped = false
 
 /**
- * 站点品牌配置（公开部分）：启动时经 /api/site-settings 拉取一次，存于 useState
- * 供各页渲染 logo/主题色/皮肤。
+ * 站点品牌配置（公开部分）：存于 useState 供各页渲染 logo/主题色/皮肤。
+ *
+ * 首屏来自服务端预取（plugins/site-settings.server.ts）：SSR 渲染前拉一次，
+ * 结果随 payload 传给客户端，首帧就能渲染配置的 logo，不会先闪默认图再换成
+ * 配置图。挂载后客户端再 refresh 一次，保证管理端改完配置能立即生效。
  *
  * 离线兜底有两层：
  *   1. 请求命中 Service Worker 的 network-first 缓存（见 public/sw.js）；
@@ -17,6 +20,11 @@ let bootstrapped = false
  */
 export function useSiteSettings() {
   const settings = useState<SiteSettingsPublic>('site-settings', () => ({}))
+  /**
+   * SSR 是否已经取到站点配置（随 payload 下发）。
+   * 客户端据此决定挂载后还要不要再补一次请求：首屏已拿到就不再重复打后端。
+   */
+  const ready = useState<boolean>('site-settings-ready', () => false)
 
   /** 从服务端拉取最新品牌配置；失败（离线且无缓存）时保持现有值，回退内置默认 */
   async function refresh() {
@@ -35,15 +43,22 @@ export function useSiteSettings() {
     const snapshot = readSiteSettingsSnapshot()
     const nuxtApp = useNuxtApp()
 
-    // 等根组件 hydration 完成后再应用配置（快照与网络请求都延后）：
-    // SSR 首帧没有站点配置，渲染的是默认 logo / 无版本号的图标 URL，客户端首帧
-    // 必须逐字一致，否则 img 的 src 属性甚至元素种类都会在 hydration 时对不上。
-    // 主题色不受影响 —— 已由 head 里的内联脚本在解析阶段按快照先行写入。
+    // 快照与网络请求都等根组件 hydration 完成后再应用，避免它们改变首帧：
+    // 首帧的形状由 SSR 预取的数据决定（没取到时是内置默认），客户端首帧必须与之
+    // 逐字一致。主题色不受影响 —— 已由 head 里的内联脚本在解析阶段按快照先行写入。
     nuxtApp.hook('app:mounted', () => {
       if (snapshot) settings.value = { ...snapshot, ...settings.value }
+
+      // SSR 首屏已拿到配置，且与本地快照的版本一致：无需再回源，只补写快照
+      // （首次访问没有快照也走这里）。版本不一致说明 SSR 命中了 TTL 内的旧缓存
+      // （管理员刚保存过），或本地快照更旧 —— 都回源一次。
+      if (ready.value && (!snapshot || snapshot.version === settings.value.version)) {
+        writeSiteSettingsSnapshot(settings.value)
+        return
+      }
       void refresh()
     })
   }
 
-  return { settings, refresh }
+  return { settings, refresh, ready }
 }

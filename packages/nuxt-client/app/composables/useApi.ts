@@ -167,7 +167,9 @@ export function useApi() {
     },
     /** 站点品牌配置（公开读取，免登录；离线可由 Service Worker 缓存命中） */
     siteSettings: {
-      get: () => apiFetch<SiteSettingsPublic>(`${base}/api/site-settings`)
+      /** options 目前只用于 SSR 预取时限制超时（见 plugins/site-settings.server.ts） */
+      get: (options: { timeout?: number } = {}) =>
+        apiFetch<SiteSettingsPublic>(`${base}/api/site-settings`, options)
     },
     /** 管理员：站点品牌/外观定制 */
     admin: {
