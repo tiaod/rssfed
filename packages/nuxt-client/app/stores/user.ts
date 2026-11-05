@@ -35,6 +35,8 @@ export const useUserStore = defineStore('user', () => {
 
   const isAuthenticated = computed(() => user.value != null)
   const isPending = computed(() => session.value.isPending)
+  /** 会话请求失败（离线 / 后端不可达）：此时 user 可能来自本地快照，不能当作「明确未登录」 */
+  const hasSessionError = computed(() => session.value.error != null)
   const isAdmin = computed(() => user.value?.role === 'admin')
 
   /** 会话结论明确后同步快照：登录写入；未登录（含服务端撤销会话）清除 */
@@ -102,6 +104,7 @@ export const useUserStore = defineStore('user', () => {
     user,
     isAuthenticated,
     isPending,
+    hasSessionError,
     isAdmin,
     refresh,
     logout

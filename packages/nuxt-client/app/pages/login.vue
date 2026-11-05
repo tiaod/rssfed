@@ -1,12 +1,20 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useUserStore } from '~/stores/user'
+import { resolveInternalPath } from '~/utils/redirectTarget'
+
+// 未登录时不该看到应用侧边栏：登录/注册与落地页共用公开布局（layouts/none.vue）
+definePageMeta({
+  layout: 'none'
+})
 
 /** 开发模式下可用的测试账号 */
 const TEST_ACCOUNTS = [
   { label: '管理员', email: 'admin@example.com', password: 'Admin123!' },
   { label: '用户 #1', email: 'user1@test.com', password: 'Password123!' }
 ] as const
+
+const route = useRoute()
 
 const mode = ref<'login' | 'register'>('login')
 const email = ref(import.meta.dev ? TEST_ACCOUNTS[0].email : '')
@@ -53,11 +61,12 @@ async function handleSubmit() {
       }
     }
 
-    // 登录成功后刷新 session 状态，并直接进入时间线（聚合所有订阅源内容）
+    // 登录成功后刷新 session 状态，再回到被拦截前想访问的页面；
+    // 没有 redirect（例如直接打开登录页）时进时间线（聚合所有订阅源内容）
     const userStore = useUserStore()
     await userStore.refresh()
 
-    await navigateTo('/timeline')
+    await navigateTo(resolveInternalPath(route.query.redirect))
   } finally {
     loading.value = false
   }

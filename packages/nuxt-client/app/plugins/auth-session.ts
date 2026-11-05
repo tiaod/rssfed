@@ -1,5 +1,5 @@
 import type { SessionUser } from '~/types/auth'
-import { SESSION_USER_STATE_KEY } from '~/utils/sessionState'
+import { SESSION_CHECK_STATE_KEY, SESSION_USER_STATE_KEY, type SessionCheckState } from '~/utils/sessionState'
 
 /**
  * 服务端预取 better-auth 会话，写入 useState 供 store 读取。
@@ -17,6 +17,8 @@ import { SESSION_USER_STATE_KEY } from '~/utils/sessionState'
  */
 export default defineNuxtPlugin(async () => {
   const sessionUser = useState<SessionUser | null>(SESSION_USER_STATE_KEY, () => null)
+  // 预取结论：中间件据此区分「明确未登录」与「后端不可达」，后者不能把人送去落地页
+  const sessionCheck = useState<SessionCheckState>(SESSION_CHECK_STATE_KEY, () => 'unknown')
 
   if (!import.meta.server) return
 
@@ -32,8 +34,11 @@ export default defineNuxtPlugin(async () => {
       }
     )
     sessionUser.value = data?.user ?? null
+    sessionCheck.value = data?.user ? 'authenticated' : 'anonymous'
   } catch {
-    // 后端不可达：保持未登录状态即可，离线时页面仍能用本地数据渲染
+    // 后端不可达：保持未登录状态即可，离线时页面仍能用本地数据渲染；
+    // 结论记为 unknown（而非 anonymous），否则已登录用户会被中间件送到落地页
     sessionUser.value = null
+    sessionCheck.value = 'unknown'
   }
 })

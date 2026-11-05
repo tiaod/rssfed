@@ -1,4 +1,10 @@
 <script setup lang="ts">
+const { settings } = useSiteSettings()
+const route = useRoute()
+
+/** 站点标题：管理员配置优先，未配置时回退内置应用名（与 app.vue 的标题回退链一致） */
+const siteTitle = computed(() => settings.value.siteTitle?.trim() || 'RSSFed')
+
 const authClient = useAuthClient()
 const { data: session } = await authClient.useSession(useFetch)
 
@@ -16,7 +22,7 @@ async function handleLogout() {
           to="/"
           class="font-bold text-lg"
         >
-          RSSFed
+          {{ siteTitle }}
         </NuxtLink>
       </template>
 
@@ -36,15 +42,15 @@ async function handleLogout() {
           </UButton>
         </template>
 
-        <template v-else>
-          <UButton
-            to="/login"
-            variant="subtle"
-            color="primary"
-          >
-            登录
-          </UButton>
-        </template>
+        <!-- 登录页自身不再显示指向自己的登录入口 -->
+        <UButton
+          v-else-if="route.path !== '/login'"
+          to="/login"
+          variant="subtle"
+          color="primary"
+        >
+          登录
+        </UButton>
       </template>
     </UHeader>
 
@@ -57,7 +63,7 @@ async function handleLogout() {
     <UFooter>
       <template #left>
         <p class="text-sm text-muted">
-          RSSFed &bull; {{ new Date().getFullYear() }}
+          {{ siteTitle }} &bull; {{ new Date().getFullYear() }}
         </p>
       </template>
     </UFooter>
