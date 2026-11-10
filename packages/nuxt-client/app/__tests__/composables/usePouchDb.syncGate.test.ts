@@ -20,8 +20,10 @@ interface FakeTask {
 }
 
 const H = vi.hoisted(() => ({
-  /** 服务端下发的远端聚合库地址（换库用例会改它） */
-  remoteUrl: 'http://remote.test/timeline',
+  /** 服务端下发的远端聚合库地址（换库用例会改它；null = 取不到地址，模拟离线/后端不可达） */
+  remoteUrl: 'http://remote.test/timeline' as string | null,
+  /** 取寻址被调用了几次（离线时它必须远小于 getEntriesDb 的调用次数） */
+  remoteUrlCalls: 0,
   tasks: [] as FakeTask[],
   refreshArgs: [] as unknown[][],
   refresh: async () => ({ accepted: true, completed: true, added: 0 }) as { accepted: boolean, completed?: boolean, added?: number }
@@ -93,7 +95,10 @@ vi.mock('~/utils/localDbName', () => ({
 vi.mock('~/composables/useCouchTargets', () => ({
   TIMELINE_ID: '__timeline__',
   useCouchTargets: () => ({
-    remoteUrlForId: async (id: string) => (id === '__timeline__' ? H.remoteUrl : null),
+    remoteUrlForId: async (id: string) => {
+      H.remoteUrlCalls++
+      return id === '__timeline__' ? H.remoteUrl : null
+    },
     dbNameFor: async (id: string) => (id === '__timeline__' ? H.remoteUrl : null),
     invalidate: () => {}
   })
@@ -126,6 +131,7 @@ let pouch: ReturnType<typeof usePouchDb>
 
 beforeEach(() => {
   H.remoteUrl = 'http://remote.test/timeline'
+  H.remoteUrlCalls = 0
   H.tasks.length = 0
   H.refreshArgs.length = 0
   H.refresh = async () => ({ accepted: true, completed: true, added: 0 })
@@ -185,6 +191,56 @@ describe('自动同步（syncFeedsIfChanged）', () => {
 
     expect(await pouch.syncFeedsIfChanged(FEEDS)).toBe(0)
     expect(H.refreshArgs).toHaveLength(1)
+    expect(H.tasks).toHaveLength(1)
+  })
+})
+
+describe('挂载失败后的退避（sync-targets 请求风暴的根因）', () => {
+  it('取不到远端地址时只重试一次，后续取库不再重复取地址', async () => {
+    H.remoteUrl = null
+    // 复现首屏：41 次并发取库 —— 旧实现里每一次都会重走一遍「取寻址 → 失败」
+    await Promise.all(Array.from({ length: 41 }, () => pouch.getUserDb()))
+
+    // 全部落在同一次挂载流程里（并发复用 timelineSyncPromise），退避记下之后不再重试
+    expect(H.remoteUrlCalls).toBe(1)
+    expect(pouch.syncStatuses[TIMELINE_ID]!.status).toBe('error')
+  })
+
+  it('退避窗口内再取库也不重试（不再是每次 getEntriesDb 一次请求）', async () => {
+    H.remoteUrl = null
+    await pouch.getUserDb()
+    expect(H.remoteUrlCalls).toBe(1)
+
+    for (let i = 0; i < 40; i++) await pouch.getUserDb()
+    expect(H.remoteUrlCalls).toBe(1)
+  })
+
+  it('恢复联网（online 事件）后立刻重试，不必等退避走完', async () => {
+    H.remoteUrl = null
+    await pouch.getUserDb()
+    expect(H.remoteUrlCalls).toBe(1)
+    const tasksBefore = H.tasks.length
+    expect(tasksBefore).toBe(0)
+
+    // 后端恢复 + 浏览器发出 online → 清退避并重挂，得到真正的复制通道。
+    // （online 监听挂在 window 上、按 nuxtApp 状态各注册一份；本文件每个用例都是一个新状态，
+    //  所以这里按「本次派发之后新挂上的那条通道」断言，而不是 H.tasks 的总数。）
+    H.remoteUrl = 'http://remote.test/timeline'
+    globalThis.window?.dispatchEvent(new Event('online'))
+
+    await vi.waitFor(() => expect(H.remoteUrlCalls).toBe(2))
+    await vi.waitFor(() => expect(H.tasks.length).toBeGreaterThan(tasksBefore))
+    expect(H.tasks.at(-1)!.url).toBe('http://remote.test/timeline')
+  })
+
+  it('显式重挂（ensureTimelineLiveSync(true)）不受退避约束', async () => {
+    H.remoteUrl = null
+    await pouch.getUserDb()
+    expect(H.remoteUrlCalls).toBe(1)
+
+    H.remoteUrl = 'http://remote.test/timeline'
+    await pouch.ensureTimelineLiveSync(true)
+    expect(H.remoteUrlCalls).toBe(2)
     expect(H.tasks).toHaveLength(1)
   })
 })

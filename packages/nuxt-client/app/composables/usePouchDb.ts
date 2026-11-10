@@ -21,8 +21,10 @@ import {
   stripPouchNamePrefix
 } from '~/utils/localDbName'
 import { COMPACT_IDLE_DELAY_MS, shouldCompactNow } from '~/utils/localCompact'
+import { mapWithLimit } from '~/utils/concurrency'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 import { isListView, type ListView } from '~/utils/listViews'
+import { isBrowserOffline, onBrowserOnline } from '~/utils/networkState'
 
 /** 浏览器版 PouchDB 的构造函数类型（`import type` 只取类型，不产生运行时 import） */
 type PouchDBConstructor = typeof PouchDBBrowser
@@ -370,6 +372,33 @@ interface PouchDbState {
    * 「两个组件各排一个压缩」—— 压缩是重活，同一天内不该跑两遍。
    */
   compactTimer: ReturnType<typeof setTimeout> | null
+  /**
+   * 清理是否已经排进空闲窗口（并发调用只排一次的判据）。
+   *
+   * 与 compactTimer 同样的理由放在共享状态里：`getEntriesDb()` 在首屏会被调用几十次，
+   * 每个调用点都是一份闭包；只有一处「已排上」的标记才挡得住「排几十个清理任务」。
+   * 这里不存定时器句柄：清理**不需要取消**（它删的是与当前账号无关的旧库，晚一点跑没有坏处），
+   * 没有句柄也就没有「排了又撤」的一致性问题。
+   */
+  cleanupScheduled: boolean
+  /** 本会话的清理是否已经跑过（跑过就不再排；清理是幂等的迁移动作，跑一次就够） */
+  cleanupDone: boolean
+  /**
+   * 旧的本地库清理的 Promise（每会话最多跑一次，重复调用复用同一个）。
+   *
+   * 放在共享状态里：清理现在由空闲窗口触发，而「有没有跑过 / 正在跑」这件事要跨闭包可见，
+   * 否则切页后新构造的闭包会再排一轮。
+   */
+  cleanupPromise: Promise<void> | null
+  /**
+   * 「挂时间线 live 复制」失败（没拿到远端地址）后的退避截止时刻（0 = 不退避）。
+   *
+   * 为什么单独记住：挂载失败时 `syncHandles` 里不会留下句柄，`ensureTimelineLiveSync` 的
+   * 幂等判据因此失效 —— 首屏那 41 次 `getEntriesDb()` 每次都重走一遍「取寻址 → 失败」。
+   * 有了这个截止时刻，失败之后的一小段时间里直接短路，不再重复取地址（见
+   * TIMELINE_SYNC_RETRY_BACKOFF_MS）。
+   */
+  timelineSyncRetryAt: number
 }
 
 /**
@@ -454,6 +483,17 @@ function isClientWritableDoc(doc: { _id?: string, type?: string }): boolean {
 const PRIORITY_SYNC_WAIT_MS = 5000
 
 /**
+ * 「挂时间线 live 复制」失败（没拿到远端地址）后的重试退避（毫秒）。
+ *
+ * 为什么失败也要退避：挂载失败时 `syncHandles` 里不会留下句柄，`ensureTimelineLiveSync` 的
+ * 「已挂上就返回」判据因此失灵 —— 而 `getEntriesDb()` 每次都会调它。离线冷启动实测首屏期间
+ * `getEntriesDb()` 被调用 41 次，于是「取寻址 → 失败」重复了 41 次（sync-targets 请求风暴的
+ * 主要来源）。失败后的一小段时间里直接短路，代价只是「恢复联网的瞬间最多晚这么久才开始同步」，
+ * 而 `online` 事件会立刻清掉这个退避。
+ */
+const TIMELINE_SYNC_RETRY_BACKOFF_MS = 5000
+
+/**
  * 删除历史遗留的本地库（迁移一次性动作）。
  *
  * 优先用 **IndexedDB 原生 API**：`indexedDB.databases()` 给出的就是实际库名，删的时候不需要任何
@@ -498,6 +538,20 @@ async function destroyLegacyLocalDbs(): Promise<void> {
   }
 }
 
+/**
+ * 「恢复联网」要照顾的那份共享状态与重挂动作（模块级，只绑一个 `online` 监听）。
+ *
+ * 为什么不是每份状态各绑一个：`online` 监听绑在 window 上、生命周期与页面一致，而共享状态
+ * 是按 nuxtApp 构造的（单测里每个用例一份新状态）。各绑一个的话旧监听不会消失，
+ * 恢复联网时它们会一起触发、各自重挂自己那份状态里的复制。生产里只有一个 nuxtApp，
+ * 「一份状态 + 一个监听」的形状本身也更简单：监听不随状态更新而累积。
+ *
+ * 每次 `usePouchDb()` 构造时把「最新那份状态 + 它的重挂动作」记在这里，监听始终调最新的。
+ */
+let onlineRecoveryState: PouchDbState | null = null
+let onlineRecoveryRetry: (() => void) | null = null
+let onlineRecoveryWired = false
+
 /** 构造共享状态（usePouchDb 与 usePouchSyncStatus 共用同一份结构） */
 function createPouchState(): PouchDbState {
   return {
@@ -517,7 +571,11 @@ function createPouchState(): PouchDbState {
     entryRemovalsVersion: ref(0),
     subscriptionsVersion: ref(0),
     storageBroken: ref<string | null>(null),
-    compactTimer: null
+    compactTimer: null,
+    cleanupScheduled: false,
+    cleanupDone: false,
+    cleanupPromise: null,
+    timelineSyncRetryAt: 0
   }
 }
 
@@ -568,12 +626,16 @@ export function usePouchDb() {
   // 计数与库字段需通过对象引用读写（解构 number 会丢失状态）
   const pouchState = nuxtApp.$pouchDbState
 
-  /** 迁移清理的幂等 Promise（避免并发重复执行） */
-  let cleanupPromise: Promise<void> | null = null
-
+  /**
+   * 迁移清理的幂等入口：每会话最多跑一次，重复调用复用同一个 Promise。
+   *
+   * 注意它**不保证**「已经跑完」——`getEntriesDb()` 不再 await 它（见 scheduleIdleCleanup）。
+   * 需要「清理确实做完了」的地方（`syncFeedsIfChanged`：旧库还占着空间且结构与新版不兼容）
+   * 自己 await 这个返回值。
+   */
   function ensureCleanup() {
-    if (!cleanupPromise) cleanupPromise = cleanupLegacyDbs()
-    return cleanupPromise
+    if (!pouchState.cleanupPromise) pouchState.cleanupPromise = cleanupLegacyDbs()
+    return pouchState.cleanupPromise
   }
 
   /**
@@ -602,6 +664,8 @@ export function usePouchDb() {
     pouchState.paused.value = false
     // 暂停期间攒下的变化要尽快拿到：清掉催促节流，让恢复后的第一次催立即发出去
     saveLastRefreshAt(0)
+    // 用户显式要求恢复：不受「上次挂载失败」的退避约束
+    pouchState.timelineSyncRetryAt = 0
     void ensureTimelineLiveSync()
   }
 
@@ -620,8 +684,12 @@ export function usePouchDb() {
     }
     syncHandles.clear()
     pouchState.timelineSyncPromise = null
+    // 挂载失败的退避属于上一个账号（换号后要允许立刻重新取寻址）
+    pouchState.timelineSyncRetryAt = 0
     // 压缩定时器属于上一个账号的库：不取消的话它会在切号后压一个已经关掉/换掉的库
     cancelIdleCompact()
+    // 空闲清理**不**取消：它删的是旧时代的库（rssfed-feed-* / rssfed-entries* 等）与
+    // localStorage 里的旧键，与当前账号的库无关，换号不影响它该不该跑
     if (pouchState.entriesDb) {
       pouchState.entriesDb.close()
       pouchState.entriesDb = null
@@ -667,6 +735,35 @@ export function usePouchDb() {
     if (pouchState.dbUserId !== uid) switchUser(uid)
   }
 
+  // 恢复联网 → 立刻清掉「挂载失败」的退避并重挂复制。
+  // 退避是为了压掉同一轮失败里的几十个并发调用点；但网络一恢复，用户最期待的就是同步
+  // 自己动起来，这时等 5s 会被当成「同步坏了」。`online` 事件是浏览器能给出的最可靠信号。
+  onlineRecoveryState = pouchState
+  onlineRecoveryRetry = () => {
+    pouchState.timelineSyncRetryAt = 0
+    // 正有一轮挂载在跑时不能直接重入（会挂上第二条 live 复制）：等它收尾再补一次。
+    // 那一轮用的还是「断网时」的判断（取地址失败），收尾大概率也是失败并写下退避 ——
+    // 所以收尾后要把退避再清一次，否则「恢复联网」会被刚刚写下的退避挡住 5s。
+    const starting = pouchState.timelineSyncPromise
+    if (starting) {
+      void starting.finally(() => {
+        pouchState.timelineSyncRetryAt = 0
+        void ensureTimelineLiveSync()
+      })
+      return
+    }
+    void ensureTimelineLiveSync()
+  }
+  if (!onlineRecoveryWired) {
+    onlineRecoveryWired = true
+    onBrowserOnline(() => {
+      const state = onlineRecoveryState
+      if (!state) return
+      state.timelineSyncRetryAt = 0
+      onlineRecoveryRetry?.()
+    })
+  }
+
   // 会话变化立即切换：登出后不该继续对着上一个账号的库做 live 同步
   if (!pouchState.userWatchReady) {
     pouchState.userWatchReady = true
@@ -694,10 +791,14 @@ export function usePouchDb() {
     return pouchState.entriesDb
   }
 
-  /** 获取本地时间线库（惰性创建，顺带清理历史本地库并确保 live 复制在跑） */
+  /** 获取本地时间线库（惰性创建；顺带把旧库清理排进空闲窗口、确保 live 复制在跑） */
   async function getEntriesDb(): Promise<PouchDB.Database> {
     const db = await openEntriesDb()
-    void ensureCleanup()
+    // 旧库清理**不在这里发起**：删库（indexedDB.databases / deleteDatabase，以及打开旧 PouchDB 库）
+    // 与首屏的 db.query 抢同一批 IndexedDB 事务，实测把 queryTimeline 从 ~60ms 拉到 ~180ms，
+    // 而它本身只是「删旧时代的库」这种一次性的迁移动作，晚几秒跑没有任何正确性影响。
+    // 这里只做一个布尔判断，真正的工作排进空闲窗口（见 scheduleIdleCleanup）。
+    scheduleIdleCleanup()
     // 任何一次「拿到条目库」的时刻都该确保 live 复制已挂上：查询方不必各自记得先起同步
     void ensureTimelineLiveSync()
     return db
@@ -769,6 +870,67 @@ export function usePouchDb() {
       ])
     } catch {
       // 清理失败不影响主流程（旧库残留只是占磁盘）
+    }
+  }
+
+  // ── 空闲清理：把「删旧时代的本地库」挪出首屏关键路径 ──
+  //
+  // 清理本身是**迁移一次性动作**（旧库的数据都能从服务端重新拉），但它用的都是重 IO：
+  // `indexedDB.databases()` + `deleteDatabase`，以及 `new PouchDB(旧名).destroy()`。
+  // 这些东西与首屏的 `db.query` 抢同一批 IndexedDB 事务 —— 实测清理一轮约 120ms，
+  // 把 queryTimeline 从 ~60ms 拉到 ~180ms，而首屏那几十毫秒是用户唯一会「盯着看」的时间。
+  //
+  // 于是沿用「空闲压缩」那套思路（同一套命名：schedule*/run* + 共享状态里的去重标记），
+  // 差别只在触发源与「能不能取消」：压缩等的是「同步安静下来」、可以取消（暂停要它立刻停）；
+  // 清理等的是「首屏画完之后的第一段空闲」、不需要取消（它删的东西与当前账号无关）。
+  //
+  // 为什么用 requestIdleCallback 而不是 setTimeout(0)：首屏之后通常还有一批收尾工作
+  // （列表查询、图片解码、blob URL 生成），`setTimeout(0)` 只会插到这些工作中间继续抢事务；
+  // 空闲回调（timeout 2000ms 兜底）要等浏览器这一帧彻底空下来才跑。Safari 没有这个 API，
+  // 回退到 2s 定时器：那时首屏早就画完了。
+
+  /** 清理最多等多久必须执行（`requestIdleCallback` 的 timeout，也是无该 API 时的回退延迟） */
+  const IDLE_CLEANUP_FALLBACK_MS = 2000
+
+  /**
+   * 排一次空闲清理：并发调用只排一次（`cleanupScheduled` 去重）。
+   *
+   * `getEntriesDb()` 在首屏会被调用几十次，每个调用点都会走到这里 —— 所以这个函数必须是
+   * 「纯布尔判断 + 最多一个定时器」，不能有任何 await 或 IO。
+   */
+  function scheduleIdleCleanup(): void {
+    if (pouchState.cleanupScheduled) return
+    // 已经清理过了（迁移标记写过、或本轮已经跑完）：不必再排
+    if (pouchState.cleanupDone) return
+    pouchState.cleanupScheduled = true
+    const run = () => {
+      pouchState.cleanupScheduled = false
+      void runIdleCleanup()
+    }
+    const idle = globalThis as {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => unknown
+    }
+    // 句柄不保存：清理不需要取消（见 PouchDbState.cleanupScheduled 的说明）
+    if (typeof idle.requestIdleCallback === 'function') {
+      idle.requestIdleCallback(run, { timeout: IDLE_CLEANUP_FALLBACK_MS })
+    } else {
+      setTimeout(run, IDLE_CLEANUP_FALLBACK_MS)
+    }
+  }
+
+  /**
+   * 真正执行空闲清理。
+   *
+   * 语义与之前完全一样（每会话最多一次、幂等、失败静默），只是发起时刻变了：现在是
+   * 「首屏画完之后的空闲窗口」。清理失败只是旧库残留占磁盘，不影响任何主流程。
+   */
+  async function runIdleCleanup(): Promise<void> {
+    if (pouchState.cleanupDone) return
+    pouchState.cleanupDone = true
+    try {
+      await ensureCleanup()
+    } catch {
+      // cleanupLegacyDbs 自己吞掉了所有异常，这里只是防御
     }
   }
 
@@ -922,6 +1084,9 @@ export function usePouchDb() {
   /** 带节流的催促（自动同步用）；返回本轮有没有真的发出请求 */
   async function refreshServerTimeline(force = false): Promise<boolean> {
     if (pouchState.paused.value || pouchState.storageBroken.value) return false
+    // 离线短路：请求必然失败，不必等浏览器网络栈报错（调用方按「没催成功」处理）。
+    // 也**不**写节流时间戳 —— 恢复联网后要能立刻催一次，而不是被上一轮的失败记录挡住。
+    if (isBrowserOffline()) return false
     const now = Date.now()
     if (!force && now - loadLastRefreshAt() < REFRESH_THROTTLE_MS) return false
     // 先落盘再请求：并发调用都按「刚催过」处理（多催一次无副作用，少催才会慢）
@@ -957,6 +1122,11 @@ export function usePouchDb() {
     }
   }
 
+  /** 当前是否处于「挂载失败后的退避窗口」内（离线时也算：取寻址注定失败） */
+  function inTimelineSyncBackoff(): boolean {
+    return isBrowserOffline() || pouchState.timelineSyncRetryAt > Date.now()
+  }
+
   /**
    * 确保时间线库的 live 单向复制在跑（幂等）。
    *
@@ -964,15 +1134,22 @@ export function usePouchDb() {
    * 也不需要每次打开页面都决定「拉哪个源」—— 这正是服务端聚合改造要买到的东西。
    *
    * restart=true 时先停掉旧句柄再重挂（本地库被重建 / 换账号之后用）。
+   *
+   * 幂等判据有两层：**已挂上句柄**（正常路径）与**上次挂载失败后的退避窗口**。缺了后者的话，
+   * 失败时句柄不存在，首屏那几十次 `getEntriesDb()` 会各自重走一遍「取寻址 → 失败」，
+   * 这就是离线时 sync-targets 请求风暴的主要来源。
    */
   async function ensureTimelineLiveSync(restart = false): Promise<void> {
     if (pouchState.paused.value || pouchState.storageBroken.value) return
     if (restart) {
       stopAllLiveSync()
+      // 显式重挂（重建本地库 / 换账号 / 用户点同步）就是要立刻重试，不受失败退避约束
+      pouchState.timelineSyncRetryAt = 0
     } else {
       if (syncHandles.has(TIMELINE_ID)) return
       // 已有一次挂载流程在跑：等它，而不是另起一条（两条 live 复制写同一个库）
       if (pouchState.timelineSyncPromise) return pouchState.timelineSyncPromise
+      if (inTimelineSyncBackoff()) return
     }
     const starting = startTimelineLiveSync()
     pouchState.timelineSyncPromise = starting
@@ -1013,9 +1190,15 @@ export function usePouchDb() {
     /** 回调是否还属于当前这一代（暂停 / 换账号 / 重建之后的迟到事件一律丢弃） */
     const isCurrent = () => pouchState.timelineSyncGeneration === generation && pouchState.dbUserId === ownerUserId
     try {
-      const url = await remoteUrlForId(TIMELINE_ID).catch(() => null)
+      // 离线短路：取寻址必然失败，连浏览器网络栈都不必碰（下面的失败分支会照常退避）
+      const url = isBrowserOffline()
+        ? null
+        : await remoteUrlForId(TIMELINE_ID).catch(() => null)
       if (!url) {
         if (pouchState.dbUserId === ownerUserId) {
+          // 记下退避截止时刻：失败时 syncHandles 里没有句柄，下一次 ensureTimelineLiveSync
+          // 只看「有没有句柄」会立刻重走一遍取寻址（见 TIMELINE_SYNC_RETRY_BACKOFF_MS）
+          pouchState.timelineSyncRetryAt = Date.now() + TIMELINE_SYNC_RETRY_BACKOFF_MS
           syncStatuses[TIMELINE_ID] = {
             feedId: TIMELINE_ID,
             status: 'error',
@@ -1027,6 +1210,8 @@ export function usePouchDb() {
       }
       // 等待寻址信息期间可能切了账号 / 被暂停 / 熔断：不能拿上一个账号的地址挂到新账号的库上
       if (pouchState.dbUserId !== ownerUserId || pouchState.paused.value || pouchState.storageBroken.value) return
+      // 地址拿到了：清掉退避（这一轮已经成功跨过「取寻址」这一步）
+      pouchState.timelineSyncRetryAt = 0
 
       // 服务端把聚合库换掉了（重建 / v1→v2 升级 / 手工删库后重建）→ 本地这份是**上一版库的镜像**：
       // 同一批 `_id` 上带着旧修订谱系，留着会让新库搬来的内容变成冲突分支、甚至显示成旧数据。
@@ -1224,8 +1409,10 @@ export function usePouchDb() {
         }
       }
     } catch (err) {
-      // 挂载本身失败（建复制抛错等）：按同步错误上报，等下一次触发再试
+      // 挂载本身失败（建复制抛错等）：按同步错误上报，等下一次触发再试。
+      // 同样要退避 —— 抛错路径下句柄也没挂上，不退避就会在首屏那几十次调用里反复重来
       if (pouchState.dbUserId === ownerUserId) {
+        pouchState.timelineSyncRetryAt = Date.now() + TIMELINE_SYNC_RETRY_BACKOFF_MS
         syncStatuses[TIMELINE_ID] = {
           feedId: TIMELINE_ID,
           status: 'error',
@@ -1266,14 +1453,34 @@ export function usePouchDb() {
     return requested ? feeds.length : 0
   }
 
-  /** 等「已同步条数」超过 before（首屏优先同步用，有界、不抛错） */
+  /**
+   * 等「已同步条数」超过 before（首屏优先同步用，有界、不抛错）。
+   *
+   * **不再空等**：每轮轮询先看同步是否已经不可能推进 —— 离线 / 复制根本没挂上（挂载失败）/
+   * 存储已熔断。这三种情况下「条数涨」永远不会发生，等满 5s 只是让首屏白挂着。
+   * 以前没有这道闸门，离线冷启动时 `refreshServerTimeline` 立刻返回 false 之后，
+   * 这里仍然实打实空转满 5000ms（`done=false` 的结果一样，只是晚了 5 秒）。
+   */
   async function waitForTimelineActivity(before: number, waitMs: number): Promise<boolean> {
     const deadline = Date.now() + waitMs
     for (;;) {
       if ((pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0) > before) return true
+      if (syncCannotProgress()) return false
       if (Date.now() >= deadline) return false
       await new Promise(resolve => setTimeout(resolve, 200))
     }
+  }
+
+  /**
+   * 同步是否已经不可能推进（离线 / 拉取通道没挂上 / 存储熔断 / 用户暂停）。
+   *
+   * 判据用「句柄在不在」而不是「状态是不是 error」：句柄是同步真的在跑的唯一证据，
+   * 而状态可能因为一次瞬时错误停在 error 上、随后被 retry 自愈（live 复制带 retry: true）。
+   */
+  function syncCannotProgress(): boolean {
+    if (pouchState.paused.value || pouchState.storageBroken.value) return true
+    if (isBrowserOffline()) return true
+    return !syncHandles.has(TIMELINE_ID)
   }
 
   /**
@@ -1285,17 +1492,31 @@ export function usePouchDb() {
    *
    * 这里**不用** wait=1 的同步请求：首屏等待上限是 5s，而服务端一轮聚合可能更久
    * （新订阅要回填窗口内的历史与图片），把首屏挂在 HTTP 请求上会变成「白屏十几秒」。
+   *
+   * **三条立即返回的路径**（催促没发出去 / 离线 / 存储熔断）：这些情况下等下去没有任何收益，
+   * 只会让「本地没缓存」的列表页盯着骨架多等满 5s。`done:false` 如实上报「没等到新内容」，
+   * 调用方（useListFirstPaint）据此按现有内容渲染，剩下的条目仍走「已同步 N 条」提示条。
    */
   async function syncPriority(waitMs: number = PRIORITY_SYNC_WAIT_MS): Promise<PrioritySyncResult> {
     if (pouchState.paused.value) return { done: true, added: 0, skipped: 0 }
     const before = pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0
+    const current = () => Math.max(0, (pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0) - before)
+
+    // 存储熔断：库已经写不进去了，同步入不了库，等下去只会白等
+    if (pouchState.storageBroken.value) return { done: false, added: current(), skipped: 1 }
+    // 离线：催促注定失败，且 live 复制此刻也推不动（连浏览器网络栈都不必碰）
+    if (isBrowserOffline()) return { done: false, added: current(), skipped: 1 }
+
     const started = Date.now()
     const requested = await refreshServerTimeline(true)
     await ensureTimelineLiveSync()
+    // 催促没发出去（离线 / 登录过期 / 被节流）且复制没挂上：不可能有新内容到端了
+    if (!requested && !syncHandles.has(TIMELINE_ID)) {
+      return { done: false, added: current(), skipped: 1 }
+    }
     // 剩下的小预算用来等数据到端（催促本身也花了时间，从预算里扣掉）
     const done = await waitForTimelineActivity(before, Math.max(0, waitMs - (Date.now() - started)))
-    const added = Math.max(0, (pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0) - before)
-    return { done, added, skipped: requested ? 0 : 1 }
+    return { done, added: current(), skipped: requested ? 0 : 1 }
   }
 
   /**
@@ -1376,6 +1597,8 @@ export function usePouchDb() {
         }
       }
       const serverAdded = typeof res.added === 'number' ? res.added : 0
+      // 手动同步是显式动作：即便上一次挂载失败过，也要立刻重试一次（否则用户点了没反应）
+      pouchState.timelineSyncRetryAt = 0
       await ensureTimelineLiveSync()
       await waitForTimelineCatchup(serverAdded, TIMELINE_CATCHUP_WAIT_MS)
       const clientAdded = Math.max(0, (pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0) - before)
@@ -1651,49 +1874,94 @@ export function usePouchDb() {
   }
 
   /**
+   * enrich 阶段读封面附件的并发上限。
+   *
+   * 串行读（旧实现）的尾延迟是一条一条累加：一页 20 条有封面就至少 20 次 IndexedDB 往返；
+   * 但也不能一次把几十个 `getAttachment` 全打出去 —— 它们会和同一时刻的列表查询 / 滚动时
+   * 新条目的查询抢同一批事务，等于拿「字的首帧」换「图的首帧」。4 是这两者之间的折中：
+   * 同屏封面通常**远少于** 20 条，所以并发 4 已经能在两三批内把所有封面取完，
+   * 同时在任何时刻都不会让事务队列被附件占满。
+   */
+  const COVER_FETCH_CONCURRENCY = 4
+
+  /** 取一条条目封面的 blob URL（缓存优先）；附件没同步下来就返回 null（不显示缩略图） */
+  async function resolveCoverUrl(entry: RssEntry): Promise<string | null> {
+    // 封面图：images 中 cover 标记的附件 → 本地 blob
+    const cover = entry.images?.find(i => i.cover)
+    if (!cover?.attachment) return null
+    const cacheKey = `${entry.id}:${cover.attachment}`
+    const hit = entryCoverBlobs.get(cacheKey)
+    if (hit) return hit
+    try {
+      const blob = await (await getEntriesDb()).getAttachment(entry.id, cover.attachment) as unknown as Blob
+      const url = URL.createObjectURL(blob)
+      entryCoverBlobs.set(cacheKey, url)
+      return url
+    } catch {
+      // 附件未同步：不显示缩略图
+      return null
+    }
+  }
+
+  /**
    * 补全条目的 feed 元信息（源名/站点/图标）与封面图 blob。
    * FeedDoc 随拉取通道同步到本地库，一次 allDocs 读取全部所需文档；
    * 图标优先本地缓存的 AVIF 附件（blob URL），离线可用；无缓存回退原始 URL。
    * 源名以用户自定义的订阅名（见 loadSubscriptionTitles）优先，注册表标题仅作兜底，
    * 保证与侧边栏显示的名字一致（自定义名可覆盖抓取到的原始标题）。
+   *
+   * **哪些可以并行**（实测 enrich 段 40~110ms，其中 readState ~2~10ms、
+   * FeedDoc+titles ~10~100ms、封面附件是逐条串行的主要来源）：
+   *
+   *   - `attachReadState`（读 `entry-state:*`）与「FeedDoc 元信息 + 订阅自定义名」这两路
+   *     **互不依赖**：一个读状态文档、一个读 feed/subscription 文档，可以同时发出去；
+   *   - 封面附件之间也互不依赖，按 COVER_FETCH_CONCURRENCY 并发取（有上限）；
+   *   - 源图标（`resolveFeedImage`）要对每个不同的源各取一次附件，同样按上限并发。
+   *
+   * 行为保持不变：拿不到状态就按未读、附件没同步就不显示缩略图、自定义订阅名优先于注册表标题。
    */
   async function enrichEntries(entries: RssEntry[]): Promise<RssEntry[]> {
     if (entries.length === 0) return entries
-    // 先合已读状态：它是状态文档，与下面的 feed 元信息互不依赖
-    await attachReadState(entries)
     const feedIds = [...new Set(entries.map(e => e.feedId))]
-    let docs: FeedDoc[] = []
-    try {
-      // FeedDoc 的 id 规则见 utils/feedDocId（下划线开头的 feedId 后端加了前缀）
-      const res = await (await getEntriesDb()).allDocs({ include_docs: true, keys: feedIds.map(feedDocId) })
-      docs = (res.rows as Array<{ doc?: FeedDoc }>)
-        .map(r => r.doc)
-        .filter((d): d is FeedDoc => Boolean(d))
-    } catch {
-      return entries
-    }
-    const byId = new Map(docs.map(d => [d._id, d]))
-    // 用户自定义订阅名：优先于注册表抓来的标题（与侧边栏一致）
-    const subscriptionTitles = await loadSubscriptionTitles(feedIds)
-    for (const entry of entries) {
-      // 封面图：images 中 cover 标记的附件 → 本地 blob
-      const cover = entry.images?.find(i => i.cover)
-      if (cover?.attachment) {
-        const cacheKey = `${entry.id}:${cover.attachment}`
-        const hit = entryCoverBlobs.get(cacheKey)
-        if (hit) {
-          entry.coverUrl = hit
-        } else {
-          try {
-            const blob = await (await getEntriesDb()).getAttachment(entry.id, cover.attachment) as unknown as Blob
-            const url = URL.createObjectURL(blob)
-            entryCoverBlobs.set(cacheKey, url)
-            entry.coverUrl = url
-          } catch {
-            // 附件未同步：不显示缩略图
-          }
-        }
+
+    /** FeedDoc + 订阅自定义名那一路（与已读态并行；任何一步失败都退化成「没有元信息」） */
+    const feedMetaPath = async () => {
+      let docs: FeedDoc[] = []
+      try {
+        // FeedDoc 的 id 规则见 utils/feedDocId（下划线开头的 feedId 后端加了前缀）
+        const res = await (await getEntriesDb()).allDocs({ include_docs: true, keys: feedIds.map(feedDocId) })
+        docs = (res.rows as Array<{ doc?: FeedDoc }>)
+          .map(r => r.doc)
+          .filter((d): d is FeedDoc => Boolean(d))
+      } catch {
+        // 源元信息读不到：条目照样上屏，只是没有源名/图标（与旧实现一致）
+        docs = []
       }
+      // 用户自定义订阅名：优先于注册表抓来的标题（与侧边栏一致）
+      const subscriptionTitles = await loadSubscriptionTitles(feedIds)
+      return { byId: new Map(docs.map(d => [d._id, d])), subscriptionTitles }
+    }
+
+    // 两路互不依赖：一处等状态文档、一处等 feed/subscription 文档，串行等于白等一轮
+    const [, { byId, subscriptionTitles }] = await Promise.all([
+      attachReadState(entries),
+      feedMetaPath()
+    ])
+
+    // 源图标按源去重后并发取（同一源只解一次，与旧实现一致）
+    const feedDocs = feedIds
+      .map(id => byId.get(feedDocId(id)))
+      .filter((d): d is FeedDoc => Boolean(d))
+    const feedImages = await mapWithLimit(feedDocs, COVER_FETCH_CONCURRENCY, doc => resolveFeedImage(doc))
+    const imageByFeedId = new Map<string, string | null>()
+    feedDocs.forEach((doc, i) => imageByFeedId.set(doc._id, feedImages[i] ?? null))
+
+    // 封面附件按条目并发取（有上限；命中缓存的条目根本不会碰 IndexedDB）
+    const coverUrls = await mapWithLimit(entries, COVER_FETCH_CONCURRENCY, entry => resolveCoverUrl(entry))
+
+    entries.forEach((entry, i) => {
+      const coverUrl = coverUrls[i]
+      if (coverUrl) entry.coverUrl = coverUrl
       const doc = byId.get(feedDocId(entry.feedId))
       if (doc) {
         entry.feed = {
@@ -1701,7 +1969,7 @@ export function usePouchDb() {
           title: doc.title ?? '',
           siteUrl: doc.siteUrl ?? '',
           feedUrl: doc.url ?? '',
-          image: (await resolveFeedImage(doc)) ?? undefined,
+          image: imageByFeedId.get(doc._id) ?? undefined,
           lastFetchedAt: doc.lastFetchedAt ?? ''
         }
       }
@@ -1710,7 +1978,7 @@ export function usePouchDb() {
       if (customTitle) {
         entry.feed = { ...entry.feed, id: entry.feedId, title: customTitle }
       }
-    }
+    })
     return entries
   }
 

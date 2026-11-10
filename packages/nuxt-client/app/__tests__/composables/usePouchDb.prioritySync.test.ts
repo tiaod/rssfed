@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { usePouchDb } from '~/composables/usePouchDb'
 
 /**
@@ -16,11 +16,14 @@ interface FakeTask {
   url: string
   emitChange: (info: { docs_written?: number, pending?: number }) => void
   emitPaused: () => void
+  emitError: (err: unknown) => void
 }
 
 const H = vi.hoisted(() => ({
   tasks: [] as FakeTask[],
   refreshArgs: [] as unknown[][],
+  /** 服务端下发的远端地址；null = 取不到（挂载失败，用于「复制根本没挂上」的用例） */
+  remoteUrl: 'http://remote.test/timeline' as string | null,
   refresh: async () => ({ accepted: true, completed: true, added: 0 }) as { accepted: boolean, completed?: boolean, added?: number }
 }))
 
@@ -57,7 +60,8 @@ vi.mock('pouchdb', () => {
     H.tasks.push({
       url,
       emitChange: info => emit('change', info),
-      emitPaused: () => emit('paused')
+      emitPaused: () => emit('paused'),
+      emitError: err => emit('error', err)
     })
     return task
   }
@@ -85,7 +89,7 @@ vi.mock('~/utils/localDbName', () => ({
 vi.mock('~/composables/useCouchTargets', () => ({
   TIMELINE_ID: '__timeline__',
   useCouchTargets: () => ({
-    remoteUrlForId: async (id: string) => (id === '__timeline__' ? 'http://remote.test/timeline' : null),
+    remoteUrlForId: async (id: string) => (id === '__timeline__' ? H.remoteUrl : null),
     invalidate: () => {}
   })
 }))
@@ -115,6 +119,7 @@ let pouch: ReturnType<typeof usePouchDb>
 beforeEach(() => {
   H.tasks.length = 0
   H.refreshArgs.length = 0
+  H.remoteUrl = 'http://remote.test/timeline'
   H.refresh = async () => ({ accepted: true, completed: true, added: 0 })
   try {
     localStorage.clear()
@@ -162,12 +167,83 @@ describe('优先同步（进入列表时催一次并等结果）', () => {
     expect(H.tasks).toHaveLength(0)
   })
 
-  it('催促请求失败（离线）→ skipped=1，仍照常等本地是否有内容', async () => {
+  it('催促请求失败（后端不可达但浏览器自认在线）→ skipped=1，仍照常等本地是否有内容', async () => {
     H.refresh = async () => {
       throw new Error('offline')
     }
     const result = await pouch.syncPriority(50)
     expect(result.skipped).toBe(1)
     expect(result.added).toBe(0)
+  })
+})
+
+describe('离线 / 熔断时立即返回，不空等满 5s', () => {
+  /** happy-dom 上 navigator.onLine 可写，直接改它模拟断网 */
+  function setOnline(online: boolean) {
+    Object.defineProperty(globalThis.navigator, 'onLine', {
+      value: online,
+      configurable: true,
+      writable: true
+    })
+  }
+
+  afterEach(() => {
+    setOnline(true)
+  })
+
+  it('离线：syncPriority 立刻返回 done=false，且一个请求都不发', async () => {
+    setOnline(false)
+    const started = Date.now()
+    // 给一个很大的等待上限：若是旧实现（空转轮询），这里会实打实等满 3000ms
+    const result = await pouch.syncPriority(3000)
+    const elapsed = Date.now() - started
+
+    expect(result.done).toBe(false)
+    expect(result.added).toBe(0)
+    expect(result.skipped).toBe(1)
+    // 立即返回（宽松上限：只要求远小于等待窗口，避免断言脆弱的「0ms」）
+    expect(elapsed).toBeLessThan(200)
+    // 离线短路：不触网、也不挂复制
+    expect(H.refreshArgs).toHaveLength(0)
+    expect(H.tasks).toHaveLength(0)
+  })
+
+  it('离线时催促不发请求（refreshServerTimeline 短路，连节流时间戳都不写）', async () => {
+    setOnline(false)
+    await pouch.syncPriority(100)
+    expect(H.refreshArgs).toHaveLength(0)
+
+    // 恢复联网后第一次 syncPriority 必须真的能催（没有被上一轮的失败节流挡住）
+    setOnline(true)
+    const pending = pouch.syncPriority(1000)
+    await vi.waitFor(() => expect(H.refreshArgs).toHaveLength(1))
+    await vi.waitFor(() => expect(H.tasks).toHaveLength(1))
+    H.tasks[0]!.emitPaused()
+    await pending
+  })
+
+  it('存储熔断后立即返回 done=false（库写不进去，等下去没有意义）', async () => {
+    await pouch.syncFeedsIfChanged([{ feedId: 'feed-a' }])
+    // 让复制报存储故障 → 熔断（配额耗尽 / 库进入 global failure）
+    H.tasks[0]!.emitError({ name: 'indexed_db_went_bad', reason: 'QuotaExceededError' })
+    expect(pouch.storageBroken.value).toBeTruthy()
+
+    const started = Date.now()
+    const result = await pouch.syncPriority(3000)
+    expect(result.done).toBe(false)
+    expect(Date.now() - started).toBeLessThan(200)
+  })
+
+  it('催促没发出去且复制没挂上：立即返回，不等满窗口', async () => {
+    // refresh 失败 → 催促没发出去；同时 live 复制也挂不上（取不到远端地址）
+    H.remoteUrl = null
+    H.refresh = async () => {
+      throw new Error('backend down')
+    }
+    const started = Date.now()
+    const result = await pouch.syncPriority(3000)
+    expect(result.done).toBe(false)
+    expect(result.skipped).toBe(1)
+    expect(Date.now() - started).toBeLessThan(400)
   })
 })
