@@ -2,6 +2,8 @@
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 import ListActionsBar from '~/components/ListActionsBar.vue'
+// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
+import EntryListSkeleton from '~/components/EntryListSkeleton.vue'
 import type { SubscriptionItem } from '~/types/rss'
 import type { GroupScanCursor } from '~/composables/usePouchDb'
 
@@ -49,11 +51,11 @@ const {
   removedIds: () => pouch.removedEntryIds
 })
 
-// 首屏：本地有缓存就先上屏（同步在后台跑，新条目折叠进「已同步 N 条」），
-// 没缓存才等优先同步把内容拉回来再上屏 —— 见 useListFirstPaint
-const { loading, renderFirstPaint } = useListFirstPaint({
+// 首屏：本地库第一批查询回来就上屏，优先同步组内所有源全程在后台（见 useListFirstPaint）。
+// `loading` 只表示「本地查询还没回来」——骨架也只在这段时间出现，之后不管同步跑没跑完都是
+// 真实内容，新条目折叠进「已同步 N 条」提示条，等用户点「查看」。
+const { loading, showSkeleton, renderFirstPaint } = useListFirstPaint({
   load,
-  hasEntries: () => entries.value.length > 0,
   sync: () => pouch.syncPriority()
 })
 
@@ -102,8 +104,8 @@ onMounted(async () => {
   // 必须在 feeds 加载之后：扫描范围就是 groupFeedIds，早了会按空范围扫出「已到底」的假结论
   resumeUnreadScan()
 
-  // 先上屏、再优先同步组内所有源：有缓存时一个请求都不等，新条目折叠进提示条
-  // （见 useListFirstPaint）；没缓存时才等它们跑完（最多 5s）再渲染。
+  // 本地库第一批查询回来就上屏，随后才把优先同步丢到后台（见 useListFirstPaint）。
+  // 首屏只等本地查询这一次：同步再慢也不挡上屏，新条目交给「已同步 N 条」提示条。
   await renderFirstPaint()
 })
 
@@ -116,18 +118,11 @@ watch(pouch.timelineVersion, () => refreshFromSync())
     <template #header>
       <UDashboardNavbar :title="category">
         <template #right>
-          <!-- 页面状态排在动作之前（切换视图按钮的左边），先看到「这是什么页面」再看到动作 -->
-          <UButton
-            v-if="loading"
-            loading
-            variant="ghost"
-            color="neutral"
-            size="sm"
-          >
-            加载中…
-          </UButton>
+          <!-- 页面状态排在动作之前（切换视图按钮的左边），先看到「这是什么页面」再看到动作。
+               首屏不再挂一个转圈按钮：内容区的骨架已经在表态，导航栏重复一个「加载中…」还会把
+               切换视图 / 动作区挤走。订阅源规模只在读出来之后才显示 —— 读之前的 0 是假数字。 -->
           <span
-            v-else
+            v-if="feeds"
             class="shrink-0 text-sm text-muted"
           >
             {{ groupFeeds.length }} 个订阅源
@@ -177,8 +172,22 @@ watch(pouch.timelineVersion, () => refreshFromSync())
           </p>
         </div>
 
+        <template v-else-if="loading">
+          <!--
+            首屏骨架：版式跟随当前视图，条目上屏时不会跳版（见 EntryListSkeleton）。
+            外层认 `loading`（本地查询还没回来，这段时间不能落到空态），里层再认
+            `showSkeleton`：几十毫秒就结束的本地查询连骨架都不画，免得闪一下。
+          -->
+          <EntryListSkeleton
+            v-if="showSkeleton"
+            class="min-h-0 flex-1"
+            :view="view"
+            show-feed
+          />
+        </template>
+
         <div
-          v-else-if="!loading && groupFeeds.length === 0"
+          v-else-if="groupFeeds.length === 0"
           class="flex flex-col items-center py-12 gap-4"
         >
           <UIcon
@@ -200,7 +209,7 @@ watch(pouch.timelineVersion, () => refreshFromSync())
 
         <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
         <NoUnreadState
-          v-else-if="unreadOnly && !visibleEntries.length && !loading"
+          v-else-if="unreadOnly && !visibleEntries.length"
           :probing="probing"
           :scanned="scannedCount"
           :has-more="visibleHasMore()"
@@ -209,7 +218,7 @@ watch(pouch.timelineVersion, () => refreshFromSync())
         />
 
         <div
-          v-else-if="!visibleEntries.length && !loading"
+          v-else-if="!visibleEntries.length"
           class="flex flex-col items-center py-12 gap-4"
         >
           <UIcon

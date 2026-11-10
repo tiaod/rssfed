@@ -5,6 +5,9 @@ import VueEasyLightbox from 'vue-easy-lightbox/external-css'
 import type { RssEntry } from '~/types/rss'
 import type { LightboxImage } from '~/composables/useImageLightbox'
 import { DEFAULT_LIST_VIEW, type ListView } from '~/utils/listViews'
+// 列数断点 / 间距 / 表格行高与首屏骨架（EntryListSkeleton）共用一份：两处各写一套断点表，
+// 迟早出现「骨架铺三列、条目铺两列」的跳版，而那正是骨架屏最该避免的事。
+import { resolveLanes, TABLE_ROW_HEIGHT, VIEW_GAP } from '~/utils/listViewLayout'
 import {
   entryByline,
   entryCoverAspect,
@@ -135,67 +138,8 @@ const showSkeleton = computed(() =>
 
 const view = computed<ListView>(() => props.view ?? DEFAULT_LIST_VIEW)
 
-/**
- * 各视图的列数断点表，与 app/assets/css/main.css 的 --breakpoint-3xl/4xl 及 Tailwind 默认断点一致。
- * 虚拟化必须由 JS 知道列数（lane 决定条目落哪一列），没法交给 CSS。按 minWidth 降序，首个命中生效。
- *
- * 列数刻意按视图分开：瀑布流在手机上也铺两列（卡片墙的密度感）；
- * 博客卡片要留大留白，手机单列、多列才在平板以上成立；
- * 紧凑列表永远单列；图片图块窄，手机上也放得下两列。
- */
-const VIEW_BREAKPOINTS: Record<ListView, ReadonlyArray<readonly [number, number]>> = {
-  // 社交动态：手机与桌面都是同一条窄列（条目内部再居中限宽），列数恒定不影响断点
-  social: [[0, 1]],
-  // 瀑布流（图片/卡片墙）：手机上就给两列，卡片窄但信息密度高，和博客视图一眼能区分
-  masonry: [
-    [2560, 8], // 4xl
-    [1792, 6], // 3xl
-    [1536, 5], // 2xl
-    [1280, 4], // xl
-    [768, 3], // md（平板）
-    [0, 2] // 手机
-  ],
-  // 博客视图：手机保持单列（卡片大、适合读），到平板/桌面才铺多列
-  blog: [
-    [1280, 3], // xl
-    [768, 2], // md
-    [0, 1]
-  ],
-  list: [[0, 1]],
-  // 表格恒为单列，且走的是 Table 分支（不用泳道虚拟化）：这里只为枚举完整、不参与布局
-  table: [[0, 1]],
-  // 图片瀑布流：图块窄，手机上也能放两列
-  image: [
-    [1536, 5], // 2xl
-    [1280, 4], // xl
-    [1024, 3], // lg
-    [0, 2]
-  ]
-}
-
-/**
- * 各视图的条目间距（px）。
- *
- * 它同时是页头跨列宽度的换算依据（见 headerSpanStyle），所以不能写死在模板 class 里。
- * 列表视图间距为 0：行与行靠 border 分隔，留缝反而不像列表。
- */
-const VIEW_GAP: Record<ListView, number> = {
-  social: 0, // 条与条靠分隔线划分，留缝就不像信息流了
-  masonry: 16,
-  blog: 24,
-  list: 0,
-  table: 0, // 同上：表格分支不吃这个值
-  image: 8
-}
-
+// 列数断点表 / 间距见 utils/listViewLayout（与首屏骨架共用一份，两边数字不会走偏）
 const laneCount = ref(1)
-
-function resolveLanes(width: number, target: ListView): number {
-  for (const [minWidth, lanes] of VIEW_BREAKPOINTS[target]) {
-    if (width >= minWidth) return lanes
-  }
-  return 1
-}
 
 const gap = computed(() => VIEW_GAP[view.value])
 
@@ -828,10 +772,10 @@ watch([isOpen, () => currentEntry.value?.id], ([open]) => {
  * 「只渲染视口附近的行」这条性能口径不变 —— 它的根节点就是滚动容器，页面给的
  * `flex-1 min-h-0` 落在根上（见模板）。一行一条、行高固定，也就不需要逐条测量。
  *
- * 行高 = 一行 text-sm（20px）+ 上下内边距（见模板 ui 把 td 的 p-4 收成 py-2）+ 1px 分隔线。
- * 53 是主题默认 p-4 下的高度，偏松；表格一行只有标题 + 摘要，收窄后信息密度更接近邮件列表。
+ * 行高是常数（TABLE_ROW_HEIGHT，在 utils/listViewLayout —— 首屏骨架照它排行高，两处必须同一个数）：
+ * 一行 text-sm + 上下内边距（见模板 ui 把 td 的 p-4 收成 py-2）+ 1px 分隔线。主题默认 p-4 下的
+ * 53px 偏松，表格一行只有标题 + 摘要，收窄后信息密度更接近邮件列表。
  */
-const TABLE_ROW_HEIGHT = 37
 
 /**
  * 表格列：来源 / 标题（标题后紧跟浅灰摘要，同一行）/ 时间。

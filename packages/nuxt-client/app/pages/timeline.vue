@@ -4,6 +4,8 @@ import type { SubscriptionItem } from '~/types/rss'
 import ListActionsBar from '~/components/ListActionsBar.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
+// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
+import EntryListSkeleton from '~/components/EntryListSkeleton.vue'
 
 definePageMeta({
   layout: 'default'
@@ -28,13 +30,14 @@ const {
   removedIds: () => pouch.removedEntryIds
 })
 
-// 首屏策略：有本地缓存先上屏；没有才等优先同步（最多 5s），与单源 / 分组 / bot 页一致
-// （见 useListFirstPaint）。时间线没有「本列表范围」，sync 只按本地订阅判空。
-const { loading, renderFirstPaint } = useListFirstPaint({
+// 首屏策略：本地库第一批查询回来就上屏，优先同步全程在后台（见 useListFirstPaint）。
+// `loading` 只表示「本地查询还没回来」——骨架也只在这段时间出现，之后不管同步跑没跑完都是
+// 真实内容（有缓存就是缓存，没有就是空态），新条目由「已同步 N 条」提示条负责。
+// 时间线没有「本列表范围」，sync 只按本地订阅判空。
+const { loading, showSkeleton, renderFirstPaint } = useListFirstPaint({
   load,
-  hasEntries: () => entries.value.length > 0,
   sync: async () => {
-    // 没有订阅就没有可聚合的内容：别为一个空列表白等 5s
+    // 没有订阅就没有可聚合的内容：没必要为之空催一次服务端聚合
     if (feedIds.value.length === 0) return
     await pouch.syncPriority()
   }
@@ -89,17 +92,10 @@ watch(pouch.timelineVersion, () => refreshFromSync())
     <template #header>
       <UDashboardNavbar title="时间线">
         <template #right>
-          <!-- 页面状态排在动作之前（切换视图按钮的左边） -->
-          <UButton
-            v-if="loading"
-            loading
-            variant="ghost"
-            color="neutral"
-            size="sm"
-          >
-            加载中…
-          </UButton>
-
+          <!--
+            首屏不在这里再放一个「加载中…」：内容区的骨架已经表态，导航栏再挂一个转圈属于
+            同一件事说两遍（而且这个按钮会挤走切换视图 / 动作区的位置，几个列表页一起统一去掉）。
+          -->
           <ListViewSwitcher
             :view="view"
             :overridden="overridden"
@@ -140,15 +136,20 @@ watch(pouch.timelineVersion, () => refreshFromSync())
           @apply="applyNew"
         />
 
-        <div
-          v-if="loading"
-          class="flex justify-center py-12"
-        >
-          <UIcon
-            name="i-lucide-loader-circle"
-            class="size-8 animate-spin text-muted"
+        <!--
+          首屏骨架：版式跟随当前视图，条目上屏时不会跳版（见 EntryListSkeleton）。
+          外层分支认 `loading`（本地查询还没回来，这段时间不能落到空态），里层再认
+          `showSkeleton`：几十毫秒就结束的本地查询连骨架都不画，免得闪一下 —— 这段时间
+          容器是空的，就是它该有的样子。
+        -->
+        <template v-if="loading">
+          <EntryListSkeleton
+            v-if="showSkeleton"
+            class="min-h-0 flex-1"
+            :view="view"
+            show-feed
           />
-        </div>
+        </template>
 
         <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
         <NoUnreadState

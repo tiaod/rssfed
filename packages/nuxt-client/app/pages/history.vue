@@ -2,6 +2,8 @@
 import type { RssEntry } from '~/types/rss'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
 import HistoryEntryList from '~/components/HistoryEntryList.vue'
+// 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
+import EntryListSkeleton from '~/components/EntryListSkeleton.vue'
 
 definePageMeta({
   layout: 'default'
@@ -10,7 +12,6 @@ definePageMeta({
 const pouch = usePouchDb()
 
 const entries = ref<RssEntry[]>([])
-const loading = ref(true)
 const error = ref<string | null>(null)
 
 /**
@@ -30,10 +31,17 @@ async function load() {
     error.value = null
   } catch (e: unknown) {
     error.value = errorMessage(e, '加载最近阅读失败')
-  } finally {
-    loading.value = false
   }
 }
+
+/**
+ * 首屏节流与骨架延迟借用 `useListFirstPaint`（不传 `sync`：历史页没有优先同步，只查本地库）。
+ *
+ * 与收藏页同一个口径：`loading` 只表示「本地库第一批查询还没回来」，一结束就是真实内容；
+ * 几十毫秒的查询由 `showSkeleton` 挡掉不画骨架。`load()` 自己不碰 `loading` —— 往下翻历史
+ * 不该把已经读到的内容换回骨架。
+ */
+const { loading, showSkeleton, renderFirstPaint } = useListFirstPaint({ load })
 
 /** 返回「是否还可能更多」，与 useInfiniteList 的约定一致（false 时不再触发） */
 async function grow(): Promise<boolean> {
@@ -70,25 +78,18 @@ const visibleEntries = computed(() => {
   return entries.value.filter(entry => entry.read !== false || entry.id === openId)
 })
 
-onMounted(load)
+onMounted(renderFirstPaint)
 </script>
 
 <template>
   <UDashboardPanel :ui="{ body: 'p-0 sm:p-0' }">
     <template #header>
       <UDashboardNavbar title="最近阅读">
-        <template #right>
-          <!-- 页面状态 -->
-          <UButton
-            v-if="loading"
-            loading
-            variant="ghost"
-            color="neutral"
-            size="sm"
-          >
-            加载中…
-          </UButton>
-        </template>
+        <!--
+          导航栏右侧不再有「加载中…」转圈按钮：内容区的骨架已经表态，同一件事说两遍只会挤走
+          别的位置（历史页右栏本来就是空的，留一个转圈更像误触）。四个带动作区的列表页
+          与收藏页也一起统一去掉。
+        -->
       </UDashboardNavbar>
     </template>
 
@@ -103,15 +104,20 @@ onMounted(load)
       />
 
       <div class="flex h-full min-h-0 flex-col">
-        <div
-          v-if="loading"
-          class="flex justify-center py-12"
-        >
-          <UIcon
-            name="i-lucide-loader-circle"
-            class="size-8 animate-spin text-muted"
+        <template v-if="loading">
+          <!--
+            首屏骨架：历史页列表本身是列表式版式（按阅读日期的单列时间流，见 HistoryEntryList），
+            所以固定传 `view="list"`，高度节奏与真实的紧凑单行一致、替换上去不跳版。
+            外层认 `loading`（本地查询还没回来，不能落到空态），里层认 `showSkeleton`
+            （几十毫秒就结束的查询连骨架都不画，免得闪一下）。
+          -->
+          <EntryListSkeleton
+            v-if="showSkeleton"
+            class="min-h-0 flex-1"
+            view="list"
+            show-feed
           />
-        </div>
+        </template>
 
         <div
           v-else-if="!visibleEntries.length"
