@@ -5,11 +5,17 @@ import type { ShareMethod } from '../../composables/useSettings'
 import { useEntryShare } from '../../composables/useEntryShare'
 
 /**
- * 分享文章：优先系统分享面板（Web Share API），不可用时复制原文链接。
+ * 分享文章：优先系统分享面板（Web Share API），不可用时复制「标题 + 原文链接」——
+ * 复制给收件人看的是一句话，不是一段看不出内容的裸链接。
  *
  * 这里盯的是「有没有按能力选对路径、取消不算失败、失败仍有保底动作」，
  * 版式（按钮放哪）不在单测范围。
  */
+
+/** 分享的原文链接：系统面板里单独传 url，复制形式里被拼进文本 */
+const ENTRY_URL = 'https://a.example/1'
+/** 复制形式实际写进剪贴板的内容：标题 + 换行 + 原文链接 */
+const SHARE_TEXT = `文章标题\n${ENTRY_URL}`
 
 const H = vi.hoisted(() => ({
   copy: vi.fn(async () => {}),
@@ -89,18 +95,18 @@ describe('useEntryShare', () => {
 
     await useEntryShare(() => makeEntry()).share()
 
-    expect(shareFn).toHaveBeenCalledWith({ title: '文章标题', url: 'https://a.example/1' })
+    expect(shareFn).toHaveBeenCalledWith({ title: '文章标题', url: ENTRY_URL })
     expect(H.copy).not.toHaveBeenCalled()
   })
 
-  it('桌面设备（auto）：即使浏览器支持系统面板也只复制链接', async () => {
+  it('桌面设备（auto）：即使浏览器支持系统面板也只复制，剪贴板里是标题加链接', async () => {
     const shareFn = vi.fn(async () => {})
     stubShare(shareFn)
 
     await useEntryShare(() => makeEntry()).share()
 
     expect(shareFn).not.toHaveBeenCalled()
-    expect(H.copy).toHaveBeenCalledWith('https://a.example/1')
+    expect(H.copy).toHaveBeenCalledWith(SHARE_TEXT)
   })
 
   it('system：桌面设备也尝试系统分享面板（与 auto 的区别）', async () => {
@@ -110,7 +116,7 @@ describe('useEntryShare', () => {
 
     await useEntryShare(() => makeEntry()).share()
 
-    expect(shareFn).toHaveBeenCalledWith({ title: '文章标题', url: 'https://a.example/1' })
+    expect(shareFn).toHaveBeenCalledWith({ title: '文章标题', url: ENTRY_URL })
     expect(H.copy).not.toHaveBeenCalled()
   })
 
@@ -130,7 +136,7 @@ describe('useEntryShare', () => {
     })
   })
 
-  it('用户选了「复制链接」：即使有 Web Share API 也只复制，不弹系统面板', async () => {
+  it('用户选了「复制标题和链接」：即使有 Web Share API 也只复制，不弹系统面板', async () => {
     const shareFn = vi.fn(async () => {})
     stubShare(shareFn)
     shareSettings.value = { shareMethod: 'clipboard' }
@@ -138,8 +144,21 @@ describe('useEntryShare', () => {
     await useEntryShare(() => makeEntry()).share()
 
     expect(shareFn).not.toHaveBeenCalled()
-    expect(H.copy).toHaveBeenCalledWith('https://a.example/1')
+    expect(H.copy).toHaveBeenCalledWith(SHARE_TEXT)
+    expect(H.toast).toHaveBeenCalledWith(expect.objectContaining({ title: '标题和链接已复制' }))
+  })
+
+  it('条目没有标题：只复制链接，不留空行，提示也不夸大', async () => {
+    await useEntryShare(() => makeEntry({ title: '' })).share()
+
+    expect(H.copy).toHaveBeenCalledWith(ENTRY_URL)
     expect(H.toast).toHaveBeenCalledWith(expect.objectContaining({ title: '链接已复制' }))
+  })
+
+  it('标题两端有空白：去掉空白再拼，不会在链接前留一个空格行', async () => {
+    await useEntryShare(() => makeEntry({ title: '  文章标题  ' })).share()
+
+    expect(H.copy).toHaveBeenCalledWith(SHARE_TEXT)
   })
 
   it('用户取消分享（AbortError）：不当成失败，也不退回复制', async () => {
@@ -157,7 +176,7 @@ describe('useEntryShare', () => {
     expect(shareBusy.value).toBe(false)
   })
 
-  it('系统分享面板调用失败：退回复制链接，动作仍有结果', async () => {
+  it('系统分享面板调用失败：退回复制标题加链接，动作仍有结果', async () => {
     stubCoarsePointer(true)
     stubShare(vi.fn(async () => {
       throw new Error('权限被拒')
@@ -165,17 +184,17 @@ describe('useEntryShare', () => {
 
     await useEntryShare(() => makeEntry()).share()
 
-    expect(H.copy).toHaveBeenCalledWith('https://a.example/1')
+    expect(H.copy).toHaveBeenCalledWith(SHARE_TEXT)
     expect(H.toast).toHaveBeenCalledWith(expect.objectContaining({ color: 'success' }))
   })
 
-  it('触屏 auto 但浏览器没有 Web Share API（非安全上下文）：复制链接并提示成功', async () => {
+  it('触屏 auto 但浏览器没有 Web Share API（非安全上下文）：复制标题加链接并提示成功', async () => {
     stubCoarsePointer(true)
 
     await useEntryShare(() => makeEntry()).share()
 
-    expect(H.copy).toHaveBeenCalledWith('https://a.example/1')
-    expect(H.toast).toHaveBeenCalledWith(expect.objectContaining({ title: '链接已复制' }))
+    expect(H.copy).toHaveBeenCalledWith(SHARE_TEXT)
+    expect(H.toast).toHaveBeenCalledWith(expect.objectContaining({ title: '标题和链接已复制' }))
   })
 
   it('剪贴板不可用（copy 抛错）：提示复制失败', async () => {

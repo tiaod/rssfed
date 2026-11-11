@@ -36,7 +36,7 @@ import {
 // 显式导入：单测环境没有 Nuxt 自动导入，裸调 composable 会直接 ReferenceError
 import { useEntryActions } from '~/composables/useEntryActions'
 import { useEntryImages } from '~/composables/useEntryImages'
-// 分享：Web Share API 优先，桌面端退回复制原文链接（与详情面同一份口径）
+// 分享：Web Share API 优先，桌面端退回复制「标题 + 原文链接」（与详情面同一份口径）
 import { useEntryShare } from '~/composables/useEntryShare'
 import type { LightboxImage } from '~/composables/useImageLightbox'
 
@@ -260,7 +260,7 @@ const { shareBusy, share } = useEntryShare(() => props.entry)
               size="sm"
             />
 
-            <!-- 分享：不必打开详情，直接在信息流里把原文链接发出去 -->
+            <!-- 分享：不必打开详情，直接在信息流里把「标题 + 原文链接」发出去 -->
             <UButton
               icon="i-lucide-share-2"
               :aria-label="`分享文章：${entry.title}`"

@@ -3,7 +3,7 @@ import { nextTick, ref, computed, watch, reactive, onBeforeUnmount, defineAsyncC
 import type { RssEntry } from '~/types/rss'
 // 打开即已读、全文懒取、上一篇/下一篇、工具栏的已读与收藏：与宽屏阅读栏共用同一份口径
 import { useEntryDetail } from '~/composables/useEntryDetail'
-// 分享：Web Share API 优先，桌面端退回复制原文链接，与阅读栏共用同一份口径
+// 分享：Web Share API 优先，桌面端退回复制「标题 + 原文链接」，与阅读栏共用同一份口径
 import { useEntryShare } from '~/composables/useEntryShare'
 import 'swiper/css'
 
@@ -891,7 +891,7 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
             variant="outline"
             size="sm"
           />
-          <!-- 分享：系统分享面板（Web Share API），桌面端退回复制原文链接 -->
+          <!-- 分享：系统分享面板（Web Share API），桌面端退回复制「标题 + 原文链接」 -->
           <UButton
             v-if="currentEntry"
             icon="i-lucide-share-2"

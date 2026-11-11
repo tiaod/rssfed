@@ -29,6 +29,7 @@ function isTouchPrimary(): boolean {
  *
  * 与 useEntryActions 一样用取值函数：详情面翻篇时会换成另一篇，取值函数每次读当下那一条。
  * 分享的是**原文链接**（`entry.url`），不是应用内地址 —— 收件人不需要本应用也能打开。
+ * 复制形式会在链接前面带上文章标题：单发一个裸链接，收件人看不出这是哪一篇。
  */
 export function useEntryShare(getEntry: () => RssEntry | null | undefined) {
   const toast = useToast()
@@ -43,12 +44,29 @@ export function useEntryShare(getEntry: () => RssEntry | null | undefined) {
       && (e as { name?: unknown }).name === 'AbortError'
   }
 
+  /**
+   * 复制到剪贴板的文本：标题 + 换行 + 原文链接。
+   *
+   * 裸链接粘到聊天窗口里只是一个看不出内容的 URL，收件人不知道点开是什么；带上标题
+   * 就成了一句话能转发的资讯。标题可能为空（RSS 条目可以没有 <title>，服务端落成 ""），
+   * 这时就只复制链接，不留一个空行。
+   */
+  function shareText(entry: RssEntry): string {
+    const title = entry.title?.trim()
+    return title ? `${title}\n${entry.url}` : entry.url
+  }
+
   /** 复制链接：Web Share API 缺席时的回退，也是分享面板调用失败后的保底 */
-  async function copyLink(url: string) {
+  async function copyEntry(entry: RssEntry) {
     try {
       // useClipboard 的 copy 返回 void，失败时抛错（不再用返回值判断）
-      await copy(url)
-      toast.add({ title: '链接已复制', description: '可以粘贴到任意地方分享', color: 'success' })
+      await copy(shareText(entry))
+      toast.add({
+        // 没有标题时实际只复制了链接，提示别说得比事实多
+        title: entry.title?.trim() ? '标题和链接已复制' : '链接已复制',
+        description: '可以粘贴到任意地方分享',
+        color: 'success'
+      })
     } catch (e: unknown) {
       toast.add({ title: '复制失败', description: errorMessage(e, '无法写入剪贴板'), color: 'error' })
     }
@@ -71,7 +89,7 @@ export function useEntryShare(getEntry: () => RssEntry | null | undefined) {
     // clipboard 永不尝试；auto 只在触屏设备上尝试（桌面端复制更顺手）；system 不区分设备
     const preferSystem = method === 'system' || (method === 'auto' && isTouchPrimary())
     if (!preferSystem) {
-      await copyLink(url)
+      await copyEntry(entry)
       return
     }
 
@@ -86,7 +104,7 @@ export function useEntryShare(getEntry: () => RssEntry | null | undefined) {
         await navigator.share(data)
       } catch (e: unknown) {
         // 取消不算失败；其余失败（如权限被拒、系统面板不可用）退回复制，动作仍有结果
-        if (!isAbortError(e)) await copyLink(url)
+        if (!isAbortError(e)) await copyEntry(entry)
       } finally {
         shareBusy.value = false
       }
@@ -94,7 +112,7 @@ export function useEntryShare(getEntry: () => RssEntry | null | undefined) {
     }
 
     // 要求了系统面板但没有 Web Share API（非安全上下文等）：复制链接保底
-    await copyLink(url)
+    await copyEntry(entry)
   }
 
   return { shareBusy, share }

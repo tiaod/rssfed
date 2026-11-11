@@ -9,9 +9,9 @@ const VALID_MODAL_SIZES: EntryModalSize[] = ['sm:max-w-xl', 'sm:max-w-2xl', 'sm:
 /**
  * 分享文章的方式。
  *
- * - auto：触屏设备（手机 / 平板）用系统分享面板，桌面直接用复制链接
+ * - auto：触屏设备（手机 / 平板）用系统分享面板，桌面直接复制「标题 + 链接」
  * - system：始终尝试系统分享面板（不区分设备，不支持时仍回退复制）
- * - clipboard：始终复制原文链接 —— 桌面端的系统分享面板往往不如复制顺手
+ * - clipboard：始终复制「标题 + 链接」—— 桌面端的系统分享面板往往不如复制顺手
  */
 export type ShareMethod = 'auto' | 'system' | 'clipboard'
 
