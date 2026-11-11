@@ -1,12 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { defineComponent } from 'vue'
 import { mount } from '@vue/test-utils'
 import SyncStatusIndicator from '../../components/SyncStatusIndicator.vue'
 
 /**
- * 左下角同步指示器的点击语义：
- *   1. 正在同步时点击 = 暂停同步（不再发起一次同步）；
- *   2. 已暂停时点击 = 继续同步（并立即拉一次）；
- *   3. 其余状态点击 = 立即同步。
+ * 左下角同步指示器的交互语义：
+ *   1. 点击图标**只打开弹层**，不执行任何同步动作（移动端没有悬停，误触暂停的代价太大）；
+ *   2. 动作在弹层里显式点击：同步中 → 暂停同步，已暂停 → 继续同步，其余 → 立即同步；
+ *   3. 本地存储故障 → 弹层里是「重置本地缓存」；
+ *   4. 动作执行后弹层自动收起。
  *
  * 状态文案（含「同步已暂停」）走 utils/syncStatusSummary 的纯函数，另有单测。
  */
@@ -76,11 +78,44 @@ vi.mock('~/composables/useStorageEstimate', async (importOriginal) => {
 const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useToast = () => ({ add: H.toastAdd })
 
-const STUBS = {
-  UTooltip: {
-    name: 'UTooltip',
-    template: '<div class="tooltip"><slot /><slot name="content" /></div>'
+/**
+ * UPopover 的替身：把 v-model:open 落成真实的开合行为。
+ *
+ * 只做「触发器 + 内容区」两件事，但必须真的记住开关状态 —— 用例断言的是
+ * 「点图标只开弹层」「点按钮后弹层收起」，桩如果不实现开关就等于没测。
+ *
+ * 用 defineComponent 而不是裸对象：裸对象的 options 不会被上下文推断，`this` 拿不到
+ * `$props` / `$emit`，typecheck 会报 TS2339。
+ */
+const UPopoverStub = defineComponent({
+  name: 'UPopover',
+  props: {
+    // 不给默认值：未受控时要能区分「父组件没传」与「父组件传了 false」，
+    // 前者回落到内部状态，后者以父组件为准
+    open: { type: Boolean, default: undefined }
   },
+  emits: ['update:open'],
+  data: () => ({ inner: false }),
+  computed: {
+    isOpen(): boolean {
+      return this.open ?? this.inner
+    }
+  },
+  methods: {
+    toggle() {
+      // 与 v-model:open 一致：先写本地，再通知父组件
+      this.inner = !this.isOpen
+      this.$emit('update:open', this.inner)
+    }
+  },
+  template: `<div class="popover">
+    <span class="trigger" @click="toggle"><slot /></span>
+    <div v-if="isOpen" class="content"><slot name="content" /></div>
+  </div>`
+})
+
+const STUBS = {
+  UPopover: UPopoverStub,
   UButton: {
     name: 'UButton',
     inheritAttrs: false,
@@ -104,7 +139,22 @@ function setSyncing() {
   H.statuses!['feed-b'] = { status: 'queued', version: 0 }
 }
 
-/** 弹层里的明细行：标题是 font-medium、底部是 text-dimmed，都不带 text-muted */
+/** 图标按钮（弹层触发器）与弹层里的动作按钮 */
+function iconButton(wrapper: ReturnType<typeof mountIndicator>) {
+  return wrapper.find('.trigger button')
+}
+
+function actionButton(wrapper: ReturnType<typeof mountIndicator>) {
+  return wrapper.find('.content button')
+}
+
+/** 打开弹层（点击图标）后再取动作按钮 */
+async function openPopover(wrapper: ReturnType<typeof mountIndicator>) {
+  await iconButton(wrapper).trigger('click')
+  await wrapper.vm.$nextTick()
+}
+
+/** 弹层里的明细行：标题是 font-medium、动作按钮不是 span，都不带 text-muted */
 function detailLines(wrapper: ReturnType<typeof mountIndicator>) {
   return wrapper.findAll('span.text-muted').map(s => s.text())
 }
@@ -126,60 +176,83 @@ beforeEach(() => {
 })
 
 describe('SyncStatusIndicator（左下角同步指示器）', () => {
-  it('正在同步时点击 = 暂停同步，且不再发起一次同步', async () => {
+  it('正在同步时点图标只打开弹层，不暂停同步', async () => {
     const wrapper = mountIndicator()
     setSyncing()
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('button').attributes('aria-label')).toBe('暂停同步')
+    // 按钮的语义是「看同步状态」，不再是「暂停同步」
+    expect(iconButton(wrapper).attributes('aria-label')).toBe('同步状态：正在同步')
+    // 弹层没打开前不渲染动作
+    expect(actionButton(wrapper).exists()).toBe(false)
 
-    await wrapper.find('button').trigger('click')
+    await openPopover(wrapper)
+
+    expect(H.pauseSync).not.toHaveBeenCalled()
+    expect(H.sync).not.toHaveBeenCalled()
+    expect(actionButton(wrapper).text()).toContain('暂停同步')
+  })
+
+  it('同步中在弹层里点「暂停同步」才暂停，并收起弹层', async () => {
+    const wrapper = mountIndicator()
+    setSyncing()
+    await wrapper.vm.$nextTick()
+    await openPopover(wrapper)
+
+    await actionButton(wrapper).trigger('click')
+    await wrapper.vm.$nextTick()
 
     expect(H.pauseSync).toHaveBeenCalledTimes(1)
     expect(H.sync).not.toHaveBeenCalled()
     expect(H.toastAdd).toHaveBeenCalledWith(expect.objectContaining({ title: '已暂停同步' }))
-    // 悬停提示要说明点下去会做什么
-    expect(wrapper.text()).toContain('点击暂停同步')
+    // 动作执行后弹层收起：否则状态一变、内容重排，容易点到别的按钮
+    expect(actionButton(wrapper).exists()).toBe(false)
   })
 
-  it('已暂停时点击 = 继续同步 + 立即拉取', async () => {
+  it('已暂停：弹层里是「继续同步」，点了恢复 + 立即拉取', async () => {
     const wrapper = mountIndicator()
     H.paused!.value = true
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('button').attributes('aria-label')).toBe('继续同步')
-    expect(wrapper.text()).toContain('同步已暂停')
-    expect(wrapper.text()).toContain('点击继续同步')
+    expect(iconButton(wrapper).attributes('aria-label')).toBe('同步状态：同步已暂停')
+    await openPopover(wrapper)
 
-    await wrapper.find('button').trigger('click')
+    expect(actionButton(wrapper).text()).toContain('继续同步')
+
+    await actionButton(wrapper).trigger('click')
+    await wrapper.vm.$nextTick()
 
     expect(H.resumeSync).toHaveBeenCalledTimes(1)
     expect(H.sync).toHaveBeenCalledTimes(1)
     expect(H.pauseSync).not.toHaveBeenCalled()
   })
 
-  it('暂停优先于同步中：仍显示已暂停，点击走恢复', async () => {
+  it('暂停优先于同步中：弹层仍显示已暂停，动作走恢复', async () => {
     const wrapper = mountIndicator()
     setSyncing()
     H.paused!.value = true
     await wrapper.vm.$nextTick()
+    await openPopover(wrapper)
 
-    expect(wrapper.text()).toContain('同步已暂停')
+    expect(actionButton(wrapper).text()).toContain('继续同步')
 
-    await wrapper.find('button').trigger('click')
+    await actionButton(wrapper).trigger('click')
+    await wrapper.vm.$nextTick()
 
     expect(H.pauseSync).not.toHaveBeenCalled()
     expect(H.sync).toHaveBeenCalledTimes(1)
   })
 
-  it('没有同步活动时点击 = 立即同步', async () => {
+  it('没有同步活动时点图标只开弹层，动作是「立即同步」', async () => {
     const wrapper = mountIndicator()
     H.statuses!['feed-a'] = { status: 'idle', version: 1, lastSyncedAt: '2026-09-27T12:30:00.000Z' }
     await wrapper.vm.$nextTick()
 
-    expect(wrapper.find('button').attributes('aria-label')).toBe('立即同步')
+    await openPopover(wrapper)
+    expect(H.sync).not.toHaveBeenCalled()
 
-    await wrapper.find('button').trigger('click')
+    await actionButton(wrapper).trigger('click')
+    await wrapper.vm.$nextTick()
 
     expect(H.sync).toHaveBeenCalledTimes(1)
     expect(H.pauseSync).not.toHaveBeenCalled()
@@ -196,6 +269,8 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
     H.statuses!['feed-a'] = { status: 'syncing', version: 0, progress: 0 }
     H.statuses!['feed-b'] = { status: 'syncing', version: 0, progress: 0 }
     await wrapper.vm.$nextTick()
+    await openPopover(wrapper)
+
     expect(detailLines(wrapper)).toEqual([
       '剩余 2 / 2 个同步目标（0%）',
       '已同步 0%',
@@ -221,18 +296,19 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
     expect(detailLines(wrapper)).toEqual(['上次同步：刚刚'])
   })
 
-  it('本地存储故障：优先于同步中/暂停，点击走「重置本地缓存 + 重新同步」', async () => {
+  it('本地存储故障：弹层动作是「重置本地缓存」，点了重置完才重新同步', async () => {
     const wrapper = mountIndicator()
     setSyncing()
     H.paused!.value = true
     H.storageBroken!.value = '本地缓存写入失败（存储空间不足或数据库已损坏）'
     await wrapper.vm.$nextTick()
+    await openPopover(wrapper)
 
-    expect(wrapper.find('button').attributes('aria-label')).toBe('重置本地缓存')
+    expect(iconButton(wrapper).attributes('aria-label')).toBe('同步状态：本地缓存写入失败')
     expect(wrapper.text()).toContain('本地缓存写入失败')
-    expect(wrapper.text()).toContain('点击可重置本地缓存并重新同步')
+    expect(actionButton(wrapper).text()).toContain('重置本地缓存')
 
-    await wrapper.find('button').trigger('click')
+    await actionButton(wrapper).trigger('click')
     await vi.waitFor(() => expect(H.sync).toHaveBeenCalledTimes(1))
 
     expect(H.resetLocalData).toHaveBeenCalledTimes(1)
@@ -251,11 +327,12 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
 
     const wrapper = mountIndicator()
     await wrapper.vm.$nextTick()
+    await openPopover(wrapper)
 
     // 云端报的是库的活数据量（external），本地报的是整站缓存；两个数字分开写，不混成一句话
     expect(detailLines(wrapper)).toContain('云端库 760.0 MB · 4965 条')
     expect(detailLines(wrapper)).toContain('本站缓存 214.0 MB')
-    // 挂载时读一次（悬停还会再刷新，见 refreshSizes）
+    // 挂载时读一次，打开弹层时再刷新一次（见组件里的 watch(open)）
     expect(H.cloudRefresh).toHaveBeenCalled()
     expect(H.storageRefresh).toHaveBeenCalled()
   })
@@ -263,6 +340,7 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
   it('体积拿不到时这两行都不出现（不显示 0 B）', async () => {
     const wrapper = mountIndicator()
     await wrapper.vm.$nextTick()
+    await openPopover(wrapper)
     expect(detailLines(wrapper).some(line => line.includes('云端库') || line.includes('本站缓存'))).toBe(false)
   })
 
@@ -270,6 +348,7 @@ describe('SyncStatusIndicator（左下角同步指示器）', () => {
     const wrapper = mountIndicator()
     H.statuses!['feed-a'] = { status: 'syncing', version: 0, progress: 30, docsWritten: 60, etaMs: 120_000 }
     await wrapper.vm.$nextTick()
+    await openPopover(wrapper)
     expect(detailLines(wrapper)).toContain('已同步 30%（60 条），预计还需 2 分钟')
 
     // 服务端没给余量 / 样本不足：状态里没有 etaMs，文案回到不带预计的样子

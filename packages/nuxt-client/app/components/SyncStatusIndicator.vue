@@ -2,11 +2,17 @@
 /**
  * 同步状态指示器：侧边栏左下角用户菜单右侧的图标按钮（原先是那个没用的 chevron）。
  *
- * 悬停弹出详情：同步中看进度，失败看原因，成功看上次同步时间；点击行为随状态而变 ——
- * 同步中 → 暂停同步，已暂停 → 继续同步，其余 → 立即同步。
+ * 交互：**点击永远只是打开弹层**，不再「同步中点一下就暂停」——
+ * 暂停 / 继续 / 立即同步 / 重置本地缓存全部是弹层里的显式按钮。
+ *
+ * 为什么要改：移动端没有悬停，图标既是「看详情」的入口又是「暂停同步」的触发器，
+ * 手指一点就暂停整个同步很容易误触；把动作收进弹层后，鼠标和手指的行为完全一致，
+ * 顶多隔一层点击，却不会误伤。
+ *
+ * 弹层内容：状态标题 + 本轮进度明细 + 云端/本地体积 + 一个动作按钮。
  * 状态判定与文案在 utils/syncStatusSummary 里（纯函数，便于单测）。
  */
-import { computed, onMounted, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { usePouchDb } from '~/composables/usePouchDb'
 import { useManualSync } from '~/composables/useManualSync'
 import { useTimelineCloudInfo } from '~/composables/useTimelineCloudInfo'
@@ -50,7 +56,7 @@ onMounted(() => {
   void storageEstimate.refresh()
 })
 
-/** 悬停时刷新：体积变化慢，refresh 内部有缓存，不会每次悬停都打请求 */
+/** 弹层打开时刷新：体积变化慢，refresh 内部有缓存，不会每次打开都打请求 */
 function refreshSizes() {
   void cloudInfo.refresh()
   void storageEstimate.refresh()
@@ -64,9 +70,15 @@ watch(() => summary.value.lastSyncedAt, (next, prev) => {
   void storageEstimate.refresh()
 })
 
-// 点击触发手动同步：与顶部工具栏的同步按钮共用逻辑，结果会有 toast 反馈。
-// 这里不给按钮挂 loading —— 按钮一旦变 disabled 就会丢焦点，悬停中的弹层也会跟着收起；
-// 同步中的反馈由状态图标本身（refresh-cw + 旋转）和 toast 承担。
+/** 弹层开关（真源）：动作执行后主动关掉，让用户立刻看到 toast / 顶部进度条 */
+const open = ref(false)
+
+// 打开时读一次体积：原先挂在悬停上，悬停预览去掉后改挂在这里
+watch(open, (isOpen) => {
+  if (isOpen) refreshSizes()
+})
+
+// 动作触发手动同步：与顶部工具栏的同步按钮共用逻辑，结果会有 toast 反馈。
 const { sync } = useManualSync()
 const toast = useToast()
 
@@ -88,7 +100,7 @@ const COLORS: Record<SyncState, string> = {
   'storage-error': 'text-error'
 }
 
-/** 点击会做什么：同步中→暂停，已暂停→继续，本地存储故障→重置本地缓存，其余→立即同步 */
+/** 弹层里那个按钮做什么：同步中→暂停，已暂停→继续，本地存储故障→重置本地缓存，其余→立即同步 */
 const actionLabel = computed(() => {
   if (summary.value.state === 'syncing') return '暂停同步'
   if (summary.value.state === 'paused') return '继续同步'
@@ -96,26 +108,49 @@ const actionLabel = computed(() => {
   return '立即同步'
 })
 
+const ACTION_ICONS: Record<SyncState, string> = {
+  'syncing': 'i-lucide-circle-pause',
+  'paused': 'i-lucide-play',
+  'error': 'i-lucide-refresh-cw',
+  'success': 'i-lucide-refresh-cw',
+  'idle': 'i-lucide-refresh-cw',
+  'storage-error': 'i-lucide-rotate-ccw'
+}
+
 /**
- * 点击：正在同步时点击是「暂停」——立即取消在途复制并清空队列（见 usePouchDb 的
- * pauseSync）；已暂停时点击是「继续」，顺手发起一次同步。
- *
- * 本地存储故障时点击是「重置本地缓存」：条目库已写不进去（配额/损坏），
- * 销毁重建是唯一有效的恢复动作，重置后自动重新同步。
+ * 弹层里动作按钮的配色：暂停/立即同步用中性软底（常态动作），继续同步用主色（用户在等它），
+ * 重置本地缓存用错误色（破坏性动作，且此时同步已被熔断）。
  */
-function handleClick() {
-  if (summary.value.state === 'syncing') {
+const actionColor = computed(() => {
+  if (summary.value.state === 'storage-error') return 'error' as const
+  if (summary.value.state === 'paused') return 'primary' as const
+  return 'neutral' as const
+})
+
+/**
+ * 执行动作：**先关弹层再动手**，否则同步态一变、弹层内容跟着重排，手指容易点到别的按钮。
+ *
+ * - 正在同步 → 暂停：立即取消在途复制并清空队列（见 usePouchDb 的 pauseSync）；
+ * - 已暂停 → 继续：恢复拉取，顺手发起一次同步（把暂停期间攒的变化尽快拿下来）；
+ * - 本地存储故障 → 重置本地缓存：条目库已写不进去（配额/损坏），销毁重建是唯一有效的
+ *   恢复动作，重置完成后再同步（必须等重建完成，否则复制会退回同一个坏库）；
+ * - 其余 → 立即同步。
+ */
+function runAction() {
+  const state = summary.value.state
+  open.value = false
+
+  if (state === 'syncing') {
     pouch.pauseSync()
     toast.add({
       title: '已暂停同步',
-      description: '不再拉取新内容，点击图标可继续',
+      description: '不再拉取新内容，点开同步面板可继续',
       color: 'neutral'
     })
     return
   }
-  if (summary.value.state === 'paused') pouch.resumeSync()
-  if (summary.value.state === 'storage-error') {
-    // 先等本地库销毁重建完成再发起同步：否则新库还没建好就复制，会退回同一个坏库
+  if (state === 'paused') pouch.resumeSync()
+  if (state === 'storage-error') {
     void pouch.resetLocalData().then(() => {
       toast.add({
         title: '本地缓存已重置',
@@ -131,11 +166,10 @@ function handleClick() {
 </script>
 
 <template>
-  <UTooltip
-    disable-closing-trigger
-    :delay-duration="120"
+  <UPopover
+    v-model:open="open"
     :content="{ side: 'top', align: 'end', sideOffset: 6, collisionPadding: 12 }"
-    :ui="{ content: 'block h-auto w-56 rounded-md px-3 py-2 whitespace-normal select-text' }"
+    :ui="{ content: 'z-50 w-64 p-3' }"
   >
     <UButton
       class="rounded-full"
@@ -143,9 +177,7 @@ function handleClick() {
       color="neutral"
       size="xs"
       square
-      :aria-label="actionLabel"
-      @click="handleClick"
-      @pointerenter="refreshSizes"
+      :aria-label="`同步状态：${label}`"
     >
       <UIcon
         :name="ICONS[summary.state]"
@@ -189,8 +221,23 @@ function handleClick() {
         >
           {{ localLine }}
         </span>
-        <span class="text-dimmed">点击{{ actionLabel }}</span>
+
+        <!-- 动作按钮铺满整行：移动端手指好点，也一眼看出这里只有一个动作。
+             size="md" 是主题默认里带文字按钮的最小一档（sm 只有 28px 高，手指够不稳）；
+             lg 以下再补到 min-h-10，与底部导航栏的 2.5rem 对齐，是这套 UI 在移动端的触摸基准 -->
+        <UButton
+          block
+          class="mt-2 max-lg:min-h-10"
+          :icon="ACTION_ICONS[summary.state]"
+          :color="actionColor"
+          variant="soft"
+          size="md"
+          :aria-label="actionLabel"
+          @click="runAction"
+        >
+          {{ actionLabel }}
+        </UButton>
       </div>
     </template>
-  </UTooltip>
+  </UPopover>
 </template>

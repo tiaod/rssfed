@@ -163,7 +163,7 @@ describe('formatSyncedAt', () => {
   })
 })
 
-describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
+describe('syncStatusLabel / syncStatusDetails（同步弹层文案）', () => {
   const now = new Date('2026-09-27T12:00:00.000Z').getTime()
 
   it('同步中：标题 + 本轮进度', () => {
@@ -267,15 +267,14 @@ describe('syncStatusLabel / syncStatusDetails（悬停弹层文案）', () => {
     expect(syncStatusDetails(s, now)).toEqual(['已停止拉取新内容'])
   })
 
-  it('本地存储故障：标题 + 原因 + 可操作提示（优先于暂停）', () => {
+  it('本地存储故障：标题 + 原因（动作说明由弹层里的按钮承担，不再写进明细行）', () => {
     const s = summarizeSyncStatuses(
       { a: { status: 'error', error: '请求超时' } },
       { paused: true, storageError: '本地缓存写入失败（存储空间不足或数据库已损坏）' }
     )
     expect(syncStatusLabel(s.state)).toBe('本地缓存写入失败')
     expect(syncStatusDetails(s, now)).toEqual([
-      '本地缓存写入失败（存储空间不足或数据库已损坏）',
-      '点击可重置本地缓存并重新同步'
+      '本地缓存写入失败（存储空间不足或数据库已损坏）'
     ])
   })
 

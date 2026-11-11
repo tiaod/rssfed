@@ -223,12 +223,10 @@ export function syncStatusDetails(
   now: number = Date.now()
 ): string[] {
   // 存储故障优先于其它状态：此时同步已被熔断，继续拉取只会把剩余任务全部失败掉，
-  // 用户唯一有效的动作是重置本地缓存
+  // 用户唯一有效的动作是重置本地缓存 —— 那个按钮就在弹层里（组件负责渲染），
+  // 这里不再写「点击可重置…」这种动作说明，按钮自己会说话
   if (summary.state === 'storage-error') {
-    return [
-      summary.storageError ?? '本地缓存写入失败，已暂停同步',
-      '点击可重置本地缓存并重新同步'
-    ]
+    return [summary.storageError ?? '本地缓存写入失败，已暂停同步']
   }
 
   // 暂停优先于其它状态：此时库里可能还留着上一轮的失败记录，但用户此刻关心的是「不再拉取」
