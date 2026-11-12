@@ -1,6 +1,17 @@
 # 源侧保留：把「保留区间」从每用户过滤改成源库物理裁剪
 
-> **状态：提案，待确认。本文是存储层重构的收敛方案（2026-10 收敛：保留策略以本文为准）。**
+> ⚠️ **后续（2026-11）：本文的核心机制已被推翻，只作历史留档。**
+> 本文主张「源库裁剪 → **删除随 JS filter 复制传播** → 用户库/浏览器是精确镜像」。
+> 实际跑下来用户库墓碑爆炸（实测一个账号 4,717 条活文档配 **42,262 个墓碑，占 90%**，
+> 浏览器首次全量拉取要读 4.8 万份文档、21.7 秒），因为源库清掉的墓碑**不会**复制（`_purge`
+> 不复制），于是永久滞留在每个用户库里。
+> 现行方案改为「**Mango selector 汇聚（墓碑静默丢失）+ 两侧各自 `_purge` 保留**」，
+> 见 [`ARCHITECTURE.md`](../../../ARCHITECTURE.md) 的保留策略条目与 `couchdb/retention.ts`。
+> 本文 §9 的探针结论（selector 匹配不到墓碑、purge 抹掉修订记忆、delete 只产生墓碑）
+> **依然成立**，只是结论导向了相反的取舍：既然 selector 必然丢删除，就顺势不靠传播、
+> 两侧各裁各的。下面「必须用标准 delete」「用户库是精确镜像」等段落描述的是**当时的方案**。
+>
+> **状态：提案，已被取代。保留策略的现行实现以 `couchdb/retention.ts` 为准。**
 > 落地后只有不变量并入 [`ARCHITECTURE.md`](../../../ARCHITECTURE.md)，实现细节留在代码注释里。
 > 前置实测结论见 [`couchdb-replicator-aggregation.md`](couchdb-replicator-aggregation.md)
 > 与 [`on-demand-replication.md`](on-demand-replication.md)；本文 §9 是本轮新增探针的结论

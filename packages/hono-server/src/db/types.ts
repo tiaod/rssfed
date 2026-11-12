@@ -1,5 +1,14 @@
 import type { FeedViewType } from "./constants"
 
+/**
+ * CouchDB 文档的形状（服务端与前端共用）。
+ *
+ * 只放**真的被多处复用**的形状。用户状态类文档（`subscription:` / `entry-state:` /
+ * `group-pref:`）不在这里 —— 它们由客户端写入、服务端只在个别路径按需读字段，
+ * 没有共用类型；以前这里放过的 `SubscriptionDoc` / `EntryStateDoc` / `UserEntryDoc` /
+ * `BotConfig` / `SyncRequest` / `SyncResponse` 都是零引用的历史遗留，已删除。
+ */
+
 export interface FeedDoc {
   _id: string
   _rev?: string
@@ -71,12 +80,6 @@ export interface CachedImage {
   v?: number
 }
 
-export interface UserEntryDoc extends EntryDoc {
-  read: boolean
-  readAt?: string
-  saved: boolean
-}
-
 export interface MediaModel {
   url: string
   type: string
@@ -88,51 +91,4 @@ export interface AttachmentModel {
   url: string
   mimeType: string
   title?: string
-}
-
-export interface SubscriptionDoc {
-  _id: string
-  _rev?: string
-  type: "subscription"
-  feedId: string
-  category?: string
-  /** 从 FeedDoc 反范式的字段，方便离线展示 */
-  title: string
-  siteUrl?: string
-  description?: string
-  image?: string
-  createdAt: string
-}
-
-/** 用户对单条条目的操作状态，存放在 user-state 库中 */
-export interface EntryStateDoc {
-  _id: string
-  _rev?: string
-  type: "entry-state"
-  entryId: string
-  feedId: string
-  read: boolean
-  readAt?: string
-  saved: boolean
-  savedAt?: string
-}
-
-export interface BotConfig {
-  id: string
-  name: string
-  description?: string
-  preferredUsername: string
-  avatarUrl?: string
-  isActive: boolean
-  feedIds: string[]
-}
-
-export interface SyncRequest {
-  feedIds: string[]
-}
-
-export interface SyncResponse {
-  status: "syncing" | "completed"
-  syncedCount: number
-  totalCount: number
 }

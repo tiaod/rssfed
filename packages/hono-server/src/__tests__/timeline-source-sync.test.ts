@@ -10,8 +10,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
  *   - 少判一次：那条内容**永远不会**进聚合库（除非该源以后再出新条目），不可接受。
  * 所以规则一律偏保守，其中最阴的一条是 `syncedAt` 必须取"同步**开始**时刻"（见下）。
  *
- * 复制**不带任何参数**（保留策略的唯一权威是源库裁剪），所以"换窗口 / 换保底条数"这类
- * 判据已经不存在了：同一个源的复制过滤器哈希恒定，checkpoint 自然续跑。
+ * 复制带的是**常量 selector**（`TIMELINE_REPLICATION_SELECTOR`，只匹配活文档），所以
+ * "换窗口 / 换保底条数"这类判据已经不存在了：复制参数恒定 → checkpoint 哈希恒定 → 自然续跑。
  */
 const mocks = vi.hoisted(() => ({
   /** `subscription:<sourceId>` 文档（null = 已退订，get 抛 404） */

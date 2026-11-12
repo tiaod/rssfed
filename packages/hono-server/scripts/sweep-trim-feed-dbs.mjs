@@ -7,11 +7,13 @@
  * （日常裁剪每次抓取最多删 2000 条，要好几轮才收敛），所以正式放开前先跑一次全量 sweep，
  * 否则第一次同步会把几十万条历史搬进用户库。
  *
- * 它做的事和抓取 worker 里的 `trimSourceToLatestN()` 完全一样（视图降序取 N+1 行算下界 →
- * 按 `publishedAt < 下界` 分页删），只是以库为单位批量跑、批量更大。
+ * 它做的事和抓取 worker 里的 `trimSourceToLatestN()` 一样（按视图**行序**升序删最旧的
+ * `total − N` 条，而不是按 `publishedAt < 下界`），只是以库为单位批量跑、批量更大。
  *
- * **删除用标准 delete（留墓碑），不用 `_purge`**：墓碑是"删除能跟着复制传播"的载体
- * 以及"重扫不复活"的保证（实测 probe-e）。
+ * ⚠️ **本脚本的删除方式已与现行实现不一致**：它用标准 `_bulk_docs { _deleted: true }`
+ * （留墓碑），而现行保留策略两侧都用 `_purge`（不留墓碑，见 `src/couchdb/retention.ts`）。
+ * 这是**故意的历史状态**：脚本已在 2026-10 全量执行完毕，留着仅作"重跑一次全量裁剪"的
+ * 兜底手段。真要重跑前，先把这里的 delete 换成 `_purge`，否则又会造出一批墓碑。
  *
  * 用法：
  *   node packages/hono-server/scripts/sweep-trim-feed-dbs.mjs --dry-run   # 只看会删多少
