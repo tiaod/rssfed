@@ -12,7 +12,6 @@
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "push": "drizzle-kit push",
-    "tombstone-gc": "tsx scripts/tombstone-gc.ts",
     "auth:generate": "auth generate --output src/db/auth-schema.ts --adapter drizzle --dialect pg -y",
     "feed-retention": "tsx scripts/feed-retention.ts"
   },

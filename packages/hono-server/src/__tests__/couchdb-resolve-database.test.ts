@@ -59,21 +59,19 @@ beforeEach(() => {
 })
 
 describe("resolveDatabase：库名已登记", () => {
-  it("源库快路径只补装一次复制过滤器（进程内缓存），不建库、不重设授权", async () => {
-    // 每个用例用不同的库名：过滤器「已 ensure」是进程内缓存的，同名会跨用例串味
+  it("源库快路径只查一次设计文档：entries-by-date 视图已在 → 不建库、不重设授权", async () => {
+    // 每个用例用不同的库名：设计文档「已 ensure」是进程内缓存的，同名会跨用例串味
     const dbName = `feed_${"b".repeat(24)}`
     mocks.findFirst.mockResolvedValue({ couchDbName: dbName })
-    const { TIMELINE_REPLICATION_FILTER } = await import("../couchdb/client")
     mocks.dbGet.mockResolvedValue({
       _id: "_design/main",
       _rev: "1-ok",
       views: { "entries-by-date": {} },
-      filters: { timeline: TIMELINE_REPLICATION_FILTER },
     })
 
     expect(await ensureFeedDatabase("f1")).toBe(dbName)
 
-    // 正好一次设计文档 GET（比对过滤器源码）；过滤器已在 → 一个写请求都不发
+    // 正好一次设计文档 GET（比对视图是否在位）；视图已在 → 一个写请求都不发
     expect(mocks.dbGet).toHaveBeenCalledTimes(1)
     expect(mocks.dbGet).toHaveBeenCalledWith("_design/main")
     expect(mocks.dbCreate).not.toHaveBeenCalled()
@@ -81,26 +79,26 @@ describe("resolveDatabase：库名已登记", () => {
     expect(mocks.insert).not.toHaveBeenCalled()
   })
 
-  it("存量源库补装过滤器：设计文档缺 filters.timeline 时带 _rev 覆盖一次（保留视图），之后缓存命中不再查", async () => {
+  it("存量源库补装视图：设计文档缺 entries-by-date 时带 _rev 覆盖一次，之后缓存命中不再查", async () => {
     const dbName = `feed_${"c".repeat(24)}`
     mocks.findFirst.mockResolvedValue({ couchDbName: dbName })
     mocks.dbGet.mockResolvedValue({
       _id: "_design/main",
       _rev: "2-old",
-      views: { "entries-by-date": { map: "function(doc){}" } },
+      views: { "some-legacy-view": { map: "function(doc){}" } },
     })
 
     await ensureFeedDatabase("f2")
     expect(mocks.insert).toHaveBeenCalledTimes(1)
     const written = mocks.insert.mock.calls[0]![0] as {
       _rev?: string
-      filters?: Record<string, string>
       views?: Record<string, unknown>
     }
     expect(written._rev).toBe("2-old")
-    expect(typeof written.filters?.timeline).toBe("string")
-    // 覆盖时不能把视图弄丢（复制过滤器是后加的，视图是老库本来就有的）
-    expect(written.views).toEqual({ "entries-by-date": { map: "function(doc){}" } })
+    // 覆盖时不能把老库已有的其它视图弄丢
+    expect(Object.keys(written.views ?? {})).toEqual(
+      expect.arrayContaining(["entries-by-date", "some-legacy-view"]),
+    )
 
     mocks.dbGet.mockClear()
     mocks.insert.mockClear()
@@ -128,9 +126,9 @@ describe("resolveDatabase：库名已登记", () => {
   })
 
   /**
-   * 只比校验函数、不比视图是个真实的坑：视图是后加的（`by_feed_published_at` 为条数保底而加），
-   * 而存量库的校验函数早就一致 —— 那样"视图还没装"的库会被当成已就位，剪枝查不到视图 → 404
-   * → 剪枝整步被跳过（窗口与保底条数一起失效，用户库只增不减）。
+   * 只比校验函数、不比视图是个真实的坑：视图是后加的（汇聚库保留要按 `[feedId, publishedAt]`
+   * 逐源裁，见 `TIMELINE_DESIGN_DOC_VIEWS`），而存量库的校验函数早就一致 —— 那样"视图还没装"
+   * 的库会被当成已就位，保留步骤查不到视图 → 404 → 整步被跳过（用户库只增不减、过期条目不清理）。
    */
   it("存量库缺新视图：校验函数一致也照样带 _rev 覆盖装一次", async () => {
     mocks.findFirst.mockResolvedValue({ timelineDbName: `user-timeline_${"8".repeat(24)}` })
@@ -139,7 +137,7 @@ describe("resolveDatabase：库名已登记", () => {
       _id: "_design/timeline-maintain",
       _rev: "3-old",
       validate_doc_update: TIMELINE_VALIDATE_DOC_UPDATE,
-      // 老库：只有按发布时间排的那个视图
+      // 老库：只有按发布时间排的那个视图（新方案要的是按 [feedId, publishedAt] 排的）
       views: { by_published_at: { map: "function(doc){ emit(doc.publishedAt, null); }" } },
     })
 
@@ -148,7 +146,8 @@ describe("resolveDatabase：库名已登记", () => {
     expect(mocks.insert).toHaveBeenCalledTimes(1)
     const written = mocks.insert.mock.calls[0]![0] as { _rev?: string, views?: Record<string, unknown> }
     expect(written._rev).toBe("3-old")
-    expect(Object.keys(written.views ?? {})).toEqual([])
+    // 覆盖成新视图集合（老视图被清掉，否则"设计文档是否最新"的比对永远不相等）
+    expect(Object.keys(written.views ?? {})).toEqual(["by-feed-date"])
   })
 
   it("并发建库：没抢到库名的一方删掉自己刚建的空库，改用赢家的库（否则订阅会写进没人指得着的孤儿库）", async () => {
@@ -199,11 +198,11 @@ describe("resolveDatabase：库名缺失（首次）", () => {
 
     expect(dbName).toMatch(/^feed_[a-z0-9]{24}$/)
     expect(mocks.dbCreate).toHaveBeenCalledWith(dbName)
-    // feed 库的设计文档：entries-by-date 视图 + 聚合复制过滤器（一起装，只装一次）
+    // feed 库的设计文档只装 entries-by-date 视图（聚合复制改用 selector，不再装过滤器）
     expect(mocks.insert).toHaveBeenCalledTimes(1)
     const designDoc = mocks.insert.mock.calls[0]![0] as { views?: Record<string, unknown>, filters?: Record<string, string> }
     expect(Object.keys(designDoc.views ?? {})).toEqual(["entries-by-date"])
-    expect(typeof designDoc.filters?.timeline).toBe("string")
+    expect(designDoc.filters).toBeUndefined()
     // 库级 _security：feed 库放行 user 角色
     expect(mocks.securityPut).toHaveBeenCalledTimes(1)
     expect(mocks.securityPut.mock.calls[0]![0]).toMatchObject({
@@ -283,9 +282,10 @@ describe("存量用户库补装写方向闸门", () => {
 /**
  * 设计文档写失败（CouchDB 的 JS 查询服务忙/卡死时是 500）**不能**被当成"已就位"缓存下来。
  *
- * 缓存下来就等于这个进程往后每一轮 reconcile 都不再补装：用户库缺 `by_published_at` 视图 →
- * 剪枝每轮 404；源库缺 `filters.timeline` → 复制任务一直 crashing。两种都表现为
- * 「客户端一条内容都同步不到」，且没有任何日志信号（原实现把错误吞在内层 catch 里）。
+ * 缓存下来就等于这个进程往后每一轮 reconcile 都不再补装：用户库缺 `by-feed-date` 视图 →
+ * 汇聚库保留每轮 404（过期条目永不清理）；源库缺 `entries-by-date` 视图 → 源库裁剪与
+ * bot outbox 都失效。两种都表现为「客户端看不到新内容 / 库只增不减」，且没有任何日志信号
+ * （原实现把错误吞在内层 catch 里）。
  */
 describe("设计文档写失败不进缓存", () => {
   const internalServerError = () => Object.assign(new Error("internal_server_error"), { statusCode: 500 })
@@ -307,33 +307,34 @@ describe("设计文档写失败不进缓存", () => {
     warn.mockRestore()
   })
 
-  it("源库复制过滤器写失败：告警、返回 false；成功之前不会被当成已装", async () => {
-    const { ensureReplicationFilter } = await import("../couchdb/client")
+  it("源库设计文档写失败：告警、返回 false；失败不进缓存，下次重试", async () => {
+    const { ensureFeedDesignDoc } = await import("../couchdb/client")
     const dbName = `feed_${"g".repeat(24)}`
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
-    mocks.dbGet.mockResolvedValue({ _id: "_design/main", _rev: "2-old", filters: {} })
+    mocks.dbGet.mockRejectedValue(new Error("not_found"))
     mocks.insert.mockRejectedValueOnce(internalServerError())
 
-    expect(await ensureReplicationFilter(dbName)).toBe(false)
+    expect(await ensureFeedDesignDoc(dbName)).toBe(false)
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(dbName))
 
     mocks.insert.mockResolvedValue({ ok: true })
-    expect(await ensureReplicationFilter(dbName)).toBe(true)
+    expect(await ensureFeedDesignDoc(dbName)).toBe(true)
     expect(mocks.insert).toHaveBeenCalledTimes(2)
     // 装好之后才进缓存：第三次不再写
-    expect(await ensureReplicationFilter(dbName)).toBe(true)
+    expect(await ensureFeedDesignDoc(dbName)).toBe(true)
     expect(mocks.insert).toHaveBeenCalledTimes(2)
     warn.mockRestore()
   })
 
-  it("并发 ensure 撞出的 409 视为到位（进缓存，不再重写）", async () => {
-    const { ensureReplicationFilter } = await import("../couchdb/client")
+  it("并发 ensure 撞出的 409 视为到位（不再重写；无进程内缓存，每次一次 GET）", async () => {
+    const { ensureFeedDesignDoc } = await import("../couchdb/client")
     const dbName = `feed_${"h".repeat(24)}`
     mocks.dbGet.mockRejectedValue(new Error("not_found"))
     mocks.insert.mockRejectedValueOnce(Object.assign(new Error("conflict"), { statusCode: 409 }))
 
-    expect(await ensureReplicationFilter(dbName)).toBe(true)
-    expect(await ensureReplicationFilter(dbName)).toBe(true)
+    expect(await ensureFeedDesignDoc(dbName)).toBe(true)
+    expect(await ensureFeedDesignDoc(dbName)).toBe(true)
+    // 第一次 409（被当成到位）、第二次视图已装在库里 → 只写了一次
     expect(mocks.insert).toHaveBeenCalledTimes(1)
   })
 })

@@ -68,6 +68,8 @@ export interface ReconcileRoundSummary {
   removedSyncs: number
   /** 退订清理掉的条目数 */
   removedEntries: number
+  /** 汇聚库保留清掉的过期条目数（逐源裁到最新 N 条） */
+  trimmedEntries: number
   /** 清掉的遗留常驻复制任务数 */
   purgedReplications: number
   /** 本轮失败的源数 */
@@ -79,6 +81,7 @@ export function isReconcileRoundMeaningful(round: ReconcileRoundSummary): boolea
   return round.dirty > 0
     || round.removedSyncs > 0
     || round.removedEntries > 0
+    || round.trimmedEntries > 0
     || round.purgedReplications > 0
     || round.failures > 0
 }
@@ -90,6 +93,7 @@ export function describeReconcileRound(round: ReconcileRoundSummary, ms: number)
   if (round.removedSyncs > 0 || round.removedEntries > 0) {
     parts.push(`退订清理 ${round.removedSyncs} 个源 / ${round.removedEntries} 条`)
   }
+  if (round.trimmedEntries > 0) parts.push(`保留清理 ${round.trimmedEntries} 条过期条目`)
   if (round.purgedReplications > 0) parts.push(`清掉 ${round.purgedReplications} 条遗留常驻复制`)
   if (round.failures > 0) parts.push(`${round.failures} 个源失败`)
   const detail = parts.length > 0 ? parts.join("；") : "无需搬运"
@@ -188,6 +192,7 @@ async function mergeIntoPreviousReconcile(userId: string, round: ReconcileRoundS
   const dirty = (data.dirty ?? 0) + round.dirty
   const removedSyncs = (data.removedSyncs ?? 0) + round.removedSyncs
   const removedEntries = (data.removedEntries ?? 0) + round.removedEntries
+  const trimmedEntries = (data.trimmedEntries ?? 0) + round.trimmedEntries
   const purgedReplications = (data.purgedReplications ?? 0) + round.purgedReplications
   const failures = (data.failures ?? 0) + round.failures
   await db.update(timelineEvents).set({
@@ -200,6 +205,7 @@ async function mergeIntoPreviousReconcile(userId: string, round: ReconcileRoundS
       dirty,
       removedSyncs,
       removedEntries,
+      trimmedEntries,
       purgedReplications,
       failures,
       rounds,

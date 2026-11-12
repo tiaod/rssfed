@@ -43,30 +43,30 @@ export function authenticatedDbUrl(dbName: string): string {
 }
 
 /**
- * 聚合复制用的**过滤函数**（装在 feed / bot 库的设计文档里，由复制器在源端执行）。
+ * 聚合复制用的 **Mango selector**（由复制器在源端求值，只搬活文档）。
  *
- * 它的职责只剩一件事：**挡住设计文档**，其余一律放行 —— **包括删除**。
+ * 为什么是 selector 而不是 JS filter（这是一次刻意的语义变更，见 `couchdb/replicator.ts` 的文件头）：
+ *   - 旧实现的 JS filter 会**放行删除**，让删除跟着复制传播、用户库成为源库的精确镜像。
+ *     代价是每个删除都在每个用户库里留一个墓碑 —— 实测线上一个账号 4,717 条活文档配
+ *     **42,262 个墓碑（90%）**，浏览器首次全量拉取要读 4.8 万份文档、21.7 秒。
+ *   - 新实现**接受墓碑静默丢失**：selector 只匹配活文档，删除进不了复制。保留改由两侧
+ *     各自独立执行同一条规则（每源最新 N 条 + `_purge`），所以两侧都不产生墓碑。
+ *   - selector 顺手完成了 filter 原本唯一的另一个职责：**挡设计文档**。`_design/*` 没有
+ *     `type` 字段，天然匹配不上。
  *
- * - 为什么必须用 JS filter 而不是 Mango selector：selector 只能对文档正文字段求值，而删除后
- *   的文档只有 `_id/_rev/_deleted`，没有可匹配字段，于是被静默跳过 —— 源端删掉的条目会在
- *   用户库永久留着。JS filter 能拿到 `{_deleted: true}`，`_id` 也不是 `_design/...`，
- *   所以删除会跟着复制传播（实测见 `docs/notes/aggregation/source-side-retention-plan.md` §9.1）。
- * - 为什么没有时间谓词：保留策略的唯一权威是**源库裁剪**（每条源只留最新 N 条，抓取 worker 做）。
- *   复制只做"精确镜像"。时间下界一旦进复制参数，换窗口就是换哈希、从 0 重扫源库
- *   （`couchdb-replicator-aggregation.md` 结论 3）—— 这条开销是这次重构要去掉的。
- * - 为什么不能干脆不用 filter：feed/bot 库的 `_design/main` 里有 `entries-by-date` 视图，
- *   bot outbox API 在用；而用户库自己也有 `_design/main`，搬过去会撞车。
- * - `type === 'feed'` 的元信息照样放行：前端要显示源标题/图标。
+ * **这个对象必须是常量**：它参与 checkpoint 哈希（两端 `_local/<哈希>`），字面量不变则
+ * 永久复用、接着上次序号继续；一旦随时间变化（比如放一个窗口下界进去），每个 (用户 × 源)
+ * 每天都会从 0 重扫源库。这是早期 `query_params` 窗口方案被废弃的原因，别再走回去。
+ *
+ * 只放 `type` 一个条件是有意的：`entry` 是条目、`feed` 是源元信息（前端要显示标题/图标），
+ * 其余类型（`subscription` / `entry-state` / `group-pref`）是客户端自己写的文档，
+ * 源库永远不会有，写进来也无害 —— 但白名单比黑名单更稳，将来加类型时不会意外漏搬。
  */
-export const TIMELINE_REPLICATION_FILTER = `function(doc) {
-  // 源库的设计文档不能搬进用户库：用户库自己也有 _design/main
-  return doc._id.indexOf('_design/') !== 0;
-}`
+export const TIMELINE_REPLICATION_SELECTOR: Record<string, unknown> = {
+  type: { $in: ["entry", "feed"] },
+}
 
-/** 复制文档里引用过滤器的方式：`<设计文档名>/<过滤器名>` */
-export const REPLICATION_FILTER_PATH = "main/timeline"
-
-/** 每个 feed 库的设计文档：entries-by-date 视图 + 聚合复制过滤器 */
+/** 每个 feed 库的设计文档：`entries-by-date` 视图（bot outbox API 与裁剪都要用） */
 const FEED_DESIGN_DOC = {
   _id: "_design/main",
   language: "javascript",
@@ -79,54 +79,46 @@ const FEED_DESIGN_DOC = {
       }`,
     },
   },
-  filters: { timeline: TIMELINE_REPLICATION_FILTER },
 }
 
-/** 过滤器是后加的，存量 feed / bot 库要补装；进程内按库名缓存，稳态零成本 */
-const ensuredReplicationFilters = new Set<string>()
-
 /**
- * 确保源库的设计文档里带着聚合复制过滤器（幂等；**保留**已有的视图等其它内容）。
+ * 确保源库的设计文档里有 `entries-by-date` 视图（幂等）。
  *
- * 只在新库安装是不够的：存量 feed 库（几百个）里没有 `filters.timeline`，
- * 而复制文档引用一个不存在的过滤器会直接失败（任务进 crashing）。所以这里比对源码，
- * 不一致才带 `_rev` 覆盖；进程内缓存避免每次 ensure 都打一次 GET。
+ * 这个视图有两个用户：bot outbox 的 API（`routes/bots.ts`），以及源库裁剪
+ * （`couchdb/retention.ts` 按它算"最旧的 N+1 条"）。
  *
- * **失败不进缓存**：写设计文档要让 CouchDB 起一次 JS 查询服务，它一忙 / 卡死就会 500
- * （真机上见过整台 CouchDB 的 JS 查询服务卡住后，所有设计文档都写不进去）。把这种失败
- * 也当成"已就位"缓存起来，等于这个进程往后每一轮 reconcile 都不再补装，而复制任务引用
- * 一个不存在的过滤器只会一直 crashing —— 用户看到的是"这个源永远不搬东西"，且没有任何信号。
- * 所以失败时打一行可定位的告警并返回 false，让下一次 ensure 重试。
+ * **不再安装复制过滤器**：复制改用 selector 了（见 `TIMELINE_REPLICATION_SELECTOR`），
+ * 而 selector 与 filter 互斥、且不需要源库里存任何东西。
  *
- * @returns 设计文档是否确实带着过滤器
+ * 失败只告警不抛：视图缺失只会让那一个源的裁剪跳过一轮 / bot outbox 读到空列表，
+ * 不该拖垮整轮抓取。带 `_rev` 覆盖，保留设计文档里的其它内容。
  */
-export async function ensureReplicationFilter(dbName: string): Promise<boolean> {
-  if (ensuredReplicationFilters.has(dbName)) return true
+const ensuredFeedDesignDocs = new Set<string>()
+
+export async function ensureFeedDesignDoc(dbName: string): Promise<boolean> {
+  if (ensuredFeedDesignDocs.has(dbName)) return true
   const db = nanoServer.use(dbName)
-  // 读不到（404 = 还没装）就按"没有"处理，交给下面的写去暴露真实失败原因
-  let existing: { _rev?: string, filters?: Record<string, string> } | null = null
+  let existing: { _rev?: string, views?: Record<string, unknown> } | null = null
   try {
-    existing = await db.get(FEED_DESIGN_DOC._id) as { _rev?: string, filters?: Record<string, string> }
+    existing = await db.get(FEED_DESIGN_DOC._id) as { _rev?: string, views?: Record<string, unknown> }
   } catch {
     existing = null
   }
   try {
-    if (existing?.filters?.timeline !== TIMELINE_REPLICATION_FILTER) {
+    if (!existing?.views?.["entries-by-date"]) {
       await db.insert(existing
-        ? {
-            ...existing,
-            filters: { ...(existing.filters ?? {}), timeline: TIMELINE_REPLICATION_FILTER },
-          } as never
+        ? { ...existing, views: { ...(existing.views ?? {}), ...FEED_DESIGN_DOC.views } } as never
         : FEED_DESIGN_DOC as never)
     }
   } catch (err) {
     // 409 = 并发 ensure 时另一个请求已写入，等价于到位
     if ((err as { statusCode?: number })?.statusCode !== 409) {
-      console.warn(`[CouchDB] 源库 ${dbName} 的复制过滤器未装好（下次重试）：${(err as Error)?.message ?? err}`)
+      console.warn(`[CouchDB] 源库 ${dbName} 的设计文档未装好（下次重试）：${(err as Error)?.message ?? err}`)
       return false
     }
   }
-  ensuredReplicationFilters.add(dbName)
+  // 装好（或并发 409）之后才进缓存：失败不进，让下一次 ensure 重试
+  ensuredFeedDesignDocs.add(dbName)
   return true
 }
 
@@ -135,8 +127,8 @@ export async function ensureReplicationFilter(dbName: string): Promise<boolean> 
  *
  * 两件事：
  *
- * 1. `views.by_published_at`：给服务端 reconcile 剪枝用（缩窗 / 退订清理，
- *    见 services/timeline.ts）。客户端从不 query 它，随复制到本地后是一份惰性文档。
+ * 1. `views`：给服务端 reconcile 的**汇聚库保留**用（逐源裁到最新 N 条，
+ *    见 services/timeline.ts 的第 ④ 步）。客户端从不 query 它，随复制到本地后是一份惰性文档。
  * 2. `validate_doc_update`：**单库方案的写方向闸门**。这个库同时装着「服务端独占写的
  *    聚合产物」（`entry` / `feed`）与「客户端也能写的用户状态」（`subscription` /
  *    `entry-state`），如果不加限制，客户端一次误写就可能影子化某个条目（同名 `entry:` 文档
@@ -170,14 +162,29 @@ export const TIMELINE_VALIDATE_DOC_UPDATE = `function(newDoc, oldDoc, userCtx) {
  * 禁掉 `entry` / `feed` 就够了。
  */
 /**
- * 用户库设计文档**不再需要任何视图**。
+ * 用户库设计文档里的视图：**按（源, 发布时间）排序**，给汇聚库裁剪用。
  *
- * 保留策略已经全部挪到源库（每条源只留最新 50 条，删除跟着复制传播过来），用户库只是镜像 ——
- * 以前那两个视图（`by_published_at` 给窗口剪枝、`by_feed_published_at` 给每源保底条数）
- * 随着剪枝一起删掉了。这里保留一个空对象并参与比对，是为了让存量库（几百个）里的旧视图
- * **真的被覆盖清掉**，而不是留在那儿没人用、还让"设计文档是否最新"的比对一直不相等。
+ * 用户库一个库里装着多个源的条目副本，所以裁剪必须**逐源**各留 N 条（不是整库留 N 条）——
+ * 这个视图的 key 是 `[feedId, publishedAt]`，行序天然按源分块、组内按时间升序，
+ * `couchdb/retention.ts` 的 `purgeExcessPerGroup` 直接吃这个顺序。
+ *
+ * 为什么用户库也要自己裁剪（以前是"源库裁、删除传播过来、用户库只做镜像"）：
+ * 新方案用 Mango selector 汇聚，删除**不再传播**（墓碑静默丢失，见 `couchdb/replicator.ts`），
+ * 所以两侧要各自独立执行同一条保留规则。实测两侧各裁 8 轮，条目集合每轮完全一致、墓碑恒为 0。
+ *
+ * 存量库（几百个）里还有老版本留下的 `by_published_at` / `by_feed_published_at` 两个视图，
+ * 它们随"用户库剪枝"一起废弃了；这里通过与 `TIMELINE_DESIGN_DOC_VIEWS` 做**键序无关比较**
+ * 来确保老视图被真正覆盖清掉（否则"设计文档是否最新"的比对永远不相等，每轮都会重写一次）。
  */
-export const TIMELINE_DESIGN_DOC_VIEWS: Record<string, { map: string }> = {}
+export const TIMELINE_DESIGN_DOC_VIEWS: Record<string, { map: string }> = {
+  "by-feed-date": {
+    map: `function(doc) {
+      if (doc.type === 'entry' && doc.feedId) {
+        emit([doc.feedId, doc.publishedAt], { _id: doc._id });
+      }
+    }`,
+  },
+}
 
 const TIMELINE_DESIGN_DOC = {
   _id: "_design/timeline-maintain",
@@ -189,10 +196,10 @@ const TIMELINE_DESIGN_DOC = {
 /**
  * 设计文档是否已经是最新：**校验函数与视图两样都要比**。
  *
- * 只比 `validate_doc_update` 曾经是个坑 —— 视图是后加的（`by_feed_published_at` 为条数保底而加），
- * 而存量库（几百个）的校验函数早就一致，于是"视图还没装"的库会被当成已就位：剪枝查一个不存在的
- * 视图 → 404 → 整个剪枝步骤每轮都被跳过（窗口与保底条数一起失效、用户库只增不减），
- * 日志里却只有一行告警。
+ * 只比 `validate_doc_update` 曾经是个坑 —— 视图是后加的（先是剪枝用的 `by_published_at`，
+ * 现在是汇聚库保留用的 `by-feed-date`），而存量库（几百个）的校验函数早就一致，于是
+ * "视图还没装"的库会被当成已就位：保留步骤查一个不存在的视图 → 404 → 整步被跳过
+ * （过期条目永不清理、用户库只增不减），日志里却只有一行告警。
  *
  * 比对用**键序无关**的稳定序列化：CouchDB 存回来的对象键序不保证与写入时一致，
  * 直接 JSON.stringify 比较可能因为键序不同而每轮都重写一遍设计文档。
@@ -264,12 +271,12 @@ type DbKind = "feed" | "user-timeline" | "bot"
 async function resolveDatabase(kind: DbKind, refId: string, prefix: string): Promise<string> {
   const existing = await getCouchDbName(kind, refId)
   if (existing) {
-    // 写方向闸门 / 复制过滤器都是后加的设计文档内容，存量库也得补上 —— 而存量库走的正是
-    // 这条快路径，所以这里要显式 ensure 一次。两者都进程内按库名缓存
-    // （见 ensureTimelineDesignDoc / ensureReplicationFilter），
+    // 设计文档里的内容（写方向闸门 / 按源裁剪视图 / entries-by-date 视图）都是后加的，
+    // 存量库也得补上 —— 而存量库走的正是这条快路径，所以这里要显式 ensure 一次。
+    // 两者都进程内按库名缓存（见 ensureTimelineDesignDoc / ensureFeedDesignDoc），
     // 稳态下只是 Set 查询，不会给高频路径加上 CouchDB 往返。
     if (kind === "user-timeline") await ensureTimelineDesignDoc(existing)
-    if (kind === "feed" || kind === "bot") await ensureReplicationFilter(existing)
+    if (kind === "feed") await ensureFeedDesignDoc(existing)
     return existing
   }
 
@@ -287,7 +294,7 @@ async function resolveDatabase(kind: DbKind, refId: string, prefix: string): Pro
       // 已删 / 正被删：忽略
     }
     if (kind === "user-timeline") await ensureTimelineDesignDoc(claim.dbName)
-    if (kind === "feed" || kind === "bot") await ensureReplicationFilter(claim.dbName)
+    if (kind === "feed") await ensureFeedDesignDoc(claim.dbName)
     console.warn(`[CouchDB] ${kind} ${refId} 并发建库：丢弃 ${dbName}，改用 ${claim.dbName}`)
     return claim.dbName
   }
@@ -426,12 +433,12 @@ async function setDatabaseSecurity(
  * 确保 feed 库存在并返回库名（首次调用时生成随机库名并持久化映射）。
  *
  * `knownDbName` 是调度器从 PostgreSQL 一并查出来、塞进 job data 的库名：稳态下（库已存在）
- * 直接跳过「按 feedId 查库名」这一次 PG 查询，只补一次进程内缓存的复制过滤器安装。
+ * 直接跳过「按 feedId 查库名」这一次 PG 查询，只补一次进程内缓存的设计文档安装。
  * 传空/未传（首抓、手工 refetch）时回退到完整解析路径。
  */
 export async function ensureFeedDatabase(feedId: string, knownDbName?: string | null): Promise<string> {
   if (knownDbName) {
-    await ensureReplicationFilter(knownDbName)
+    await ensureFeedDesignDoc(knownDbName)
     return knownDbName
   }
   const dbName = await resolveDatabase("feed", feedId, COUCHDB_FEED_PREFIX)
@@ -446,8 +453,6 @@ async function installFeedDesignDoc(dbName: string) {
   } catch {
     // 并发创建时另一个请求可能已安装，忽略冲突
   }
-  // 设计文档里已经带着复制过滤器，直接标缓存：新建路径不必再为了 ensure 打一次 GET
-  ensuredReplicationFilters.add(dbName)
 }
 
 // ── 用户库（合并后每用户唯一） ──
@@ -486,11 +491,11 @@ export async function createTimelineDatabase(userId: string): Promise<string> {
  * 确保用户库的设计文档到位（视图 + 写方向闸门），已到位则返回。
  *
  * 与 feed 设计文档的区别：这里必须能**升级存量库** —— 闸门与视图都是后加的，老库（200+ 个）
- * 里没有它们，而「只在新库安装」会让所有老库永久裸奔（视图缺失还会让剪枝整步被跳过）。
+ * 里没有它们，而「只在新库安装」会让所有老库永久裸奔（视图缺失还会让汇聚库保留整步被跳过）。
  * 做法是比对校验函数与视图源码，不一致才带 _rev 覆盖；进程内按库名缓存，避免每次 ensure 都打一次 GET。
  *
- * **失败不进缓存**（同 ensureReplicationFilter）：写设计文档要过 CouchDB 的 JS 查询服务，
- * 它一忙就 500。若把失败也缓存成"已就位"，这个进程以后每轮 reconcile 都会在剪枝那步
+ * **失败不进缓存**（同 ensureFeedDesignDoc）：写设计文档要过 CouchDB 的 JS 查询服务，
+ * 它一忙就 500。若把失败也缓存成"已就位"，这个进程以后每轮 reconcile 都会在保留那步
  * 查一个不存在的视图（404），整轮聚合直接挂掉 —— 用户看到的就是"客户端一条都同步不到"，
  * 而日志里没有任何信号。失败时告警 + 返回 false，让下一次 ensure 重试。
  *

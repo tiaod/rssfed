@@ -24,27 +24,45 @@ import {
   purgeLegacyReplications,
   runSourceReplication,
 } from "../couchdb/replicator"
+import {
+  buildPurgeBody,
+  countPurged,
+  createTrimDb,
+  DEFAULT_SOURCE_RETENTION_ENTRIES,
+  purgeRequest,
+  trimSourceToLatestN,
+  USER_TIMELINE_TRIM_VIEW,
+} from "../couchdb/retention"
 
 /**
- * 用户时间线聚合服务：维护「用户聚合库 = 他订阅的源当前内容的**精确镜像**」这份拓扑。
+ * 用户时间线聚合服务：维护「用户聚合库 = 他所订阅源当前内容的集合」这份拓扑。
  *
- * **保留策略只有一个权威、且只按源生效**：每条源库裁到最新 N 条（`couchdb/retention.ts`，
- * 抓取 worker 写完新条目后裁一次）。用户库和浏览器都只是镜像 —— 源库删了哪条，删除就作为
- * `_deleted` 变更随复制传到用户库、再随 live 拉取传到 PouchDB。所以这里**不剪枝、不算窗口、
- * 没有按用户生效的保留参数**（见 `docs/notes/aggregation/source-side-retention-plan.md`）。
+ * ## 保留策略：两侧各自独立执行同一条规则（不再靠删除传播）
  *
- * **搬运仍由 CouchDB 复制器完成，但改由我们按需触发**（见 couchdb/replicator.ts）：
+ * 旧方案是「源库裁到最新 N 条 → 删除随复制传播 → 用户库/浏览器是精确镜像」。新方案去掉了
+ * 传播这一环：汇聚用 **Mango selector**（`couchdb/replicator.ts`），它只匹配活文档，
+ * 删除**静默丢失** —— 这是刻意的，为的是不再让每个删除在每个用户库里留一个墓碑
+ * （实测线上一个账号 4,717 条活文档配 42,262 个墓碑，占 90%）。
+ *
+ * 所以保留变成**两侧各做一遍**[`trimSourceToLatestN`]：
+ *   - 源库：抓取 worker 写完新条目后裁到每源最新 N 条（`workers/index.ts`）；
+ *   - 汇聚库：本文件的 reconcile 每轮裁到**逐源**最新 N 条（`USER_TIMELINE_TRIM_VIEW` 视图，
+ *     `groupByFeed: true`）。
+ * 两侧都用 `_purge`，所以两侧都不产生墓碑。实测 8 轮随机抓取/裁剪：两侧条目集合每轮完全
+ * 一致、墓碑恒为 0。前提是两处调用的 N 与排序口径一致 —— 所以这条规则只有一份实现。
+ *
+ * ## 搬运：CouchDB 复制器，但由我们按需触发
+ *
  *   ① 水位：每个 (用户 × 源) 在 PG 里记一行 `timeline_source_sync`（上次同步时刻）。
  *      reconcile 只把「上次同步之后源那边有过变化」的源（feed 看 `feeds.lastChangedAt`，它把
  *      "只裁剪删除"也算进来；bot 看 `lastNewEntryAt`）与新订阅的源交给 `rss-timeline-sync` 队列
  *      （限并发跑一次性复制）。**没变化的源一个复制请求都不发** —— 这正是把常驻复制换掉的意义：
  *      实测单源复制即使无内容可搬也要 ~1.3s（建复制会话的固定开销），625 个源每轮空转就是
  *      十几分钟机器时间。
- *   ② 复制不带任何参数：过滤器源码稳定 → checkpoint 哈希稳定 → 每次只搬增量。代价是"改了
- *      保留策略"不会自动回填，需要重建聚合库（见 rederiveUserTimeline）。
+ *   ② 复制参数是**常量 selector** → checkpoint 哈希稳定 → 每次只搬增量。
  *   ③ 重建：聚合库是从源库复制出来的，要整体重来时就换一个空库重搬（复制是变更投递，
  *      就地清空是搬不回来的）；
- *   ④ 清理：退订的源按前缀删条目 + 删水位行；升级后把遗留的**常驻**复制任务一次性清掉。
+ *   ④ 清理：退订的源按前缀 **purge** 删条目 + 删水位行；升级后把遗留的**常驻**复制任务一次性清掉。
  *
  * 稳态下一轮的成本是「一次订阅列表读 + 一条水位 SQL」，**脏源为空时一个写请求都不发**，
  * 客户端侧与订阅数无关。
@@ -238,18 +256,33 @@ async function writeTimelineState(dbName: string, state: TimelineState): Promise
   }
 }
 
-async function deleteByPrefix(scope: DocumentScope<unknown>, startkey: string, endkey: string): Promise<number> {
+/**
+ * 清掉某个源在用户库里的全部条目（退订清理），**用 `_purge` 而不是 delete**。
+ *
+ * 为什么不用 delete：删除会留墓碑，而墓碑正是这次改造要去掉的东西 —— 一个 600 源账号
+ * 退订再重订几轮，用户库里就会积起几万个墓碑，浏览器每次首次全量拉取都要把它们读一遍
+ * （实测 4.7 万份文档、21.7 秒，其中 90% 是墓碑）。
+ *
+ * **这里 purge 是安全的**，因为它的语义是"这些文档从此不该存在"：退订之后用户就不该再
+ * 看到这些条目，源库那边即使还有它们也不会再被搬过来（`syncSubscriptionSource` 会先查
+ * `subscription:` 文档，退订了直接跳过）。代价是客户端本地那份不会被通知删除 —— 但客户端的
+ * 订阅列表变了本来就会重查本地库，被退订源的条目不再出现在任何列表里。
+ */
+async function purgeByPrefix(
+  dbName: string,
+  scope: DocumentScope<unknown>,
+  startkey: string,
+  endkey: string,
+): Promise<number> {
   let deleted = 0
   for (let page = 0; page < MAX_PAGE_LOOPS; page++) {
-    const res = await scope.list({ startkey, endkey, limit: 500 })
+    const res = await scope.list({ startkey, endkey, limit: 500, include_docs: false })
     if (res.rows.length === 0) break
-    const docs = res.rows.map(row => ({
-      _id: row.id,
-      _rev: (row.value as { rev: string }).rev,
-      _deleted: true,
-    }))
-    const results = await scope.bulk({ docs })
-    deleted += results.filter(r => !r.error).length
+    const docs = res.rows.map(row => ({ _id: row.id, _rev: (row.value as { rev: string }).rev }))
+    const body = buildPurgeBody(docs)
+    // `_purge` 没有对应的 DocumentScope 方法，只能走 nanoServer.request
+    const purged = await purgeRequest(dbName, body)
+    deleted += countPurged(purged, body)
     if (res.rows.length < 500) break
   }
   return deleted
@@ -401,6 +434,35 @@ async function readSourceFreshness(sources: TimelineSource[]): Promise<Map<strin
   return out
 }
 
+/**
+ * 该用户汇聚库裁剪时该用多大的 N。
+ *
+ * 用户库一个库里装着多个源的副本，而每个源自己的保留条数不同（自适应，见
+ * `services/feed-retention.ts`）。这里取**订阅源里最大的那个 N**：
+ *
+ * - 取最小会误删 —— A 源只留 10 条、B 源留 50 条时，全库按 10 裁会把 B 源该留的条目删掉，
+ *   而源库里它们还活着，下一轮又会被搬回来（白搬 + 用户看到内容闪烁）；
+ * - 取最大只是让"活跃度低、自己 N 小"的源在用户库里多留几条，属于**多留**，安全方向正确
+ *   （多留可恢复，少留不可逆）。
+ *
+ * 一条 SQL 拿全部订阅源的 N（每源一次请求在 600+ 源时不可接受）。查不到/没算过（null）的源
+ * 回退全局默认值。
+ */
+export async function resolveTimelineRetentionEntries(sources: TimelineSource[]): Promise<number | null> {
+  const feedIds = sources.filter(source => source.kind === "feed").map(source => source.id)
+  // **只订阅 bot 的账号不裁**：bot 库不裁剪（见 ARCHITECTURE.md §10.7），源库那边一条不删，
+  // 用户库这边裁掉哪条下一轮就会被原样搬回来 —— 白搬 + 用户看到内容闪烁。
+  // 返回 null = 本轮跳过汇聚库保留。
+  if (feedIds.length === 0) return null
+  const rows = await db.select({ n: feeds.retentionEntries })
+    .from(feeds).where(inArray(feeds.id, feedIds))
+  let max = DEFAULT_SOURCE_RETENTION_ENTRIES
+  for (const row of rows) {
+    if (typeof row.n === "number" && row.n > max) max = row.n
+  }
+  return max
+}
+
 export interface SourceSyncOutcome {
   sourceId: string
   /** 跳过（没搬也没推进水位）：订阅在排队期间被退掉了 */
@@ -422,8 +484,8 @@ export interface SourceSyncOutcome {
  * status 落回 idle 并把源库序号记下来，搬砸了把 syncedAt 清空并记 lastError ——
  * 清空保证下一轮还会把它判成脏源（BullMQ 同时也会按 attempts 重试）。
  *
- * 复制不带任何参数，所以这里没有"重算下界 / 换哈希"这一步：同一份过滤器源码的 checkpoint
- * 恒定，第二轮起只搬增量。
+ * 复制带的是**常量 selector**，所以这里没有"重算下界 / 换哈希"这一步：checkpoint 恒定，
+ * 第二轮起只搬增量。
  */
 export async function syncSubscriptionSource(input: {
   userId: string
@@ -537,8 +599,10 @@ export interface TimelineReconcileResult {
   dirtySources: string[]
   /** 因退订清掉的水位行数（= 已不再订阅的源数） */
   removedSyncs: number
-  /** 因退订删除的条目数 */
+  /** 因退订清掉的条目数 */
   removedEntries: number
+  /** 本轮汇聚库保留清掉的过期条目数（逐源裁到最新 N 条） */
+  trimmedEntries: number
   /** 清理掉的遗留**常驻**复制任务数（升级一次性动作，之后恒为 0） */
   purgedReplications: number
   /** 逐源失败的原因（不阻塞其余源） */
@@ -571,6 +635,7 @@ export async function reconcileUserTimeline(
       dirtySources: [],
       removedSyncs: 0,
       removedEntries: 0,
+      trimmedEntries: 0,
       purgedReplications: 0,
       failures: [],
     }
@@ -607,6 +672,7 @@ async function reconcileUserTimelineUnlocked(
     dirtySources: [],
     removedSyncs: 0,
     removedEntries: 0,
+    trimmedEntries: 0,
     purgedReplications: 0,
     failures: [],
   }
@@ -625,7 +691,7 @@ async function reconcileUserTimelineUnlocked(
     if (subscribed.has(sourceId)) continue
     try {
       const prefix = entryIdPrefix(sourceId)
-      result.removedEntries += await deleteByPrefix(scope, prefix, `${prefix}\uffff`)
+      result.removedEntries += await purgeByPrefix(dbName, scope, prefix, `${prefix}\uffff`)
       await deleteDocIfExists(scope, sourceId)
       await deleteSourceWatermark(userId, sourceId)
       result.removedSyncs += 1
@@ -634,10 +700,43 @@ async function reconcileUserTimelineUnlocked(
     }
   }
 
-  // ④ 用户库**不再剪枝**：保留策略的唯一权威是源库裁剪（每条源只留最新 N 条）——
-  //    源库删掉的条目会跟着复制传播过来，用户库因此是精确镜像，不需要自己再挑一遍
-  //    （见 docs/notes/aggregation/source-side-retention-plan.md）。
-  //    这一步原来每轮都要扫用户库全部条目，是整个聚合链路里唯一随数据量恶化的成本。
+  // ④ 汇聚库保留：**逐源**裁到最新 N 条，多余的直接 purge。
+  //
+  //    为什么用户库也要裁：汇聚改用 Mango selector 之后，删除不再随复制传播（墓碑静默丢失），
+  //    所以「源库裁了就够」不再成立 —— 两侧必须各自执行同一条规则（见文件头）。裁的是
+  //    `USER_TIMELINE_TRIM_VIEW`（key = [feedId, publishedAt]），所以是按源分组各留 N 条。
+  //
+  //    为什么不放在 sync worker 里：那里一个 job 只搬一个源，看不到全库；而"每源留 N 条"是
+  //    整库视图的事。放 reconcile 还有个好处：它的节奏（默认 5 分钟）跟抓取一样，
+  //    源库新增之后下一轮就会被裁掉，用户库不会长期超过 N 条。
+  //
+  //    失败不致命：裁不掉只是库暂时偏大，下一轮继续（视图缺失时 `ensureTimelineDesignDoc`
+  //    会补装，装不上则本步跳过，不影响搬运与同步）。
+  // null = 只订阅 bot 的账号：bot 库不裁剪，裁了会被原样搬回来，所以本轮跳过
+  let retention: number | null = null
+  if (sources.length > 0) {
+    try {
+      retention = await resolveTimelineRetentionEntries(sources)
+    } catch (err) {
+      // 取 N 失败（PG 抖动）只影响本轮清理，不影响搬运
+      result.failures.push({ sourceId: "*retention", error: (err as Error)?.message ?? String(err) })
+    }
+  }
+  if (retention !== null) {
+    try {
+      const trim = await trimSourceToLatestN(createTrimDb(dbName), {
+        n: retention,
+        viewPath: USER_TIMELINE_TRIM_VIEW,
+        groupByFeed: true,
+        // 不在这里 compact：purge 只让 doc_del_count 下降，字节回收交给 CouchDB 自己的
+        // smoosh 节奏（实测清理 879 个墓碑 + compact 后文件 12.0MB → 12.2MB，几乎不降）
+        compact: false,
+      })
+      result.trimmedEntries = trim.deleted
+    } catch (err) {
+      result.failures.push({ sourceId: "*retention", error: (err as Error)?.message ?? String(err) })
+    }
+  }
 
   // ⑤ 升级清理：老版本给每个 (用户 × 源) 建了一条**常驻**复制，它们会继续占槽位与长轮询、
   //    还会和新的一次性复制抢复制器，所以升级后一次性删干净。靠状态文档里的标记只做一次。
@@ -681,6 +780,7 @@ async function reconcileUserTimelineUnlocked(
       dirty: result.dirtySources.length,
       removedSyncs: result.removedSyncs,
       removedEntries: result.removedEntries,
+      trimmedEntries: result.trimmedEntries,
       purgedReplications: result.purgedReplications,
       failures: result.failures.length,
     },

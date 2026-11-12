@@ -3,7 +3,7 @@
  *
  * 为什么需要压缩：PouchDB 只有 `compact()` 才会删掉**不再是叶子**的旧修订正文，以及
  * 「不再被任何修订引用」的附件 blob（见 pouchdb 的 compactRevs）。服务端那份在裁剪 /
- * 墓碑 GC 之后会显式 compact（hono-server 的 couchdb/retention.ts、tombstone-gc.ts），
+ * 库里发生过批量清理之后会显式 compact（hono-server 的 couchdb/retention.ts），
  * 本地这份没人压：删掉的条目的正文与图片会一直留在 IndexedDB 里 —— 这就是「本站缓存」
  * 比「云端库」大出好几成、而且只增不减的主要原因。
  *

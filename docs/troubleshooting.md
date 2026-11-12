@@ -108,26 +108,57 @@
   [notes/aggregation/on-demand-replication.md](notes/aggregation/on-demand-replication.md)），所以水位判定是
   **必需**而不是优化：稳态下一轮聚合一个复制请求都不发（`refresh?wait=1` 返回 `queued: 0`）。
 
-### 重建 / 新订阅时一次写入几千到几万条：源库墓碑重放（已加 GC）
+### 重建 / 新订阅时一次写入几千到几万条：墓碑重放（新方案已从机制上消除）
 
 - **现象**：`[Timeline] 同步源 xxx（用户=…）写入 4782 份、5070ms` 这类日志出现在**新订阅、重建、换设备首拉**时；
-  日常增量只有几十条。源库 `doc_del_count` 很大（重历史源可到几万），用户库墓碑数也一路涨。
+  日常增量只有几十条。源库 `doc_del_count` 很大，用户库墓碑数也一路涨。
   注意：旧版本这行份数取的是 CouchDB 复制任务 history 里的**累计值**（无变化时还会返回上一次会话的旧值），
-  数字会虚高；判断是否墓碑重放看用户库 `doc_del_count` 与首搬耗时，或直接跑下面的 GC 脚本看"可清"数。
-  现在这行已改成**单次增量**（见 `couchdb/replicator.ts` 的 `summarizeReplicationSession`）。
-- **原因**：保留策略用标准 delete 留墓碑（删除能传播 / 重扫不复活），墓碑只增不减；首搬从 0 重扫时
-  复制会把源库**全部历史墓碑**再搬一遍（实际首搬写入 ≈ 该源墓碑数 + 当前 ≤N 条活文档；旧日志的累计值只作参考）。
-- **解法**（现行实现）：后台墓碑 GC（`couchdb/tombstone-gc.ts` + `services/timeline-maintenance.ts`）
-  在每个源库 `_changes` 里记录条目墓碑，等**所有活跃订阅者**都成功同步过之后 `_purge` 再 `_compact`，
-  首搬就只剩 ≤N 条活文档。运维可手动 dry-run / 实清：
+  数字会虚高；现在这行已改成**单次增量**（见 `couchdb/replicator.ts` 的 `summarizeReplicationSession`）。
+- **原因**（旧方案）：保留策略用标准 delete 留墓碑，且**删除随复制传播**；首搬从 0 重扫时复制会把源库
+  全部历史墓碑再搬一遍。
+- **现状**：这条链路的三个前提都已不存在 ——
+  1. 复制改用 **Mango selector**，墓碑根本进不了复制（`couchdb/replicator.ts`）；
+  2. 两侧保留都用 **`_purge`**，库里不再产生墓碑（`couchdb/retention.ts`）；
+  3. 原来的后台墓碑 GC（`tombstone-gc` 脚本、`timeline_source_tombstone` 表、维护定时器）**已整体删除**。
+- **如果仍然看到墓碑堆积**，先确认跑的是不是新版本：
   ```bash
-  cd packages/hono-server
-  pnpm tombstone-gc                # 只报告
-  pnpm tombstone-gc --apply        # 真清（purge + compact）
+  curl -s -u admin:admin "http://localhost:5984/<user-timeline 库名>" | grep doc_del_count   # 新版本应稳定不涨
   ```
-  被"订阅者还没同步到墓碑之后"挡住的源会自动把 `feeds.last_changed_at` 往前拨一次，让下一轮聚合补同步
-  （静默源也能清）。**休眠账号**（默认 90 天未用，`TIMELINE_DORMANT_DAYS`）停止聚合、回来时自动重建，
-  否则它们的旧水位会让所有源都清不动。
+  历史遗留的墓碑（旧版本产生的）不会自己消失，需要一次性清理 —— 见下节。
+
+### 一次性清掉存量墓碑（升级后执行一次）
+
+旧版本在用户库里留下了大量墓碑（实测一个 600 源账号 4.7 万条活文档配 4.2 万个墓碑，占 90%）。
+新版本不再产生新墓碑，但**存量不会自动消失**，做一次全量 purge 可以显著降低客户端首拉成本
+（实测首次全量同步 21.7s → 10.1s、读取文档数 48,207 → 6,304）：
+
+```bash
+# 逐个 user-timeline_* 库：扫 _changes 收集墓碑 rev → 每 500 个一批 _purge → compact
+# 只读 + 幂等：某条墓碑已被清掉时 CouchDB 返回空数组，重复跑不会出错
+DB=user-timeline_xxx
+since=0
+while :; do
+  page=$(curl -s -u admin:pass "http://localhost:5984/$DB/_changes?since=$since&style=all_docs&limit=2000")
+  body=$(echo "$page" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); out={}
+for r in d.get("results",[]):
+    if r.get("deleted") and len(r.get("changes",[]))==1:
+        out.setdefault(r["id"],[]).append(r["changes"][0]["rev"])
+print(json.dumps(out))')
+  [ "$body" = "{}" ] || curl -s -u admin:pass -X POST "http://localhost:5984/$DB/_purge" \
+    -H 'Content-Type: application/json' -d "$body" > /dev/null
+  since=$(echo "$page" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d["last_seq"]))')
+  n=$(echo "$page" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("results",[])))')
+  [ "$n" = "0" ] && break
+done
+curl -s -u admin:pass -X POST "http://localhost:5984/$DB/_compact" -H 'Content-Type: application/json' > /dev/null
+curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_count'
+```
+
+**注意**：purge 之后，落后的客户端（checkpoint 停在 purge 之前）不会再收到那些删除，本地会留幽灵条目。
+两个客户端都实测过：一直跟得上的客户端不受影响；落后客户端需要本地重置一次（清 IndexedDB 重拉）。
+所以清理应选在用户活跃度低的时段做，并接受"个别长期不用的设备要重置本地缓存"。
 
 ### 时间线一直空、提示条停在「已同步 0 条」：这一轮还没把内容搬过来
 

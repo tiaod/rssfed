@@ -96,6 +96,7 @@ const round = (over: Partial<ReconcileRoundSummary> = {}): ReconcileRoundSummary
   dirty: 0,
   removedSyncs: 0,
   removedEntries: 0,
+  trimmedEntries: 0,
   purgedReplications: 0,
   failures: 0,
   ...over,

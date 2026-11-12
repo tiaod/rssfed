@@ -175,7 +175,10 @@ export async function runAdaptiveRetentionForFeed(
     retentionEntries: nextN,
     activityBytesPerDay: bytesPerDay === null ? null : Math.round(bytesPerDay),
     activityComputedAt: now,
-    // 裁掉了条目 = 源内容变了：bump lastChangedAt，下一轮聚合把删除同步到用户库/浏览器
+    // 裁掉了条目 = 源内容变了：bump lastChangedAt，下一轮聚合把该源重搬一遍。
+    // 注意新方案里这次搬运**不会**把删除传过去（selector 只搬活文档），用户库的过期条目
+    // 由它自己的保留步骤清（见 services/timeline.ts 的 ④）；这里 bump 只是让"保留条数调小"
+    // 这个动作尽快反映到用户库，不必等源库下次出内容。
     ...(trim.deleted > 0 ? { lastChangedAt: now } : {}),
   }).where(eq(feeds.id, feed.id))
   return { changed, shrunk, trimmed: trim.deleted, skipped: false }

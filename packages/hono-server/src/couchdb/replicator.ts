@@ -1,21 +1,28 @@
 import {
   authenticatedDbUrl,
   nanoServer,
-  REPLICATION_FILTER_PATH,
+  TIMELINE_REPLICATION_SELECTOR,
 } from "./client"
 
 /**
  * 用户时间线的聚合搬运：交给 **CouchDB 复制器**，但由**我们**决定"什么时候搬哪个源"。
  *
- * 搬运本身是一条 (源库 → 该用户聚合库) 的复制，过滤器挂在源库设计文档上（`main/timeline`，
- * 职责降级为"只挡设计文档"），附件走 CouchDB 内部 multipart。**不带任何 `query_params`**：
- * 保留策略的唯一权威是**源库裁剪**（每条源只留最新 N 条，见
- * `docs/notes/aggregation/source-side-retention-plan.md`），复制只做精确镜像。
+ * 搬运本身是一条 (源库 → 该用户聚合库) 的复制，用 **Mango selector** 只搬活文档，
+ * 附件走 CouchDB 内部 multipart。**不带任何 `query_params`**。
  *
- * 与早期实现的区别只有一点：**不再创建常驻（continuous）复制**，改成 `POST /_replicate` 的
- * **一次性同步复制**，由 `rss-timeline-sync` 队列限并发地触发。
+ * 为什么要 selector 而不再用 JS filter（刻意的语义变更）：
+ *   旧实现靠「删除以 `_deleted` 变更跟着复制」让用户库成为源库的精确镜像，代价是每个删除
+ *   都要留一个墓碑并被镜像进每个用户库。实测线上一个账号：4,717 条活文档配 **42,262 个墓碑
+ *   （90%）**，浏览器首次全量拉取要读 4.8 万份文档、21.7 秒。而且这些墓碑里绝大多数**不是**
+ *   源库现有墓碑的镜像（源库合计仅 803 个）—— 是旧实现里源库清理任务早已 purge 掉的删除，
+ *   purge 不复制，于是永久留在每个用户库里。
  *
- * 为什么不留常驻任务（实测）：
+ *   新实现**接受墓碑静默丢失**：selector 只匹配活文档，删除进不了复制。于是"精确镜像"这条
+ *   不变量换成「两侧各自独立执行同一条保留规则」——源库裁到每源最新 N 条（`retention.ts`），
+ *   汇聚库也裁到每源最新 N 条（`services/timeline.ts` 的 reconcile 步骤），两侧都用 `_purge`，
+ *   所以两侧都不产生墓碑。实测 8 轮随机抓取/裁剪：两侧条目集合每轮完全一致、墓碑恒为 0。
+ *
+ * 为什么不留常驻（continuous）复制（实测）：
  *   - 每个 (用户 × 源) 一条常驻复制时，625 条一起做首次追赶会把机器压死：
  *     CouchDB 162% CPU / 988MB、宿主 2 核 load 20.8、swap 1.6G/2G，源库都打不开；
  *   - 想用 `[replicator] max_jobs` 限流则必然**饿死**：常驻任务永不结束、不释放槽位，
@@ -24,17 +31,18 @@ import {
  *   而"要搬哪个源"由 PG 里的水位表（`timeline_source_sync`）按
  *   `feeds.lastChangedAt / bots.lastNewEntryAt > synced_at` 判定 —— 没变化的源连一次复制请求都不发。
  *
- * 四条必须知道的边界（都实测过，见 docs/notes/aggregation/ 下的留档与
- * report/aggregation-* 的探针输出）：
- *   ① **过滤器只能用 JS filter**：Mango selector 不搬删除（删除后的文档没有字段可匹配），
- *      而「源端删除跟随」正是本方案让用户库保持镜像的机制。
- *   ② **checkpoint 是按「源库 + 目标库 + 过滤器源码」算的**（两端 `_local/<哈希>`）：同一份
- *      过滤器再调一次会**接着上次的序号继续**；改了过滤器源码就是新哈希 → 从 0 重扫。
- *      所以过滤器里不能写随时间的谓词（早期把窗口下界塞进 `query_params` 就是这么坏掉的）。
- *   ③ **不带 `query_params` 也就少一个坑**：以前参数名不能叫 `since`（会和 `_changes` 的
- *      since 撞名），现在整块消失了。
- *   ④ 复制是"变更投递"不是"投影"：目标端**自己删过**的文档不会再被送回来（目标端已经认识
- *      那个 rev，见 probe-e）。要找回历史只能走「重建」（重建聚合库后重搬）。
+ * 四条必须知道的边界（都实测过）：
+ *   ① **selector 与 filter / doc_ids 互斥**：同时传直接 400
+ *      （`doc_ids`,`filter`,`selector` are mutually exclusive）。所以源库不再需要装复制过滤器，
+ *      `ensureReplicationFilter` 那套"存量库补装"逻辑一并删除。
+ *   ② **selector 天然排除 `_design/*`**：设计文档没有 `type` 字段，进不了匹配。以前 filter
+ *      的主要职责就是挡它，现在由 selector 顺手完成。
+ *   ③ **checkpoint 按「源库 + 目标库 + 复制参数哈希」算**（两端 `_local/<哈希>`）：参数字面量
+ *      不变则**永久复用**、接着上次序号继续。所以 selector 必须是**常量**
+ *      （`TIMELINE_REPLICATION_SELECTOR`），里面不能出现随时间变化的谓词 —— 那会让每个
+ *      (用户 × 源) 每天都从 0 重扫源库（早期把窗口下界塞进 `query_params` 就是这么坏掉的）。
+ *   ④ 复制是"变更投递"不是"投影"：目标端 purge 过的文档，只要源端之后**没有新修订**就不会被
+ *      送回来；源端有了新修订则会被重新搬过去（这是"恢复历史"，可接受）。
  */
 
 /** 本服务创建的**历史**常驻复制文档前缀：升级后要把它们清掉（见 purgeLegacyReplications） */
@@ -140,11 +148,6 @@ export function summarizeReplicationSession(res: ReplicateResponse): { docsWritt
 export async function runSourceReplication(spec: {
   sourceDb: string
   targetDb: string
-  /**
-   * @deprecated 过渡期保留字段：**已不参与复制**。下界计算与水位里的 bound 会随
-   * `windowDays` / `minFeedEntries` 一起删掉（见 source-side-retention-plan.md §11）。
-   */
-  boundIso?: string | null
 }): Promise<SourceReplicationResult> {
   const startedAt = Date.now()
   const timer = { timedOut: false }
@@ -159,10 +162,11 @@ export async function runSourceReplication(spec: {
       // 一次性：不常驻。checkpoint 由参数哈希决定，与 continuous 无关地在下次调用时复用
       continuous: false,
       create_target: false,
-      filter: REPLICATION_FILTER_PATH,
-      // **没有任何 query_params**：保留策略的唯一权威是源库裁剪，复制只做精确镜像。
-      // 参数一旦进这里，换参数就是换哈希 → 从 0 重扫源库；而且窗口过滤会和源库裁剪
-      // 变成两套权威（用户库不再自己剪枝）。
+      // 只搬活文档：墓碑进不了 selector（删除后没有字段可匹配），这正是本方案要的
+      // 「墓碑静默丢失」；删除由两侧各自的保留策略独立完成，不靠传播。
+      // **这个对象必须是常量**：它参与 checkpoint 哈希，随时间变就是从 0 重扫。
+      selector: TIMELINE_REPLICATION_SELECTOR,
+      // **没有任何 query_params**：换参数就是换哈希 → 从 0 重扫源库。
     },
   }) as Promise<ReplicateResponse>
 

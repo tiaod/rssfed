@@ -25,6 +25,8 @@ const mocks = vi.hoisted(() => ({
   oldDocs: [] as Array<Record<string, unknown>>,
   /** 每个库收到的 bulk 文档（按库名分组） */
   bulkByDb: {} as Record<string, Array<Record<string, unknown>>>,
+  /** 每个库被 `_purge` 清掉的文档 id（按库名分组） */
+  purgeByDb: {} as Record<string, string[]>,
   /** 每个库被 destroy 的文档 id */
   destroyedByDb: {} as Record<string, string[]>,
   /** 每个库的状态文档（`_local/state`） */
@@ -122,7 +124,14 @@ vi.mock("../couchdb/client", () => ({
   ensureFeedDatabase: async () => "feed_test",
   nanoServer: {
     db: { destroy: async (name: string) => { mocks.destroyedDbs.push(name) } },
-    request: async (opts: { db?: string, method?: string, doc?: string, body?: Record<string, unknown> }) => {
+    request: async (opts: { db?: string, method?: string, doc?: string, path?: string, body?: Record<string, unknown> }) => {
+      // 退订清理走 `_purge`（不是 bulk delete）：记下清掉了哪些 id，返回 CouchDB 的响应形状
+      if (opts?.path && opts.path.endsWith("/_purge")) {
+        const db = opts.path.slice(0, -"/_purge".length)
+        const body = (opts.body ?? {}) as Record<string, string[]>
+        mocks.purgeByDb[db] = [...(mocks.purgeByDb[db] ?? []), ...Object.keys(body)]
+        return { purged: body }
+      }
       if (opts?.doc !== "_local/state" || !opts.db) return {}
       if (opts.method === "PUT") {
         mocks.stateByDb[opts.db] = opts.body ?? {}
@@ -199,6 +208,7 @@ beforeEach(() => {
     { _id: "_design/timeline-maintain", _rev: "1-d", views: {} },
   ]
   mocks.bulkByDb = {}
+  mocks.purgeByDb = {}
   mocks.destroyedByDb = {}
   mocks.stateByDb = {}
   mocks.rowsByRange = { "entry:feed1:": [] }
@@ -215,6 +225,8 @@ beforeEach(() => {
 
 const copiedIds = () => (mocks.bulkByDb["user-timeline_new"] ?? []).map(d => String(d._id))
 const deletedIds = (db = "user-timeline_old") => (mocks.bulkByDb[db] ?? []).filter(d => d._deleted).map(d => String(d._id))
+/** 被 `_purge` 清掉的 id（退订清理的新路径） */
+const purgedIds = (db = "user-timeline_old") => mocks.purgeByDb[db] ?? []
 
 /** 一行"已经同步过、且源那边没有新内容"的水位 */
 const settledWatermark = (overrides: Record<string, unknown> = {}) => ({
@@ -320,7 +332,7 @@ describe("reconcileUserTimeline：升级与稳态", () => {
     expect(result.dirtySources).toEqual(["feed1"])
   })
 
-  it("退订：删条目 + 删裸源 id 的 FeedDoc 副本 + 删水位行", async () => {
+  it("退订：purge 条目 + 删裸源 id 的 FeedDoc 副本 + 删水位行", async () => {
     mocks.stateByDb["user-timeline_old"] = { version: 2, replicatorsPurged: true }
     mocks.watermarks = [settledWatermark()]
     mocks.subscriptions = []
@@ -331,7 +343,8 @@ describe("reconcileUserTimeline：升级与稳态", () => {
 
     const result = await reconcileUserTimeline("u1")
 
-    expect(deletedIds()).toEqual(expect.arrayContaining(["entry:feed1:001", "entry:feed1:002"]))
+    // 条目用 `_purge` 清（不留墓碑）；裸 id 的 FeedDoc 副本仍用普通 delete
+    expect(purgedIds()).toEqual(expect.arrayContaining(["entry:feed1:001", "entry:feed1:002"]))
     expect(mocks.destroyedByDb["user-timeline_old"]).toContain("feed1")
     expect(result.removedSyncs).toBe(1)
     expect(result.removedEntries).toBeGreaterThan(0)
