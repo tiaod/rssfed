@@ -23,6 +23,10 @@ import { blurhashFromImage } from "./blurhash"
  * `IMAGE_CACHE_TTL_DAYS`（默认 7 天）清掉；清掉之后最多是「下次遇到同 URL 时重下一遍」，
  * 不影响任何已入库数据。key 里带 `IMAGE_CACHE_VERSION`，改压缩实现时递增版本即可让旧对象失效。
  *
+ * 为什么默认 7 天：实测重复出现的模板图间隔 99% 在 6.6 天内，TTL 再长命中率只多 0.2pp、
+ * 稳态体积却翻几倍。这是实测拐点，不是拍脑袋取的整数。
+ * 诊断入口见 `scripts/diagnose-image-cache.ts` 头部注释。
+ *
  * 没有 sidecar 元数据：命中时用 `probeImageSize` / `blurhashFromImage` 从 AVIF 本体现算
  * （头部解码是毫秒级），省掉每张图一个 JSON 对象的写与读。
  */

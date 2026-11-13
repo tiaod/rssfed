@@ -8,7 +8,8 @@
  *   ② sync-targets 只下发这一个合并库（订阅与条目同库，旧版逐源下发的 /targets 已删除）；
  *   ③ 源库（feed 库）里新写入的条目会在下一轮聚合里出现在用户库中；
  *   ④ 拉取通道能在**不重启复制**的情况下拿到服务端后来写入的条目；
- *   ⑤ 源库里的条目被删除后，客户端也删掉本地副本（镜像语义，删除随复制传播）；
+ *   ⑤ 源库里的条目被删除后，**删除不会随复制传播**（selector 只搬活文档，墓碑静默丢失）——
+ *      服务端用户库与浏览器本地的副本都仍在，过期条目由两侧各自的保留策略清；
  *   ⑥ **写方向闸门**（用户库设计文档里的 validate_doc_update）：经代理写 `entry` / `feed` 被拒
  *      （403），写 `entry-state` / `subscription` 这类状态文档放行；
  *   ⑦ 回写通道只推状态文档：本地写的已读/收藏能自己上去；
@@ -596,7 +597,10 @@ test('单库聚合 + 拉取/回写双向同步的真栈行为符合设计', asyn
         : `dev 残留 ${filterCandidates.length} 个（旧版本留下的，不影响新复制）`
     )
 
-    // ── 4.2 复制是**精确镜像**：源库里直接写入的老条目也会被搬进来 ──
+    // ── 4.2 复制**只搬活文档、不看发布时间**：源库里直接写入的老条目也会被搬进来 ──
+    //
+    // 注意别把它读成"精确镜像"——镜像指删除也跟随，而 selector 不搬删除（见 ⑤）。这里只说
+    // 「源库里活着的都会被搬」，与发布时间无关。
     //
     // 保留策略的权威是源库裁剪（每源最新 N 条），复制本身**不带任何时间参数**。所以一条发布时间
     // 很老、但确实躺在源库里的条目，重扫时必须出现在用户库 —— 反过来说，"窗口外置不入"这条旧断言
@@ -710,22 +714,46 @@ test('单库聚合 + 拉取/回写双向同步的真栈行为符合设计', asyn
       `${JSON.stringify(checkpointsBefore)} → ${JSON.stringify(checkpointsAfter)}`
     )
 
-    // ── ⑤ 源库删除 → 本地跟随删除（源库裁剪走的路就是这条） ──
+    // ── ⑤ 源库删除 → **不传播**（墓碑静默丢失，保留由两侧各自 `_purge` 完成） ──
+    //
+    // 这条在 selector 方案下**与旧实现方向相反**，是刻意变更（见 `couchdb/replicator.ts` 头注释）：
+    //   - 旧实现用 JS filter 放行 `_deleted`，删除随复制传播，用户库是源库的精确镜像；
+    //   - 新实现用 Mango selector，只匹配活文档，**删除进不了复制**。
+    //
+    // 所以这里断言的是「删除**不会**传播」，而不是「本地跟着删」。不要把它改回"本地跟随服务端"——
+    // 那会重新引入"每个删除在每个用户库各留一个墓碑"的代价（实测一个用户库被墓碑占掉 90%，
+    // 见 `ARCHITECTURE.md` 的「保留策略」一条）。
+    //
+    // 用户库里过期的条目由两处独立清理：服务端 reconcile 每轮逐源裁到 N（`services/timeline.ts` 的 ④），
+    // 浏览器本地则由 `usePouchDb` 的 idle compact 回收旧修订。
+    let sourceDeletedAny = false
     for (const db of feedDbNames) {
       const sourceDoc = await couch<CouchDoc>(`/${db}/${encodeURIComponent(ENTRY_ID_2)}`).catch(() => null)
       if (sourceDoc?._rev) {
         await couch(`/${db}/${encodeURIComponent(ENTRY_ID_2)}?rev=${sourceDoc._rev}`, { method: 'DELETE' })
+        sourceDeletedAny = true
       }
     }
+    check('源条目已在源库删除', sourceDeletedAny, `${feedDbNames.length} 个候选库`)
     const thirdRefresh = await session.request('/api/timeline/refresh?wait=1&force=1', { method: 'POST' })
     check('删除源条目后催促聚合成功', thirdRefresh.status === 200, `HTTP ${thirdRefresh.status}`)
 
-    const removed = await waitFor(
-      '客户端跟随服务端的删除',
-      async () => (await local.get(ENTRY_ID_2).catch(() => null)) === null,
-      60_000
-    ).then(() => true).catch(() => false)
-    check('源条目删除后本地副本也删掉了（本地跟随服务端）', removed)
+    // 服务端用户库里的副本**仍在**：selector 不搬删除，所以没有任何机制会把它清掉。
+    // （它最终由 reconcile 的逐源裁剪清 —— 那是按 N 裁，不是按"源库删了"裁，两件事别混。）
+    const stillServer = await couch<CouchDoc>(`/${timelineDb}/${encodeURIComponent(ENTRY_ID_2)}`).catch(() => null)
+    check(
+      '删除**没有**随复制传播：服务端用户库里的副本仍在（墓碑静默丢失是刻意的）',
+      !!stillServer,
+      stillServer?._rev ?? '（缺失 —— 说明删除被传播了，与本方案相反）'
+    )
+
+    // 浏览器本地同样留着：拉取通道只收到过当初那一条写入，删除从来没到过本地。
+    const stillLocal = await local.get(ENTRY_ID_2).catch(() => null)
+    check(
+      '删除没有到达浏览器：本地副本仍在（不是"本地跟随服务端"）',
+      !!stillLocal,
+      stillLocal?._rev ?? '（缺失）'
+    )
 
     // ── ⑧ 未登录不能读派生库 ──
     const anonymous = await fetch(`${proxyUrl}/_all_docs`)
@@ -1003,7 +1031,7 @@ test('单库聚合 + 拉取/回写双向同步的真栈行为符合设计', asyn
     const accountRemoved = await cleanup()
     check('临时账号已清理', accountRemoved, `共 ${resources.accounts.length} 个临时账号`)
     console.log(failures.length === 0
-      ? `\n全部通过（${checks - failures.length}/${checks} 个断言）：单库下发 → 按需一次性搬运（水位判定 / 固定下界 + 同 checkpoint / 镜像不过滤 / 附件二进制）→ 拉取/回写两条通道 → 删除跟随 → 退订清理 / 重建换库 → 写方向闸门，链路行为符合设计。`
+      ? `\n全部通过（${checks - failures.length}/${checks} 个断言）：单库下发 → 按需一次性搬运（水位判定 / 固定下界 + 同 checkpoint / 只搬活文档 / 附件二进制）→ 拉取/回写两条通道 → 删除**不**传播（墓碑静默丢失）→ 退订清理 / 重建换库 → 写方向闸门，链路行为符合设计。`
       : `\n失败 ${failures.length}/${checks} 项：${failures.join('；')}`)
   }
 })

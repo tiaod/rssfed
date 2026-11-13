@@ -8,8 +8,11 @@
  *   pnpm feed-retention --feed-id <id> # 单源
  *   pnpm feed-retention --apply        # 真应用（写 feeds.retention_entries + 裁剪）
  *
- * ⚠️ N 变小是**破坏性**的：源库删除会随复制一路传到所有用户库与浏览器。第一次上线前先用
- * dry-run 看一眼会裁多少，必要时用 --limit 灰度。
+ * ⚠️ N 变小会裁掉源库里的旧条目。**它不会以删除的形式传到用户库或浏览器**（汇聚用 Mango
+ * selector，删除不随复制传播 —— 见 `couchdb/replicator.ts`），用户库那边的旧条目由它自己
+ * 的逐源裁剪在下一轮 reconcile 收敛（两者用的是同一个 N）。所以这里的破坏性是「不可逆地
+ * 丢掉源库里的历史」，不是「把用户正在读的东西删掉」。第一次上线前仍建议先用 dry-run 看一眼
+ * 会裁多少，必要时用 --limit 灰度。
  */
 import 'dotenv/config'
 import pLimit from 'p-limit'

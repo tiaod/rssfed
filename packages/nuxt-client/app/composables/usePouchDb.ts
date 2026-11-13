@@ -1292,9 +1292,15 @@ export function usePouchDb() {
         // `docs` 是 PouchDB 复制 change 事件里本批写入成功的文档（`docs_written` 只是累计计数，
         // 拆不出源），批次之外还有 FeedDoc / 状态文档，所以只认 entry。
         //
-        // 同一批里还可能有条目**删除**（源库按保留 N 条裁剪，删除随复制传播）：删除文档只剩
-        // `_id` 与 `_deleted`，没有 type，按 type 判断会漏掉。它们不计入「已同步 N 条」，
-        // 但要记进 removedEntryIds，供列表快照剔除已经失效的行（见 useSyncedEntryList）。
+        // 同一批里还可能有条目**删除**，删除文档只剩 `_id` 与 `_deleted`、没有 type，按 type
+        // 判断会漏掉。它们不计入「已同步 N 条」，但要记进 removedEntryIds，供列表快照剔除
+        // 已经失效的行（见 useSyncedEntryList）。
+        //
+        // **注意**：现行保留策略（两侧各自 `_purge`，见 hono-server 的 `couchdb/retention.ts`）
+        // 不产生墓碑，`_purge` 掉的文档也不会进复制 —— 所以**新数据里这两条分支基本不会命中**。
+        // 留着是因为客户端仍可能收到删除：(a) 存量库里旧 filter 方案留下的 `entry:` 墓碑还在，
+        // 首次全量拉取会读到；(b) 退订清理对 FeedDoc 副本用的是标准 delete。
+        // 删掉这段的后果是列表里留着点开即 404 的幽灵行，所以宁可多一层兜底。
         let removedInBatch = false
         for (const doc of i.docs ?? []) {
           if (typeof doc?._id === 'string' && doc._id.startsWith('entry:')) {

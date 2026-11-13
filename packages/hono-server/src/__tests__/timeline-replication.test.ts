@@ -9,8 +9,7 @@ import { TIMELINE_REPLICATION_SELECTOR } from "../couchdb/client"
  *   ① selector **必须是常量**：它参与 checkpoint 的哈希，出现随时间变化的谓词会让每个
  *      (用户 × 源) 每天都从 0 重扫源库（早期 `query_params` 窗口就是这么坏掉的）；
  *   ② selector **只匹配活文档**，墓碑进不来 —— 这是刻意的：删除不再传播，保留改由两侧
- *      各自 `_purge` 完成（见 `couchdb/retention.ts`）。旧实现靠"删除放行"让用户库成为镜像，
- *      代价是每个删除在每个用户库都留一个墓碑（实测一个账号 4.2 万个，占 90%）；
+ *      各自 `_purge` 完成（见 `couchdb/retention.ts`）；
  *   ③ 顺手挡住设计文档：`_design/*` 没有 `type` 字段，天然匹配不上（以前是 JS filter 的活）。
  *
  * 真库行为（附件二进制到端、退订取消、两侧保留收敛）在

@@ -10,28 +10,28 @@ import {
  * 搬运本身是一条 (源库 → 该用户聚合库) 的复制，用 **Mango selector** 只搬活文档，
  * 附件走 CouchDB 内部 multipart。**不带任何 `query_params`**。
  *
- * 为什么要 selector 而不再用 JS filter（刻意的语义变更）：
- *   旧实现靠「删除以 `_deleted` 变更跟着复制」让用户库成为源库的精确镜像，代价是每个删除
- *   都要留一个墓碑并被镜像进每个用户库。实测线上一个账号：4,717 条活文档配 **42,262 个墓碑
- *   （90%）**，浏览器首次全量拉取要读 4.8 万份文档、21.7 秒。而且这些墓碑里绝大多数**不是**
- *   源库现有墓碑的镜像（源库合计仅 803 个）—— 是旧实现里源库清理任务早已 purge 掉的删除，
- *   purge 不复制，于是永久留在每个用户库里。
+ * ## 为什么是 selector（刻意的语义变更：删除不再传播）
  *
- *   新实现**接受墓碑静默丢失**：selector 只匹配活文档，删除进不了复制。于是"精确镜像"这条
- *   不变量换成「两侧各自独立执行同一条保留规则」——源库裁到每源最新 N 条（`retention.ts`），
- *   汇聚库也裁到每源最新 N 条（`services/timeline.ts` 的 reconcile 步骤），两侧都用 `_purge`，
- *   所以两侧都不产生墓碑。实测 8 轮随机抓取/裁剪：两侧条目集合每轮完全一致、墓碑恒为 0。
+ * 旧实现用 JS filter **放行删除**，让删除跟着复制传播、用户库成为源库的精确镜像。代价是
+ * 每个删除都要在每个用户库留一个墓碑 —— 一个用户库被墓碑撑到 90% 的体积，浏览器首次全量
+ * 拉取都要把它们读一遍。**具体实测数据与取舍见 `ARCHITECTURE.md` 的「保留策略」一条。**
  *
- * 为什么不留常驻（continuous）复制（实测）：
- *   - 每个 (用户 × 源) 一条常驻复制时，625 条一起做首次追赶会把机器压死：
- *     CouchDB 162% CPU / 988MB、宿主 2 核 load 20.8、swap 1.6G/2G，源库都打不开；
- *   - 想用 `[replicator] max_jobs` 限流则必然**饿死**：常驻任务永不结束、不释放槽位，
- *     `max_jobs` 事实上变成"最多多少个源会被搬"（设 50 时 573 个源一条都搬不过来）。
- *   一次性复制把并发完全交给我们的队列（`TIMELINE_SYNC_CONCURRENCY`），机器压力可控，
- *   而"要搬哪个源"由 PG 里的水位表（`timeline_source_sync`）按
- *   `feeds.lastChangedAt / bots.lastNewEntryAt > synced_at` 判定 —— 没变化的源连一次复制请求都不发。
+ * 新实现**接受墓碑静默丢失**：selector 只匹配活文档，删除进不了复制。"精确镜像"这条不变量
+ * 换成「两侧各自独立执行同一条保留规则」（源库与汇聚库都裁到每源最新 N 条，都用 `_purge`，
+ * 见 `retention.ts`），所以两侧都不产生墓碑。
  *
- * 四条必须知道的边界（都实测过）：
+ * ## 为什么不留常驻（continuous）复制
+ *
+ * 一个 625 源的账号 = 625 条常驻复制，同时追赶会把机器压死；用 `[replicator] max_jobs`
+ * 限流则必然**饿死**（常驻任务永不结束、不释放槽位，`max_jobs` 实际变成"最多搬多少个源"）。
+ * 完整实测（各档 CPU/load/pending 数据）见 `docs/notes/aggregation/on-demand-replication.md`。
+ *
+ * 一次性复制把并发完全交给我们的队列（`TIMELINE_SYNC_CONCURRENCY`），机器压力可控，
+ * 而"要搬哪个源"由 PG 里的水位表（`timeline_source_sync`）按
+ * `feeds.lastChangedAt / bots.lastNewEntryAt > synced_at` 判定 —— 没变化的源连一次复制请求都不发。
+ *
+ * ## 四条必须知道的边界（都实测过）
+ *
  *   ① **selector 与 filter / doc_ids 互斥**：同时传直接 400
  *      （`doc_ids`,`filter`,`selector` are mutually exclusive）。所以源库不再需要装复制过滤器，
  *      `ensureReplicationFilter` 那套"存量库补装"逻辑一并删除。
@@ -143,7 +143,8 @@ export function summarizeReplicationSession(res: ReplicateResponse): { docsWritt
  * 饿死与过载并存的根源。`_replicate` 是一次同步调用，并发完全由调用方（我们的队列）控制。
  *
  * checkpoint 与 `_replicator` 完全一致（两端 `_local/<参数哈希>`）：同参数的下一次调用
- * 接着上次的序号继续；传了不同的 `boundIso` 就是新哈希，会从 0 重扫（探针实测）。
+ * 接着上次的序号继续；参数一旦变化就是新哈希、从 0 重扫（探针实测）。所以这里的复制参数
+ * 只保留源库与目标库两项 —— 别再往里加会变的量（窗口下界之类），那会让每轮都换哈希。
  */
 export async function runSourceReplication(spec: {
   sourceDb: string

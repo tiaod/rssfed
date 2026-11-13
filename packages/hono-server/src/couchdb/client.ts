@@ -45,22 +45,21 @@ export function authenticatedDbUrl(dbName: string): string {
 /**
  * 聚合复制用的 **Mango selector**（由复制器在源端求值，只搬活文档）。
  *
- * 为什么是 selector 而不是 JS filter（这是一次刻意的语义变更，见 `couchdb/replicator.ts` 的文件头）：
- *   - 旧实现的 JS filter 会**放行删除**，让删除跟着复制传播、用户库成为源库的精确镜像。
- *     代价是每个删除都在每个用户库里留一个墓碑 —— 实测线上一个账号 4,717 条活文档配
- *     **42,262 个墓碑（90%）**，浏览器首次全量拉取要读 4.8 万份文档、21.7 秒。
- *   - 新实现**接受墓碑静默丢失**：selector 只匹配活文档，删除进不了复制。保留改由两侧
- *     各自独立执行同一条规则（每源最新 N 条 + `_purge`），所以两侧都不产生墓碑。
- *   - selector 顺手完成了 filter 原本唯一的另一个职责：**挡设计文档**。`_design/*` 没有
- *     `type` 字段，天然匹配不上。
- *
- * **这个对象必须是常量**：它参与 checkpoint 哈希（两端 `_local/<哈希>`），字面量不变则
- * 永久复用、接着上次序号继续；一旦随时间变化（比如放一个窗口下界进去），每个 (用户 × 源)
- * 每天都会从 0 重扫源库。这是早期 `query_params` 窗口方案被废弃的原因，别再走回去。
+ * 为什么用 selector 而不是 JS filter（包括"删除不再传播"这条刻意的语义变更）：见
+ * `couchdb/replicator.ts` 的文件头。
  *
  * 只放 `type` 一个条件是有意的：`entry` 是条目、`feed` 是源元信息（前端要显示标题/图标），
  * 其余类型（`subscription` / `entry-state` / `group-pref`）是客户端自己写的文档，
  * 源库永远不会有，写进来也无害 —— 但白名单比黑名单更稳，将来加类型时不会意外漏搬。
+ * selector 顺手完成了 filter 原本唯一的另一个职责：**挡设计文档**（`_design/*` 没有
+ * `type` 字段，天然匹配不上）。
+ *
+ * **这个对象的字面量参与 checkpoint 哈希**（两端 `_local/<哈希>`，由 CouchDB 的
+ * `couch_replicator_ids` 算，不是我们的代码）。字面量不变则永久复用、接着上次序号继续；
+ * 一旦变化 —— 包括语义等价的改写（`$in` 数组换序、包一层 `$and`、键顺序重排）—— 哈希就变，
+ * 每个 (用户 × 源) 都会从 0 重扫一次源库。重扫本身有界（目标端已有的修订会被 `_revs_diff`
+ * 跳过、不重传附件）且只影响那一轮，但没必要为之付出这个代价：**别改这个字面量**。
+ * 早期把窗口下界塞进 `query_params` 的写法正是这样坏掉的（每轮都换哈希）。
  */
 export const TIMELINE_REPLICATION_SELECTOR: Record<string, unknown> = {
   type: { $in: ["entry", "feed"] },
