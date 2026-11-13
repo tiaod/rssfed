@@ -156,9 +156,13 @@ curl -s -u admin:pass -X POST "http://localhost:5984/$DB/_compact" -H 'Content-T
 curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_count'
 ```
 
-**注意**：purge 之后，落后的客户端（checkpoint 停在 purge 之前）不会再收到那些删除，本地会留幽灵条目。
-两个客户端都实测过：一直跟得上的客户端不受影响；落后客户端需要本地重置一次（清 IndexedDB 重拉）。
-所以清理应选在用户活跃度低的时段做，并接受"个别长期不用的设备要重置本地缓存"。
+**注意**：`_purge` 掉的文档**不会进入任何复制**（这一点对服务端→用户库、用户库→浏览器都成立），
+所以被 purge 的墓碑不会以"删除"的形式传到浏览器。结果是**任何**客户端——不只是落后的那些——
+本地都会留着这些条目的副本（幽灵条目）。这不是 bug，是「墓碑静默丢失」的直接后果：过期条目
+本来就不指望靠删除传播来清，而由两侧各自的保留策略与浏览器本地的 idle compact 回收。
+
+清理时应选在用户活跃度低的时段；如果想让浏览器立刻干净，让用户手动重置一次本地缓存
+（清 IndexedDB 重拉）即可，之后就是服务端当前内容的一份完整副本。
 
 ### 时间线一直空、提示条停在「已同步 0 条」：这一轮还没把内容搬过来
 
@@ -206,6 +210,22 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
   ```
   feed / bot 库同理（`feeds` / `bots` 表的 `couch_db_name`）；**用户库**置空 `user.timeline_db_name` 后下次聚合会重建。重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次（用户状态文档要从客户端再推上来，见下面那条）。库级 `_security` 只在建库时设置一次，改坏了同样用置空库名的方式重建。
 
+### 约 1/64 的源「订阅在、队列在跑、条目库一直空」：feedId 以下划线开头
+
+- **现象**：某个源的库建出来了、`_design/main` 也装了，但 FeedDoc 永远写不进去（库里只剩设计文档），
+  条目一条都没有。用户看到的就是「订阅在、队列在跑，这个源永远是暂无条目」。
+- **原因**：feedId 由 `sha256(url).base64url.slice(0, 16)` 派生，base64url 字母表含 `_`，于是约 1/64 的源
+  feedId 以 `_` 开头，而 CouchDB **保留** `_` 开头的文档 id：
+  ```
+  Error: Only reserved document ids may start with underscore.
+  ```
+  错误只落在那一次 job 上，没有回显到任何用户可见的地方，很容易漏看。
+- **解法**：所有 `feed_*` 库的文档 id 一律走 [`doc-ids.ts`](../packages/hono-server/src/couchdb/doc-ids.ts)
+  的 `feedDocId()` —— 以 `_` 开头的 feedId 加 `feed` 前缀（加完长度 20，与未加前缀的 12/16 位不可能撞车），
+  其余原样返回，所以存量文档不受影响、**不需要迁移**。前端
+  [`utils/feedDocId.ts`](../packages/nuxt-client/app/utils/feedDocId.ts) 有一份同样的实现，两边必须同步改。
+- **排查**：`select id from feeds where id like '\_%'` 能列出受影响的源。
+
 ### 重建之后内容回来了，但浏览器里看不见
 
 - **现象**：`POST /api/timeline/rebuild`（或设置页的「重建时间线」）之后，服务端新库里有条目，但页面上的时间线还是空的（或比预期的少）。
@@ -221,27 +241,66 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
 
 ### 某个订阅源的页面永远是「暂无条目」，但源站明明有文章
 
-- **现象**：`/rss/feed/<feedId>` 一直空。源库（`feed_*`）里有 entry，`feeds.last_fetched_at` 也一直在更新、`error_message` 为空，而用户库（`user-timeline_*`）里这个源只有 FeedDoc 副本与 `subscription:` 文档、`entry:<feedId>:*` **一条都没有**。
-- **原因**：条目都落在**保留区间**之外。保留 = 「发布时间在时间线窗口内 **∨** 属于该源最新 N 条」（N 见下面）。复制过滤器只能按 `publishedAt >= minPublishedAt` 过滤（[client.ts](../packages/hono-server/src/couchdb/client.ts) 的 `main/timeline`），下界存在 `timeline_source_sync.bound_iso`。**低频源**（几周才发一篇）最新的一篇也在 3 天窗口之外时，下界就把整个源挡在外面了。
-- **诊断**（不用起前端）：拿源库名（`select couch_db_name from feeds where id='<feedId>'`）直接问 CouchDB 那个过滤器放行了什么：
+- **现象**：`/rss/feed/<feedId>` 一直空。源库（`feed_*`）里有 entry，`feeds.last_fetched_at` 一直在更新、
+  `error_message` 为空，而用户库（`user-timeline_*`）里这个源只有 FeedDoc 副本与 `subscription:` 文档、
+  `entry:<feedId>:*` **一条都没有**。
+- **先排除两种"看起来像、其实不是"的情况**：
+  1. **源库本身是空的** —— 抓取失败或源站就没内容。查源库活文档数
+     （`curl -s -u ... "http://localhost:5984/<feed 库名>" | grep doc_count`）。源库空的话问题在抓取，不在聚合。
+  2. **用户库里其实有，只是前端有缓存** —— 见上面「重建之后内容回来了，但浏览器里看不见」。
+
+- **原因**（按概率排）：现在**没有"时间线窗口"这层过滤了**，条目能不能进用户库只取决于三件事：
+
+  | 闸门 | 判据 | 怎么查 |
+  | --- | --- | --- |
+  | ① 订阅还在 | 复制前先读 `subscription:<sourceId>`，404 就跳过 | 用户库里 `GET /<user-timeline 库>/subscription:<feedId>` |
+  | ② 该源被判成"脏" | 没有水位行 / 上次同步失败 / 源在**上次同步开始之后**有变化 | PG 的 `timeline_source_sync`（`status`、`synced_at`、`last_error`） |
+  | ③ 源库确实有这些条目 | selector 只搬活文档，源库已 `_purge` 的搬不到 | 源库 `_all_docs` 对数 |
+
+  ②最常踩：水位判定看 `feeds.lastChangedAt`（新增**或裁剪删除**都会 bump）。**外部直接往源库写数据**
+  （脚本、手工导入、另一个实例）不会动这一列，于是服务端认为"这个源没变化"、一个复制请求都不发。
+
+- **诊断**（起一个 `wait=1&force=1`，跳过水位判定把该源重扫一遍）：
   ```bash
+  curl -s -b "<cookie>" -X POST "http://localhost:3001/api/timeline/refresh?wait=1&force=1"
   curl -s -u "$COUCHDB_USER:$COUCHDB_PASSWORD" \
-    "http://localhost:5984/feed_<...>/_changes?filter=main/timeline&minPublishedAt=<bound_iso>"
+    "http://localhost:5984/<user-timeline 库名>/_all_docs?startkey=%22entry%3A<feedId>%3A%22&endkey=%22entry%3A<feedId>%3A%EF%BF%BF%22" | grep -c '"id"'
   ```
-  只回 1 行（FeedDoc）就说明条目全被挡了。把 `minPublishedAt` 换成 `now - 30d` 或整个去掉再问一次：能回 N 条就确认是这个原因。
-- **解法**：个人设置里把**时间线窗口**调大（只对窗口外几十天内的有效），或者用**每源保底条数**（`user_timeline_settings.min_feed_entries`，默认 50，0 = 关闭）—— 它按源数"最新 N 条"，对低频源就是"一篇都不丢"，高频源不受影响。两个都是改完由服务端自己回填（换设置 = 水位里的 `bound_iso` 重算 = 复制哈希改变 = 该源从 0 重扫）。**注意**：`refresh?force=1` 与页面上的「刷新订阅」都**不能**救这种情况 —— `force` 只跳过"脏源判定"，下界仍是水位里存着的那个旧值。
-- **被剪掉过的条目会自动补回来**：编辑设置（调大窗口 / 打开保底条数）后，服务端除了重扫复制，还会把"保底条数要求留住、但用户库里已经是 tombstone"的条目**直接写回用户库**（`restoreTombstonedEntries`，见 [timeline.ts](../packages/hono-server/src/services/timeline.ts)）。这一步不能省：复制是**变更投递**不是投影，目标端删过的 rev 仍在它的修订树里，复制器认为"这个修订我有"，永远不会再送（`CouchDB 3.x` 也拒绝拿 tombstone 的 rev 直接 PUT 复活，必须用 `new_edits: false` 声明谱系）。保底条数**之外**的更老历史仍然找不回来，只能 `POST /api/timeline/rebuild`（换库重搬）。另外：条目补回本地后，订阅源页面的列表**不会自动插入**（这是页面本来的设计），点一下「已同步 N 条」旁边的「查看」或刷新页面就能看到。
+  `force=1` 之后有内容 → 就是 ②；仍然没有 → 查 ①（订阅文档在不在）和源库有没有这些条目。
+
+- **解法**：
+  - ② 的常规情形：等下一轮聚合（默认 5 分钟）或 `force=1` 手动催一次；持续性不搬看
+    `timeline_source_sync.last_error`。
+  - ① 订阅文档丢了：重新订阅一次。
+  - 库整体搬不动：`POST /api/timeline/rebuild`（换空库重搬，顺带作废全部水位）。
+
+- **注意「重订之后历史没回来」**：退订清理会 `_purge` 掉条目、删掉 FeedDoc 副本与水位行，但**不清
+  checkpoint**（它在两端的 `_local/<哈希>` 里）。重新订阅后该源会从 checkpoint 之后继续，
+  也就是**只收到新内容，退订期间一直没动过的历史不会再补**。要拿回历史只能 `POST /api/timeline/rebuild`。
 
 ### 某个订阅源一直不搬东西（水位行是 error / 一轮聚合没把它算成脏源）
 
-- **现象**：某个源在用户库里始终没有内容；`timeline_source_sync` 里这一行的 `status` 是 `error`、`last_error` 有原文，或者干脆没有这一行（说明从来没成功同步过）。旧版本里等价的现象是 `_scheduler/docs/_replicator` 里那条常驻任务 `crashing` / `error` —— **新实现不再有这种文档**。
+- **现象**：某个源在用户库里始终没有内容；`timeline_source_sync` 里这一行的 `status` 是 `error`、
+  `last_error` 有原文，或者干脆没有这一行（说明从来没成功同步过）。旧版本里等价的现象是
+  `_scheduler/docs/_replicator` 里那条常驻任务 `crashing` / `error` —— **新实现不再有这种文档**
+  （按需一次性复制，跑完即止，临时任务不出现在 `_scheduler` 里）。
 - **原因**（按出现频率）：
-  1. 复制请求失败：源/目标必须是**带凭据的完整 URL**（裸库名会被当远端地址解析，报 `replication_auth_error`，见 [replicator.ts](../packages/hono-server/src/couchdb/replicator.ts)），或 CouchDB 太忙导致超时（`TIMELINE_REPLICATION_TIMEOUT_MS`，失败会清空 `synced_at`，下一轮重试）；
-  2. 源库设计文档里没有 `filters.timeline`（过滤器没装上，或库是手工建的）→ `filter_fetch_error`；
-  3. **过滤器的 `query_params` 里出现了叫 `since` 的参数**：它与 CouchDB 自己的 `since` 撞名，过滤器读到的是序号字符串，窗口会静默失效（可能反而多搬）；
-  4. 这个源被判成"没更新"：水位判定看的是 `feeds` / `bots` 的 `lastNewEntryAt`。**外部直接往源库写过东西**（脚本、手工导入）不会动它 → 用 `refresh?wait=1&force=1` 强制重扫；
-  5. 目标库被手工删了 / `_security` 改坏 → 复制反复失败。
-- **解法**：先看 `timeline_source_sync.last_error` 与日志里的 `[Timeline]` 行；"让代码重新对齐"的通用手段是**退订再订阅**该源（删条目 + 删 FeedDoc 副本 + 删水位行），或 `POST /api/timeline/rebuild`（换库重搬 + 作废水位）。**不要手工编辑 `_local/<hash>` checkpoint**：它就是"这次从哪个序号接着搬"的依据，改坏了要么漏搬要么全量重扫。
+  1. **复制请求失败**：源/目标必须是带完整凭据的 URL（裸库名会被当远端地址解析，报
+     `replication_auth_error`，见 [replicator.ts](../packages/hono-server/src/couchdb/replicator.ts)），
+     或 CouchDB 太忙导致超时（`TIMELINE_REPLICATION_TIMEOUT_MS`，默认 120s）。失败会清空 `synced_at`，
+     下一轮自动重试。
+  2. **这个源被判成"没更新"**：水位判定看 `feeds.lastChangedAt` / `bots.lastNewEntryAt`。
+     **外部直接往源库写过东西**（脚本、手工导入）不会动这一列 → 用 `refresh?wait=1&force=1` 强制重扫。
+  3. **目标库被手工删了 / `_security` 改坏** → 复制反复失败（见上面「库名还登记着，库却没了」）。
+  4. **订阅文档不在**：复制任务入队前先读 `subscription:<sourceId>`，读不到直接判"已退订"跳过。
+- **解法**：先看 `timeline_source_sync.last_error` 与日志里的 `[Timeline]` 行。要"让代码重新对齐"，
+  首选 `POST /api/timeline/rebuild`（换库重搬 + 作废全部水位）；
+  **不要手工编辑 `_local/<hash>` checkpoint** —— 它就是"这次从哪个序号接着搬"的依据，
+  改坏了要么漏搬、要么全量重扫一次。
+
+> 旧版本这一节还列过两条现在**已不存在**的原因：源库设计文档缺 `filters.timeline`（复制改用
+> Mango selector 后不再安装过滤器），以及 `query_params` 里出现叫 `since` 的参数导致窗口失效
+> （参数方案已整体废弃）。看到这两条说明文档过旧，现行机制见 `ARCHITECTURE.md`。
 
 ## 反向代理与网络
 

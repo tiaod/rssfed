@@ -12,6 +12,7 @@
 | [`sync/`](sync/) | 同步链路：水位判定、弹层状态、同步窗口锚点 |
 | [`aggregation/`](aggregation/) | 服务端聚合搬运与 CouchDB 复制语义 |
 | [`frontend-perf/`](frontend-perf/) | 前端列表渲染与性能基准 |
+| [`images/`](images/) | 图片压缩的并发与内存实测 |
 | [`evidence/`](evidence/) | 上述文档引用的原始数据 |
 
 ## 文档
@@ -31,6 +32,12 @@
 | [`couchdb-replicator-aggregation.md`](aggregation/couchdb-replicator-aggregation.md) | 聚合搬运为什么改用 CouchDB 复制器；复制语义的 5 条边界与三条路线取舍 |
 | [`on-demand-replication.md`](aggregation/on-demand-replication.md) | 常驻复制为什么在生产被打崩（625 条 / load 20.8）；改成按需一次性复制 + 水位后的实测数字与四个易错点 |
 | [`source-side-retention-plan.md`](aggregation/source-side-retention-plan.md) | **已被取代**：当时主张「源库裁剪 → 删除跟着 filter 复制传播 → 用户库精确镜像」，实际墓碑爆炸（90%）；现行方案是 selector 汇聚 + 两侧各自 purge。五个探针的实测结论（selector 不搬删除、purge 抹修订记忆）依然成立 |
+
+### `images/` —— 图片处理
+
+| 文档 | 记录了什么问题 |
+| --- | --- |
+| [`image-concurrency-memory.md`](images/image-concurrency-memory.md) | 抓取时图片压缩把机器压到 OOM：并发数 vs 峰值内存的实测，以及为什么只限并发、不改单张参数 |
 
 ### `frontend-perf/` —— 前端性能
 

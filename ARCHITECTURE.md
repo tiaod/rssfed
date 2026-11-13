@@ -155,11 +155,9 @@ outbox 路由从该库的 `entries-by-date` 视图读取（见 `routes/bots.ts`�
 
 - `bots.preferred_username` **必须有唯一约束** —— 它就是联邦标识符 `@username@域名`，ActivityPub
   的 acct 语义要求全局唯一；创建接口对重名返回 409。
-- **Fedify 的表必须放在独立 schema（`fedify`）下，不能留在 `public`**：`fedify_kv_v2` / `fedify_message_v2`
-  由 `@fedify/postgres` 自建自管、不在本仓库 schema 中，留在 `public` 会被 `drizzle-kit push` 当成「多余
-  副本」DROP —— migrate 跑的 `push --force` 自动批准数据丢失语句，等于每次部署都可能清掉 Bot 私钥。做法是
-  BotKit 的独立连接把 `search_path` 指向 `fedify`（见 `bots/index.ts`），schema 由 `ensureFedifySchema()`
-  幂等创建；`drizzle.config.ts` 另配 `tablesFilter: ["*", "!fedify_*"]` 作第二道防线。
+- **Fedify 的表必须放在独立 schema（`fedify`）下，不能留在 `public`**：`fedify_kv_v2` 存着 Bot 的
+  密钥对，留在 `public` 会被 `drizzle-kit push` 当成多余副本 DROP。做法与踩坑细节见
+  [troubleshooting.md](docs/troubleshooting.md#drizzle-kit-push-要-drop-fedify_kv_v2会删掉-bot-私钥)。
 
 ## 文件存储职责
 
@@ -180,15 +178,13 @@ outbox 路由从该库的 `entries-by-date` 视图读取（见 `routes/bots.ts`�
 
 **压缩结果按 URL + 参数内容寻址**（`images/cache.ts`）：同一条源图 + 同一组参数只下载、编码一次，正文里重复
 出现的模板图（公众号文章内嵌的固定图等）因此不必每个条目都重下一遍。它只是抓取路径的**去重中间产物**：
-浏览器不直连外站图片，附件随用户库同步到本地，拿不到附件时回填原始地址走网络（没有按需压缩接口）；
-缓存对象按 `IMAGE_CACHE_TTL_DAYS`（默认 7 天）由内建清理任务删除，删掉最多是下次遇到同 URL 时重下一遍。
-7 天是实测拐点：重复出现的模板图间隔 99% 在 6.6 天内，TTL 再长命中率只多 0.2pp、稳态体积却翻几倍。
-诊断入口见 `scripts/diagnose-image-cache.ts` 头部注释。
+浏览器不直连外站图片，附件随用户库同步到本地，拿不到附件时回填原始地址走网络（没有按需压缩接口）。
+缓存对象按 `IMAGE_CACHE_TTL_DAYS` 由内建清理任务过期删除，删掉最多是下次遇到同 URL 时重下一遍 ——
+所以它是**可随时重建的中间产物**，不属于任何需要保证的数据。
 
-**正文图片的 `src` 必须在注入 DOM 之前就换成本地占位**：`<img>` 一进 DOM，浏览器就按 `src` 发起请求，
-之后再换只是取消它（现象是"打开一篇已缓存的文章仍然在打源站"，DevTools 里全是 `ERR_ABORTED`）。
-占位图用抓取时算好、随 `images` 落库的 BlurHash（老条目没有则退化为 1×1 透明），原始地址挂在
-`data-orig-src` 上；附件字节读出后再由前端管线换成 `blob:`，读不到就回填原始地址走网络。
+**正文图片的 `src` 必须在注入 DOM 之前就换成本地占位**（否则浏览器已按原地址发出请求）：
+占位图用抓取时算好的 BlurHash、原始地址挂 `data-orig-src`、附件读出后再换 `blob:`。
+具体渲染管线见 [frontend-list-rendering.md](docs/frontend-list-rendering.md#正文图片src-必须在注入-dom-之前换成占位)。
 
 **头像为什么单独走存储后端**：头像是**上传类**文件（用户主动提交、需要独立 URL 展示），不适合塞进
 文档库。统一走 `Storage` 接口，有两个可切换的实现：
