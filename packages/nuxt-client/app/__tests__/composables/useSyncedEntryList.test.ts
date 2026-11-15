@@ -140,6 +140,74 @@ describe('useSyncedEntryList', () => {
     expect(list.newCount.value).toBe(0)
   })
 
+  it('查询进行中同步进来的条目不会被基线吃掉（宁可多报一次，也不静默吞掉）', async () => {
+    // 真实路径（冷启动 / 重开应用最容易撞上）：
+    //   ① load() 发起本地查询，此刻同步计数还是 N；
+    //   ② 查询在途，后台 live 复制把新条目写进本地库、计数涨到 N+3；
+    //   ③ 查询返回。
+    // 旧实现把基线记在**查询结束**时刻，于是这 3 条被算成「已看过」—— 提示条永不出现，
+    // 而用户重开应用时正是最该看到「有新内容」的时刻（实测重开 30 秒停在「已同步 0 条」）。
+    //
+    // 查询有没有恰好把这几条也查进来是**不可知**的（本地查询读最新库，复制同时在写）。
+    // 这里选的方向是「宁可在已经上屏时多报一次」：多点一下「查看」只是列表不变，
+    // 而少报一次用户就永远不知道有新内容。
+    const docs = syncedCounter(0)
+    const rows = [makeEntry('c'), makeEntry('b'), makeEntry('a')]
+    // 第一次查询挂住（模拟查询在途），之后恢复成即时返回（供 applyNew 重查）
+    let gate: ((rows: RssEntry[]) => void) | null = null
+    let first = true
+    const query = () => {
+      if (!first) return Promise.resolve(rows)
+      first = false
+      return new Promise<RssEntry[]>((resolve) => {
+        gate = resolve
+      })
+    }
+    const list = useSyncedEntryList({ query, syncedDocs: docs.docs })
+
+    const loading = list.load()
+    // 查询在途：同步写入 3 条（计数 0 → 3）
+    docs.count.value = 3
+    list.refreshFromSync()
+
+    gate!(rows)
+    await loading
+
+    // 不静默吞掉：那 3 条仍然报给用户
+    expect(ids(list)).toEqual(['c', 'b', 'a'])
+    expect(list.newCount.value).toBe(3)
+
+    // 点「查看」后自愈：基线对齐到当前，提示条收起
+    await list.applyNew()
+    expect(list.newCount.value).toBe(0)
+
+    // 之后再来 2 条照旧提示
+    docs.count.value = 5
+    list.refreshFromSync()
+    expect(list.newCount.value).toBe(2)
+  })
+
+  it('查询在途、新条目没进这次结果时，提示条照旧出现', async () => {
+    // 与上一条的区别：查询返回的是**旧窗口**（查询在同步写入之前就拿到了结果快照）。
+    // 这时候那 3 条还没上屏，必须留给提示条 —— 不能因为「计数涨了但列表没变」就把计数吃掉。
+    const docs = syncedCounter(0)
+    let releaseQuery: (rows: RssEntry[]) => void = () => {}
+    const query = () => new Promise<RssEntry[]>((resolve) => {
+      releaseQuery = resolve
+    })
+    const list = useSyncedEntryList({ query, syncedDocs: docs.docs })
+
+    const loading = list.load()
+    docs.count.value = 3
+    list.refreshFromSync()
+    // 查询结果里没有那 3 条新内容（更旧的窗口）
+    releaseQuery([makeEntry('z')])
+    await loading
+
+    expect(ids(list)).toEqual(['z'])
+    expect(list.newCount.value).toBe(3)
+  })
+
   it('不传 syncedDocs 的列表永远不显示提示条', async () => {
     const list = useSyncedEntryList({ query: async () => [makeEntry('a')] })
     await list.load()

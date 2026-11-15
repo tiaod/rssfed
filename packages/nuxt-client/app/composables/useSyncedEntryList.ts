@@ -90,14 +90,29 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
     return gen === generation ? list : null
   }
 
-  /** 列表里显示的就是已同步的最新内容：计数归零，提示条收起 */
-  function markSeen() {
-    seenDocs = syncedDocs()
-    newCount.value = 0
+  /**
+   * 列表里显示的就是已同步的最新内容：把基线对齐到**这次查询发起时**的计数，提示条收起。
+   *
+   * 基线取 `before`（查询发起时刻）而不是此刻的 `syncedDocs()`：查询在途时后台 live 复制
+   * 随时可能写入新条目，一返回就取当前值，等于**把查询期间进来的那批一并算成"已看过"**。
+   * 冷启动 / 重开应用最容易撞上 —— 首屏 load 与复制几乎同时开始，那批条目直接被吞掉，
+   * 提示条永远不出现（实测重开应用 30 秒都停在「已同步 0 条」，而本地确实多了新条目）。
+   *
+   * `newCount` 由 `refreshFromSync` 维护，这里**不清零**，否则会把查询期间攒下的计数一起抹掉。
+   * 代价是查询恰好把新条目也查进来时，提示条仍会报一次（内容其实已经上屏）。这是刻意选的
+   * 方向：多报一次只是点了「查看」列表不变，少报一次则是用户永远不知道有新内容 ——
+   * 而 `applyNew()` 会重新对齐基线，多报的那次点一下就自愈。
+   */
+  function markSeen(before: number) {
+    seenDocs = Math.max(seenDocs, before)
+    // load() 换上的就是最新内容：待查看数按新基线重算（可能仍有查询期间到达的那几条）
+    newCount.value = Math.max(0, syncedDocs() - seenDocs)
   }
 
   /** 查一次当前窗口并整体替换列表（首屏与用户点「查看」都走这里） */
   async function load(): Promise<void> {
+    // 基线必须是**查询发起时刻**的计数（原因见 markSeen）
+    const before = syncedDocs()
     const next = await queryWindow(displayLimit.value)
     if (!next) return
     // 查询异常时本地查询会返回空数组（见 usePouchDb.queryByView 的 catch）。
@@ -105,7 +120,7 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
     if (next.length === 0 && entries.value.length > 0) return
     entries.value = next
     hasMore.value = next.length >= displayLimit.value && displayLimit.value < maxEntries
-    markSeen()
+    markSeen(before)
   }
 
   /**
