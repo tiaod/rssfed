@@ -73,4 +73,13 @@ pnpm dev:all
 
 ## 许可证
 
-[MIT](LICENSE)
+[AGPL-3.0](LICENSE)
+
+整个项目按 AGPL-3.0 授权。这不是随手选的最严格许可证，而是依赖决定的：
+
+`packages/hono-server` 直接依赖 `@fedify/botkit`（AGPL-3.0-only），且 `src/bots/` 由
+`app.ts`、`index.ts` 无条件 import——联邦分发是运行时必经路径，不是可选插件。把本项目声明成
+MIT 会承诺一批我们无权授予的自由，所以整体跟随 AGPL。Fedify 本体是 MIT，只有 BotKit 这一层是 AGPL。
+
+**自建部署者请注意**：AGPL 第 13 条要求，如果你修改代码后对公众提供服务，必须向使用该服务的
+用户提供修改后的完整对应源码（通常是在界面上放一个指向源码仓库的链接）。原样运行则只需保留本声明。
