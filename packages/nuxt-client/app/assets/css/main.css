@@ -108,10 +108,19 @@
   overflow-wrap: break-word;
 }
 
-/* 图片/视频/嵌入：绝不超出容器 */
+/* 图片/视频/嵌入：绝不超出容器。
+ *
+ * iframe 不能跟 img/video 共用 `height: auto`：iframe 没有内在宽高比，auto 高度会塌成浏览器
+ * 默认的 150px 横条。这里只兜住宽度，比例由净化阶段按源站声明的宽高换算（见
+ * utils/iframeSizing.ts）；box-sizing 是防 1px：默认 content-box 下边框会把宽度顶出容器。 */
 .entry-content :where(img, video) {
   max-width: 100%;
   height: auto;
+}
+
+.entry-content :where(iframe) {
+  max-width: 100%;
+  box-sizing: border-box;
 }
 
 .entry-content :where(img) {

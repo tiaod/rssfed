@@ -8,6 +8,7 @@ import {
   type IframeSourceContext
 } from '~/utils/iframePolicy'
 import { applyImagePlaceholder, type PlaceholderMap } from '~/utils/entryImagePlaceholders'
+import { applyResponsiveIframeSizing } from '~/utils/iframeSizing'
 
 /**
  * RSS 正文的净化（XSS 防御）。
@@ -113,6 +114,9 @@ function installHooks() {
       if (placeholders) applyImagePlaceholder(el, placeholders.baseUrl, placeholders.map, placeholders.skeletonClasses)
     } else if (el.tagName === 'IFRAME') {
       el.setAttribute('loading', 'lazy')
+      // 按源站声明的宽高补 aspect-ratio + 宽度上限：iframe 没有内在宽高比，
+      // 光靠 CSS 的 max-width 只会把宽度压窄、高度留在原处（见 utils/iframeSizing.ts）
+      applyResponsiveIframeSizing(el)
     }
   })
 }

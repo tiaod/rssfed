@@ -410,6 +410,15 @@ JS
 - **解法**：见 `EntryDetailModal.vue` 的 `neutralizeOverlayPreventDefault`（保留冒泡、只把遮罩层那一次 `preventDefault` 置空）与 Swiper 的 `:simulate-touch="false"`（桌面翻页走浮钮与 ←/→ 键，触屏滑动不受影响）。
 - **别改回 `stopPropagation`**：在正文层掐断冒泡会让 reka-ui 的外部点击状态机漏收一次 `pointerdown`，症状变成下一条（点遮罩要关两次）。
 
+### 阅读视频类订阅源时，嵌入的视频比屏幕还宽（整页横向滚动）
+
+- **现象**：打开一篇正文里嵌了播放器（B 站 / YouTube / 源站自建）的文章，iframe 按源站声明的 `width="800"` 铺开，在手机上把正文容器顶出视口，整页可以左右拖；同一篇里的图片却是正常的。
+- **原因**：`main.css` 里「绝不超出容器」的规则只写了 `img, video`。iframe 是**替换元素**且**没有内在宽高比**，`overflow-wrap` 管不到它，`width`/`height` 属性就是它的 CSS 尺寸 —— 于是源站写多宽就渲染多宽。
+- **为什么补一条 CSS 不够**：`max-width: 100%` 只能把宽度压到容器宽，`height` 仍停在源站声明的 500px，播放器被拉成竖条；而给 iframe 写 `height: auto`（img/video 那条规则）又没有比例可依，会塌成浏览器默认的 150px 横条。实测（375 视口、正文可用宽 343）三种写法分别是 `343×500`、`343×150`、`343×214`，只有第三种是对的。
+- **解法**：净化阶段（`useSafeHtml` 的 `afterSanitizeAttributes`）按源站声明的宽高补 `aspect-ratio`，宽度改成 `min(声明值, 100%)`，见 [utils/iframeSizing.ts](../packages/nuxt-client/app/utils/iframeSizing.ts)；`main.css` 另补一条只兜宽度的 `iframe` 规则。内联一律带 `!important`：源站也常写 `width: 800px !important`，不带优先级会输给它。
+- **不要**把 `iframe` 并进 `img, video` 那条 `height: auto` 规则（原因见上）；也**不要**给没有尺寸声明的 iframe 猜「占满一行」—— 保持浏览器默认 300×150。
+- **验证**：`app/__tests__/utils/iframeSizing.test.ts`（换算规则 + 与净化管线的串联）；真实排版在 Chromium 里量过：修复前 320 视口下 `documentElement.scrollWidth` 是 1100，修复后等于视口宽。
+
 ### 弹窗里点过正文之后，点遮罩（弹窗外）要关两次
 
 - **现象**：打开条目弹窗、先在正文里点一下，再点弹窗外侧**不会关闭**；再点一次才关。没点过正文时行为正常。
