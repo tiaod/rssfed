@@ -6,6 +6,8 @@ import ListActionsBar from '~/components/ListActionsBar.vue'
 import ListViewSwitcher from '~/components/ListViewSwitcher.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
 import EntryListSkeleton from '~/components/EntryListSkeleton.vue'
+// 显式导入：同上，右栏整块不在自动扫描的清单里时会被静默渲染成空（这栏是新增的）
+import TimelineSidebar from '~/components/TimelineSidebar.vue'
 
 definePageMeta({
   layout: 'default'
@@ -114,84 +116,96 @@ watch(pouch.timelineVersion, () => refreshFromSync())
     </template>
 
     <template #body>
-      <!-- 错误只做提示，不遮挡已有内容：从上次的列表恢复时照样能接着读 -->
-      <UAlert
-        v-if="error"
-        color="error"
-        variant="soft"
-        title="加载失败"
-        :description="error"
-        class="mb-4"
-      />
-
-      <div
-        ref="listAnchorRef"
-        class="relative flex h-full min-h-0 flex-col"
-      >
-        <!-- 浮层提示条：盖在滚动区顶部，不占布局，按滚动方向让位 -->
-        <NewEntriesBanner
-          floating
-          :count="newCount"
-          :visible="bannerVisible"
-          @apply="applyNew"
-        />
-
-        <!--
-          首屏骨架：版式跟随当前视图，条目上屏时不会跳版（见 EntryListSkeleton）。
-          外层分支认 `loading`（本地查询还没回来，这段时间不能落到空态），里层再认
-          `showSkeleton`：几十毫秒就结束的本地查询连骨架都不画，免得闪一下 —— 这段时间
-          容器是空的，就是它该有的样子。
-        -->
-        <template v-if="loading">
-          <EntryListSkeleton
-            v-if="showSkeleton"
-            class="min-h-0 flex-1"
-            :view="view"
-            show-feed
+      <!--
+        两栏：左边是列表（自己滚），右边是常驻的同步健康 + 阅读小结。
+        右栏只在 xl 以上出现（见 TimelineSidebar 的说明），窄屏下这一层退化成单列，
+        `min-w-0` 让列表在 flex 里能正常收缩、不被内容撑宽。
+      -->
+      <div class="flex h-full min-h-0">
+        <div class="flex min-w-0 flex-1 flex-col">
+          <!-- 错误只做提示，不遮挡已有内容：从上次的列表恢复时照样能接着读 -->
+          <UAlert
+            v-if="error"
+            color="error"
+            variant="soft"
+            title="加载失败"
+            :description="error"
+            class="mb-4"
           />
-        </template>
 
-        <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
-        <NoUnreadState
-          v-else-if="unreadOnly && !visibleEntries.length"
-          :probing="probing"
-          :scanned="scannedCount"
-          :has-more="visibleHasMore()"
-          @scan-more="loadMoreVisible"
-          @show-all="toggleUnreadOnly"
-        />
-
-        <div
-          v-else-if="!visibleEntries.length"
-          class="flex flex-col items-center py-12 gap-4"
-        >
-          <UIcon
-            name="i-lucide-inbox"
-            class="size-12 text-muted"
-          />
-          <p class="text-muted">
-            暂无条目，先订阅一些 RSS 源吧
-          </p>
-          <UButton
-            to="/"
-            variant="outline"
-            color="neutral"
+          <div
+            ref="listAnchorRef"
+            class="relative flex h-full min-h-0 flex-col"
           >
-            去发现订阅源
-          </UButton>
+            <!-- 浮层提示条：盖在滚动区顶部，不占布局，按滚动方向让位 -->
+            <NewEntriesBanner
+              floating
+              :count="newCount"
+              :visible="bannerVisible"
+              @apply="applyNew"
+            />
+
+            <!--
+              首屏骨架：版式跟随当前视图，条目上屏时不会跳版（见 EntryListSkeleton）。
+              外层分支认 `loading`（本地查询还没回来，这段时间不能落到空态），里层再认
+              `showSkeleton`：几十毫秒就结束的本地查询连骨架都不画，免得闪一下 —— 这段时间
+              容器是空的，就是它该有的样子。
+            -->
+            <template v-if="loading">
+              <EntryListSkeleton
+                v-if="showSkeleton"
+                class="min-h-0 flex-1"
+                :view="view"
+                show-feed
+              />
+            </template>
+
+            <!-- 「只看未读」的空态：扫描中 / 扫完这批没找到 / 真的没有，三种情况分开说 -->
+            <NoUnreadState
+              v-else-if="unreadOnly && !visibleEntries.length"
+              :probing="probing"
+              :scanned="scannedCount"
+              :has-more="visibleHasMore()"
+              @scan-more="loadMoreVisible"
+              @show-all="toggleUnreadOnly"
+            />
+
+            <div
+              v-else-if="!visibleEntries.length"
+              class="flex flex-col items-center py-12 gap-4"
+            >
+              <UIcon
+                name="i-lucide-inbox"
+                class="size-12 text-muted"
+              />
+              <p class="text-muted">
+                暂无条目，先订阅一些 RSS 源吧
+              </p>
+              <UButton
+                to="/"
+                variant="outline"
+                color="neutral"
+              >
+                去发现订阅源
+              </UButton>
+            </div>
+
+            <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
+            <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
+            <EntryList
+              v-else
+              class="min-h-0 flex-1"
+              :view="view"
+              :entries="visibleEntries"
+              :load-more="loadMore"
+              :has-more="visibleHasMore"
+              show-feed
+            />
+          </div>
         </div>
 
-        <!-- listAnchorRef 供用户点「查看」时定位滚动容器并回到顶部 -->
-        <!-- 列表交给 ScrollArea 虚拟化，需要确定高度：容器撑满，列表占剩余空间 -->
-        <EntryList
-          v-else
-          class="min-h-0 flex-1"
-          :view="view"
-          :entries="visibleEntries"
-          :load-more="loadMore"
-          :has-more="visibleHasMore"
-          show-feed
-        />
+        <!-- 右栏：同步健康 + 阅读小结（xl 以下整块隐藏，见组件里的说明） -->
+        <TimelineSidebar />
       </div>
     </template>
   </UDashboardPanel>

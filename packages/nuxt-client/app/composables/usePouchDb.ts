@@ -359,6 +359,17 @@ interface PouchDbState {
    */
   subscriptionsVersion: Ref<number>
   /**
+   * 条目状态（已读 / 收藏）变化后递增的版本号。
+   *
+   * 右栏的「阅读小结」要跟着标已读、收藏即时变数字，但它不该为每一批新条目重扫状态库 ——
+   * `subscriptionsVersion` 只管订阅文档，`timelineVersion` 会被新条目刷爆（同步一次涨几千条，
+   * 重扫一遍状态库纯属浪费）。所以单独一个计数器，只在状态写入口 +1。
+   *
+   * 本地的标记已读 / 收藏（下面 markRead / toggleSaved）与远端复制下来的状态文档都算变化：
+   * 别的设备读完一篇，这台机器的小结也该跟着动。
+   */
+  stateVersion: Ref<number>
+  /**
    * 本地存储故障（IndexedDB 配额耗尽 / 库进入 global failure）的说明文案。
    *
    * 非 null 表示本轮同步已熔断：不再入队新复制，也不再发起在途复制 ——
@@ -570,6 +581,7 @@ function createPouchState(): PouchDbState {
     removedEntryIds: new Set<string>(),
     entryRemovalsVersion: ref(0),
     subscriptionsVersion: ref(0),
+    stateVersion: ref(0),
     storageBroken: ref<string | null>(null),
     compactTimer: null,
     cleanupScheduled: false,
@@ -1323,6 +1335,14 @@ export function usePouchDb() {
           pouchState.subscriptionsVersion.value += 1
         }
 
+        // 条目状态（已读 / 收藏）变化 → 右栏的阅读小结重算。与订阅同一条判据：删除后的文档
+        // 只剩 `_id` 与 `_deleted`，按 type 判断会漏掉；`entry-state:` 前缀不会误命中条目
+        // 文档本身（那些是 `entry:` 开头、带 feedId 的）。
+        // 别的设备读完一篇随复制落库也走这里，小结因此不必等本机重新标一遍。
+        if ((i.docs ?? []).some(doc => typeof doc?._id === 'string' && doc._id.startsWith('entry-state:'))) {
+          pouchState.stateVersion.value += 1
+        }
+
         // ── 剩余时间估算（见 utils/syncEta） ──
         // 基准是「本轮」的：上一轮已经收尾（状态被换成不带基准的 idle/error）或这是手动同步
         // 新建的状态，就说明这是新一轮，以本批为起点。`docs_written` 是复制实例的累计值，
@@ -1798,6 +1818,7 @@ export function usePouchDb() {
     const results = await stateDb.bulkDocs(writes)
     // 个别冲突（同一条在别处刚被改过）不算整体失败，只记未写入
     const written = results.filter(r => !('error' in r && r.error)).length
+    if (written > 0) pouchState.stateVersion.value += 1
     return written
   }
 
@@ -1869,6 +1890,35 @@ export function usePouchDb() {
   /** 收藏列表：按 savedAt 倒序 */
   async function querySavedEntries(limit = 50): Promise<RssEntry[]> {
     return queryEntriesByState(state => state.saved === true, state => state.savedAt, limit)
+  }
+
+  /**
+   * 读过 / 收藏过的**状态文档**（不做 enrich、不查条目库），供侧栏类的小结直接计数。
+   *
+   * 与 querySavedEntries / queryHistoryEntries 的差别：那两个要的是「能上屏的条目」，
+   * 每条都要回查条目库并补源信息与封面 blob；右栏只要几个数字，走同一条路会为几十条
+   * 不可见的条目取附件。所以这里只读状态库那一次 allDocs。
+   *
+   * 读不到（状态库不可用）时返回空数组：调用方据此显示「还没有记录」，而不是报错 ——
+   * 小结是辅助信息，不能因为它让整页进错误态（与 queryEntriesByState 同一口径）。
+   */
+  async function queryEntryStates(): Promise<Array<Pick<StateDoc, 'read' | 'readAt' | 'saved' | 'savedAt'>>> {
+    try {
+      const res = await (await getUserDb()).allDocs({
+        include_docs: true,
+        startkey: 'entry-state:',
+        endkey: 'entry-state:\uffff'
+      })
+      const states: Array<Pick<StateDoc, 'read' | 'readAt' | 'saved' | 'savedAt'>> = []
+      for (const row of res.rows as Array<{ doc?: StateDoc }>) {
+        const doc = row.doc
+        if (doc?.type !== 'entry-state') continue
+        states.push({ read: doc.read, readAt: doc.readAt, saved: doc.saved, savedAt: doc.savedAt })
+      }
+      return states
+    } catch {
+      return []
+    }
   }
 
   /**
@@ -2431,6 +2481,7 @@ export function usePouchDb() {
         // undefined 在序列化时会被丢掉，等于把 readAt 一并清掉
         : { read: false, readAt: undefined }
     ))
+    pouchState.stateVersion.value += 1
   }
 
   /**
@@ -2444,6 +2495,7 @@ export function usePouchDb() {
         ? { saved: true, savedAt: new Date().toISOString() }
         : { saved: false, savedAt: undefined }
     })
+    pouchState.stateVersion.value += 1
     return saved
   }
 
@@ -2689,6 +2741,11 @@ export function usePouchDb() {
      */
     subscriptionsVersion: computed(() => pouchState.subscriptionsVersion.value),
     /**
+     * 条目状态（已读 / 收藏）变化版本（响应式）：本地标记或随复制落库后 +1。
+     * 右栏的阅读小结 watch 它来重算，而不是跟着每批新条目重扫状态库。
+     */
+    stateVersion: computed(() => pouchState.stateVersion.value),
+    /**
      * 「已同步 N 条」的响应式计数源：本次会话已写入本地的**条目**数。
      *
      * 不传 feedIds 是全库合计（时间线页就是它）；传了就只算这些源 —— 单源 / 分组 / bot 页
@@ -2716,6 +2773,8 @@ export function usePouchDb() {
     queryFeedEntries,
     queryGroupEntries,
     querySavedEntries,
+    /** 读过 / 收藏过的状态文档（不 enrich），供右栏小结计数 */
+    queryEntryStates,
     queryHistoryEntries,
     /**
      * 把「投影行」补成可上屏的条目（源名 / 站点 / 图标 / 封面 blob URL）。
