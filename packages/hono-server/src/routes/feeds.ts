@@ -53,8 +53,18 @@ feedsRouter.get("/", requireAdmin, async (c) => {
   })))
 })
 
-/** 发现并订阅一个新 RSS 订阅源 */
-feedsRouter.post("/discover", async (c) => {
+/**
+ * 发现并订阅一个新 RSS 订阅源。
+ *
+ * **必须登录**：这个端点会让服务端按请求里的 URL 真实发一次 HTTP 请求，等于「替调用方
+ * 访问任意地址」。没有会话时它就是一个免鉴权的 SSRF 入口（实测未登录 POST
+ * `{"url":"http://127.0.0.1:5984/"}` 能拿到内网 CouchDB 的响应体，只是被当成"不是 feed"
+ * 报格式错误）。前端 `FeedNavigation.vue` 本来就在登录态下调用，加鉴权不影响功能。
+ *
+ * 注意这只是**第一道**闸门：地址本身的合法性（拒绝私网/环回/链路本地）在 rss/ssrf-guard.ts，
+ * 两道都要有 —— 光有鉴权，任何注册用户仍可拿它探内网。
+ */
+feedsRouter.post("/discover", requireAuth, async (c) => {
   const { url } = await c.req.json()
   if (!url) return c.json({ error: "url required" }, 400)
 
