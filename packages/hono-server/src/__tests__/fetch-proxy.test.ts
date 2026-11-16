@@ -48,8 +48,10 @@ describe("抓取代理环境变量", () => {
       NO_PROXY: "",
     })
 
-    expect(httpAgent).toBeUndefined()
-    expect(httpsAgent).toBeUndefined()
+    // 未配置 RSS_FETCH_PROXY 时不走代理。agent 现在恒为「带 SSRF 校验的直连 agent」
+    // （不再是 undefined，见 rss/ssrf-guard.ts），所以断言的是"不是代理 agent"。
+    expect(httpAgent?.constructor.name).not.toMatch(/Proxy/)
+    expect(httpsAgent?.constructor.name).not.toMatch(/Proxy/)
     expect(shouldProxy("https://news.ycombinator.com/rss")).toBe(false)
     expect(shouldProxy("http://localhost:5984/rssfed")).toBe(false)
   })
@@ -77,8 +79,9 @@ describe("抓取代理环境变量", () => {
   it("未配置代理时 shouldProxy 恒为 false", async () => {
     const { shouldProxy, httpAgent, httpsAgent } = await load({})
 
-    expect(httpAgent).toBeUndefined()
-    expect(httpsAgent).toBeUndefined()
+    // agent 恒为「带 SSRF 校验的直连 agent」（不再是 undefined，见 rss/ssrf-guard.ts）
+    expect(httpAgent?.constructor.name).not.toMatch(/Proxy/)
+    expect(httpsAgent?.constructor.name).not.toMatch(/Proxy/)
     expect(shouldProxy("https://news.ycombinator.com/rss")).toBe(false)
   })
 })

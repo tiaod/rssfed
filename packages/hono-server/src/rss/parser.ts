@@ -5,7 +5,8 @@ import zlib from "node:zlib"
 import { parseFeed } from "feedsmith"
 import { HttpProxyAgent } from "http-proxy-agent"
 import { HttpsProxyAgent } from "https-proxy-agent"
-import { rewriteRssHubUrl } from "./rsshub"
+import { rewriteRssHubUrl, rssHubBaseUrl } from "./rsshub"
+import { allowTrustedEndpoint, assertFetchableUrl, guardedHttpAgent, guardedHttpsAgent } from "./ssrf-guard"
 import { envInt } from "../env"
 
 /**
@@ -34,8 +35,13 @@ const PREFER_DIRECT = (process.env.RSS_FETCH_PREFER || process.env.rss_fetch_pre
 // 连接级代理可复用，创建一次即可（内部有连接池）。keepAlive 让同一目标的后续请求复用
 // 已建立的 CONNECT 隧道：代理链路每请求省一次 TCP+TLS 握手（2026-10-18 实测同一 host
 // 连续请求 ~700ms → ~180ms/次），对「一个 tick 里几十个请求打同一个 host」收益最明显。
-export const httpAgent = PROXY ? new HttpProxyAgent(PROXY, { keepAlive: true }) : undefined
-export const httpsAgent = PROXY ? new HttpsProxyAgent(PROXY, { keepAlive: true }) : undefined
+// 直连时使用带 SSRF 校验的 agent（见 rss/ssrf-guard.ts）；配置了代理时 IP 由代理解析，
+// 本地 lookup 拦不到 —— 那条路径只剩 assertFetchableUrl() 的前置检查，边界见 ssrf-guard.ts。
+export const httpAgent = PROXY ? new HttpProxyAgent(PROXY, { keepAlive: true }) : guardedHttpAgent
+export const httpsAgent = PROXY ? new HttpsProxyAgent(PROXY, { keepAlive: true }) : guardedHttpsAgent
+
+// 自建 RSSHub 是运维显式配置的抓取目标，改写产物要能连通（见 ssrf-guard.ts 的 trustedEndpoints）
+allowTrustedEndpoint(rssHubBaseUrl)
 
 /**
  * 该 URL 是否应走抓取代理：未配置代理时恒为 false；
@@ -560,6 +566,10 @@ export async function withProxyFallback<T>(url: string, request: (useProxy: bool
  * ETag/Last-Modified 时，带验证器只换回一个 304（几百字节），而不是整份 XML。
  */
 export async function fetchFeed(url: string, validators?: FeedValidators): Promise<FeedFetchResult> {
+  // SSRF 闸门只作用于**用户提交的原始 URL**，必须在 rewriteRssHubUrl 之前：
+  // 改写后的地址（RSSHUB_BASE_URL，通常是 localhost:1200）是运维的可信配置，
+  // 对它做内网拦截会把本地 RSSHub 上的所有源一起打死。
+  await assertFetchableUrl(url)
   return fetchFeedWithRedirects(rewriteRssHubUrl(url), validators, 0)
 }
 
@@ -597,7 +607,11 @@ async function fetchFeedWithRedirects(
   if (res.status >= 300 && res.status < 400) {
     const location = headerValue(res.headers.location)
     if (!location) throw new Error(`Redirect without location: ${res.status}`)
-    return fetchFeedWithRedirects(new URL(location, url).href, validators, redirects + 1)
+    // 逐跳校验：公网地址 302 到 127.0.0.1 / 169.254.169.254 是最常见的 SSRF 绕过手法，
+    // 只查首次请求的 URL 等于没查。这里校验的是「下一跳的原始地址」。
+    const next = new URL(location, url).href
+    await assertFetchableUrl(next)
+    return fetchFeedWithRedirects(next, validators, redirects + 1)
   }
 
   const body = await decodeContent(res.body, headerValue(res.headers["content-encoding"]))

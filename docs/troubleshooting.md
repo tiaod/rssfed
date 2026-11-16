@@ -302,6 +302,32 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
 > Mango selector 后不再安装过滤器），以及 `query_params` 里出现叫 `since` 的参数导致窗口失效
 > （参数方案已整体废弃）。看到这两条说明文档过旧，现行机制见 `ARCHITECTURE.md`。
 
+### 订阅源/正文图片指向内网地址：SSRF 防护
+
+- **现象**：添加或编辑订阅源时报
+  `Failed to parse feed: <url>: 拒绝访问内网/保留地址: 127.0.0.1`；
+  或图片缓存日志里出现 `invalid-url` 原因码。抓取失败但服务本身正常。
+- **背景**：`POST /api/feeds/discover` 与抓取链路都会**按调用方给的 URL 真实发请求**，
+  等于「替调用方访问任意地址」。2026-11 实测未登录即可 `POST /api/feeds/discover`
+  指着 `http://127.0.0.1:5984/` 拿到内网 CouchDB 的响应体（被当成"不是 feed"而报格式错误）。
+  这既是 SSRF，也是内网探测通道。
+- **现在的两道闸门**（都在 `packages/hono-server/src/rss/ssrf-guard.ts`）：
+  1. **鉴权**：`/discover` 要求登录（`requireAuth`）。
+  2. **地址校验**：拒绝私网 / 环回 / 链路本地 / 云元数据等地址，覆盖 IPv4 与 IPv6，
+     以及把 IPv4 藏在 IPv6 里的写法（`::ffff:127.0.0.1`、NAT64 `64:ff9b::`、6to4 `2002::`）。
+- **为什么不写成「先解析再判断」**：那会被 DNS rebinding 绕过（第一次解析到公网、第二次
+  到 `127.0.0.1`）。这里对齐 Miniflux 的 `Dialer.Control` 思路——校验放在 **Node 的
+  `lookup` 回调**里（`rss/ssrf-guard.ts` 的 `GuardedHttpAgent`），**被检查的 IP 就是要连接的
+  IP**，中间没有二次解析的窗口。（Go 用 `Control`，Node 用 `lookup`，语义等价。）
+- **本地 RSSHub 为什么不受影响**：校验只作用于**用户提交的原始 URL**，在
+  `rewriteRssHubUrl()` **之前**执行；`RSSHUB_BASE_URL` 会被自动登记为可信端点
+  （`allowTrustedEndpoint`），改写产物豁免。若反过来先改写再校验，本地 RSSHub 上的
+  所有源会一起失效。
+- **残余边界**：配置了 `RSS_FETCH_PROXY` 时，目标 IP 由代理服务器解析，本地 `lookup`
+  拦不到——那条路径只剩「拒绝 URL 里直接写内网 IP」的前置检查。代理本身必须可信。
+- **开关**：`SSRF_GUARD_ALLOW_PRIVATE=1` 放行全部内网地址，**仅供测试**（单测大量依赖
+  `127.0.0.1` 的临时 HTTP 服务，见 `vitest.config.ts`）。生产开启等于这层防护不存在。
+
 ## 反向代理与网络
 
 ### https 页面上附件地址是 `http://`，图片被浏览器拦截

@@ -2,6 +2,7 @@ import http from "node:http"
 import https from "node:https"
 import sharp from "sharp"
 import { httpAgent, httpsAgent, withProxyFallback } from "../rss/parser"
+import { assertFetchableUrl } from "../rss/ssrf-guard"
 import { envInt } from "../env"
 import { withImageSlot } from "./concurrency"
 
@@ -77,6 +78,10 @@ export async function downloadImage(url: string, maxBytes?: number): Promise<Dow
     let current = url
     // 最多跟随 3 次重定向
     for (let i = 0; i < 4; i++) {
+      // SSRF 闸门：正文图片的 URL 来自订阅源内容，攻击者可控（在 feed 里放一张
+      // `http://169.254.169.254/...` 的图，服务端就会去取）。每一跳都要查 ——
+      // 公网图床 302 到内网地址同样是绕过手法（与 rss/parser.ts 的重定向校验同理）。
+      await assertFetchableUrl(current)
       // 走同一个「先代理、网络级失败回退直连」策略：图床走代理挂死时不再每张图都白等一次超时
       const res = await withProxyFallback(current, (useProxy) => httpGet(current, maxBytes, useProxy))
       if (res.status >= 300 && res.status < 400 && res.headers.location) {
@@ -95,6 +100,8 @@ export async function downloadImage(url: string, maxBytes?: number): Promise<Dow
     const msg = (err as Error).message
     if (msg === "image too large") return { buffer: null, reason: "too-large" }
     if (msg === "timeout") return { buffer: null, reason: "timeout" }
+    // 被 SSRF 闸门拦下：归到 network，但日志侧能通过 reason 看出不是普通网络抖动
+    if (msg.includes("内网") || msg.includes("保留地址")) return { buffer: null, reason: "invalid-url" }
     return { buffer: null, reason: "network" }
   }
 }
