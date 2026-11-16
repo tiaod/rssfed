@@ -1,3 +1,4 @@
+import { computed, watch } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import { resolveScrollContainer } from '~/utils/scrollContainer'
 
@@ -17,6 +18,9 @@ export interface UseSyncedEntryListOptions {
    *
    * 必须按列表口径：同步是全局的（一次聚合全部订阅），拿全库数字会让「在单源页点同步」
    * 报出别的源的新增。
+   *
+   * **必须是响应式的读取**（读 reactive / ref）：`newCount` 是派生的 computed，靠它跟踪
+   * 「复制又写进来几条」，传一个普通变量进来就只会算一次。
    */
   syncedDocs?: () => number
   /**
@@ -67,8 +71,6 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
   /** 查询窗口：无限滚动逐步增大；点提示条刷新时保留当前深度（用户翻到第几页不丢） */
   const displayLimit = ref(pageSize)
   const hasMore = ref(true)
-  /** 待查看的新条目数（0 表示提示条收起） */
-  const newCount = ref(0)
   /** 列表顶部锚点：应用更新时据此找到滚动容器并回顶 */
   const listAnchorRef = ref<HTMLElement | null>(null)
 
@@ -80,8 +82,35 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
     return options.syncedDocs ? options.syncedDocs() : 0
   }
 
-  /** 上次「列表里显示的就是最新内容」时的同步计数：与当前值之差即待查看条数 */
-  let seenDocs = syncedDocs()
+  /**
+   * 上次「列表里显示的就是最新内容」时的同步计数：与当前值之差即待查看条数。
+   *
+   * 是 ref 而不是普通变量：计数要跟着复制实时涨（见下面 newCount 的说明）。
+   */
+  const seenDocs = ref(syncedDocs())
+
+  /**
+   * 待查看的新条目数（0 表示提示条收起）。
+   *
+   * **必须是派生的 computed，不能只在收尾时赋值**：复制的 `change` 事件按批把条目记进
+   * `syncedEntryDocsByFeed`（见 usePouchDb 的 onChange），而 `syncStatuses.version` 只在
+   * 复制安静下来（`paused`）时才 +1 —— 页面 watch version 才调 refreshFromSync。
+   * 于是「同步过程中计数一直在涨、提示条却要等同步结束才出现」，首屏那次几千条的全量同步
+   * 更是从头到尾不显示条数（用户在顶部只能看到一个百分比，而条目其实已经一条条落到本地了）。
+   *
+   * 改成 computed 后，读的是同一个响应式计数源：同步每写一批就重算，提示条全程跟着涨；
+   * 而 `seenDocs` 仍是基线，语义没变 —— 比上次 load 多出来的部分才报。
+   *
+   * 代价是**计数源必须是响应式的**（真实链路都满足：syncedEntryCount 读的是 usePouchDb 里
+   * 那个 reactive 的分摊表）。传一个普通变量进来就会算一次、缓存住不动。
+   */
+  const newCount = computed(() => Math.max(0, syncedDocs() - seenDocs.value))
+
+  // 计数源掉回基线以下 = 换账号 / 重建了本地库（usePouchDb 那两个入口都会清空分摊表）。
+  // 基线要跟着退，否则新账号要先把上一个账号那几千条的差额补满，提示条才会再出现。
+  watch(() => syncedDocs(), (now) => {
+    if (now < seenDocs.value) seenDocs.value = now
+  })
 
   /** 查询窗口；期间又发起了新查询时返回 null 表示本次结果作废 */
   async function queryWindow(limit: number): Promise<RssEntry[] | null> {
@@ -98,15 +127,14 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
    * 冷启动 / 重开应用最容易撞上 —— 首屏 load 与复制几乎同时开始，那批条目直接被吞掉，
    * 提示条永远不出现（实测重开应用 30 秒都停在「已同步 0 条」，而本地确实多了新条目）。
    *
-   * `newCount` 由 `refreshFromSync` 维护，这里**不清零**，否则会把查询期间攒下的计数一起抹掉。
+   * `newCount` 是派生的（见上面的 computed），这里只需要挪基线；**不能**顺手把它清成 0，
+   * 否则会把查询期间攒下的计数一起抹掉。
    * 代价是查询恰好把新条目也查进来时，提示条仍会报一次（内容其实已经上屏）。这是刻意选的
    * 方向：多报一次只是点了「查看」列表不变，少报一次则是用户永远不知道有新内容 ——
    * 而 `applyNew()` 会重新对齐基线，多报的那次点一下就自愈。
    */
   function markSeen(before: number) {
-    seenDocs = Math.max(seenDocs, before)
-    // load() 换上的就是最新内容：待查看数按新基线重算（可能仍有查询期间到达的那几条）
-    newCount.value = Math.max(0, syncedDocs() - seenDocs)
+    seenDocs.value = Math.max(seenDocs.value, before)
   }
 
   /** 查一次当前窗口并整体替换列表（首屏与用户点「查看」都走这里） */
@@ -158,17 +186,15 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
   /**
    * 同步完成后的入口（页面 watch syncStatuses 的 version 时调用）。
    *
-   * 「已同步 N 条」只更新计数，不推走正在读的位置；唯一的例外是**已被同步删除**的条目：
-   * 它们在本地已不存在，留在列表里只会是一个点开就报「正文加载失败」的死行，直接剔除。
+   * 提示条条数不再由这里维护：`newCount` 是跟着复制实时重算的 computed（见上面的说明），
+   * 这里只剩一件必须做的事 —— 剔除**已被同步删除**的条目：它们在本地已不存在，留在列表里
+   * 只会是一个点开就报「正文加载失败」的死行。
    */
   function refreshFromSync(): void {
     const removed = options.removedIds?.()
-    if (removed && removed.size > 0) {
-      const kept = entries.value.filter(entry => !removed.has(entry.id))
-      if (kept.length !== entries.value.length) entries.value = kept
-    }
-    const delta = syncedDocs() - seenDocs
-    if (delta > 0) newCount.value = delta
+    if (!removed || removed.size === 0) return
+    const kept = entries.value.filter(entry => !removed.has(entry.id))
+    if (kept.length !== entries.value.length) entries.value = kept
   }
 
   /** 用户点「查看」：重新从本地库加载最新数据，并回到列表顶部 */

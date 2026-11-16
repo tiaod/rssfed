@@ -48,6 +48,44 @@ describe('useSyncedEntryList', () => {
     expect(list.hasMore.value).toBe(false)
   })
 
+  it('同步进行中每写一批就报数：不用等复制安静下来', async () => {
+    // 真实链路里复制的 change 事件按批把条目记进分摊表，而 syncStatuses.version
+    // 要等 paused 才 +1。提示条若只在收尾时取值，首屏几千条的全量同步全程都不显示条数。
+    const docs = syncedCounter(0)
+    const list = useSyncedEntryList({ query: async () => [makeEntry('a')], syncedDocs: docs.docs })
+    await list.load()
+    expect(list.newCount.value).toBe(0)
+
+    // 复制写了第一批 —— 此刻根本没调 refreshFromSync()
+    docs.count.value = 20
+    expect(list.newCount.value).toBe(20)
+
+    // 又一批
+    docs.count.value = 45
+    expect(list.newCount.value).toBe(45)
+
+    // 收尾（页面 watch version 调到这里）不改变数字
+    list.refreshFromSync()
+    expect(list.newCount.value).toBe(45)
+  })
+
+  it('计数源掉回基线以下（换账号 / 重建本地库）时基线跟着退', async () => {
+    const docs = syncedCounter(0)
+    const list = useSyncedEntryList({ query: async () => [makeEntry('a')], syncedDocs: docs.docs })
+    await list.load()
+
+    docs.count.value = 100
+    expect(list.newCount.value).toBe(100)
+
+    // 换账号 / 重置缓存：分摊表被清空，新库从头计数
+    docs.count.value = 0
+    expect(list.newCount.value).toBe(0)
+
+    // 新账号同步进 3 条：从 0 起算，而不是先把旧的 100 条差额补满
+    docs.count.value = 3
+    expect(list.newCount.value).toBe(3)
+  })
+
   it('同步完成只累计条数：列表一个条目都不动，也不发查询', async () => {
     let rows = [makeEntry('b'), makeEntry('a')]
     const docs = syncedCounter(2)
