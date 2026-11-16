@@ -111,8 +111,10 @@
 /* 图片/视频/嵌入：绝不超出容器。
  *
  * iframe 不能跟 img/video 共用 `height: auto`：iframe 没有内在宽高比，auto 高度会塌成浏览器
- * 默认的 150px 横条。这里只兜住宽度，比例由净化阶段按源站声明的宽高换算（见
- * utils/iframeSizing.ts）；box-sizing 是防 1px：默认 content-box 下边框会把宽度顶出容器。 */
+ * 默认的 150px 横条。这里只兜住宽度，比例由净化阶段按源站声明的宽高换算、视频类嵌入再补齐
+ * （见 utils/iframeSizing.ts）；box-sizing 是防 1px：默认 content-box 下边框会把宽度顶出容器。
+ * 视频的 `height: auto` + `aspect-ratio` 也是那条路径写进去的，CSS 这层不重复声明 ——
+ * 源站的内联样式优先级更高，写在这里压不住它。 */
 .entry-content :where(img, video) {
   max-width: 100%;
   height: auto;

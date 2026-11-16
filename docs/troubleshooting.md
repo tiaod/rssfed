@@ -416,8 +416,20 @@ JS
 - **原因**：`main.css` 里「绝不超出容器」的规则只写了 `img, video`。iframe 是**替换元素**且**没有内在宽高比**，`overflow-wrap` 管不到它，`width`/`height` 属性就是它的 CSS 尺寸 —— 于是源站写多宽就渲染多宽。
 - **为什么补一条 CSS 不够**：`max-width: 100%` 只能把宽度压到容器宽，`height` 仍停在源站声明的 500px，播放器被拉成竖条；而给 iframe 写 `height: auto`（img/video 那条规则）又没有比例可依，会塌成浏览器默认的 150px 横条。实测（375 视口、正文可用宽 343）三种写法分别是 `343×500`、`343×150`、`343×214`，只有第三种是对的。
 - **解法**：净化阶段（`useSafeHtml` 的 `afterSanitizeAttributes`）按源站声明的宽高补 `aspect-ratio`，宽度改成 `min(声明值, 100%)`，见 [utils/iframeSizing.ts](../packages/nuxt-client/app/utils/iframeSizing.ts)；`main.css` 另补一条只兜宽度的 `iframe` 规则。内联一律带 `!important`：源站也常写 `width: 800px !important`，不带优先级会输给它。
-- **不要**把 `iframe` 并进 `img, video` 那条 `height: auto` 规则（原因见上）；也**不要**给没有尺寸声明的 iframe 猜「占满一行」—— 保持浏览器默认 300×150。
+- **不要**把 `iframe` 并进 `img, video` 那条 `height: auto` 规则（原因见上）。
 - **验证**：`app/__tests__/utils/iframeSizing.test.ts`（换算规则 + 与净化管线的串联）；真实排版在 Chromium 里量过：修复前 320 视口下 `documentElement.scrollWidth` 是 1100，修复后等于视口宽。
+
+### 视频播放器在正文里只有一条缝（高度 150px）或缩在左边一小块
+
+- **现象**：打开一篇视频条目（B 站 / IT 之家 / B 站每周必看 / Coding Horror），播放器要么是「宽度铺满、高度只有 150px」的一条横缝，视频被压扁；要么是一个 640×360 的小方块挤在正文左边，右边一大片空白。
+- **原因**：上一条只按「源站声明的宽高」缩放，而播放器的声明往往不可用：
+  1. **只说宽度不说高度**：`<iframe width="100%" allowfullscreen>`（B 站 / IT 之家的导出）。宽度铺满了，高度没有比例可依，停在浏览器默认的 150px —— 1104 宽的阅读栏里就是一条 1104×150 的缝。
+  2. **写的是源站自己窄栏里的尺寸**：B 站每周必看 / 旧版 YouTube 的默认嵌入是 `640×360`。照抄等于把一个 640 宽的小播放器摆在 1104 宽的正文中间偏左。
+- **解法**：`isVideoEmbed` 认出播放器（`allowfullscreen`、`allow` 里的 fullscreen、class/title/id 里的 video/player/embed、地址路径里的 player/embed/video），**横向**播放器（宽 ≥ 高，或没给比例）一律 `width: 100%` + 源站比例（没给就 16:9）。
+- **什么样的不铺满**：一是**竖版视频**（宽 < 高），拉成 100% 宽会变成一屏高的竖条；二是**定高嵌入**（`width="100%" height="152"` 的音频条，Spotify / SoundCloud / 腾讯视频都这么写）——高度是它自己算好的，按 16:9 撑开会变成一条 621px 高的空条，所以这条分支必须排在视频判断**前面**。
+- **为什么不给所有 iframe 都铺满**：认不出来的嵌入可能是投票、地图、评论区，猜一个比例只会制造一整屏空白。所以「铺满」只给认出是播放器的，且只给横向的。
+- **另一处顺带的坑**：Ghost 导出的 iframe 带 `position: absolute; top: 0; left: 0`，高度靠源站脚本写到外层 `figure` 上。那套脚本在阅读器里不存在，`figure` 高度塌成 0，一部里嵌三四个视频时全叠在正文同一位置。`applyResponsiveIframeSizing` 强制 `position: static !important` 把它按回行内。
+- **验证**：`app/__tests__/utils/iframeSizing.test.ts` 的「播放器没有声明高度时补 16:9」一组（无高度补 16:9、640×360 铺满、竖版不铺满、定高音频条不动、绝对定位被清掉）。真实浏览器里量过（1264 视口、正文可用宽 1104）：IT 之家那篇从 `1104×150` 变成 `1104×621`；Coding Horror 那篇四个嵌入从叠在 `y=120` 变成依次排开、各 `1104×621`；390 视口下 `documentElement.scrollWidth` 仍等于视口宽。
 
 ### 弹窗里点过正文之后，点遮罩（弹窗外）要关两次
 
