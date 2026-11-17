@@ -5,7 +5,8 @@ import {
   LIST_VIEW_META,
   DEFAULT_LIST_VIEW,
   TIMELINE_DEFAULT_VIEW,
-  isListView
+  isListView,
+  showsTimelineSidebar
 } from '../../utils/listViews'
 
 describe('列表视图枚举', () => {
@@ -39,5 +40,24 @@ describe('列表视图枚举', () => {
     expect(isListView(null)).toBe(false)
     expect(isListView(undefined)).toBe(false)
     expect(isListView(3)).toBe(false)
+  })
+})
+
+/**
+ * 时间线右栏（同步健康 + 阅读小结）只跟社交动态一起出现。
+ *
+ * 这是「哪一版能容得下一栏」的布局判断，不是权限或偏好：其余五种都是靠满宽铺密度的版式，
+ * 加一栏等于把它们的列宽切掉。以后再加视图时，这个用例会逼着人明确表态而不是默认多出一栏。
+ */
+describe('时间线右栏的视图判据', () => {
+  it('只有社交动态有右栏', () => {
+    expect(showsTimelineSidebar('social')).toBe(true)
+    expect(LIST_VIEWS.filter(showsTimelineSidebar)).toEqual(['social'])
+  })
+
+  it('所有枚举视图都有明确结论（表里没有漏项 / 没有未定义）', () => {
+    for (const view of LIST_VIEWS) {
+      expect(typeof showsTimelineSidebar(view)).toBe('boolean')
+    }
   })
 })

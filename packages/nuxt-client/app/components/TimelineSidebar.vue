@@ -2,31 +2,27 @@
 /**
  * 时间线右栏：同步健康 + 阅读小结。
  *
- * 只存在于宽屏（xl 以上）：内容列本身就是 `max-w-xl` 居中的，右侧那块留白在窄窗口里
- * 根本不存在 —— 强行塞进来会把正文挤到左边、还挤不满。窄屏用页面顶部的动作区和左下角的
- * 同步指示器就够了（同一份数据，那边是紧凑版）。
+ * **只在「社交动态」视图出现**（判据见 utils/listViews 的 showsTimelineSidebar）：
+ * 那个视图的正文列固定 `max-w-xl`(576px) 居中，右侧留白从布局里就存在，塞一栏进去是白捡
+ * 的地方；瀑布流 / 博客 / 图片 / 表格 / 列表都是「一屏扫过很多条」的密版式，右栏会直接
+ * 吃掉它们的列宽。所以这一栏属于视图而不属于页面 —— 切到别的视图就整块不渲染
+ * （也顺带省掉那几轮数据请求，见 useTimelineSidebar 的挂载刷新）。
+ *
+ * 只存在于宽屏（xl 以上）：窄窗口里连内容列右侧的留白都不存在，强行塞进来会把正文挤到
+ * 左边还挤不满。窄屏用页面顶部的动作区和左下角的同步指示器就够了（同一份数据，紧凑版）。
  *
  * 这一栏**不参与滚动**：它是「页面上一直看得见的一块」，随列表滚走的话用户永远得往下翻
  * 才能看到上次同步是什么时候。所以它自己 `sticky`，列表在左边独立滚。
  *
  * 为什么不做成可拖动 / 可折叠的第三栏（像 EntryReaderPane 那样）：那样要动布局、并处理与
  * 阅读栏抢同一个位置的问题；这里只是面板内的一块常驻区域，宽度固定就够用。
+ *
+ * 也因此**不再需要「阅读栏开着时让位」**：阅读栏只在「列表」视图 + 宽屏成立，而这一栏只在
+ * 「社交动态」成立，两者永远不会同时出现（同一条 view 派生出的互斥判据）。
  */
 import { computed } from 'vue'
 import { useTimelineSidebar } from '~/composables/useTimelineSidebar'
-import { useReaderPaneMode } from '~/composables/useReaderLayout'
 import { useSettingsModal } from '~/composables/useSettingsModal'
-
-/**
- * 阅读栏开着时让位。
- *
- * 两者抢的是同一块右侧空间：阅读栏是布局级的第三栏（见 EntryReaderPane），它一出现，
- * 这一栏再占 320px 就把中间列表压成一条缝（1440 下实测只剩约 630px 且还在缩）。
- * 阅读栏只在「列表」视图 + 宽屏成立，此时用户是在专心读文章，右栏的信息让位是对的。
- *
- * 注意不是互斥关系而是**优先级**：关掉文章后阅读栏消失，这栏自动回来（同一份判据驱动）。
- */
-const readerPaneOpen = useReaderPaneMode()
 
 const {
   syncState,
@@ -87,7 +83,6 @@ const dotClass = computed(() => {
 
 <template>
   <aside
-    v-if="!readerPaneOpen"
     class="hidden w-80 shrink-0 flex-col gap-4 overflow-y-auto py-6 pe-6 ps-2 xl:flex"
     aria-label="时间线侧栏"
   >

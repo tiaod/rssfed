@@ -21,6 +21,21 @@ export const DEFAULT_LIST_VIEW: ListView = 'masonry'
  */
 export const TIMELINE_DEFAULT_VIEW: ListView = 'social'
 
+/**
+ * 哪些视图在时间线右侧配那块「同步健康 + 阅读小结」。
+ *
+ * 只有社交动态：它是一种「一条一条读」的信息流，正文列永远停在 `max-w-xl`（576px）居中，
+ * 右边的留白从布局里就存在，塞一栏进去是白捡的地方；其余五种是为了「一屏扫过很多条」而
+ * 存在的（瀑布流 / 博客 / 图片 / 表格 / 列表），右栏会直接切掉它们的列宽、把密版式压窄 ——
+ * 那等于用一块辅助信息毁掉版式本身的意图。
+ *
+ * 判据放在这里而不是页面模板里：它描述的是「这一版有没有地方放一栏」这个版式事实，
+ * 与 LIST_VIEW_META 是同一类东西；加视图时这里也会跟着被要求表态（见单测）。
+ */
+export function showsTimelineSidebar(view: ListView): boolean {
+  return view === 'social'
+}
+
 export interface ListViewMeta {
   /** 切换菜单 / 设置弹窗里的显示名，也是切换菜单的可访问名 */
   label: string

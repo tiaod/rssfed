@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { SubscriptionItem } from '~/types/rss'
+import { showsTimelineSidebar } from '~/utils/listViews'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空
 import ListActionsBar from '~/components/ListActionsBar.vue'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
@@ -118,7 +119,9 @@ watch(pouch.timelineVersion, () => refreshFromSync())
     <template #body>
       <!--
         两栏：左边是列表（自己滚），右边是常驻的同步健康 + 阅读小结。
-        右栏只在 xl 以上出现（见 TimelineSidebar 的说明），窄屏下这一层退化成单列，
+        右栏**只在「社交动态」视图**出现（见 TimelineSidebar 与 utils/listViews 的
+        showsTimelineSidebar）：那是唯一把正文列固定在 576px、右侧天然有空的一版，
+        其余视图要靠满宽来铺密度。窄屏（xl 以下）这一层也退化成单列。
         `min-w-0` 让列表在 flex 里能正常收缩、不被内容撑宽。
       -->
       <div class="flex h-full min-h-0">
@@ -204,8 +207,12 @@ watch(pouch.timelineVersion, () => refreshFromSync())
           </div>
         </div>
 
-        <!-- 右栏：同步健康 + 阅读小结（xl 以下整块隐藏，见组件里的说明） -->
-        <TimelineSidebar />
+        <!--
+          右栏：同步健康 + 阅读小结。
+          只在「社交动态」视图渲染（判据见 utils/listViews 的 showsTimelineSidebar），
+          并且整块不挂载 —— 别的视图里那几轮数据请求（库体积、状态库全扫）也就白跑了。
+        -->
+        <TimelineSidebar v-if="showsTimelineSidebar(view)" />
       </div>
     </template>
   </UDashboardPanel>
