@@ -41,11 +41,6 @@ const items = computed<DropdownMenuItem[][]>(() => {
         to: '/profile'
       },
       {
-        label: '订阅管理',
-        icon: 'i-lucide-rss',
-        to: '/subscriptions'
-      },
-      {
         label: '设置',
         icon: 'i-lucide-settings',
         // 打开设置弹窗，不跳页：用户通常正读到一半，跳页会丢掉列表与滚动位置

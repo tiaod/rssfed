@@ -71,6 +71,20 @@ const modalUi = {
   // 内容槽自己管内边距与滚动，默认的 body 内边距必须清掉（合并语义，只写 p-0 不够）
   body: 'p-0 sm:p-0'
 }
+
+/**
+ * 订阅管理入口（左侧导航底部，带一个外链样式的小图标）。
+ *
+ * 它不是设置分区：不切换右侧内容，点一下就离开弹窗去整页 —— 订阅列表长、整理时还要
+ * 来回开编辑弹窗，塞不进这个弹窗。因此图标走 trailing 位、独立于上面的分区按钮。
+ *
+ * 必须显式先关弹窗：弹窗挂在 default 布局上（不在页面里），跳页不会卸载它，
+ * 不关的话新页面上会继续盖着一层设置。
+ */
+async function openSubscriptions(closeModal: () => void): Promise<void> {
+  closeModal()
+  await navigateTo('/subscriptions')
+}
 </script>
 
 <template>
@@ -101,6 +115,20 @@ const modalUi = {
             class="justify-start"
             :aria-current="section === item.value ? 'page' : undefined"
             @click="section = item.value"
+          />
+
+          <!-- 订阅管理不属于设置分区：点一下就关弹窗跳页，trailing 图标表明「会离开这里」 -->
+          <div class="my-1 border-t border-default" />
+          <UButton
+            class="justify-start"
+            icon="i-lucide-rss"
+            trailing-icon="i-lucide-external-link"
+            label="订阅管理"
+            block
+            size="md"
+            color="neutral"
+            variant="ghost"
+            @click="openSubscriptions(closeModal)"
           />
         </aside>
 
@@ -143,6 +171,18 @@ const modalUi = {
               :aria-current="section === item.value ? 'page' : undefined"
               class="shrink-0"
               @click="section = item.value"
+            />
+            <!-- 与左侧竖导航同一个入口：窄屏收起 aside 后，这里不能只剩三个分区 -->
+            <div class="mx-1 shrink-0 self-stretch border-s border-default" />
+            <UButton
+              class="shrink-0"
+              size="sm"
+              icon="i-lucide-rss"
+              trailing-icon="i-lucide-external-link"
+              label="订阅管理"
+              color="neutral"
+              variant="ghost"
+              @click="openSubscriptions(closeModal)"
             />
           </div>
 

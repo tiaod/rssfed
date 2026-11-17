@@ -91,12 +91,7 @@ const navItems = computed<NavigationMenuItem[]>(() => {
       to: '/history',
       onSelect: () => { open.value = false }
     },
-    {
-      label: '订阅管理',
-      icon: 'i-lucide-rss',
-      to: '/subscriptions',
-      onSelect: () => { open.value = false }
-    },
+    // 订阅管理不进主导航：它是低频的整理类操作，入口留在设置弹窗左侧导航与账户页
     {
       label: '我的',
       icon: 'i-lucide-user',
