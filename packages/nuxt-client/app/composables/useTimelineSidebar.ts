@@ -13,7 +13,8 @@ import { summarizeReading, type ReadingDigest } from '~/utils/readingStats'
  *   - 阅读小结：本地状态文档的一次全量扫描 + 纯函数汇总（见 utils/readingStats）。
  *
  * 都不新增后端接口：右栏是「顺手看一眼」的位置，为它加轮询或新端点不划算。
- * 因此这里也**不做定时刷新** —— 触发点只有挂载、窗口重新可见、以及状态/同步版本变化。
+ * 因此这里也**不做定时刷新** —— 自动触发点只有挂载、窗口重新可见、以及状态/同步版本变化；
+ * 想立刻看最新数字的用户点卡片上的刷新按钮（`refreshNow`，绕过缓存）。
  */
 
 /** 同步健康里「哪些源有问题」的明细行，最多列这么多（再多就不适合放在侧栏了） */
@@ -144,16 +145,47 @@ export function useTimelineSidebar() {
     }
   }
 
-  /** 一次把两张卡的数据都刷了（挂载、窗口重新可见时调） */
-  async function refreshAll() {
+  /**
+   * 一次把两张卡的数据都刷一遍。
+   *
+   * 自动触发点（挂载、窗口重新可见）走缓存：云端体积 60 秒内不会变，没必要每次回到标签页
+   * 都打一次请求。手动刷新必须传 `force` —— 用户点按钮就是不相信屏幕上的数字，
+   * 拿缓存里的旧值回他等于按钮没反应（见 refreshNow）。
+   */
+  async function refreshAll(force = false) {
     await Promise.all([
       refreshFeeds(),
       refreshDigest(),
-      cloudInfo.refresh(),
+      cloudInfo.refresh(force),
       storageEstimate.refresh(),
       // 源水位表：同步健康卡靠它说「哪个源失败了」。失败不该让整张卡空掉，load 内部已兜底
       timelineLog.load()
     ])
+  }
+
+  /** 手动刷新是否在跑：按钮据此转圈，否则一次几百毫秒的刷新看起来就是「点了没反应」 */
+  const refreshing = ref(false)
+
+  /**
+   * 手动刷新（右栏卡片右上角那个按钮）。
+   *
+   * 与 refreshAll 的区别只有两点，但两点都必要：
+   *   - 绕过缓存：否则 60 秒内点几次都还是原来那几个数字；
+   *   - 推进时钟：不推进的话「上次同步 3 分钟前」不会变成「刚刚」，屏幕上的文字一个字都不变。
+   *
+   * 重入时直接返回 false，不并发打两轮请求（按钮在 loading 态下也可能被快捷键触发）。
+   * 返回是否真的刷了一轮，调用方据此决定提示什么。
+   */
+  async function refreshNow(): Promise<boolean> {
+    if (refreshing.value) return false
+    refreshing.value = true
+    try {
+      await refreshAll(true)
+      clockNow.value = Date.now()
+      return true
+    } finally {
+      refreshing.value = false
+    }
   }
 
   onMounted(() => {
@@ -211,7 +243,11 @@ export function useTimelineSidebar() {
     problemSources,
     feedCount,
     logLoading: computed(() => timelineLog.loading.value),
+    /** 自动刷新（挂载 / 重新可见）：走缓存 */
     refreshAll,
+    /** 手动刷新：绕过缓存、推进时钟，并在跑的过程中把按钮变成 loading */
+    refreshNow,
+    refreshing,
     // 阅读小结
     digest,
     digestLoaded,

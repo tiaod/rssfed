@@ -12,6 +12,7 @@
  * 为什么不做成可拖动 / 可折叠的第三栏（像 EntryReaderPane 那样）：那样要动布局、并处理与
  * 阅读栏抢同一个位置的问题；这里只是面板内的一块常驻区域，宽度固定就够用。
  */
+import { computed } from 'vue'
 import { useTimelineSidebar } from '~/composables/useTimelineSidebar'
 import { useReaderPaneMode } from '~/composables/useReaderLayout'
 import { useSettingsModal } from '~/composables/useSettingsModal'
@@ -35,10 +36,27 @@ const {
   localText,
   problemSources,
   feedCount,
-  refreshAll,
+  refreshNow,
+  refreshing,
   digest,
   digestLoaded
 } = useTimelineSidebar()
+
+const toast = useToast()
+
+/**
+ * 卡片右上角的手动刷新。
+ *
+ * 三件事缺一都像「点了没反应」（这正是它最早的毛病）：
+ *   - 绕过 60 秒缓存（refreshNow 的 force），否则数字原样不动；
+ *   - 按钮进入 loading（refreshing），几百毫秒里也有明确的进行中状态；
+ *   - 结束后给一句 toast，让「已经刷过了」这件事留下痕迹。
+ */
+async function refresh() {
+  const did = await refreshNow()
+  if (!did) return
+  toast.add({ title: '已刷新', description: '同步状态与阅读小结已重新读取', color: 'success' })
+}
 
 /**
  * 「查看同步日志」不再跳到 /profile?tab=1：它在原地打开设置弹窗的「数据」分区，
@@ -85,14 +103,15 @@ const dotClass = computed(() => {
           <h3 class="min-w-0 flex-1 truncate text-sm font-semibold text-highlighted">
             {{ syncLabel }}
           </h3>
-          <UTooltip text="重新读取">
+          <UTooltip text="重新读取（跳过缓存）">
             <UButton
               icon="i-lucide-refresh-cw"
               variant="ghost"
               color="neutral"
               size="xs"
               aria-label="重新读取同步状态"
-              @click="refreshAll"
+              :loading="refreshing"
+              @click="refresh"
             />
           </UTooltip>
         </div>
