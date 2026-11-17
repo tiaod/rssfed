@@ -11,6 +11,7 @@
 import { envInt, formatDuration } from "../env"
 import { pauseDormantUsers } from "../services/timeline-lifecycle"
 import { readAdaptiveRetentionConfig, runAdaptiveRetention } from "../services/feed-retention"
+import { resumeSubscribedAutoPaused } from "../services/feed-orphans"
 
 const isTestProcess = process.env.VITEST === "true" || process.env.NODE_ENV === "test"
 
@@ -23,7 +24,18 @@ const RETENTION_INTERVAL_MS = envInt("FEED_RETENTION_INTERVAL_MS", 86_400_000, {
 const DORMANT_DAYS = envInt("TIMELINE_DORMANT_DAYS", 90, { min: 0, max: 3650 })
 const DORMANT_SCAN_INTERVAL_MS = envInt("TIMELINE_DORMANT_SCAN_INTERVAL_MS", 86_400_000, { min: 300_000 })
 
+/**
+ * 孤儿源自动恢复的扫描周期。
+ *
+ * 只做**恢复**、不做暂停：暂停是破坏性的（会让一个源停止抓取），必须由管理员在后台
+ * 明确点一次（`POST /api/feeds/orphans/pause`）。恢复是安全的（最多多抓一个源），
+ * 所以挂定时器兜底 —— 订阅不一定走 API：客户端离线同步的订阅文档不会经过
+ * addSubscriptionIfAbsent，也就不会触发即时恢复。
+ */
+const ORPHAN_RESUME_INTERVAL_MS = envInt("FEED_ORPHAN_RESUME_INTERVAL_MS", 3_600_000, { min: 300_000 })
+
 let dormantInterval: ReturnType<typeof setInterval> | null = null
+let orphanResumeInterval: ReturnType<typeof setInterval> | null = null
 let retentionInterval: ReturnType<typeof setInterval> | null = null
 let retentionInitialTimer: ReturnType<typeof setTimeout> | null = null
 /** 上一轮还没跑完就不叠第二轮（一轮要扫几百个库，可能超过间隔） */
@@ -105,13 +117,27 @@ export function startTimelineMaintenance(): void {
     }, 600_000)
     initial.unref?.()
   }
+
+  // 孤儿源恢复：被自动暂停的源一旦有人重新订阅就开回来（有人订阅也可能来自客户端离线同步，
+  // 那条路径不经过 API 的即时恢复，所以要有定时兜底）
+  console.log(`[FeedOrphans] 自动恢复扫描已启用：每 ${formatDuration(ORPHAN_RESUME_INTERVAL_MS)} 一轮`)
+  orphanResumeInterval = setInterval(() => {
+    void resumeSubscribedAutoPaused()
+      .then((n) => { if (n > 0) console.log(`[FeedOrphans] 恢复了 ${n} 个重新有人订阅的源`) })
+      .catch((err) => {
+        console.error("[FeedOrphans] 恢复扫描失败（下一轮继续）：", (err as Error)?.message ?? err)
+      })
+  }, ORPHAN_RESUME_INTERVAL_MS)
+  orphanResumeInterval.unref?.()
 }
 
 export function shutdownTimelineMaintenance(): void {
   if (dormantInterval) clearInterval(dormantInterval)
+  if (orphanResumeInterval) clearInterval(orphanResumeInterval)
   if (retentionInterval) clearInterval(retentionInterval)
   if (retentionInitialTimer) clearTimeout(retentionInitialTimer)
   dormantInterval = null
+  orphanResumeInterval = null
   retentionInterval = null
   retentionInitialTimer = null
 }

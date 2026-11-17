@@ -9,6 +9,7 @@ import { isUniqueViolation, uniqueViolationConstraint } from "../db/errors"
 import { enqueueFetch, fetchQueue } from "../workers"
 import { deleteFeed, listFeedSubscribers } from "../services/feed-deletion"
 import { validateFeedPatch } from "../services/feed-field-validation"
+import { pauseOrphanFeeds, resumeSubscribedAutoPaused, scanOrphanFeeds } from "../services/feed-orphans"
 import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
 import {
   resolveFeedId,
@@ -268,6 +269,38 @@ feedsRouter.get("/image-defaults", requireAdmin, async (c) => {
   return c.json(DEFAULT_IMAGE_OPTIONS)
 })
 
+/**
+ * 扫描零订阅的"孤儿源"（仅管理员，只读）。
+ *
+ * 存在的原因：调度器只看 `feeds.status = 'active'`，不看有没有人订阅，于是被退订干净的源
+ * 会永久占用抓取配额（实测线上 707 条源里 578 条是零订阅且都在跑）。这里只统计不写库，
+ * 让管理员先看清规模再决定是否暂停。判定口径见 services/feed-orphans.ts。
+ *
+ * **必须注册在 `/:feedId` 之前**，否则 "orphans" 会被当成 feedId 匹配掉。
+ */
+feedsRouter.get("/orphans", requireAdmin, async (c) => {
+  const limit = Number(c.req.query("limit") ?? 50)
+  const result = await scanOrphanFeeds({ limit: Number.isFinite(limit) ? limit : 50 })
+  return c.json(result)
+})
+
+/** 批量暂停零订阅孤儿源（仅管理员） */
+feedsRouter.post("/orphans/pause", requireAdmin, async (c) => {
+  const body = await c.req.json().catch(() => ({})) as { limit?: number }
+  const result = await pauseOrphanFeeds({ limit: body?.limit })
+  if (result.aborted) {
+    // 503 而不是 200：什么都没做，且原因需要管理员看到（读用户库失败时不敢乱暂停）
+    return c.json({ error: result.reason, code: "scan_incomplete", paused: 0 }, 503)
+  }
+  return c.json(result)
+})
+
+/** 恢复所有"曾自动暂停、但现在确实有人订阅"的源（仅管理员，定时任务之外的即时入口） */
+feedsRouter.post("/orphans/resume", requireAdmin, async (c) => {
+  const resumed = await resumeSubscribedAutoPaused()
+  return c.json({ resumed })
+})
+
 /** 暂停/恢复订阅抓取（仅管理员） */
 feedsRouter.patch("/:feedId", requireAdmin, async (c) => {
   const feedId = c.req.param("feedId")!
@@ -275,8 +308,12 @@ feedsRouter.patch("/:feedId", requireAdmin, async (c) => {
   if (status !== "active" && status !== "paused") {
     return c.json({ error: "status must be 'active' or 'paused'" }, 400)
   }
+  // 管理员的动作必须覆盖"自动暂停"标记：
+  //  - 手动暂停 → pausedBySystem=false，否则用户一订阅它就被自动恢复了；
+  //  - 手动恢复 → 清成 null。
+  // 谁按的永远是最新那个动作说了算（见 db/schema.ts 该列注释）。
   const updated = await db.update(feeds)
-    .set({ status })
+    .set({ status, pausedBySystem: null })
     .where(eq(feeds.id, feedId))
     .returning({ id: feeds.id })
   if (!updated.length) return c.json({ error: "feed not found" }, 404)

@@ -86,6 +86,36 @@ export function useApi() {
         `${base}/api/feeds/image-defaults`
       ),
       /**
+       * 管理员：扫描零订阅的孤儿源（只读）。
+       *
+       * 调度器只看 status=active，不看有没有人订阅，被退订干净的源会一直占着抓取配额。
+       * 判定口径见后端 services/feed-orphans.ts。
+       */
+      orphans: (limit = 50) => apiFetch<{
+        total: number
+        referenced: number
+        orphans: Array<{
+          id: string
+          url: string
+          title: string
+          status: string
+          pausedBySystem: boolean | null
+          lastFetchedAt: string | null
+        }>
+        activeOrphans: number
+        alreadyPaused: number
+        scanFailures: number
+      }>(`${base}/api/feeds/orphans?limit=${limit}`),
+      /** 管理员：批量暂停零订阅孤儿源 */
+      pauseOrphans: (limit?: number) =>
+        apiFetch<{ paused: number, skipped: number, aborted: boolean, reason?: string }>(
+          `${base}/api/feeds/orphans/pause`,
+          { method: 'POST', body: { limit } }
+        ),
+      /** 管理员：恢复那些曾自动暂停、但现在确实有人订阅的源 */
+      resumeOrphans: () =>
+        apiFetch<{ resumed: number }>(`${base}/api/feeds/orphans/resume`, { method: 'POST' }),
+      /**
        * 导入 OPML：批量注册订阅源并创建订阅。
        *
        * 这是个流式接口（后端逐源推 NDJSON 进度事件，见 utils/opmlImport.ts），

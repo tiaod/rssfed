@@ -6,6 +6,7 @@ import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../co
 import { feedDocId } from "../couchdb/doc-ids"
 import { db, feeds, bots } from "../db"
 import { isUniqueViolation, uniqueViolationConstraint } from "../db/errors"
+import { resumeIfAutoPaused } from "./feed-orphans"
 import { enqueueFetch } from "../workers"
 
 /**
@@ -131,6 +132,10 @@ export async function addSubscriptionIfAbsent(
       category: item.category,
       createdAt: new Date().toISOString(),
     } as any)
+    // 订阅成功 = 这个源重新"有人关注"了。若它是被孤儿清理自动暂停的，立刻恢复抓取
+    // （只动 pausedBySystem=true 的，管理员手动暂停的不会被打开，见 services/feed-orphans.ts）。
+    // 放在这里而不是各调用方，是因为 OPML 导入 / 单条添加 / MCP 都汇聚到这一个写入口。
+    await resumeIfAutoPaused(meta.feedId).catch(() => {})
     return true
   } catch (err: any) {
     // CouchDB 文档冲突 = 该用户已订阅过，跳过

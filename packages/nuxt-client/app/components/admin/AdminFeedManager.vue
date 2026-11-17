@@ -181,6 +181,61 @@ async function confirmDelete(force = false) {
   }
 }
 
+/**
+ * 孤儿源清理（零订阅源批量暂停）。
+ *
+ * 设计意图：调度器只看 status=active，不看有没有人订阅，所以被退订干净的源会一直抓。
+ * 这里只把它暂停、不删除 —— 注册表与源库都留着，有人重新订阅时自动恢复
+ * （后端在订阅写入点直接恢复，另有每小时兜底扫描）。
+ */
+const orphansOpen = ref(false)
+const orphansLoading = ref(false)
+const orphansPausing = ref(false)
+const orphanScan = ref<{
+  total: number
+  referenced: number
+  orphans: Array<{ id: string, url: string, title: string, status: string, pausedBySystem: boolean | null, lastFetchedAt: string | null }>
+  activeOrphans: number
+  alreadyPaused: number
+  scanFailures: number
+} | null>(null)
+
+async function openOrphans() {
+  orphansOpen.value = true
+  await scanOrphans()
+}
+
+async function scanOrphans() {
+  orphansLoading.value = true
+  try {
+    orphanScan.value = await api.feeds.orphans(20)
+  } catch (e) {
+    toast.add({ title: '扫描失败', description: errorMessage(e), color: 'error' })
+  } finally {
+    orphansLoading.value = false
+  }
+}
+
+async function pauseAllOrphans() {
+  orphansPausing.value = true
+  try {
+    const res = await api.feeds.pauseOrphans()
+    toast.add({
+      title: `已暂停 ${res.paused} 个孤儿源`,
+      description: res.skipped > 0 ? `跳过 ${res.skipped} 个（已暂停或刚被订阅）` : '有人订阅时自动恢复',
+      color: 'success'
+    })
+    await scanOrphans()
+    await load()
+  } catch (e: unknown) {
+    // 后端在"读用户库失败"时返回 503 且一个都不暂停，把原因如实显示
+    const err = e as { data?: { error?: string } }
+    toast.add({ title: '暂停失败', description: err.data?.error ?? errorMessage(e), color: 'error' })
+  } finally {
+    orphansPausing.value = false
+  }
+}
+
 function timeAgo(iso?: string): string {
   if (!iso) return '从未抓取'
   const diff = Date.now() - new Date(iso).getTime()
@@ -309,6 +364,17 @@ onMounted(load)
             title="CouchDB 后台管理页（Fauxton）"
           >
             数据库控制台
+          </UButton>
+          <UButton
+            icon="i-lucide-sparkles"
+            color="neutral"
+            variant="outline"
+            size="sm"
+            class="shrink-0"
+            title="找出没有任何人订阅的源，批量暂停抓取"
+            @click="openOrphans"
+          >
+            清理孤儿源
           </UButton>
         </div>
       </div>
@@ -450,6 +516,93 @@ onMounted(load)
         </UCard>
       </div>
     </template>
+
+    <UModal
+      v-model:open="orphansOpen"
+      title="孤儿源清理"
+      :ui="{ footer: 'justify-end' }"
+    >
+      <template #body>
+        <div class="space-y-3">
+          <p class="text-sm text-muted">
+            找出<strong>没有任何用户或 Bot 引用</strong>的订阅源。抓取调度只看启用状态、不看是否有人订阅，
+            这些源会一直占用抓取配额。
+          </p>
+          <p class="text-xs text-muted">
+            处理方式是<strong>暂停</strong>而非删除：注册表与已抓内容都保留，有人重新订阅时自动恢复抓取。
+            管理员手动暂停的源不会被自动恢复。
+          </p>
+
+          <div
+            v-if="orphanScan"
+            class="rounded-lg border border-default px-3 py-2 text-sm"
+          >
+            <p>
+              共 <strong>{{ orphanScan.total }}</strong> 个源，其中
+              <strong>{{ orphanScan.referenced }}</strong> 个有引用；
+              孤儿源 <strong>{{ orphanScan.activeOrphans }}</strong> 个仍在抓取
+              <span v-if="orphanScan.alreadyPaused > 0">（{{ orphanScan.alreadyPaused }} 个已暂停）</span>
+            </p>
+            <UAlert
+              v-if="orphanScan.scanFailures > 0"
+              class="mt-2"
+              color="warning"
+              variant="soft"
+              icon="i-lucide-triangle-alert"
+              :title="`有 ${orphanScan.scanFailures} 个用户库读取失败`"
+              description="无法确认订阅关系，批量暂停会被拒绝执行（避免误停别人正在看的源）。"
+            />
+          </div>
+
+          <div
+            v-if="orphansLoading"
+            class="space-y-2"
+          >
+            <USkeleton class="h-10 w-full" />
+            <USkeleton class="h-10 w-full" />
+          </div>
+
+          <div
+            v-else-if="orphanScan && orphanScan.orphans.length > 0"
+            class="max-h-64 space-y-1 overflow-y-auto rounded-lg border border-default p-2"
+          >
+            <div
+              v-for="item in orphanScan.orphans"
+              :key="item.id"
+              class="rounded px-2 py-1 text-xs"
+            >
+              <p class="truncate font-medium">
+                {{ item.title }}
+                <span
+                  v-if="item.pausedBySystem"
+                  class="ml-1 text-muted"
+                >（已暂停）</span>
+              </p>
+              <p class="truncate text-muted">
+                {{ item.url }}
+              </p>
+            </div>
+          </div>
+        </div>
+      </template>
+      <template #footer="{ close }">
+        <UButton
+          variant="outline"
+          color="neutral"
+          @click="close"
+        >
+          关闭
+        </UButton>
+        <UButton
+          color="primary"
+          :loading="orphansPausing"
+          :disabled="!orphanScan || orphanScan.activeOrphans === 0 || orphanScan.scanFailures > 0"
+          @click="pauseAllOrphans"
+        >
+          暂停全部孤儿源
+        </UButton>
+      </template>
+    </UModal>
 
     <UModal
       v-model:open="deleteOpen"

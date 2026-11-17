@@ -281,6 +281,17 @@ export const timelineEvents = pgTable("timeline_events", {
   createdAt: timestamp("created_at").notNull().defaultNow(),
   /** 抓取状态：active 正常抓取 / paused 用户暂停（worker 跳过） */
   status: text("status").notNull().default("active"),
+  /**
+   * 本次 `paused` 是不是**自动暂停**（零订阅孤儿源清理，见 services/feed-orphans.ts）。
+   *
+   * 为什么不能只看 `status = 'paused'`：管理员手动暂停的源也在 paused 里，两者混在一起后
+   * "有人订阅就自动恢复"会把管理员有意停掉的源重新打开。所以暂停原因要单独记一列：
+   * 自动恢复只碰 `status = 'paused' AND pausedBySystem = true`。
+   *
+   * 管理员手动暂停时写 `pausedBySystem = false`（覆盖掉之前的自动暂停标记），
+   * 手动恢复时清成 null。这样"谁按的"永远是最新那个动作说了算。
+   */
+  pausedBySystem: boolean("paused_by_system"),
   /** 关联的 CouchDB 库名（首次 ensure 时生成随机库名并回写） */
   couchDbName: text("couch_db_name").unique(),
   // ── 图片缓存 per-feed 策略（管理员可覆盖全局默认，见 rss/entry-images.ts） ──
