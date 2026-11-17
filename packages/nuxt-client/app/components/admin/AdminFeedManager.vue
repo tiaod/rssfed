@@ -722,7 +722,9 @@ onMounted(load)
             <p class="text-xs text-muted">
               天数看的是「持续无人订阅」的时长，不是某一刻没人订阅——避免误伤刚退订、正在重新订阅，
               或多设备同步尚未完成的源。删除前会再确认一次确实无人订阅。
-              <template v-if="orphanPolicyInfo.source === 'env'">当前值来自环境变量默认。</template>
+              <template v-if="orphanPolicyInfo.source === 'env'">
+                当前值来自环境变量默认。
+              </template>
             </p>
             <div class="flex items-center gap-2">
               <UButton
