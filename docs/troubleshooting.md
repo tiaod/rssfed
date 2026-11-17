@@ -383,6 +383,29 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
   —— 休眠账号（`aggregation_paused_at` 非空）在暂停期间照常能订阅，但聚合被跳过、永远不建水位行，
   只查水位表会把它误判成「没人订阅」而误删。`bot_feeds` 无论如何都查。
 
+### 编辑订阅源时能存进非法地址 / `javascript:` 链接
+
+- **现象**：管理端「编辑订阅源」把 Feed URL 改成 `abc`、把站点链接改成 `javascript:alert(1)`，
+  保存成功且写进了库；之后抓取一直失败，或点「访问网站」执行了脚本。
+- **原因**：`PUT /api/feeds/:feedId` 原本只判断 `typeof body[key] === "string"` 就写库，
+  完全没有 URL 校验。而 MCP 的 `update_subscription` 却有 `z.string().url()`，两条路径行为不一致。
+- **为什么四个字段不能一视同仁**（见 `services/feed-field-validation.ts`）：
+
+  | 字段 | 谁来消费 | 该查什么 |
+  | --- | --- | --- |
+  | `url` | 服务端抓取 | http(s) + 拦内网（否则是 SSRF 入口） |
+  | `image`（图标） | **服务端下载**（`cacheSingleImage`） | 同上：worker 真的会去取 |
+  | `siteUrl` | 前端 `<a href>` 跳转 | 只查协议（`javascript:` 点开就是 XSS），**不拦内网** |
+  | `title` / `description` | 纯文本 | 不是 URL，不校验 |
+
+- **`siteUrl` 为什么不拦内网**：它只做展示跳转，服务端不会去访问。现有数据里就有
+  `site_url = http://localhost:8099/` 的源（`arQo7BMXRjpAFtXb`、`KEwHKZQWBgrM5IGP`），
+  若一并按内网拦，这些源**改任何字段（哪怕只改标题）都会被卡住**。
+- **空串是合法的**：表示"清空该字段"（编辑弹窗清空输入框就是这个语义），库里本来就有空的 `image`。
+- **不做归一化**：不会把 `rsshub:1200` 自动改写成 `rsshub.app` —— 那属于行为变更，且
+  `rsshub:1200` 在容器内部署下是合法地址。校验只保证"存进去的值能用"，不替用户猜意图。
+- **报错形状**：`400 + code: "invalid_field" + field`，前端弹窗直接显示 message。
+
 ## 反向代理与网络
 
 ### https 页面上附件地址是 `http://`，图片被浏览器拦截

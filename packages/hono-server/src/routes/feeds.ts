@@ -8,6 +8,7 @@ import { db, feeds } from "../db"
 import { isUniqueViolation, uniqueViolationConstraint } from "../db/errors"
 import { enqueueFetch, fetchQueue } from "../workers"
 import { deleteFeed, listFeedSubscribers } from "../services/feed-deletion"
+import { validateFeedPatch } from "../services/feed-field-validation"
 import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
 import {
   resolveFeedId,
@@ -305,6 +306,13 @@ feedsRouter.put("/:feedId", requireAdmin, async (c) => {
   }
   if (!Object.keys(patch).length) {
     return c.json({ error: "no fields to update" }, 400)
+  }
+  // URL 类字段校验：以前只判断 `typeof === "string"` 就写库，能存进 "abc"、
+  // "javascript:..." 这类值。其中 url / image 会被**服务端真的去请求**（抓取、图标缓存），
+  // 存进内网地址等于留一个 SSRF 入口，所以一并查内网。详见 services/feed-field-validation.ts
+  const fieldError = await validateFeedPatch(patch)
+  if (fieldError) {
+    return c.json({ error: fieldError.message, code: "invalid_field", field: fieldError.field }, 400)
   }
   // URL 是否真的变了要拿改之前的值比：updated 的 returning 只会给新值
   const [before] = await db.select({ url: feeds.url }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
