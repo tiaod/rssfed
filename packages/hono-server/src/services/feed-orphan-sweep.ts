@@ -1,5 +1,5 @@
 import { and, eq, inArray, isNull, lt, or, sql } from "drizzle-orm"
-import { db, feeds, user, botFeeds } from "../db"
+import { db, feeds, user, botFeeds, siteSettings } from "../db"
 import { createCouchDb } from "../couchdb/client"
 import { deleteFeed, type FeedSubscriber } from "./feed-deletion"
 import { envInt } from "../env"
@@ -41,12 +41,26 @@ import { envInt } from "../env"
  * 它会走同一套冷静期。真正的紧急清理可以在界面上显式强删/单条删除。
  */
 
-/** 多少天后"持续零订阅"才暂停抓取（0 = 关闭自动暂停） */
-const PAUSE_AFTER_DAYS = envInt("FEED_ORPHAN_PAUSE_AFTER_DAYS", 7, { min: 0, max: 3650 })
-/** 暂停后再过多少天仍零订阅就删除（0 = 永不删除） */
-const DELETE_AFTER_DAYS = envInt("FEED_ORPHAN_DELETE_AFTER_DAYS", 30, { min: 0, max: 3650 })
-/** 一轮扫描最多改动多少条（防止首次上线把所有积压源一次性全处理） */
-const BATCH_LIMIT = envInt("FEED_ORPHAN_BATCH_LIMIT", 500, { min: 1, max: 5000 })
+/**
+ * 环境变量给的**默认值**。运行时真正生效的值来自 `loadOrphanPolicy()`：
+ * 管理员在「站点设置」里改过的值优先，没改过才回退到这里。
+ *
+ * 为什么允许在库里改：这几项直接决定"源什么时候被暂停/删除"，属于运营策略，
+ * 不该每调一次都改 env 重启进程。
+ */
+const DEFAULT_PAUSE_AFTER_DAYS = envInt("FEED_ORPHAN_PAUSE_AFTER_DAYS", 7, { min: 0, max: 3650 })
+const DEFAULT_DELETE_AFTER_DAYS = envInt("FEED_ORPHAN_DELETE_AFTER_DAYS", 30, { min: 0, max: 3650 })
+const DEFAULT_BATCH_LIMIT = envInt("FEED_ORPHAN_BATCH_LIMIT", 500, { min: 1, max: 5000 })
+
+/** 站点设置里存放该策略的 key（siteSettings.extras 是自由 jsonb，不必加新列） */
+const POLICY_EXTRAS_KEY = "orphanPolicy"
+/** 站点配置恒为单行，固定主键（与 routes/site-settings.ts 一致） */
+const SITE_ID = "site"
+
+/** 保证单例行存在；并发安全（onConflictDoNothing） */
+async function ensureSiteSettingsRow(): Promise<void> {
+  await db.insert(siteSettings).values({ id: SITE_ID }).onConflictDoNothing()
+}
 
 const DAY_MS = 86_400_000
 
@@ -110,6 +124,10 @@ export async function sweepOrphanFeeds(options: { now?: Date } = {}): Promise<Or
     marked: 0, cleared: 0, paused: 0, deleted: 0, skipped: 0, aborted: false,
   }
 
+  // 运行时策略（站点设置优先、env 兜底）：管理员可能刚在设置里改过天数
+  const policy = await loadOrphanPolicy()
+  const { pauseAfterDays, deleteAfterDays, batchLimit } = policy
+
   const { ids: referenced, failures } = await referencedFeedIds()
   if (failures > 0) {
     return { ...result, aborted: true, reason: `有 ${failures} 个订阅库读取失败` }
@@ -135,7 +153,7 @@ export async function sweepOrphanFeeds(options: { now?: Date } = {}): Promise<Or
   // ② 零订阅且还没打过标记的：记录「从此刻开始没人要」
   const toMark = all
     .filter((f) => !referenced.has(f.id) && f.orphanSince === null)
-    .slice(0, BATCH_LIMIT)
+    .slice(0, batchLimit)
   if (toMark.length > 0) {
     const marked = await db.update(feeds)
       .set({ orphanSince: now })
@@ -147,17 +165,17 @@ export async function sweepOrphanFeeds(options: { now?: Date } = {}): Promise<Or
     result.marked = marked.length
   }
 
-  const pauseCutoff = new Date(now.getTime() - PAUSE_AFTER_DAYS * DAY_MS)
-  const deleteCutoff = new Date(now.getTime() - DELETE_AFTER_DAYS * DAY_MS)
+  const pauseCutoff = new Date(now.getTime() - pauseAfterDays * DAY_MS)
+  const deleteCutoff = new Date(now.getTime() - deleteAfterDays * DAY_MS)
 
   // ③ 零订阅已持续超过冷静期、仍在抓的 → 暂停
-  if (PAUSE_AFTER_DAYS > 0) {
+  if (pauseAfterDays > 0) {
     const candidates = all.filter((f) => (
       !referenced.has(f.id)
       && f.status === "active"
       && f.orphanSince !== null
       && f.orphanSince <= pauseCutoff
-    )).slice(0, BATCH_LIMIT)
+    )).slice(0, batchLimit)
     if (candidates.length > 0) {
       const paused = await db.update(feeds)
         .set({ status: "paused", pausedBySystem: true })
@@ -174,14 +192,14 @@ export async function sweepOrphanFeeds(options: { now?: Date } = {}): Promise<Or
   //
   //    删除不可逆，所以**逐个复核**（不是信任几天的判断）：删除前再确认它此刻确实
   //    零订阅。复核成本是每源一次内存查找（referenced 集合是本轮刚扫的），不额外查库。
-  if (DELETE_AFTER_DAYS > 0) {
+  if (deleteAfterDays > 0) {
     const doomed = all.filter((f) => (
       !referenced.has(f.id)
       && f.status === "paused"
       && f.pausedBySystem === true
       && f.orphanSince !== null
       && f.orphanSince <= deleteCutoff
-    )).slice(0, BATCH_LIMIT)
+    )).slice(0, batchLimit)
 
     for (const feed of doomed) {
       try {
@@ -207,13 +225,78 @@ export async function sweepOrphanFeeds(options: { now?: Date } = {}): Promise<Or
   return result
 }
 
-/** 供管理端展示的自动清理配置（前端据此说明"多久会发生什么"） */
-export function orphanPolicy() {
+/** 生效中的孤儿源策略 */
+export interface OrphanPolicy {
+  pauseAfterDays: number
+  deleteAfterDays: number
+  batchLimit: number
+  /** 两级都关时自动清理实际不工作 */
+  enabled: boolean
+  /** 这份值来自哪里：settings=管理员在站点设置里改过；env=环境变量默认值 */
+  source: "settings" | "env"
+}
+
+/** 把未知输入规范成合法策略（非法值回退默认，不抛错 —— 存量数据可能不全） */
+function normalizePolicy(raw: unknown): Omit<OrphanPolicy, "enabled" | "source"> {
+  const src = (raw ?? {}) as Record<string, unknown>
+  const num = (v: unknown, def: number, min: number, max: number): number => {
+    const n = Number(v)
+    if (!Number.isFinite(n)) return def
+    return Math.max(min, Math.min(max, Math.floor(n)))
+  }
   return {
-    pauseAfterDays: PAUSE_AFTER_DAYS,
-    deleteAfterDays: DELETE_AFTER_DAYS,
-    batchLimit: BATCH_LIMIT,
-    /** 两级都关时自动清理实际不工作 */
-    enabled: PAUSE_AFTER_DAYS > 0 || DELETE_AFTER_DAYS > 0,
+    pauseAfterDays: num(src.pauseAfterDays, DEFAULT_PAUSE_AFTER_DAYS, 0, 3650),
+    deleteAfterDays: num(src.deleteAfterDays, DEFAULT_DELETE_AFTER_DAYS, 0, 3650),
+    // batchLimit 不允许配成 0：那会让自动清理永久不动
+    batchLimit: num(src.batchLimit, DEFAULT_BATCH_LIMIT, 1, 5000),
+  }
+}
+
+/**
+ * 读取**当前生效**的策略：站点设置里存的优先，没有则用环境变量默认值。
+ *
+ * 读失败时回退默认值而不是抛错：调用方是定时任务，一次 PG 抖动不该让自动清理停摆
+ * （用默认值最多是"按 env 那套跑"，行为仍可预期）。
+ */
+export async function loadOrphanPolicy(): Promise<OrphanPolicy> {
+  let stored: unknown
+  try {
+    const [row] = await db
+      .select({ extras: siteSettings.extras })
+      .from(siteSettings)
+      .where(eq(siteSettings.id, SITE_ID))
+      .limit(1)
+    stored = row?.extras?.[POLICY_EXTRAS_KEY]
+  } catch {
+    stored = undefined
+  }
+  const base = normalizePolicy(stored)
+  return {
+    ...base,
+    enabled: base.pauseAfterDays > 0 || base.deleteAfterDays > 0,
+    source: stored === undefined ? "env" : "settings",
+  }
+}
+
+/**
+ * 保存策略到站点设置（管理员操作）。
+ *
+ * 写进 `extras` 而不是加列：`extras` 就是"新配置字段暂写此处、避免频繁改表结构"用的
+ * （见 db/schema.ts 该列注释）。只保留本 key，不动 extras 里其它内容。
+ */
+export async function saveOrphanPolicy(input: unknown): Promise<OrphanPolicy> {
+  const next = normalizePolicy(input)
+  await ensureSiteSettingsRow()
+  const [existing] = await db
+    .select({ extras: siteSettings.extras })
+    .from(siteSettings)
+    .where(eq(siteSettings.id, SITE_ID))
+    .limit(1)
+  const extras = { ...(existing?.extras ?? {}), [POLICY_EXTRAS_KEY]: next }
+  await db.update(siteSettings).set({ extras }).where(eq(siteSettings.id, SITE_ID))
+  return {
+    ...next,
+    enabled: next.pauseAfterDays > 0 || next.deleteAfterDays > 0,
+    source: "settings",
   }
 }

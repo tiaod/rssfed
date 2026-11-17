@@ -226,9 +226,40 @@ const orphanPolicyInfo = ref<{
   deleteAfterDays: number
   batchLimit: number
   enabled: boolean
+  /** 当前值来自哪里：settings=站点设置里改过；env=环境变量默认 */
+  source: 'settings' | 'env'
 } | null>(null)
 /** 「立即执行一轮」进行中 */
 const orphanSweeping = ref(false)
+
+/** 可编辑的策略表单（与 orphanPolicyInfo 分开：editing 未保存时不该影响展示） */
+const policyForm = ref({ pauseAfterDays: 7, deleteAfterDays: 30 })
+const policySaving = ref(false)
+/** 表单是否与已保存值不同（只有改动过才允许保存） */
+const policyDirty = computed(() => {
+  const p = orphanPolicyInfo.value
+  if (!p) return false
+  return policyForm.value.pauseAfterDays !== p.pauseAfterDays
+    || policyForm.value.deleteAfterDays !== p.deleteAfterDays
+})
+
+/** 保存规则（写进站点设置，立即生效） */
+async function savePolicy() {
+  policySaving.value = true
+  try {
+    const saved = await api.feeds.saveOrphanPolicy({
+      pauseAfterDays: policyForm.value.pauseAfterDays,
+      deleteAfterDays: policyForm.value.deleteAfterDays
+    })
+    orphanPolicyInfo.value = saved
+    policyForm.value = { pauseAfterDays: saved.pauseAfterDays, deleteAfterDays: saved.deleteAfterDays }
+    toast.add({ title: '规则已保存', description: '下一次自动扫描起生效，无需重启', color: 'success' })
+  } catch (e: unknown) {
+    toast.add({ title: '保存失败', description: errorMessage(e), color: 'error' })
+  } finally {
+    policySaving.value = false
+  }
+}
 
 async function openOrphans() {
   orphansOpen.value = true
@@ -239,6 +270,10 @@ async function openOrphans() {
 async function loadOrphanPolicy() {
   try {
     orphanPolicyInfo.value = await api.feeds.orphanPolicy()
+    policyForm.value = {
+      pauseAfterDays: orphanPolicyInfo.value.pauseAfterDays,
+      deleteAfterDays: orphanPolicyInfo.value.deleteAfterDays
+    }
   } catch {
     // 策略只影响说明文案，取不到就退化成不显示
   }
@@ -644,30 +679,64 @@ onMounted(load)
             管理员手动暂停的源不会被自动恢复。
           </p>
 
-          <UAlert
+          <div
             v-if="orphanPolicyInfo"
-            color="info"
-            variant="soft"
-            icon="i-lucide-clock"
-            title="自动清理规则"
+            class="rounded-lg border border-default p-3 space-y-2"
           >
-            <template #description>
-              <p class="text-xs">
-                <template v-if="orphanPolicyInfo.pauseAfterDays > 0">
-                  零订阅满 <strong>{{ orphanPolicyInfo.pauseAfterDays }}</strong> 天 → 自动暂停抓取；
-                </template>
-                <template v-else>不自动暂停；</template>
-                <template v-if="orphanPolicyInfo.deleteAfterDays > 0">
-                  自动暂停后再满 <strong>{{ orphanPolicyInfo.deleteAfterDays }}</strong> 天仍无人订阅 → 自动删除。
-                </template>
-                <template v-else>永不自动删除。</template>
+            <div class="flex items-center justify-between gap-2">
+              <p class="text-sm font-medium">
+                自动清理规则
               </p>
-              <p class="mt-1 text-xs text-muted">
-                天数看的是「持续无人订阅」的时长，不是某一刻没人订阅——避免误伤刚退订、正在重新订阅，
-                或多设备同步尚未完成的源。删除前会再确认一次确实无人订阅。
-              </p>
-            </template>
-          </UAlert>
+              <UBadge
+                size="sm"
+                :color="orphanPolicyInfo.enabled ? 'success' : 'neutral'"
+                variant="soft"
+              >
+                {{ orphanPolicyInfo.enabled ? '已启用' : '已停用' }}
+              </UBadge>
+            </div>
+            <div class="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              <UFormField
+                label="零订阅满多少天 → 暂停抓取"
+                help="0 = 不自动暂停"
+              >
+                <UInput
+                  v-model.number="policyForm.pauseAfterDays"
+                  type="number"
+                  min="0"
+                  class="w-full"
+                />
+              </UFormField>
+              <UFormField
+                label="暂停满多少天 → 自动删除"
+                help="0 = 永不自动删除"
+              >
+                <UInput
+                  v-model.number="policyForm.deleteAfterDays"
+                  type="number"
+                  min="0"
+                  class="w-full"
+                />
+              </UFormField>
+            </div>
+            <p class="text-xs text-muted">
+              天数看的是「持续无人订阅」的时长，不是某一刻没人订阅——避免误伤刚退订、正在重新订阅，
+              或多设备同步尚未完成的源。删除前会再确认一次确实无人订阅。
+              <template v-if="orphanPolicyInfo.source === 'env'">当前值来自环境变量默认。</template>
+            </p>
+            <div class="flex items-center gap-2">
+              <UButton
+                size="xs"
+                color="primary"
+                :loading="policySaving"
+                :disabled="!policyDirty"
+                @click="savePolicy"
+              >
+                保存规则
+              </UButton>
+              <span class="text-xs text-muted">保存后立即生效，无需重启</span>
+            </div>
+          </div>
 
           <div
             v-if="orphanScan"

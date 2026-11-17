@@ -10,7 +10,7 @@ import { enqueueFetch, fetchQueue } from "../workers"
 import { deleteFeed, listFeedSubscribers } from "../services/feed-deletion"
 import { validateFeedPatch } from "../services/feed-field-validation"
 import { pauseOrphanFeeds, resumeSubscribedAutoPaused, scanOrphanFeeds } from "../services/feed-orphans"
-import { orphanPolicy, sweepOrphanFeeds } from "../services/feed-orphan-sweep"
+import { loadOrphanPolicy, saveOrphanPolicy, sweepOrphanFeeds } from "../services/feed-orphan-sweep"
 import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
 import {
   resolveFeedId,
@@ -299,7 +299,17 @@ feedsRouter.post("/orphans/pause", requireAdmin, async (c) => {
 
 /** 孤儿源自动清理策略（仅管理员）：前端据此说明"多久后会发生什么" */
 feedsRouter.get("/orphans/policy", requireAdmin, async (c) => {
-  return c.json(orphanPolicy())
+  return c.json(await loadOrphanPolicy())
+})
+
+/** 修改孤儿源自动清理策略（仅管理员）：存进 siteSettings.extras，无需重启 */
+feedsRouter.put("/orphans/policy", requireAdmin, async (c) => {
+  const body = await c.req.json().catch(() => ({}))
+  try {
+    return c.json(await saveOrphanPolicy(body))
+  } catch (err) {
+    return c.json({ error: (err as Error)?.message ?? String(err) }, 422)
+  }
 })
 
 /** 立刻跑一轮自动清理（仅管理员，等价于定时任务那一轮；用于立刻见到效果） */

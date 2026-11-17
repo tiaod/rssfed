@@ -12,7 +12,7 @@ import { envInt, formatDuration } from "../env"
 import { pauseDormantUsers } from "../services/timeline-lifecycle"
 import { readAdaptiveRetentionConfig, runAdaptiveRetention } from "../services/feed-retention"
 import { resumeSubscribedAutoPaused } from "../services/feed-orphans"
-import { orphanPolicy, sweepOrphanFeeds } from "../services/feed-orphan-sweep"
+import { loadOrphanPolicy, sweepOrphanFeeds } from "../services/feed-orphan-sweep"
 
 const isTestProcess = process.env.VITEST === "true" || process.env.NODE_ENV === "test"
 
@@ -144,13 +144,22 @@ export function startTimelineMaintenance(): void {
 
   // 孤儿源自动清理：标记 → 冷静期后暂停 → 再一段冷静期后删除。
   // 门槛看的是 orphanSince 上的天数，所以这个频率只影响"多久检查一次"，不影响语义。
-  const policy = orphanPolicy()
-  if (policy.enabled) {
+  // 策略存在站点设置里（可运行时改），所以这里异步读一次只为打启动日志；
+  // 真正生效的判断在每轮 sweep 内部，定时器无论如何都挂上。
+  void loadOrphanPolicy().then((policy) => {
     const describe = [
       policy.pauseAfterDays > 0 ? `零订阅满 ${policy.pauseAfterDays} 天暂停` : "不自动暂停",
       policy.deleteAfterDays > 0 ? `暂停满 ${policy.deleteAfterDays} 天删除` : "永不自动删除",
     ].join("，")
-    console.log(`[FeedOrphans] 自动清理已启用（${describe}）：每 ${formatDuration(ORPHAN_SWEEP_INTERVAL_MS)} 扫描一轮`)
+    console.log(
+      `[FeedOrphans] 自动清理${policy.enabled ? "已启用" : "已禁用"}（${describe}，`
+      + `来源=${policy.source === "settings" ? "站点设置" : "环境变量"}）：`
+      + `每 ${formatDuration(ORPHAN_SWEEP_INTERVAL_MS)} 扫描一轮`,
+    )
+  }).catch(() => {
+    console.log("[FeedOrphans] 自动清理已启用（策略读取失败，按环境变量默认值）")
+  })
+  {
     orphanSweepInterval = setInterval(() => {
       if (orphanSweepRunning) return
       orphanSweepRunning = true
@@ -173,8 +182,6 @@ export function startTimelineMaintenance(): void {
         .finally(() => { orphanSweepRunning = false })
     }, ORPHAN_SWEEP_INTERVAL_MS)
     orphanSweepInterval.unref?.()
-  } else {
-    console.log("[FeedOrphans] 自动清理已禁用（两个天数都是 0）")
   }
 }
 

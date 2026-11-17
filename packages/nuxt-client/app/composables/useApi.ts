@@ -118,7 +118,17 @@ export function useApi() {
         deleteAfterDays: number
         batchLimit: number
         enabled: boolean
+        source: 'settings' | 'env'
       }>(`${base}/api/feeds/orphans/policy`),
+      /** 管理员：修改孤儿源策略（存进站点设置，运行时生效，无需重启） */
+      saveOrphanPolicy: (body: { pauseAfterDays: number, deleteAfterDays: number, batchLimit?: number }) =>
+        apiFetch<{
+          pauseAfterDays: number
+          deleteAfterDays: number
+          batchLimit: number
+          enabled: boolean
+          source: 'settings' | 'env'
+        }>(`${base}/api/feeds/orphans/policy`, { method: 'PUT', body }),
       /** 管理员：立刻跑一轮自动清理（等同于定时任务那一轮） */
       sweepOrphans: () =>
         apiFetch<{

@@ -456,6 +456,10 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
 - **积压消化**：每轮最多 `FEED_ORPHAN_BATCH_LIMIT`（默认 500）条，首次上线靠多轮跑完。
 - **手动入口也遵守冷静期**：`POST /api/feeds/orphans/pause` 默认只暂停满冷静期的源，
   要立即处理须传 `force: true`（界面上是「强制全部暂停」）。
+- **规则可在界面上调，不必改环境变量重启**：管理后台「订阅源管理 → 清理孤儿源」里的
+  「自动清理规则」可直接改天数（存进 `site_settings.extras.orphanPolicy`，保存即生效）。
+  环境变量只是"从未在界面上改过"时的默认值；接口 `GET/PUT /api/feeds/orphans/policy`
+  返回的 `source` 字段会说明当前值来自 `settings` 还是 `env`。
 - **立刻看效果**：`POST /api/feeds/orphans/sweep`（界面「立即执行一轮」）等价于定时任务那一轮。
 
 ## 反向代理与网络

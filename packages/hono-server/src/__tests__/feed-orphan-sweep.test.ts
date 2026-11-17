@@ -31,12 +31,15 @@ const state = vi.hoisted(() => ({
   /** 记录每次 update().set() */
   updates: [] as Array<{ set: Record<string, unknown>, ids: string[] }>,
   deleted: [] as string[],
+  /** siteSettings.extras（存孤儿策略） */
+  extras: {} as Record<string, unknown>,
 }))
 
 vi.mock("../db", () => {
   const feeds = { id: "id", status: "status", pausedBySystem: "paused_by_system", orphanSince: "orphan_since", url: "url" }
   const user = { id: "id", timelineDbName: "timeline_db_name" }
   const botFeeds = { feedId: "feed_id" }
+  const siteSettings = { id: "id", extras: "extras" }
 
   // 从 SQL 条件里"反推"要更新哪些行：这里用简化的方式 —— 测试里每个用例只关心
   // 传入的 id 集合与 set 内容，所以直接记录参数并返回对应的行
@@ -45,6 +48,15 @@ vi.mock("../db", () => {
       select: () => ({
         from: (table: unknown) => {
           if (table === user) return Promise.resolve(state.users)
+          if (table === siteSettings) {
+            // loadOrphanPolicy 用 select({extras}).from(siteSettings).where(...).limit(1)
+            const chain = {
+              where: () => chain,
+              limit: async () => [{ extras: state.extras }],
+              then: (res: (v: unknown) => unknown) => Promise.resolve([{ extras: state.extras }]).then(res),
+            }
+            return chain as unknown as Promise<typeof state.feeds>
+          }
           const chain = {
             where: () => Promise.resolve(state.feeds),
             then: (res: (v: unknown) => unknown) => Promise.resolve(state.feeds).then(res),
@@ -55,26 +67,39 @@ vi.mock("../db", () => {
       selectDistinct: () => ({
         from: () => Promise.resolve(state.botRefs.map((feedId) => ({ feedId }))),
       }),
-      update: () => ({
-        set: (values: Record<string, unknown>) => ({
-          where: (cond: unknown) => {
-            // 从 drizzle 的 SQL 对象里拿不到 id 列表，测试里用"当前全部行"近似，
-            // 具体哪些会命中由用例里的 feeds 状态决定（见各用例断言）
-            state.updates.push({ set: values, ids: cond as unknown as string[] })
-            const affected = state.feeds.filter((f) => {
-              if ("status" in values && values.status === "paused" && f.status !== "active") return false
-              if ("orphanSince" in values && values.orphanSince === null) return f.orphanSince !== null
-              if ("orphanSince" in values) return f.orphanSince === null
-              return true
-            })
-            return { returning: async () => affected.map((f) => ({ id: f.id, url: `https://x/${f.id}` })) }
-          },
-        }),
+      // ensureSiteSettingsRow：幂等插入单例行
+      insert: () => ({
+        values: () => ({ onConflictDoNothing: async () => [] }),
+      }),
+      update: (table?: unknown) => ({
+        set: (values: Record<string, unknown>) => {
+          // 保存策略走 siteSettings.extras
+          if (table === siteSettings) {
+            state.extras = values.extras as Record<string, unknown>
+            return { where: async () => [] }
+          }
+          // feeds 的 update：记录 set 内容，并按"当前行状态"近似计算影响行数
+          return {
+            where: (cond: unknown) => {
+              state.updates.push({ set: values, ids: cond as unknown as string[] })
+              const affected = state.feeds.filter((f) => {
+                if ("status" in values && values.status === "paused" && f.status !== "active") return false
+                if ("orphanSince" in values && values.orphanSince === null) return f.orphanSince !== null
+                if ("orphanSince" in values) return f.orphanSince === null
+                return true
+              })
+              return {
+                returning: async () => affected.map((f) => ({ id: f.id, url: `https://x/${f.id}` })),
+              }
+            },
+          }
+        },
       }),
     },
     feeds,
     user,
     botFeeds,
+    siteSettings,
   }
 })
 
@@ -99,7 +124,7 @@ vi.mock("../env", () => ({
   envInt: (_k: string, def: number) => def,
 }))
 
-const { sweepOrphanFeeds, orphanPolicy } = await import("../services/feed-orphan-sweep")
+const { sweepOrphanFeeds, loadOrphanPolicy, saveOrphanPolicy } = await import("../services/feed-orphan-sweep")
 
 function feed(
   id: string,
@@ -121,6 +146,7 @@ beforeEach(() => {
   state.feeds = []
   state.updates = []
   state.deleted = []
+  state.extras = {}
 })
 
 describe("sweepOrphanFeeds：标记阶段", () => {
@@ -237,9 +263,30 @@ describe("sweepOrphanFeeds：安全护栏", () => {
   })
 })
 
-describe("orphanPolicy", () => {
-  it("回传两级天数供前端展示", () => {
-    const p = orphanPolicy()
-    expect(p).toMatchObject({ pauseAfterDays: 7, deleteAfterDays: 30, enabled: true })
+describe("策略读写（站点设置可调）", () => {
+  it("没有存过时回退环境变量默认值，source=env", async () => {
+    state.extras = {}
+    const p = await loadOrphanPolicy()
+    expect(p).toMatchObject({ pauseAfterDays: 7, deleteAfterDays: 30, enabled: true, source: "env" })
+  })
+
+  it("保存后读取到的是设置里的值，source=settings", async () => {
+    await saveOrphanPolicy({ pauseAfterDays: 14, deleteAfterDays: 60, batchLimit: 100 })
+    const p = await loadOrphanPolicy()
+    expect(p).toMatchObject({ pauseAfterDays: 14, deleteAfterDays: 60, batchLimit: 100, source: "settings" })
+  })
+
+  it("非法值被规范化回默认（不抛错）", async () => {
+    await saveOrphanPolicy({ pauseAfterDays: -5, deleteAfterDays: "abc", batchLimit: 0 })
+    const p = await loadOrphanPolicy()
+    // pauseAfterDays 夹到 0（=关闭该级），deleteAfterDays 非法回默认 30，batchLimit 最小 1
+    expect(p.pauseAfterDays).toBe(0)
+    expect(p.deleteAfterDays).toBe(30)
+    expect(p.batchLimit).toBe(1)
+  })
+
+  it("两个天数都为 0 时 enabled=false", async () => {
+    await saveOrphanPolicy({ pauseAfterDays: 0, deleteAfterDays: 0 })
+    expect((await loadOrphanPolicy()).enabled).toBe(false)
   })
 })
