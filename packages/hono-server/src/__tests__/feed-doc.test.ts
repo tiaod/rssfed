@@ -49,9 +49,12 @@ describe("mergeFeedDocDisplay", () => {
     })
   })
 
-  it("url 以旧文档为准（重定向不回写源地址）", () => {
-    const next = mergeFeedDocDisplay({ title: "t", url: "https://original/" }, parsed, "https://redirected/")
-    expect(next.url).toBe("https://original/")
+  it("url 跟调用方给的抓取地址走（重定向到不了这里，它由 fetchFeed 内部消化）", () => {
+    // `feedUrl` 传的是**注册表里存的那份地址**（worker 直接用 job.data.url），不是重定向目标；
+    // 早期写的是 `existing?.url ?? feedUrl` 让旧文档永久胜出，结果管理员改了源地址后
+    // Postgres 已是新的、FeedDoc 还是旧的，而前端编辑弹窗读的正是 FeedDoc。
+    const next = mergeFeedDocDisplay({ title: "t", url: "https://original/" }, parsed, "https://new/")
+    expect(next.url).toBe("https://new/")
   })
 })
 
@@ -98,6 +101,14 @@ describe("feedDocDisplayChanged", () => {
   it("标题变化算展示变化", () => {
     const next = display()
     expect(feedDocDisplayChanged({ ...next }, { ...next, title: "新标题" })).toBe(true)
+  })
+
+  it("源地址变化算展示变化（否则管理员改了 URL，编辑弹窗永远显示旧地址）", () => {
+    const next = display()
+    expect(feedDocDisplayChanged(
+      { ...next, url: "https://feed.example/old" },
+      { ...next, url: "https://feed.example/new" },
+    )).toBe(true)
   })
 })
 

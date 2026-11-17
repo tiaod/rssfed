@@ -302,6 +302,37 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
 > Mango selector 后不再安装过滤器），以及 `query_params` 里出现叫 `since` 的参数导致窗口失效
 > （参数方案已整体废弃）。看到这两条说明文档过旧，现行机制见 `ARCHITECTURE.md`。
 
+### 管理后台「编辑订阅源」改 Feed URL 报 500 `Internal Server Error`
+
+- **现象**：改 Feed URL 点保存，弹窗里出现一片红色
+  `[PUT] "http://localhost:3001/api/feeds/<feedId>": 500 Internal Server Error`，
+  改别的字段（标题 / 描述 / 图片参数）都正常。服务端日志是一整段 `DrizzleQueryError`，
+  `cause` 为 `PostgresError: duplicate key value violates unique constraint "feeds_url_unique"`，
+  `detail: Key (url)=(...) already exists.`
+- **原因**：`feeds.url` 是**唯一列**（`db/schema.ts`），而 feedId 由 URL 哈希派生 ——
+  「一个地址对应一个源」是数据模型的前提。把 A 源的地址改成 B 源**已在用**的地址时，
+  `UPDATE feeds SET url=...` 必然撞 23505。旧实现没有接住这个错误，直接抛给 Hono 的默认
+  errorHandler，于是变成一行没有任何信息的 500。典型触发场景是把 RSSHub 公共实例地址
+  （`https://rsshub.app/...`）换成本地实例（`http://rsshub:1200/...`）时，**那个地址此前已经
+  按本地地址订阅过一条**，两条就撞在一起了（`select id,url,title from feeds where url like '%bilibili/weekly%'`
+  能看到两个同路径的源）。
+- **解法**：
+  - 现在的行为：`PUT /api/feeds/:id` 捕获 23505 并返回 **409**，body 带
+    `code: "feed_url_taken"`、`url`、`existingFeedId`、`existingTitle`，弹窗直接显示
+    「该地址已被另一个订阅源「X」使用（feedId），请换一个地址，或直接订阅那一条」。
+  - 要保留旧源的历史就**不要改地址**，而是把要用的那种地址作为新订阅另起一条；
+    确认要合并的话没有内置入口（没有删源 API），直接在库里处理并清掉多余那条的
+    `feed_*` 库与用户库里的 `subscription:` 文档。
+  - 409 只对**改地址**生效：只改标题不会走到这里。
+- **连带修掉的两处**（改地址之后才会发现，都是「改了但没生效」）：
+  1. **FeedDoc 仍留旧地址**。`mergeFeedDocDisplay` 原来写 `url: existing?.url ?? feedUrl`，
+     旧文档永远胜出；而前端编辑弹窗的地址读的正是 FeedDoc（`usePouchDb.getFeedUrl`），
+     于是界面上一直是旧地址。现在 url 取注册表那份，`feedDocDisplayChanged` 也比 url，
+     下一轮抓取就会重写文档。
+  2. **旧地址的 ETag/Last-Modified 会带到新地址**。换地址时 `requeueAfterUrlChange`
+     现在一并清空 `fetch_validator_url` / `fetch_etag` / `fetch_last_modified`
+     （`has_fetch_validators` 重置为 null），避免新地址被回一个 304、永远抓不到内容。
+
 ### 订阅源/正文图片指向内网地址：SSRF 防护
 
 - **现象**：添加或编辑订阅源时报

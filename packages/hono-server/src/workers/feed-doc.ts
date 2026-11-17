@@ -57,7 +57,11 @@ export function mergeFeedDocDisplay(
     description: parsed.description ?? existing?.description,
     siteUrl: parsed.link ?? existing?.siteUrl,
     image: parsed.image?.url ?? existing?.image,
-    url: existing?.url ?? feedUrl,
+    // url 取注册表里那份（调用方传进来的就是 **存库的抓取地址**，不是重定向后的地址：
+    // 重定向在 fetchFeed 内部消化掉了）。早先写的是 `existing?.url ?? feedUrl`，让旧文档
+    // 永久胜出 —— 重定向本来就不会走到这里，结果只有「管理员改了源地址」被吞掉：
+    // Postgres 已经是新地址、FeedDoc 还是旧的，前端编辑弹窗（读 FeedDoc）继续显示旧地址。
+    url: feedUrl,
   }
 }
 
@@ -77,6 +81,9 @@ export function feedDocDisplayChanged(
     || existing.description !== next.description
     || existing.siteUrl !== next.siteUrl
     || existing.image !== next.image
+    // url 也要比：改了源地址之后它变了，而客户端编辑弹窗展示的正是这个字段
+    // （见 usePouchDb.getFeedUrl），不重写文档就等于旧地址永远留在界面上。
+    || existing.url !== next.url
 }
 
 /** 该 FeedDoc 现在需要重写吗？（展示字段没变、也没遗留簿记 → 不写，避免产生无意义修订） */

@@ -1,6 +1,7 @@
 import { Hono, type Context, type Next } from "hono"
 import crypto from "node:crypto"
 import { db, bots, feeds, attachments, botFeeds, botFollowing, botInbox, type Bot } from "../db"
+import { isUniqueViolation as isUniqueViolationDb } from "../db/errors"
 import { eq, and, desc } from "drizzle-orm"
 import { auth } from "../auth"
 import { clearBotKv, followActor, unfollowActor } from "../bots"
@@ -35,8 +36,7 @@ async function requireAuth(c: Context<{ Variables: BotVariables }>, next: Next) 
 
 /** 判断是否为 PostgreSQL 唯一约束冲突（23505）；postgres.js 可能把原始错误包在 cause 里 */
 function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string, cause?: { code?: string } } | null
-  return e?.code === "23505" || e?.cause?.code === "23505"
+  return isUniqueViolationDb(err)
 }
 
 botsRouter.post("/", requireAuth, async (c) => {

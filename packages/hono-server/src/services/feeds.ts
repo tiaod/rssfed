@@ -5,6 +5,7 @@ import type { OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
 import { feedDocId } from "../couchdb/doc-ids"
 import { db, feeds, bots } from "../db"
+import { isUniqueViolation, uniqueViolationConstraint } from "../db/errors"
 import { enqueueFetch } from "../workers"
 
 /**
@@ -196,7 +197,49 @@ export async function setSubscriptionStatus(userId: string, feedId: string, stat
 }
 
 /**
+ * 目标 URL 已被另一个订阅源占用。
+ *
+ * `feeds.url` 是唯一列，且 feedId 由 URL 哈希派生（见 deriveFeedId）——「一个地址对一个源」
+ * 是数据模型的前提。所以改地址撞到已注册的源时不能硬写库，只能如实拒绝；调用方据此给
+ * 用户可操作的说法（换地址 / 直接订阅那一条），而不是一个 500。
+ */
+export class FeedUrlTakenError extends Error {
+  constructor(
+    readonly url: string,
+    /** 已占用该地址的源：用于把提示写具体（查不到时为 null） */
+    readonly existing: { id: string, title: string } | null,
+  ) {
+    super(`feed url already registered: ${url}`)
+    this.name = "FeedUrlTakenError"
+  }
+}
+
+/** 查某个 URL 是否已被注册（用于把冲突提示写具体） */
+async function findFeedByUrl(url: string): Promise<{ id: string, title: string } | null> {
+  const [row] = await db
+    .select({ id: feeds.id, title: feeds.title })
+    .from(feeds)
+    .where(eq(feeds.url, url))
+    .limit(1)
+  return row ?? null
+}
+
+/** 把唯一约束冲突翻译成 FeedUrlTakenError；不是 URL 冲突则原样抛出 */
+async function throwOnUrlConflict(err: unknown, url: string | undefined): Promise<void> {
+  if (url && isUniqueViolation(err)) {
+    // 只认 feeds_url_unique：feeds 上还有 couch_db_name 的唯一约束，别把它的冲突也报成「地址重复」
+    const constraint = uniqueViolationConstraint(err)
+    if (constraint === null || constraint === "feeds_url_unique") {
+      throw new FeedUrlTakenError(url, await findFeedByUrl(url))
+    }
+  }
+  throw err
+}
+
+/**
  * 更新某 feed 的元信息（title/url/description/siteUrl/image），**仅当属于当前用户订阅时**。
+ *
+ * 改 URL 撞到已注册的源时抛 FeedUrlTakenError（见上）。
  */
 export async function updateSubscriptionMeta(
   userId: string,
@@ -212,10 +255,15 @@ export async function updateSubscriptionMeta(
   }
   if (!Object.keys(clean).length) return false
   const [before] = await db.select({ url: feeds.url }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
+  // 冲突时 throwOnUrlConflict 直接抛出（不会落到下面的空数组）
   const updated = await db.update(feeds)
     .set(clean)
     .where(eq(feeds.id, feedId))
     .returning({ id: feeds.id })
+    .catch(async (err: unknown): Promise<{ id: string }[]> => {
+      await throwOnUrlConflict(err, clean.url)
+      return []
+    })
   if (!updated.length) return false
   await requeueAfterUrlChange(feedId, before?.url, clean.url)
   return true
@@ -228,7 +276,26 @@ async function resetAndEnqueue(feedId: string, url: string): Promise<void> {
 }
 
 /**
- * URL 变更后的收尾：清错 + 按新地址重建抓取任务。
+ * 丢弃条件请求验证器。
+ *
+ * 换地址后旧的 ETag/Last-Modified 属于**旧资源**，带给新地址只会两种下场：服务端拿它
+ * 和自家资源比对后回一个 304（等于新地址永远抓不到内容），或者干脆无视。多数源没这问题，
+ * 但 `fetch_validator_url` 为 null 的老数据没有这项保护 —— parser 只在
+ * `validatorUrl === 当前 url` 时才带条件头，url 缺失时会按「第一跳」放行（见 rss/parser.ts）。
+ * 所以改地址时把三列一起清空，让下一轮走一次干净的全量下载。
+ */
+async function clearFetchValidators(feedId: string): Promise<void> {
+  await db.update(feeds).set({
+    fetchValidatorUrl: null,
+    fetchEtag: null,
+    fetchLastModified: null,
+    // 清成 null 而不是 false：null = 「还没成功抓过」，调度器按有验证器处理，不会提前降频
+    hasFetchValidators: null,
+  }).where(eq(feeds.id, feedId))
+}
+
+/**
+ * URL 变更后的收尾：清错 + 丢弃旧验证器 + 按新地址重建抓取任务。
  *
  * 这一步不能省：enqueueFetch 按 jobId 去重，队列里若还压着一个旧 URL 的 job，
  * 不先清掉的话新地址根本进不了队列（静默无效），表现就是「改了 URL、点了立即抓取，
@@ -240,6 +307,7 @@ export async function requeueAfterUrlChange(
   newUrl: string | undefined,
 ): Promise<boolean> {
   if (!newUrl || newUrl === oldUrl) return false
+  await clearFetchValidators(feedId)
   await resetAndEnqueue(feedId, newUrl)
   return true
 }

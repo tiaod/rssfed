@@ -5,6 +5,7 @@ import { parseOpml, type OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
 import { feedDocId } from "../couchdb/doc-ids"
 import { db, feeds } from "../db"
+import { isUniqueViolation, uniqueViolationConstraint } from "../db/errors"
 import { enqueueFetch } from "../workers"
 import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
 import {
@@ -307,10 +308,37 @@ feedsRouter.put("/:feedId", requireAdmin, async (c) => {
   // URL 是否真的变了要拿改之前的值比：updated 的 returning 只会给新值
   const [before] = await db.select({ url: feeds.url }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
   if (!before) return c.json({ error: "feed not found" }, 404)
-  const updated = await db.update(feeds)
-    .set(patch)
-    .where(eq(feeds.id, feedId))
-    .returning({ id: feeds.id })
+  let updated: { id: string }[]
+  try {
+    updated = await db.update(feeds)
+      .set(patch)
+      .where(eq(feeds.id, feedId))
+      .returning({ id: feeds.id })
+  } catch (err) {
+    // feeds.url 有唯一约束：改成另一个已注册源正在用的地址会撞 23505。以前这里直接把
+    // Postgres 错误抛出去，前端只看到一行 `[PUT] ...: 500 Internal Server Error`，
+    // 既不知道是地址重复、也不知道该改什么。改成 409 + 具体占用者。
+    if (typeof patch.url === "string" && isUniqueViolation(err)) {
+      const constraint = uniqueViolationConstraint(err)
+      if (constraint === null || constraint === "feeds_url_unique") {
+        const [taken] = await db
+          .select({ id: feeds.id, title: feeds.title })
+          .from(feeds)
+          .where(eq(feeds.url, patch.url))
+          .limit(1)
+        return c.json({
+          error: taken
+            ? `该地址已被另一个订阅源「${taken.title}」使用（${taken.id}），请换一个地址，或直接订阅那一条`
+            : "该地址已被另一个订阅源使用，请换一个地址",
+          code: "feed_url_taken",
+          url: patch.url,
+          existingFeedId: taken?.id ?? null,
+          existingTitle: taken?.title ?? null,
+        }, 409)
+      }
+    }
+    throw err
+  }
   if (!updated.length) return c.json({ error: "feed not found" }, 404)
   // 改了 URL 就顺手清错 + 按新地址重建抓取任务，否则队列里压着的旧 URL job 会一直跑旧地址
   const requeued = await requeueAfterUrlChange(feedId, before.url, typeof patch.url === "string" ? patch.url : undefined)

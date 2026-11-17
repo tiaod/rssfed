@@ -11,6 +11,7 @@ import {
   refetchFeed,
   resolveFeedId,
   formatFeedError,
+  FeedUrlTakenError,
 } from "../services/feeds"
 import { parseFeedUrl } from "../rss/parser"
 import {
@@ -202,9 +203,21 @@ async function buildServer(ctx: McpRequestContext): Promise<McpServer> {
       }),
     },
     async ({ feedId, ...patch }) => {
-      const ok = await updateSubscriptionMeta(userId, feedId, patch)
-      if (!ok) return errorContent(`cannot update: feed not subscribed or not found: ${feedId}`)
-      return textContent({ feedId, updated: true })
+      try {
+        const ok = await updateSubscriptionMeta(userId, feedId, patch)
+        if (!ok) return errorContent(`cannot update: feed not subscribed or not found: ${feedId}`)
+        return textContent({ feedId, updated: true })
+      } catch (err) {
+        // 改地址撞到已注册源：说清楚占用者，模型才可能换个地址或提示用户去订阅那一条
+        if (err instanceof FeedUrlTakenError) {
+          return errorContent(
+            err.existing
+              ? `feed url already registered by "${err.existing.title}" (${err.existing.id}): ${err.url}`
+              : `feed url already registered: ${err.url}`,
+          )
+        }
+        throw err
+      }
     },
   )
 
