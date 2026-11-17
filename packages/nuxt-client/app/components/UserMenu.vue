@@ -45,7 +45,7 @@ const items = computed<DropdownMenuItem[][]>(() => {
         icon: 'i-lucide-settings',
         // 打开设置弹窗，不跳页：用户通常正读到一半，跳页会丢掉列表与滚动位置
         // （弹窗与入口不同组件树，状态见 composables/useSettingsModal）
-        onSelect: () => { openSettings('general') }
+        onSelect: () => { openSettings() }
       }
     ]
   ]

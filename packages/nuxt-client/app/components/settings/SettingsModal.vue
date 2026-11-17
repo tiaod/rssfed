@@ -1,9 +1,15 @@
 <script setup lang="ts">
 /**
- * 设置弹窗：左侧分区导航 + 右侧内容。
+ * 设置弹窗：宽屏是「左侧分区导航 + 右侧内容」，窄屏是「分区列表 → 分区详情」两级。
  *
  * 设置从「独立页面 + 标签页」改成弹窗，是因为打开设置时用户通常正读到一半：
  * 原先跳到 /profile 会丢掉列表与滚动位置（宽屏下连右侧阅读栏都会关掉）。
+ *
+ * 窄屏为什么不做成顶部横排标签：分区只有三个但每个标签都带图标和文字，一行放不下要横滑；
+ * 而分区本身的说明很长（常规分区一屏放不下四张卡），横滑条再压掉一行高度后，用户既看不全
+ * 分区又看不好内容。改成两级后每屏只承担一件事，返回键位置也符合手机上的预期。
+ * 用 `sm` 断点与 aside 的 `hidden sm:flex` 成对，判定完全交给 CSS，不需要读窗口宽度
+ * （SSR 首帧与客户端就不会不一致）。
  *
  * 弹窗只负责外壳与分区切换；各分区自己的状态（草稿、加载、确认弹窗）留在各自组件里，
  * 于是关掉弹窗时它们一起卸载 —— 草稿自然丢弃，下次打开总是已保存的值。
@@ -16,9 +22,13 @@ import { computed, nextTick, ref, watch } from 'vue'
 import SettingsGeneralSection from '~/components/settings/SettingsGeneralSection.vue'
 import SettingsDataSection from '~/components/settings/SettingsDataSection.vue'
 import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
-import { SETTINGS_SECTIONS, useSettingsModal } from '~/composables/useSettingsModal'
+import {
+  SETTINGS_SECTIONS,
+  useSettingsModal,
+  type SettingsSection
+} from '~/composables/useSettingsModal'
 
-const { isOpen, section } = useSettingsModal()
+const { isOpen, section, pane } = useSettingsModal()
 
 const current = computed(
   () => SETTINGS_SECTIONS.find(item => item.value === section.value) ?? SETTINGS_SECTIONS[0]!
@@ -33,29 +43,16 @@ const current = computed(
  */
 const scrollEl = ref<HTMLElement | null>(null)
 
-/**
- * 窄屏横向分区条：把当前分区滚进视野。
- *
- * 分区条只有窄屏出现，且分区变多之后一行放不下（手机宽度约放得下 3 个）。
- * 分区也可能从外部被指定（时间线的「查看同步日志」直接落到「数据」），
- * 那时被选中的按钮往往在滚动区外面 —— 用户看到的是「点了没高亮」。
- */
-const mobileTabRow = ref<HTMLElement | null>(null)
-
-function revealActiveMobileTab(): void {
-  const row = mobileTabRow.value
-  if (!row) return
-  const active = row.querySelector<HTMLElement>('[aria-current="page"]')
-  if (!active) return
-  // inline: 'center' 而不是 'nearest'：贴边时高亮块会被滚动条的圆角切掉一半
-  active.scrollIntoView({ inline: 'center', block: 'nearest', behavior: 'smooth' })
-}
-
-watch([section, isOpen], async () => {
+watch([section, isOpen, pane], async () => {
   await nextTick()
   scrollEl.value?.scrollTo({ top: 0 })
-  revealActiveMobileTab()
 })
+
+/** 移动端列表里点一行：落到该分区。宽屏没有这一步，直接切换右侧内容 */
+function openSection(next: SettingsSection): void {
+  section.value = next
+  pane.value = 'section'
+}
 
 /**
  * 弹窗尺寸：宽到能放下「说明在左、控件在右」的双栏，高到不超过视口。
@@ -73,7 +70,7 @@ const modalUi = {
 }
 
 /**
- * 订阅管理入口（左侧导航底部，带一个外链样式的小图标）。
+ * 订阅管理入口（导航末尾，带一个外链样式的小图标）。
  *
  * 它不是设置分区：不切换右侧内容，点一下就离开弹窗去整页 —— 订阅列表长、整理时还要
  * 来回开编辑弹窗，塞不进这个弹窗。因此图标走 trailing 位、独立于上面的分区按钮。
@@ -96,7 +93,7 @@ async function openSubscriptions(closeModal: () => void): Promise<void> {
   >
     <template #content="{ close: closeModal }">
       <div class="flex min-h-0 flex-1">
-        <!-- 左侧分区导航：窄屏收起（改为内容区顶部的横向标签） -->
+        <!-- 左侧分区导航：窄屏收起，改为「分区列表 → 分区详情」两级（见下方 sm:hidden 的两块） -->
         <aside
           class="hidden w-56 shrink-0 flex-col gap-1 border-e border-default p-3 sm:flex"
         >
@@ -132,8 +129,84 @@ async function openSubscriptions(closeModal: () => void): Promise<void> {
           />
         </aside>
 
-        <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+        <!--
+          窄屏第一级：分区列表。
+          行高按触控目标给足（py-3.5 约 48px），右端 chevron 提示「点进去」；
+          与宽屏 aside 的分区按钮是同一份数据源，不另维护一套文案。
+        -->
+        <div
+          v-if="pane === 'menu'"
+          class="flex min-h-0 flex-1 flex-col sm:hidden"
+        >
+          <header class="flex shrink-0 items-center gap-2 px-5 py-3">
+            <h2 class="text-base font-semibold text-highlighted">
+              设置
+            </h2>
+            <UButton
+              class="ms-auto"
+              icon="i-lucide-x"
+              color="neutral"
+              variant="ghost"
+              size="sm"
+              aria-label="关闭设置"
+              @click="closeModal()"
+            />
+          </header>
+
+          <nav class="min-h-0 flex-1 overflow-y-auto px-4 pb-6">
+            <div class="divide-y divide-default overflow-hidden rounded-xl border border-default bg-default">
+              <UButton
+                v-for="item in SETTINGS_SECTIONS"
+                :key="item.value"
+                block
+                color="neutral"
+                variant="ghost"
+                size="lg"
+                class="justify-start rounded-none px-4"
+                :icon="item.icon"
+                :label="item.label"
+                trailing-icon="i-lucide-chevron-right"
+                @click="openSection(item.value)"
+              />
+            </div>
+
+            <!-- 与宽屏左侧导航同一个入口：订阅管理不是分区，点下去是关弹窗跳页 -->
+            <div class="mt-3 overflow-hidden rounded-xl border border-default bg-default">
+              <UButton
+                block
+                color="neutral"
+                variant="ghost"
+                size="lg"
+                class="justify-start rounded-none px-4"
+                icon="i-lucide-rss"
+                label="订阅管理"
+                trailing-icon="i-lucide-external-link"
+                @click="openSubscriptions(closeModal)"
+              />
+            </div>
+          </nav>
+        </div>
+
+        <!--
+          分区详情：宽屏常驻（与 aside 并排）；窄屏只在 pane === 'section' 出现。
+          用 CSS 判宽屏而不是读窗口宽度，SSR 首帧与客户端因此不会不一致。
+        -->
+        <div
+          class="min-h-0 min-w-0 flex-1 flex-col"
+          :class="pane === 'menu' ? 'hidden sm:flex' : 'flex'"
+        >
           <header class="flex shrink-0 items-center gap-2 px-5 py-3 sm:px-6">
+            <!-- 返回上一级：只在窄屏出现，宽屏没有「上一级」（分区列表一直在左边） -->
+            <UButton
+              v-if="pane === 'section'"
+              class="-ms-1 sm:hidden"
+              icon="i-lucide-arrow-left"
+              color="neutral"
+              variant="ghost"
+              size="sm"
+              aria-label="返回设置列表"
+              @click="pane = 'menu'"
+            />
             <h2 class="text-base font-semibold text-highlighted">
               {{ current.label }}
             </h2>
@@ -147,44 +220,6 @@ async function openSubscriptions(closeModal: () => void): Promise<void> {
               @click="closeModal()"
             />
           </header>
-
-          <!--
-            窄屏分区切换：横向排一行。
-            - 放不下时左右滑动（`overflow-x-auto` + 每项 `shrink-0`），滚动条隐藏 ——
-              这是手机上常见的横向标签，露出一条始终存在的灰条只会显得像故障；
-            - 用 -mx-4/px-4 让滚动区铺到弹窗边缘：内边距写在外层会让首尾两项在
-              滚到端点时永远贴不到边，看起来像「还能继续滚」；
-            - scroll-px-4 让 scrollIntoView 居中时给首尾留出同样的呼吸位。
-          -->
-          <div
-            ref="mobileTabRow"
-            class="-mx-4 flex shrink-0 gap-1 overflow-x-auto scroll-px-4 px-4 pb-2 [-ms-overflow-style:none] [scrollbar-width:none] sm:hidden [&::-webkit-scrollbar]:hidden"
-          >
-            <UButton
-              v-for="item in SETTINGS_SECTIONS"
-              :key="item.value"
-              :icon="item.icon"
-              :label="item.label"
-              size="sm"
-              :color="section === item.value ? 'primary' : 'neutral'"
-              :variant="section === item.value ? 'soft' : 'ghost'"
-              :aria-current="section === item.value ? 'page' : undefined"
-              class="shrink-0"
-              @click="section = item.value"
-            />
-            <!-- 与左侧竖导航同一个入口：窄屏收起 aside 后，这里不能只剩三个分区 -->
-            <div class="mx-1 shrink-0 self-stretch border-s border-default" />
-            <UButton
-              class="shrink-0"
-              size="sm"
-              icon="i-lucide-rss"
-              trailing-icon="i-lucide-external-link"
-              label="订阅管理"
-              color="neutral"
-              variant="ghost"
-              @click="openSubscriptions(closeModal)"
-            />
-          </div>
 
           <!--
             顶部留出 pt-2：滚动容器本身会裁掉溢出内容，第一张卡片若贴着容器上沿，

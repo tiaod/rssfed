@@ -13,6 +13,15 @@
 export type SettingsSection = 'general' | 'ai' | 'data'
 
 /**
+ * 窄屏的两级结构：先给分区列表，点进去才看具体设置。
+ *
+ * 分区里有的说明很长（常规分区一屏放不下四张卡），窄屏再把分区导航挤成顶部一条横排标签，
+ * 用户既看不全分区、内容区又被压掉一行。改成「列表 → 详情」后，每屏只承担一件事。
+ * 宽屏仍是左侧导航 + 右侧内容并排，这个状态不参与。
+ */
+export type SettingsPane = 'menu' | 'section'
+
+/**
  * 设置行的图标底色。
  *
  * 只做「一组行一个色系」的视觉分组，不带任何语义（红色不表示危险）；
@@ -35,6 +44,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSectionMeta[] = [
 export function useSettingsModal() {
   const isOpen = useState<boolean>('settings-modal-open', () => false)
   const section = useState<SettingsSection>('settings-modal-section', () => 'general')
+  const pane = useState<SettingsPane>('settings-modal-pane', () => 'menu')
   /**
    * 「打开后直接展开同步日志」的一次性意图。
    *
@@ -44,7 +54,11 @@ export function useSettingsModal() {
   const wantTimelineLog = useState<boolean>('settings-modal-want-timeline-log', () => false)
 
   function open(next?: SettingsSection): void {
-    if (next) section.value = next
+    // 不带分区 = 「打开设置」这个笼统意图：宽屏落到常规、窄屏先给分区列表；
+    // 带分区 = 深链（如时间线的「查看同步日志」），两边都直接落到该分区，
+    // 否则用户点了「看日志」还得在窄屏再点一次「数据」。
+    section.value = next ?? 'general'
+    pane.value = next ? 'section' : 'menu'
     isOpen.value = true
   }
 
@@ -52,6 +66,7 @@ export function useSettingsModal() {
   function openSyncLog(): void {
     wantTimelineLog.value = true
     section.value = 'data'
+    pane.value = 'section'
     isOpen.value = true
   }
 
@@ -66,5 +81,5 @@ export function useSettingsModal() {
     return wanted
   }
 
-  return { isOpen, section, open, close, openSyncLog, consumeTimelineLogIntent }
+  return { isOpen, section, pane, open, close, openSyncLog, consumeTimelineLogIntent }
 }

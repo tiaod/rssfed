@@ -81,7 +81,7 @@ const handleLogout = async () => {
             variant="ghost"
             size="sm"
             label="设置"
-            @click="openSettings('general')"
+            @click="openSettings()"
           />
         </template>
       </UDashboardNavbar>
@@ -170,7 +170,7 @@ const handleLogout = async () => {
         <div class="grid gap-3 sm:grid-cols-2">
           <UCard
             class="cursor-pointer transition-colors hover:ring-primary/40"
-            @click="openSettings('general')"
+            @click="openSettings()"
           >
             <div class="flex items-start gap-3">
               <UIcon

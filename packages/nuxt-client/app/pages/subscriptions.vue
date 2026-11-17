@@ -27,7 +27,7 @@ const { open: openSettings } = useSettingsModal()
             variant="ghost"
             size="sm"
             label="设置"
-            @click="openSettings('general')"
+            @click="openSettings()"
           />
         </template>
       </UDashboardNavbar>

@@ -3,14 +3,19 @@ import { flushPromises, mount } from '@vue/test-utils'
 import SettingsModal from '../../components/settings/SettingsModal.vue'
 
 /**
- * 设置弹窗的订阅管理入口。
+ * 设置弹窗的窄屏两级结构 + 订阅管理入口。
  *
- * 它不切换分区：点下去要先关弹窗再跳转。弹窗挂在 default 布局上、不属于任何页面，
- * 跳页不会卸载它 —— 漏掉 close 的话订阅管理页上会压着一层设置，所以这两件事的
- * 先后顺序在这里钉住。
+ * 钉住三件事：
+ *   1. 窄屏先给「分区列表」，点一行才进详情，详情页左上角有返回键回到列表；
+ *   2. 深链入口（open('data') / openSyncLog）不能停在列表上 —— 用户点的是「看日志」；
+ *   3. 订阅管理不是分区：点击先关弹窗再跳转，否则跳页后设置还盖在上面。
  */
 
-const H = vi.hoisted(() => ({ openUpdates: vi.fn() }))
+const H = vi.hoisted(() => ({
+  openUpdates: vi.fn(),
+  section: { value: 'general' },
+  pane: { value: 'menu' }
+}))
 
 vi.mock('~/composables/useSettingsModal', async () => {
   const { ref } = await import('vue')
@@ -22,7 +27,8 @@ vi.mock('~/composables/useSettingsModal', async () => {
     ],
     useSettingsModal: () => ({
       isOpen: ref(true),
-      section: ref('general'),
+      section: ref(H.section.value),
+      pane: ref(H.pane.value),
       open: vi.fn(),
       close: vi.fn(),
       openSyncLog: vi.fn(),
@@ -33,7 +39,7 @@ vi.mock('~/composables/useSettingsModal', async () => {
 
 /**
  * UModal：只渲染 content 槽，并把 `close` 以同样形状传进去。
- * openUpdates 记录的就是「弹窗被要求收起」，订阅管理入口按钮触发的正是这个函数。
+ * openUpdates 记录「弹窗被要求收起」，订阅管理入口触发的正是这个函数。
  * 不用真 UModal：它依赖 reka 的 Portal / focus 管理，单测里没有能挂的场景。
  */
 const STUBS = {
@@ -67,13 +73,70 @@ const STUBS = {
 }
 
 function mountModal() {
+  H.pane.value = 'menu'
+  H.section.value = 'general'
   return mount(SettingsModal, { global: { stubs: STUBS } })
 }
 
-/** 订阅管理入口（桌面上只有竖导航一个，窄屏横排标签里还有另一个） */
-function subscriptionEntry(wrapper: ReturnType<typeof mountModal>) {
-  return wrapper.findAll('button').find(b => b.text().includes('订阅管理'))
+function allButtons(wrapper: ReturnType<typeof mountModal>) {
+  return wrapper.findAll('button')
 }
+
+/** 窄屏列表里的一行（按文案找，右侧带 chevron，与外链型入口区分开） */
+function listRow(wrapper: ReturnType<typeof mountModal>, label: string) {
+  return allButtons(wrapper).find(
+    b => b.text().trim() === label && b.attributes('data-trailing') === 'i-lucide-chevron-right'
+  )
+}
+
+/** 订阅管理入口（桌面上只有竖导航一个，窄屏列表里还有另一个） */
+function subscriptionEntry(wrapper: ReturnType<typeof mountModal>) {
+  return allButtons(wrapper).find(b => b.text().includes('订阅管理'))
+}
+
+function backButton(wrapper: ReturnType<typeof mountModal>) {
+  return allButtons(wrapper).find(b => b.attributes('aria-label') === '返回设置列表')
+}
+
+describe('SettingsModal 窄屏分区列表', () => {
+  beforeEach(() => {
+    H.openUpdates.mockClear()
+    vi.mocked(navigateTo).mockClear()
+  })
+
+  it('第一级只给分区行，每行带「点进去」的 chevron', () => {
+    const wrapper = mountModal()
+
+    for (const label of ['常规', 'AI 助手', '数据']) {
+      expect(listRow(wrapper, label)?.attributes('data-trailing')).toBe('i-lucide-chevron-right')
+    }
+    // 列表页没有返回键（已经在顶层）
+    expect(backButton(wrapper)).toBeUndefined()
+  })
+
+  it('点一行进入该分区详情，左侧导航不参与窄屏这两级', async () => {
+    const wrapper = mountModal()
+
+    await listRow(wrapper, '数据')!.trigger('click')
+
+    // 详情页的标志：返回键出现、该分区内容挂上，列表行随之让位
+    expect(backButton(wrapper)).toBeDefined()
+    expect(wrapper.find('.data').exists()).toBe(true)
+    expect(listRow(wrapper, '常规')).toBeUndefined()
+  })
+
+  it('详情页左上角有返回键，退回分区列表', async () => {
+    H.pane.value = 'section'
+    const wrapper = mount(SettingsModal, { global: { stubs: STUBS } })
+
+    expect(backButton(wrapper)?.attributes('data-icon')).toBe('i-lucide-arrow-left')
+
+    await backButton(wrapper)!.trigger('click')
+
+    expect(backButton(wrapper)).toBeUndefined()
+    expect(listRow(wrapper, '常规')).toBeDefined()
+  })
+})
 
 describe('SettingsModal 的订阅管理入口', () => {
   beforeEach(() => {

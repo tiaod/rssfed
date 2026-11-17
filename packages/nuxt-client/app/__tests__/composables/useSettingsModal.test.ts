@@ -42,12 +42,27 @@ describe('useSettingsModal', () => {
     expect(modal.section.value).toBe('ai')
   })
 
+  it('open() 不带分区时窄屏先落到分区列表', () => {
+    const modal = useSettingsModal()
+
+    modal.open('data')
+    expect(modal.pane.value).toBe('section')
+    modal.close()
+
+    // 「打开设置」这个笼统意图：窄屏应先给列表，宽屏无视 pane、直接显示常规
+    modal.open()
+    expect(modal.pane.value).toBe('menu')
+    expect(modal.section.value).toBe('general')
+  })
+
   it('openSyncLog() 直接落到数据分区，并留下「展开同步日志」的意图', () => {
     const modal = useSettingsModal()
     modal.openSyncLog()
 
     expect(modal.isOpen.value).toBe(true)
     expect(modal.section.value).toBe('data')
+    // 深链不能停在列表上，否则用户点了「看日志」还要再点一次「数据」
+    expect(modal.pane.value).toBe('section')
     expect(modal.consumeTimelineLogIntent()).toBe(true)
     // 意图是一次性的：数据分区消费掉之后，下次普通打开不该又自动展开
     expect(modal.consumeTimelineLogIntent()).toBe(false)
