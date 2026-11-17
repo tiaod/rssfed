@@ -12,6 +12,7 @@ import SettingsModal from '../../components/settings/SettingsModal.vue'
  */
 
 const H = vi.hoisted(() => ({
+  close: vi.fn(),
   openUpdates: vi.fn(),
   section: { value: 'general' },
   pane: { value: 'menu' }
@@ -30,7 +31,7 @@ vi.mock('~/composables/useSettingsModal', async () => {
       section: ref(H.section.value),
       pane: ref(H.pane.value),
       open: vi.fn(),
-      close: vi.fn(),
+      close: H.close,
       openSyncLog: vi.fn(),
       consumeTimelineLogIntent: vi.fn()
     })
@@ -82,14 +83,21 @@ function allButtons(wrapper: ReturnType<typeof mountModal>) {
   return wrapper.findAll('button')
 }
 
-/** 窄屏列表里的一行（按文案找，右侧带 chevron，与外链型入口区分开） */
+/** 窄屏第一级里的一行：宽屏竖栏与窄屏共用 SettingsNav，所以只在 <nav> 容器里找 */
 function listRow(wrapper: ReturnType<typeof mountModal>, label: string) {
-  return allButtons(wrapper).find(
-    b => b.text().trim() === label && b.attributes('data-trailing') === 'i-lucide-chevron-right'
-  )
+  const nav = wrapper.find('nav')
+  if (!nav.exists()) return undefined
+  return nav.findAll('button').find(b => b.text().trim() === label)
 }
 
-/** 订阅管理入口（桌面上只有竖导航一个，窄屏列表里还有另一个） */
+/** 宽屏竖栏里的同一行（对照用：两边必须是同一套按钮） */
+function asideRow(wrapper: ReturnType<typeof mountModal>, label: string) {
+  const aside = wrapper.find('aside')
+  if (!aside.exists()) return undefined
+  return aside.findAll('button').find(b => b.text().trim() === label)
+}
+
+/** 订阅管理入口：窄屏列表里在 <nav> 内，宽屏在 <aside> 内 */
 function subscriptionEntry(wrapper: ReturnType<typeof mountModal>) {
   return allButtons(wrapper).find(b => b.text().includes('订阅管理'))
 }
@@ -101,14 +109,19 @@ function backButton(wrapper: ReturnType<typeof mountModal>) {
 describe('SettingsModal 窄屏分区列表', () => {
   beforeEach(() => {
     H.openUpdates.mockClear()
+    H.close.mockClear()
     vi.mocked(navigateTo).mockClear()
   })
 
-  it('第一级只给分区行，每行带「点进去」的 chevron', () => {
+  it('第一级直接复用宽屏的分区导航，不再另做一套带边框的卡片', () => {
     const wrapper = mountModal()
 
     for (const label of ['常规', 'AI 助手', '数据']) {
-      expect(listRow(wrapper, label)?.attributes('data-trailing')).toBe('i-lucide-chevron-right')
+      const row = listRow(wrapper, label)
+      expect(row).toBeDefined()
+      // 与宽屏竖栏同一套按钮：图标、无尾部 chevron
+      expect(row?.attributes('data-icon')).toBe(asideRow(wrapper, label)?.attributes('data-icon'))
+      expect(row?.attributes('data-trailing')).toBeUndefined()
     }
     // 列表页没有返回键（已经在顶层）
     expect(backButton(wrapper)).toBeUndefined()
@@ -141,6 +154,7 @@ describe('SettingsModal 窄屏分区列表', () => {
 describe('SettingsModal 的订阅管理入口', () => {
   beforeEach(() => {
     H.openUpdates.mockClear()
+    H.close.mockClear()
     vi.mocked(navigateTo).mockClear()
   })
 

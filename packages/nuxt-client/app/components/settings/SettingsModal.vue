@@ -21,6 +21,7 @@
 import { computed, nextTick, ref, watch } from 'vue'
 import SettingsGeneralSection from '~/components/settings/SettingsGeneralSection.vue'
 import SettingsDataSection from '~/components/settings/SettingsDataSection.vue'
+import SettingsNav from '~/components/settings/SettingsNav.vue'
 import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
 import {
   SETTINGS_SECTIONS,
@@ -95,44 +96,22 @@ async function openSubscriptions(closeModal: () => void): Promise<void> {
       <div class="flex min-h-0 flex-1">
         <!-- 左侧分区导航：窄屏收起，改为「分区列表 → 分区详情」两级（见下方 sm:hidden 的两块） -->
         <aside
-          class="hidden w-56 shrink-0 flex-col gap-1 border-e border-default p-3 sm:flex"
+          class="hidden w-56 shrink-0 flex-col border-e border-default p-3 sm:flex"
         >
           <p class="px-2 pb-2 pt-1 text-lg font-semibold text-highlighted">
             设置
           </p>
-          <UButton
-            v-for="item in SETTINGS_SECTIONS"
-            :key="item.value"
-            :icon="item.icon"
-            :label="item.label"
-            block
-            size="md"
-            :color="section === item.value ? 'primary' : 'neutral'"
-            :variant="section === item.value ? 'soft' : 'ghost'"
-            class="justify-start"
-            :aria-current="section === item.value ? 'page' : undefined"
-            @click="section = item.value"
-          />
-
-          <!-- 订阅管理不属于设置分区：点一下就关弹窗跳页，trailing 图标表明「会离开这里」 -->
-          <div class="my-1 border-t border-default" />
-          <UButton
-            class="justify-start"
-            icon="i-lucide-rss"
-            trailing-icon="i-lucide-external-link"
-            label="订阅管理"
-            block
-            size="md"
-            color="neutral"
-            variant="ghost"
-            @click="openSubscriptions(closeModal)"
+          <SettingsNav
+            :active="section"
+            @select="section = $event"
+            @subscriptions="openSubscriptions(closeModal)"
           />
         </aside>
 
         <!--
-          窄屏第一级：分区列表。
-          行高按触控目标给足（py-3.5 约 48px），右端 chevron 提示「点进去」；
-          与宽屏 aside 的分区按钮是同一份数据源，不另维护一套文案。
+          窄屏第一级：与宽屏竖栏同一个 SettingsNav，不另做一套视觉 ——
+          同一个弹窗在两种宽度下应当看起来是同一个东西。
+          这里只负责外壳（标题行 + 可滚动区）与「点了去哪」。
         -->
         <div
           v-if="pane === 'menu'"
@@ -153,37 +132,12 @@ async function openSubscriptions(closeModal: () => void): Promise<void> {
             />
           </header>
 
-          <nav class="min-h-0 flex-1 overflow-y-auto px-4 pb-6">
-            <div class="divide-y divide-default overflow-hidden rounded-xl border border-default bg-default">
-              <UButton
-                v-for="item in SETTINGS_SECTIONS"
-                :key="item.value"
-                block
-                color="neutral"
-                variant="ghost"
-                size="lg"
-                class="justify-start rounded-none px-4"
-                :icon="item.icon"
-                :label="item.label"
-                trailing-icon="i-lucide-chevron-right"
-                @click="openSection(item.value)"
-              />
-            </div>
-
-            <!-- 与宽屏左侧导航同一个入口：订阅管理不是分区，点下去是关弹窗跳页 -->
-            <div class="mt-3 overflow-hidden rounded-xl border border-default bg-default">
-              <UButton
-                block
-                color="neutral"
-                variant="ghost"
-                size="lg"
-                class="justify-start rounded-none px-4"
-                icon="i-lucide-rss"
-                label="订阅管理"
-                trailing-icon="i-lucide-external-link"
-                @click="openSubscriptions(closeModal)"
-              />
-            </div>
+          <nav class="min-h-0 flex-1 overflow-y-auto px-2 pb-6">
+            <SettingsNav
+              :active="section"
+              @select="openSection"
+              @subscriptions="openSubscriptions(closeModal)"
+            />
           </nav>
         </div>
 
