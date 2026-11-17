@@ -6,7 +6,8 @@ import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../co
 import { feedDocId } from "../couchdb/doc-ids"
 import { db, feeds } from "../db"
 import { isUniqueViolation, uniqueViolationConstraint } from "../db/errors"
-import { enqueueFetch } from "../workers"
+import { enqueueFetch, fetchQueue } from "../workers"
+import { deleteFeed, listFeedSubscribers } from "../services/feed-deletion"
 import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
 import {
   resolveFeedId,
@@ -343,6 +344,59 @@ feedsRouter.put("/:feedId", requireAdmin, async (c) => {
   // 改了 URL 就顺手清错 + 按新地址重建抓取任务，否则队列里压着的旧 URL job 会一直跑旧地址
   const requeued = await requeueAfterUrlChange(feedId, before.url, typeof patch.url === "string" ? patch.url : undefined)
   return c.json({ feedId, updated: true, requeued })
+})
+
+/**
+ * 删除订阅源（仅管理员）。
+ *
+ * 破坏性操作，所以先做订阅者守卫：**还有别人订阅就拒绝**，把订阅者列出来让管理员
+ * 先处理（让对方退订，或确认要强删）。
+ *
+ * 用 `?force=1` 显式强删：守卫的目的是"别在不知情时删掉别人在读的东西"，
+ * 不是"永远不许删"——后者会让误建的源一旦被人误订阅就再也清不掉。
+ *
+ * 清理范围与顺序见 services/feed-deletion.ts 的头部注释：用户侧订阅/条目/FeedDoc →
+ * 水位行 → bot 引用 → 源库 → 注册表行。
+ */
+feedsRouter.delete("/:feedId", requireAdmin, async (c) => {
+  const feedId = c.req.param("feedId")!
+  const force = c.req.query("force") === "1"
+
+  const [feed] = await db.select({ id: feeds.id, url: feeds.url, title: feeds.title })
+    .from(feeds).where(eq(feeds.id, feedId)).limit(1)
+  if (!feed) return c.json({ error: "feed not found" }, 404)
+
+  const subscribers = await listFeedSubscribers(feedId)
+  if (subscribers.length > 0 && !force) {
+    // 409（而非 403）：这是「当前状态不允许」而不是「你没有权限」，前端据此渲染可操作提示
+    return c.json({
+      error: `该源还有 ${subscribers.length} 个订阅者，删除会影响他们的阅读内容`,
+      code: "feed_has_subscribers",
+      feedId,
+      subscribers: subscribers.map((s) => ({ userId: s.userId, email: s.email, via: s.via })),
+      hint: "确认要删除请加 ?force=1",
+    }, 409)
+  }
+
+  const result = await deleteFeed(feedId, subscribers)
+
+  // 队列里可能还压着这个源的抓取 job：删掉，免得 worker 对着已删的数据继续跑。
+  // 放在路由层是因为 fetchQueue 由 workers 模块持有（服务层不该依赖 worker）。
+  try {
+    const job = await fetchQueue.getJob(feedId)
+    if (job) await job.remove()
+  } catch {
+    // 队列不可用：worker 取不到源会自己跳过，不影响删除结果
+  }
+
+  return c.json({
+    feedId,
+    title: feed.title,
+    deleted: true,
+    purgedUsers: result.purgedUsers,
+    forced: force && subscribers.length > 0,
+    failures: result.failures,
+  })
 })
 
 /** 立即重新抓取订阅源（仅管理员）：清空错误并加入抓取队列 */

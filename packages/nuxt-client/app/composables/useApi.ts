@@ -66,6 +66,21 @@ export function useApi() {
         apiFetch(`${base}/api/feeds/${id}`, { method: 'PUT', body }),
       /** 管理员：触发重新抓取 */
       refetch: (id: string) => apiFetch(`${base}/api/feeds/${id}/refetch`, { method: 'POST' }),
+      /**
+       * 管理员：删除订阅源（破坏性，含订阅/条目/源库）。
+       *
+       * 后端有订阅者守卫：还有别人订阅时返回 409 + `code: "feed_has_subscribers"`
+       * 与订阅者列表；确认要删须显式传 force。
+       */
+      remove: (id: string, options: { force?: boolean } = {}) =>
+        apiFetch<{
+          feedId: string
+          title?: string
+          deleted: boolean
+          purgedUsers: number
+          forced: boolean
+          failures: Array<{ userId?: string, error: string }>
+        }>(`${base}/api/feeds/${id}${options.force ? '?force=1' : ''}`, { method: 'DELETE' }),
       /** 管理员：获取全局默认图片缓存参数（供输入框 placeholder 展示默认值） */
       imageDefaults: () => apiFetch<{ maxImageCount: number, maxEntryImageBytes: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number }>(
         `${base}/api/feeds/image-defaults`

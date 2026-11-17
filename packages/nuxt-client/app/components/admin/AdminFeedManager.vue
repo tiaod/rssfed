@@ -133,6 +133,54 @@ async function refetch(feed: AdminFeed) {
   }
 }
 
+/**
+ * 删除源（两步确认）。
+ *
+ * 第一次点只弹确认框，把"会删掉什么"写清楚；后端若有别的订阅者会回 409，
+ * 此时不再自动强删 —— 而是把订阅者列出来，让管理员再点一次"仍然删除"。
+ * 删除不可逆（源库与条目都会被清掉），所以绝不能一点就删。
+ */
+const deletingFeed = ref<AdminFeed | null>(null)
+const deleteOpen = computed({
+  get: () => deletingFeed.value !== null,
+  set: (v: boolean) => { if (!v) deletingFeed.value = null }
+})
+const deleting = ref(false)
+/** 409 返回的订阅者列表：非空时弹窗会把"仍然删除"暴露出来 */
+const deleteSubscribers = ref<Array<{ userId: string, email?: string, via: string }>>([])
+
+function openDelete(feed: AdminFeed) {
+  deletingFeed.value = feed
+  deleteSubscribers.value = []
+}
+
+async function confirmDelete(force = false) {
+  if (!deletingFeed.value) return
+  deleting.value = true
+  try {
+    const res = await api.feeds.remove(deletingFeed.value.id, { force })
+    toast.add({
+      title: '已删除订阅源',
+      description: `${res.title ?? deletingFeed.value.title}（清理了 ${res.purgedUsers} 个用户的副本）`,
+      color: 'success'
+    })
+    deletingFeed.value = null
+    deleteSubscribers.value = []
+    await load()
+  } catch (e: unknown) {
+    const err = e as { data?: { code?: string, subscribers?: typeof deleteSubscribers.value, error?: string } }
+    if (err.data?.code === 'feed_has_subscribers') {
+      // 有别人在订阅：留在弹窗里展示名单，由管理员决定是否强删
+      deleteSubscribers.value = err.data.subscribers ?? []
+    } else {
+      toast.add({ title: '删除失败', description: errorMessage(e), color: 'error' })
+      deletingFeed.value = null
+    }
+  } finally {
+    deleting.value = false
+  }
+}
+
 function timeAgo(iso?: string): string {
   if (!iso) return '从未抓取'
   const diff = Date.now() - new Date(iso).getTime()
@@ -389,11 +437,92 @@ onMounted(load)
                 aria-label="编辑"
                 @click="openEdit(feed)"
               />
+              <UButton
+                icon="i-lucide-trash-2"
+                size="xs"
+                variant="ghost"
+                color="error"
+                aria-label="删除"
+                @click="openDelete(feed)"
+              />
             </div>
           </div>
         </UCard>
       </div>
     </template>
+
+    <UModal
+      v-model:open="deleteOpen"
+      title="删除订阅源"
+      :ui="{ footer: 'justify-end' }"
+    >
+      <template #body>
+        <div class="space-y-3">
+          <p class="text-sm">
+            确定要删除
+            <span class="font-semibold">{{ deletingFeed?.title }}</span>
+            吗？此操作不可撤销。
+          </p>
+          <p class="break-all text-xs text-muted">
+            {{ deletingFeed?.url }}
+          </p>
+          <ul class="list-disc space-y-1 pl-5 text-xs text-muted">
+            <li>该源的 CouchDB 库与全部已抓条目</li>
+            <li>所有订阅者库里的订阅关系、条目副本与源信息</li>
+            <li>Bot 对该源的引用与同步水位</li>
+          </ul>
+
+          <UAlert
+            v-if="deleteSubscribers.length > 0"
+            color="warning"
+            variant="soft"
+            icon="i-lucide-users"
+            title="这个源还有订阅者"
+          >
+            <template #description>
+              <p class="text-xs">
+                删除会同时清掉他们的阅读内容。确认要继续请点「仍然删除」。
+              </p>
+              <ul class="mt-1 list-disc pl-4 text-xs">
+                <li
+                  v-for="sub in deleteSubscribers"
+                  :key="sub.userId"
+                  class="break-all"
+                >
+                  {{ sub.email ?? sub.userId }}
+                  <span class="text-muted">（{{ sub.via === 'bot' ? 'Bot 引用' : '订阅' }}）</span>
+                </li>
+              </ul>
+            </template>
+          </UAlert>
+        </div>
+      </template>
+      <template #footer="{ close }">
+        <UButton
+          variant="outline"
+          color="neutral"
+          @click="close"
+        >
+          取消
+        </UButton>
+        <UButton
+          v-if="deleteSubscribers.length === 0"
+          color="error"
+          :loading="deleting"
+          @click="confirmDelete(false)"
+        >
+          删除
+        </UButton>
+        <UButton
+          v-else
+          color="error"
+          :loading="deleting"
+          @click="confirmDelete(true)"
+        >
+          仍然删除
+        </UButton>
+      </template>
+    </UModal>
 
     <UModal
       v-model:open="editOpen"
