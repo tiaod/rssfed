@@ -187,18 +187,38 @@ async function confirmDelete(force = false) {
  * 设计意图：调度器只看 status=active，不看有没有人订阅，所以被退订干净的源会一直抓。
  * 这里只把它暂停、不删除 —— 注册表与源库都留着，有人重新订阅时自动恢复
  * （后端在订阅写入点直接恢复，另有每小时兜底扫描）。
+ *
+ * 列表的分页：后端一次最多回 2000 条，但**统计（activeOrphans / alreadyPaused）始终是
+ * 全量的**，只有 `orphans` 数组按 limit 截断。所以这里先取一页，滚到底再追加下一页 ——
+ * 不能一次渲染 578 条（弹窗会卡），也不该只渲染前 20 条（用户以为只有这些）。
  */
+const ORPHAN_PAGE_SIZE = 50
+
 const orphansOpen = ref(false)
 const orphansLoading = ref(false)
+const orphansLoadingMore = ref(false)
 const orphansPausing = ref(false)
+/** 已经取到手的孤儿源（逐页追加） */
+const orphanItems = ref<OrphanItem[]>([])
+/** 是否还有下一页：拿到空页或数量对不上时置 false */
+const orphanHasMore = ref(false)
 const orphanScan = ref<{
   total: number
   referenced: number
-  orphans: Array<{ id: string, url: string, title: string, status: string, pausedBySystem: boolean | null, lastFetchedAt: string | null }>
+  orphans: OrphanItem[]
   activeOrphans: number
   alreadyPaused: number
   scanFailures: number
 } | null>(null)
+
+interface OrphanItem {
+  id: string
+  url: string
+  title: string
+  status: string
+  pausedBySystem: boolean | null
+  lastFetchedAt: string | null
+}
 
 async function openOrphans() {
   orphansOpen.value = true
@@ -207,12 +227,59 @@ async function openOrphans() {
 
 async function scanOrphans() {
   orphansLoading.value = true
+  orphanItems.value = []
+  orphanHasMore.value = false
   try {
-    orphanScan.value = await api.feeds.orphans(20)
+    const res = await api.feeds.orphans(ORPHAN_PAGE_SIZE)
+    orphanScan.value = res
+    orphanItems.value = res.orphans
+    // "还有更多"的判据：本页取满了，且总孤儿数大于已取的数量
+    const totalOrphans = res.activeOrphans + res.alreadyPaused
+    orphanHasMore.value = res.orphans.length === ORPHAN_PAGE_SIZE && orphanItems.value.length < totalOrphans
   } catch (e) {
     toast.add({ title: '扫描失败', description: errorMessage(e), color: 'error' })
   } finally {
     orphansLoading.value = false
+  }
+}
+
+/** 滚到底时追加下一页（后端按 limit 截断，offset 用已取数量模拟） */
+async function loadMoreOrphans() {
+  if (orphansLoadingMore.value || !orphanHasMore.value) return
+  orphansLoadingMore.value = true
+  try {
+    // 后端没有 offset 参数，用"这次要多取多少"来表达：多取一页，再按 id 去掉已有的。
+    const next = await api.feeds.orphans(orphanItems.value.length + ORPHAN_PAGE_SIZE)
+    const known = new Set(orphanItems.value.map(i => i.id))
+    const appended = next.orphans.filter(i => !known.has(i.id))
+    orphanItems.value = [...orphanItems.value, ...appended]
+    // 用全量统计（而非本页数组长度）判断是否到底：统计始终是全部孤儿源的数量
+    const totalOrphans = next.activeOrphans + next.alreadyPaused
+    orphanHasMore.value = appended.length > 0 && orphanItems.value.length < totalOrphans
+    // 只同步统计字段，**不覆盖 orphanScan.orphans** —— 它只是"本次请求的那一页"，
+    // 拿来渲染会和逐步追加的 orphanItems 打架（列表突然变短）。
+    if (orphanScan.value) {
+      orphanScan.value = {
+        ...orphanScan.value,
+        total: next.total,
+        referenced: next.referenced,
+        activeOrphans: next.activeOrphans,
+        alreadyPaused: next.alreadyPaused,
+        scanFailures: next.scanFailures
+      }
+    }
+  } catch (e) {
+    toast.add({ title: '加载更多失败', description: errorMessage(e), color: 'error' })
+  } finally {
+    orphansLoadingMore.value = false
+  }
+}
+
+/** 列表容器滚动到底部附近（提前 48px）就取下一页 */
+function onOrphanScroll(e: Event) {
+  const el = e.target as HTMLElement
+  if (el.scrollTop + el.clientHeight >= el.scrollHeight - 48) {
+    void loadMoreOrphans()
   }
 }
 
@@ -543,6 +610,9 @@ onMounted(load)
               孤儿源 <strong>{{ orphanScan.activeOrphans }}</strong> 个仍在抓取
               <span v-if="orphanScan.alreadyPaused > 0">（{{ orphanScan.alreadyPaused }} 个已暂停）</span>
             </p>
+            <p class="mt-1 text-xs text-muted">
+              列表已显示 {{ orphanItems.length }} 条<span v-if="orphanHasMore">，滚到底继续加载</span>
+            </p>
             <UAlert
               v-if="orphanScan.scanFailures > 0"
               class="mt-2"
@@ -563,11 +633,12 @@ onMounted(load)
           </div>
 
           <div
-            v-else-if="orphanScan && orphanScan.orphans.length > 0"
+            v-else-if="orphanItems.length > 0"
             class="max-h-64 space-y-1 overflow-y-auto rounded-lg border border-default p-2"
+            @scroll="onOrphanScroll"
           >
             <div
-              v-for="item in orphanScan.orphans"
+              v-for="item in orphanItems"
               :key="item.id"
               class="rounded px-2 py-1 text-xs"
             >
@@ -582,6 +653,30 @@ onMounted(load)
                 {{ item.url }}
               </p>
             </div>
+            <div
+              v-if="orphanHasMore || orphansLoadingMore"
+              class="px-2 py-2 text-center"
+            >
+              <UButton
+                v-if="!orphansLoadingMore"
+                variant="ghost"
+                color="neutral"
+                size="xs"
+                @click="loadMoreOrphans"
+              >
+                加载更多（已显示 {{ orphanItems.length }} 条）
+              </UButton>
+              <span
+                v-else
+                class="text-xs text-muted"
+              >加载中…</span>
+            </div>
+            <p
+              v-else
+              class="px-2 py-1 text-center text-xs text-muted"
+            >
+              已全部显示
+            </p>
           </div>
         </div>
       </template>
@@ -599,7 +694,7 @@ onMounted(load)
           :disabled="!orphanScan || orphanScan.activeOrphans === 0 || orphanScan.scanFailures > 0"
           @click="pauseAllOrphans"
         >
-          暂停全部孤儿源
+          {{ orphanScan && orphanScan.activeOrphans === 0 ? '没有在抓的孤儿源' : '暂停全部孤儿源' }}
         </UButton>
       </template>
     </UModal>
