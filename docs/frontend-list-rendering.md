@@ -201,9 +201,9 @@ cookie 持久化（键 `dashboard-sidebar-reader-pane`），边框把手也是�
 时间线那一层的落点与其它页不同：它是各源混在一起的信息流，内置默认取**社交动态**
 （`TIMELINE_DEFAULT_VIEW`），其余页面兜底仍是瀑布流。要做到「没配过」不落到瀑布流，全局那一层
 必须是**可选**的（`AppSettings.view?: ListView`，默认无值）：`undefined` 表示用户没配过，
-显式配成瀑布流是另一回事 —— 通用设置页的下拉为此多一项「跟随内置默认」（哨兵值，见 profile.vue）。
+显式配成瀑布流是另一回事 —— 设置弹窗（`设置 → 常规`）的下拉为此多一项「跟随内置默认」（哨兵值，见 SettingsGeneralSection.vue）。
 
-存储位置分别是：全局在 `useSettings` 的 localStorage（`AppSettings.view`，通用设置页可改）；
+存储位置分别是：全局在 `useSettings` 的 localStorage（`AppSettings.view`，设置弹窗可改）；
 订阅源在订阅文档上（编辑订阅弹窗里的「默认视图」，跟着用户库回写通道同步，不用改服务端 schema）；
 分组新开一种用户库文档 `pref:group:<name>`（订阅管理页分组行的菜单）。分组是订阅文档上的
 自由文本 `category`，所以分组改名后偏好会留在旧名字下成为孤儿，不做自动跟随。

@@ -17,7 +17,7 @@ import type { Ref } from 'vue'
  *
  * 能力探测与失败降级都要有：estimate() 在不支持的浏览器上不存在，
  * 在隐私模式 / 配额查询被拒绝时会抛错 —— 两种情况下都只是「不显示」，
- * 绝不能让设置页因此报错。
+ * 绝不能让设置界面因此报错。
  */
 
 export interface StorageEstimateInfo {

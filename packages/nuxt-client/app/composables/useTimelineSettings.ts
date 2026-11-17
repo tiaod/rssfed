@@ -22,7 +22,7 @@ export function useTimelineSettings() {
   const rebuilding = ref(false)
   const error = ref<string | null>(null)
 
-  /** 读取服务端设置（进入设置页时调用一次） */
+  /** 读取服务端设置（打开设置的「常规」分区时调用一次） */
   async function load(): Promise<void> {
     try {
       const res = await api.timeline.settings()

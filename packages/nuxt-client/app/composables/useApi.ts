@@ -177,10 +177,10 @@ export function useApi() {
         `${base}/api/timeline/refresh`,
         { method: 'POST', params }
       ),
-      /** 重建派生库（设置页的「重建时间线」） */
+      /** 重建派生库（运维兜底入口，见 useTimelineSettings.rebuild） */
       rebuild: () => apiFetch<{ accepted: boolean }>(`${base}/api/timeline/rebuild`, { method: 'POST' }),
       /**
-       * 同步日志（设置页 → 数据 →「同步日志」调试面板）。
+       * 同步日志（设置弹窗 → 数据 →「同步日志」调试面板）。
        *
        * 返回两段：`events` = 服务端落下的流水（汇聚/重建/首搬/失败），
        * `sources` = 每个订阅源的当前同步状态（读水位表，不是流水）。

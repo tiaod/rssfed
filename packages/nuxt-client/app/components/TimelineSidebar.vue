@@ -14,6 +14,7 @@
  */
 import { useTimelineSidebar } from '~/composables/useTimelineSidebar'
 import { useReaderPaneMode } from '~/composables/useReaderLayout'
+import { useSettingsModal } from '~/composables/useSettingsModal'
 
 /**
  * 阅读栏开着时让位。
@@ -38,6 +39,12 @@ const {
   digest,
   digestLoaded
 } = useTimelineSidebar()
+
+/**
+ * 「查看同步日志」不再跳到 /profile?tab=1：它在原地打开设置弹窗的「数据」分区，
+ * 并直接展开同步日志面板（意图见 useSettingsModal 的 wantTimelineLog）。
+ */
+const { openSyncLog } = useSettingsModal()
 
 /**
  * 状态点配色：失败 / 存储故障一眼要能看出来，其余用中性色。
@@ -168,12 +175,12 @@ const dotClass = computed(() => {
           另有 {{ problemSources.more }} 个
         </p>
         <UButton
-          to="/profile?tab=1"
           variant="link"
           color="neutral"
           size="xs"
           trailing-icon="i-lucide-arrow-right"
           class="mt-1 px-0"
+          @click="openSyncLog"
         >
           查看同步日志
         </UButton>

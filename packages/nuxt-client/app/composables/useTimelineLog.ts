@@ -3,10 +3,10 @@ import { summarizeTimelineSources } from '~/utils/timelineLog'
 import type { TimelineEvent, TimelineHeartbeat, TimelineSourceState } from '~/types/timeline-log'
 
 /**
- * 同步日志（设置页 → 数据 →「同步日志」）。
+ * 同步日志（设置弹窗 → 数据 →「同步日志」）。
  *
  * 这里**不做轮询**：排查时按需点「刷新」即可，常驻轮询会把一个纯调试面板变成额外的
- * 后台请求源（设置页本身也是低频页面）。打开页面时自动拉一次。
+ * 后台请求源（设置弹窗本身也是低频入口）。展开时拉一次。
  */
 export function useTimelineLog() {
   const api = useApi()

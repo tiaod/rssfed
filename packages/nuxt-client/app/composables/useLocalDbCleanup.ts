@@ -8,12 +8,12 @@ import {
 } from '~/utils/localDbCleanup'
 
 /**
- * 设置页「其它账号的本地缓存」的状态。
+ * 设置弹窗「数据 → 其它账号的本地缓存」的状态。
  *
  * 只负责两件事：扫出可清理的库、执行清理后如实重新扫一遍。真正的命名判断与 IndexedDB
  * 操作在 utils/localDbCleanup（纯函数与带兜底的 I/O），这里只包一层响应式状态。
  *
- * 扫不到（浏览器不支持 `indexedDB.databases()`）时 `supported` 为 false，设置页隐藏这个入口 ——
+ * 扫不到（浏览器不支持 `indexedDB.databases()`）时 `supported` 为 false，设置里隐藏这个入口 ——
  * 与其显示一个永远「没有缓存」的假结论，不如不显示。
  */
 export function useLocalDbCleanup() {
@@ -53,7 +53,7 @@ export function useLocalDbCleanup() {
   async function clean(userId: string | null | undefined): Promise<{ deleted: number, failed: number, accounts: number }> {
     if (cleaning.value) return { deleted: 0, failed: 0, accounts: 0 }
     // 账号未知时一律不动：此时分不清哪个库是当前账号的，删错就是当前账号的离线数据全丢。
-    // （会话就绪前 user id 为 null，设置页不会走到这里；这条是兜底。）
+    // （会话就绪前 user id 为 null，设置界面不会走到这里；这条是兜底。）
     if (!userId) return { deleted: 0, failed: 0, accounts: 0 }
     cleaning.value = true
     error.value = null

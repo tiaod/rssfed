@@ -2,11 +2,15 @@
 import type { DropdownMenuItem } from '@nuxt/ui'
 // 显式导入：与 FeedNavigation 的 FeedIcon 一致，避免组件清单扫描不到时静默退化
 import SyncStatusIndicator from '~/components/SyncStatusIndicator.vue'
+// 显式导入：设置弹窗的状态在 composable 里（弹窗本体挂在布局上）
+import { useSettingsModal } from '~/composables/useSettingsModal'
 
 const userStore = useUserStore()
 // 必须保持响应式：登录 / 登出 / 换账号后 session 会更新，快照取值不会跟着刷新
 const user = computed(() => userStore.user)
 const isAdmin = computed(() => userStore.isAdmin)
+// 设置由弹窗承载（见 composables/useSettingsModal），菜单项不跳页
+const { open: openSettings } = useSettingsModal()
 
 // 明暗主题偏好（system / light / dark），由 @nuxtjs/color-mode 写入 localStorage
 const colorMode = useColorMode()
@@ -28,42 +32,61 @@ const handleLogout = async () => {
 
 const displayName = computed(() => user.value?.name || user.value?.email || '未登录')
 
-const items = computed<DropdownMenuItem[][]>(() => [
-  // 注意：分组之间不需要自己写 { type: 'separator' }，Nuxt UI 的 dropdown 主题
-  // 已给每个分组加了 not-last 下边框，再加一条会出现两道挨着的分割线。
-  [
-    {
-      label: '账户资料',
-      icon: 'i-lucide-user',
-      to: '/profile'
-    },
-    {
-      label: '通用设置',
-      icon: 'i-lucide-settings',
-      // 深链到「通用设置」标签页（?tab= 的处理见 pages/profile.vue）
-      to: { path: '/profile', query: { tab: '1' } }
-    }
-  ],
-  [
-    { type: 'label', label: '主题' },
-    ...THEME_OPTIONS.map(option => ({
-      label: option.label,
-      icon: option.icon,
-      type: 'checkbox' as const,
-      checked: colorMode.preference === option.value,
-      // 不走 toggle 语义：点任意一项都把偏好切到该项，选中态始终由 colorMode 派生
-      onUpdateChecked: () => { colorMode.preference = option.value }
-    }))
-  ],
-  [
-    {
-      label: '报告问题',
-      icon: 'i-lucide-circle-help',
-      to: 'https://github.com/tiaod/rssfed/issues',
-      target: '_blank'
-    }
+const items = computed<DropdownMenuItem[][]>(() => {
+  const groups: DropdownMenuItem[][] = [
+    [
+      {
+        label: '账户资料',
+        icon: 'i-lucide-user',
+        to: '/profile'
+      },
+      {
+        label: '订阅管理',
+        icon: 'i-lucide-rss',
+        to: '/subscriptions'
+      },
+      {
+        label: '设置',
+        icon: 'i-lucide-settings',
+        // 打开设置弹窗，不跳页：用户通常正读到一半，跳页会丢掉列表与滚动位置
+        // （弹窗与入口不同组件树，状态见 composables/useSettingsModal）
+        onSelect: () => { openSettings('general') }
+      }
+    ]
   ]
-])
+  // 管理员设置独立成页：只有管理员看得到这一项，普通用户不再看到灰色的管理标签
+  if (isAdmin.value) {
+    groups.push([
+      {
+        label: '管理后台',
+        icon: 'i-lucide-shield',
+        to: '/admin'
+      }
+    ])
+  }
+  groups.push(
+    [
+      { type: 'label', label: '主题' },
+      ...THEME_OPTIONS.map(option => ({
+        label: option.label,
+        icon: option.icon,
+        type: 'checkbox' as const,
+        checked: colorMode.preference === option.value,
+        // 不走 toggle 语义：点任意一项都把偏好切到该项，选中态始终由 colorMode 派生
+        onUpdateChecked: () => { colorMode.preference = option.value }
+      }))
+    ],
+    [
+      {
+        label: '报告问题',
+        icon: 'i-lucide-circle-help',
+        to: 'https://github.com/tiaod/rssfed/issues',
+        target: '_blank'
+      }
+    ]
+  )
+  return groups
+})
 </script>
 
 <template>

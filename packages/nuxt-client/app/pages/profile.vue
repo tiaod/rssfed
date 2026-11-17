@@ -1,43 +1,27 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
-import SubscriptionManager from '~/components/settings/SubscriptionManager.vue'
-import AdminFeedManager from '~/components/admin/AdminFeedManager.vue'
-import SiteSettingsManager from '~/components/admin/SiteSettingsManager.vue'
-import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
-import { useStorageEstimate, formatBytes } from '~/composables/useStorageEstimate'
-import { useLocalDbCleanup } from '~/composables/useLocalDbCleanup'
-import type { AppSettings, EntryModalSize, ShareMethod } from '~/composables/useSettings'
-import { LIST_VIEW_OPTIONS, type ListView } from '~/utils/listViews'
-import {
-  READER_FONTS,
-  loadReaderFontCss,
-  normalizeReaderFontId,
-  resolveReaderFont
-} from '~/utils/readerFonts'
-import {
-  READER_FONT_SCALE_MAX,
-  READER_FONT_SCALE_MIN,
-  READER_FONT_SCALE_STEP,
-  normalizeReaderFontScale,
-  readerFontSizeCss
-} from '~/utils/readerFontSize'
-import {
-  formatSince,
-  formatTimelineEventData,
-  formatTimelineEventTime,
-  timelineEventColor,
-  timelineEventLabel
-} from '~/utils/timelineLog'
-import { timelineSettingsEqual } from '~/utils/timelineSettings'
+import { computed, ref } from 'vue'
+import { useOffline } from '~/composables/useOffline'
+import { useSettingsModal } from '~/composables/useSettingsModal'
 
 definePageMeta({
   layout: 'default'
 })
 
+/**
+ * 账户资料页。
+ *
+ * 只放「我是谁、我这个账号怎么登出」这类账号级信息。其它三块在 2026-11 拆走：
+ *  - 阅读 / 同步 / AI / 数据偏好 → 设置弹窗（components/settings/SettingsModal.vue）；
+ *  - 订阅管理 → `/subscriptions` 独立页（列表长、需要整页空间）；
+ *  - 订阅源与站点配置 → `/admin` 独立页（只有管理员看得到）。
+ *
+ * 拆分的动机：原先这三类东西挤在一排标签页里，普通用户能看到两个永远用不上的管理员标签，
+ * 而打开「设置」却要先离开正在读的列表、跳到这一页。
+ */
 const userStore = useUserStore()
 const user = userStore.user
 const { isOnline } = useOffline()
-const { settings, updateSettings } = useSettings()
+const { open: openSettings } = useSettingsModal()
 const toast = useToast()
 
 // 头像上传：选择文件后立即上传并刷新 session（S3 存储，URL 落 user.image）
@@ -61,328 +45,50 @@ const handleAvatarChange = async (e: Event) => {
   }
 }
 
-// 设置草稿：修改后需点击“保存”按钮才生效并持久化
-const draftSettings = ref<AppSettings>({ ...settings.value })
-
-/**
- * 时间线聚合设置（服务端，每用户一份）。
- *
- * 与本地偏好一起由「保存设置」提交：两类设置都在同一张页面上，两个保存按钮反而更容易漏点。
- * 保存后服务端会催一次聚合，数据随后由 live 复制到端。
- */
-const {
-  settings: timelineSettings, loaded: timelineLoaded, saving: timelineSaving,
-  error: timelineError, load: loadTimelineSettings, save: saveTimelineSettings
-} = useTimelineSettings()
-const draftTimeline = ref({ ...timelineSettings.value })
-
-/**
- * 同步日志（调试用，折叠在「数据」里）。
- *
- * 服务端的聚合过程用户平时看不见（只在服务端控制台），排查"时间线怎么不动了"时用它：
- * 一轮汇聚什么时候跑的、判了几个脏源、退订清理了什么、重建过几次、哪些源失败。
- * 不在挂载时就请求 —— 展开时才拉，避免把一个调试面板变成设置页的固定开销。
- */
-const {
-  events: timelineEvents, sources: timelineSources, summary: timelineSummary, heartbeat: timelineHeartbeat,
-  loaded: timelineLogLoaded, loading: timelineLogLoading, clearing: timelineLogClearing,
-  error: timelineLogError, canLoadMore: timelineLogCanLoadMore,
-  load: loadTimelineLog, loadMore: loadMoreTimelineLog, clear: clearTimelineLog
-} = useTimelineLog()
-const timelineLogOpen = ref(false)
-
-/** 展开并（首次）拉取；已展开时再点是「刷新」 */
-async function openTimelineLog(): Promise<void> {
-  timelineLogOpen.value = true
-  if (!timelineLogLoaded.value) await loadTimelineLog()
-}
-
-// 服务端设置到达后同步草稿（进入页面时 load 是异步的）
-watch(timelineSettings, (next) => {
-  draftTimeline.value = { ...next }
-})
-
-onMounted(() => {
-  void loadTimelineSettings()
-})
-
-const saving = ref(false)
-
-const saveSettings = async () => {
-  updateSettings({ ...draftSettings.value })
-  // 本地偏好与时间线聚合设置一起保存：时间线设置没变就不发请求
-  if (timelineLoaded.value && !timelineSettingsEqual(draftTimeline.value, timelineSettings.value)) {
-    saving.value = true
-    try {
-      await saveTimelineSettings({ ...draftTimeline.value })
-      toast.add({ title: '设置已保存', color: 'success' })
-    } catch (e: unknown) {
-      toast.add({ title: '时间线设置保存失败', description: errorMessage(e), color: 'error' })
-    } finally {
-      saving.value = false
-    }
-    return
-  }
-  toast.add({ title: '设置已保存', color: 'success' })
-}
-
-// 条目详情模态宽度选项
-const modalSizeOptions: { label: string, value: EntryModalSize }[] = [
-  { label: '标准', value: 'sm:max-w-xl' },
-  { label: '较宽', value: 'sm:max-w-2xl' },
-  { label: '宽', value: 'sm:max-w-4xl' },
-  { label: '很宽', value: 'sm:max-w-6xl' },
-  { label: '全屏', value: 'fullscreen' }
-]
-
-// 分享方式：桌面端的系统分享面板往往不如复制顺手，所以让用户自己定
-const shareMethodOptions: { label: string, value: ShareMethod }[] = [
-  { label: '自动（手机用系统面板，电脑复制标题和链接）', value: 'auto' },
-  { label: '系统分享面板', value: 'system' },
-  { label: '复制标题和链接', value: 'clipboard' }
-]
-
-/**
- * 「正文字体」与「正文字号」：都只影响文章正文（.entry-prose），不动列表与界面文字；
- * 清单见 utils/readerFonts，字号百分比口径见 utils/readerFontSize。
- * 'inherit' / 100 本身就是合法选项值，不需要像 draftView 那样用哨兵字符串区分「未配置」。
- */
-const readerFontOptions = READER_FONTS.map(font => ({ label: font.label, value: font.id }))
-
-const draftReaderFont = computed({
-  get: () => normalizeReaderFontId(draftSettings.value.readerFont),
-  set: (value: string) => {
-    draftSettings.value = {
-      ...draftSettings.value,
-      readerFont: normalizeReaderFontId(value)
-    }
-  }
-})
-
-const draftReaderFontScale = computed({
-  get: () => normalizeReaderFontScale(draftSettings.value.readerFontScale),
-  set: (value: number | number[] | undefined) => {
-    // USlider 单滑块回传 number；类型上还允许数组，统一取第一个就够
-    draftSettings.value = {
-      ...draftSettings.value,
-      readerFontScale: normalizeReaderFontScale(Array.isArray(value) ? value[0] : value)
-    }
-  }
-})
-
-// 预览区用它自己的字体渲染；选到自带字体时先把样式拉下来，
-// 否则预览会显示回退后的系统字体，等于没预览
-watch(draftReaderFont, (id) => {
-  void loadReaderFontCss(id)
-})
-
-const readerFontPreviewStyle = computed(() => {
-  const stack = resolveReaderFont(draftReaderFont.value).stack
-  return {
-    fontFamily: stack ?? undefined,
-    // 预览块本身是 1rem 的界面字号，不显式写字号就看不出拖动滑块的效果；
-    // 100% 在 CSS 里也是 1rem，这里补上同一个值
-    fontSize: readerFontSizeCss(draftReaderFontScale.value) ?? '1rem'
-  }
-})
-
-/**
- * 「默认列表视图」里的「跟随内置默认」项：选中它 = 不写设置（view 为 undefined）。
- *
- * 用一个哨兵字符串而不是空值：reka 的 Select 明确禁止选项值为空串（空串被它当作「清空选择」，
- * 传了整个下拉都打不开，见 EditSubscriptionModal 的同类注释）；undefined 又表示「未选中」，
- * 没法表达「显式选择：取消配置」这个动作。用户不选它时才落一个具体视图 —— 于是
- * 「没配过」与「配成瀑布流」区分得开，时间线的内置默认（社交动态）才生效。
- */
-const INHERIT_VIEW = '__default__'
-
-const viewOptions = [
-  { label: '跟随内置默认', value: INHERIT_VIEW },
-  ...LIST_VIEW_OPTIONS
-]
-
-const draftView = computed({
-  get: () => draftSettings.value.view ?? INHERIT_VIEW,
-  set: (value: string) => {
-    draftSettings.value = {
-      ...draftSettings.value,
-      view: value === INHERIT_VIEW ? undefined : (value as ListView)
-    }
-  }
-})
-
 const isAdmin = computed(() => userStore.isAdmin)
-
-// 标签页：AI 助手对普通用户可用；管理员额外显示“订阅源管理”“站点设置”
-const tabs = computed(() => {
-  const items = [
-    { label: '订阅管理', icon: 'i-lucide-rss' },
-    { label: '通用设置', icon: 'i-lucide-settings' },
-    { label: 'AI 助手', icon: 'i-lucide-bot' }
-  ]
-  if (isAdmin.value) {
-    items.push({ label: '订阅源管理', icon: 'i-lucide-shield' })
-    items.push({ label: '站点设置', icon: 'i-lucide-palette' })
-  }
-  return items
-})
-// 注意：UTabs 的 tab 值内部为字符串（String(index)），需用字符串初始值才能默认激活第一个 tab
-// 与 URL 的 ?tab= 双向绑定：用户菜单里的「通用设置」直接落到对应标签页，手动切页也同步回地址栏
-const route = useRoute()
-const activeTab = computed({
-  get: () => {
-    const tab = route.query.tab
-    // 越界或非数字（含管理员才有后两个标签页）一律回落到第一个标签页
-    const valid = typeof tab === 'string' && /^\d+$/.test(tab) && Number(tab) < tabs.value.length
-    return valid ? tab : '0'
-  },
-  set: (value: string) => {
-    void navigateTo(
-      { query: { ...route.query, tab: value === '0' ? undefined : value } },
-      { replace: true }
-    )
-  }
-})
 
 const handleLogout = async () => {
   await userStore.logout()
   await navigateTo('/login')
-}
-
-/**
- * 重置本地缓存：清空本地 PouchDB 与全部增量水位，并从服务器全量重同步。
- *
- * 破坏性操作（本地条目、图片、已读/收藏的本地副本都会没），必须走弹窗确认：
- * 原先的「双击按钮」在触控板上极易误触，而且用户第二次点击时往往并不确定
- * 自己在确认什么。弹窗里把后果讲清楚，确认键用 error 色。
- */
-const pouch = usePouchDb()
-const resetting = ref(false)
-/** 确认弹窗开关（用 ref 而非 computed：弹窗需要可被外部指令式打开） */
-const resetOpen = ref(false)
-
-/**
- * 本地存储占用：只有 StorageManager 能给出真实占用（PouchDB 的 db.info()
- * 只返回文档数，没有体积字段 —— 详见 useStorageEstimate 的说明）。
- *
- * 进入设置页时读一次；同步结束后再读一次 —— 刚拉完一批条目 / 图片时
- * 用量变化最明显，用户此时看设置页正是想知道「缓存到底占了多少」。
- */
-const storageEstimate = useStorageEstimate()
-onMounted(() => {
-  void storageEstimate.refresh()
-})
-// 剩余目标从「有」变为「无」即为一轮同步结束
-const remainingSyncTargets = computed(() =>
-  Object.values(pouch.syncStatuses).filter(s => s.status === 'syncing' || s.status === 'queued').length
-)
-watch(
-  () => remainingSyncTargets.value,
-  (current, previous) => {
-    if (previous > 0 && current === 0) void storageEstimate.refresh()
-  }
-)
-
-/** 弹窗内的失败原因（非空时在弹窗里显示，不关弹窗） */
-const resetError = ref<string | null>(null)
-
-/** 打开确认弹窗：顺手清掉上一次的错误，否则重开后还挂着旧报错 */
-function openResetConfirm() {
-  resetError.value = null
-  resetOpen.value = true
-}
-
-/**
- * 确认弹窗里的「确认重置」：执行重置 + 全量重同步。
- *
- * 失败不关弹窗，把原因显示在弹窗里（同 SubscriptionManager 的取消订阅确认）——
- * 直接关掉再弹 toast，用户会以为重置成功了。
- */
-const confirmReset = async () => {
-  if (resetting.value) return
-  resetting.value = true
-  resetError.value = null
-  try {
-    // 清本地 → 重新拉：服务端派生库不动，重置后从头复制一遍（新库没有 checkpoint，
-    // 必然是完整的首轮同步）
-    await pouch.resetLocalData()
-    await pouch.syncNow()
-    // 重置清空了本地库：立刻重算用量，让用户看到「缓存已清」而不是旧数字
-    void storageEstimate.refresh()
-    resetOpen.value = false
-    toast.add({ title: '本地缓存已重置，正在重新同步', color: 'success' })
-  } catch (e: unknown) {
-    resetError.value = errorMessage(e)
-  } finally {
-    resetting.value = false
-  }
-}
-
-/**
- * 其它账号的本地缓存清理。
- *
- * 本地库按账号隔离且「换回来还能离线读」（见 utils/localDbName），所以每登录过一个账号
- * 这个浏览器就多留一份整库副本。这里只负责扫描/清理的状态，名字判断与 IndexedDB 操作在
- * useLocalDbCleanup / utils/localDbCleanup。
- *
- * 销毁的是**别的账号**的离线副本：当前账号与服务器数据都不动；被清的账号下次登录会
- * 整库重新同步（这正是删它的代价，弹窗里写清楚）。
- */
-const localDbCleanup = useLocalDbCleanup()
-const cleanupOpen = ref(false)
-/** 弹窗内的失败原因（非空时在弹窗里显示，不关弹窗） */
-const cleanupError = ref<string | null>(null)
-
-/** 打开确认弹窗：顺手清掉上一次的错误，否则重开后还挂着旧报错 */
-function openCleanupConfirm() {
-  cleanupError.value = null
-  cleanupOpen.value = true
-}
-
-/**
- * 会话是异步恢复的：user id 一到就扫一遍（immediate 覆盖「挂载时已登录」）。
- * 每次重扫都只挑「别的账号」的库 —— 当前账号的库永远不在名单里。
- */
-watch(
-  () => userStore.user?.id ?? null,
-  (id) => {
-    // 会话就绪前 user id 是 null：这时候扫描会把「当前账号的库」当成「其它账号」列出来，
-    // 点下去就删了自己的离线数据。因此拿不到账号时先不扫，等会话恢复再看。
-    if (id) void localDbCleanup.scan(id)
-  },
-  { immediate: true }
-)
-
-/**
- * 确认清理：删完重新扫（被别的标签页占住的库会原样留着），并立刻重算整站占用，
- * 让用户在上方那张卡里看到数字回落。
- */
-const confirmCleanup = async () => {
-  if (localDbCleanup.cleaning.value) return
-  const userId = userStore.user?.id
-  if (!userId) return
-  cleanupError.value = null
-  const result = await localDbCleanup.clean(userId)
-  void storageEstimate.refresh()
-  if (result.deleted > 0) {
-    toast.add({ title: `已清理 ${result.accounts} 个账号的本地缓存`, color: 'success' })
-  }
-  if (result.failed > 0) {
-    cleanupError.value = localDbCleanup.error.value ?? `${result.failed} 个本地库未能删除`
-    return
-  }
-  cleanupOpen.value = false
 }
 </script>
 
 <template>
   <UDashboardPanel>
     <template #header>
-      <UDashboardNavbar title="我的" />
+      <UDashboardNavbar title="账户资料">
+        <template #right>
+          <UButton
+            to="/subscriptions"
+            icon="i-lucide-rss"
+            color="neutral"
+            variant="ghost"
+            size="sm"
+            label="订阅管理"
+          />
+          <UButton
+            v-if="isAdmin"
+            to="/admin"
+            icon="i-lucide-shield"
+            color="neutral"
+            variant="ghost"
+            size="sm"
+            label="管理后台"
+          />
+          <UButton
+            icon="i-lucide-settings"
+            color="neutral"
+            variant="ghost"
+            size="sm"
+            label="设置"
+            @click="openSettings('general')"
+          />
+        </template>
+      </UDashboardNavbar>
     </template>
 
     <template #body>
-      <div class="mx-auto w-full max-w-4xl px-4 py-6 space-y-6">
+      <div class="mx-auto w-full max-w-3xl px-4 py-6 space-y-6">
         <!-- 账户概览 -->
         <UCard>
           <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
@@ -460,531 +166,49 @@ const confirmCleanup = async () => {
           </div>
         </UCard>
 
-        <!-- 功能标签页 -->
-        <UTabs
-          v-model="activeTab"
-          :items="tabs"
-        >
-          <template #content="{ index }">
-            <div class="pt-4">
-              <!-- 订阅管理 -->
-              <SubscriptionManager v-if="index === 0" />
-
-              <!-- 通用设置 -->
-              <div
-                v-else-if="index === 1"
-                class="space-y-8"
-              >
-                <section class="space-y-4">
-                  <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
-                    阅读
-                  </h3>
-
-                  <UFormField
-                    label="默认列表视图"
-                    description="各列表页的默认视图；选「跟随内置默认」则不写配置 —— 时间线用「社交动态」，单个订阅源 / 分组 / 收藏页用「瀑布流」（列表页上的切换按钮只影响本次会话）"
-                  >
-                    <USelect
-                      v-model="draftView"
-                      :items="viewOptions"
-                      value-key="value"
-                      class="w-48"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="条目详情宽度"
-                    description="详情弹窗的窗口宽度；宽屏的右侧阅读栏还用它限制正文宽度，阅读栏拖得再宽，多出来的也是两边留白"
-                  >
-                    <USelect
-                      v-model="draftSettings.entryModalSize"
-                      :items="modalSizeOptions"
-                      value-key="value"
-                      class="w-48"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="固定顶部栏和底部栏"
-                    description="全屏时固定顶栏与底栏、仅正文滚动；关闭后随文章一起滚动"
-                  >
-                    <USwitch v-model="draftSettings.fixedBars" />
-                  </UFormField>
-
-                  <UFormField
-                    label="分享方式"
-                    description="分享文章时用系统分享面板，还是复制「标题 + 原文链接」。「自动」按设备选择：手机 / 平板（触屏）弹系统面板，电脑复制标题和链接；浏览器没有系统面板时一律回退复制"
-                  >
-                    <USelect
-                      v-model="draftSettings.shareMethod"
-                      :items="shareMethodOptions"
-                      value-key="value"
-                      class="w-64"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="正文字体"
-                    description="只影响文章正文（条目详情与右侧阅读栏）。系统字体取决于本机已安装的字体，缺失时自动回退；霞鹜文楷（屏幕阅读版，SIL OFL 1.1）为内置字体，首次选择时按需下载用到的字形分片"
-                  >
-                    <USelect
-                      v-model="draftReaderFont"
-                      :items="readerFontOptions"
-                      value-key="value"
-                      class="w-64"
-                    />
-                  </UFormField>
-
-                  <UFormField
-                    label="正文字号"
-                    description="只影响文章正文（条目详情与右侧阅读栏），标题与代码块按比例缩放。100% 为应用原本的字号；用 rem 计，系统/浏览器调大默认字号时正文会一起变大"
-                  >
-                    <div class="flex w-72 items-center gap-3">
-                      <USlider
-                        v-model="draftReaderFontScale"
-                        :min="READER_FONT_SCALE_MIN"
-                        :max="READER_FONT_SCALE_MAX"
-                        :step="READER_FONT_SCALE_STEP"
-                        class="flex-1"
-                        tooltip
-                      />
-                      <span class="w-12 shrink-0 text-right text-sm tabular-nums text-muted">{{ draftReaderFontScale }}%</span>
-                    </div>
-                  </UFormField>
-
-                  <!-- 预览：用它自己的字体与字号渲染当前草稿选择，省得保存后再回正文对比 -->
-                  <p
-                    class="rounded-md border border-default px-3 py-2 text-muted"
-                    :style="readerFontPreviewStyle"
-                  >
-                    字体与字号预览：这是一段示例文字，用来看字形的疏密、笔画与字号大小。
-                  </p>
-                </section>
-
-                <USeparator />
-
-                <section class="space-y-4">
-                  <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
-                    同步
-                  </h3>
-
-                  <!--
-                    AI 摘要开关由**服务端**保存（每用户一份，见 useTimelineSettings）。
-                    图片参数不在这里：它是 per-feed 的，管理员在「订阅源管理」里按源调，
-                    抓取时就压好了（见 AdminFeedManager）。
-                  -->
-                  <UFormField
-                    label="AI 摘要"
-                    description="为每条内容生成摘要。开关已经可以设置，生成链路还在开发中，开启后暂时不会产出摘要。"
-                  >
-                    <USwitch v-model="draftTimeline.aiSummaryEnabled" />
-                  </UFormField>
-
-                  <p
-                    v-if="timelineError"
-                    class="text-sm text-error"
-                  >
-                    {{ timelineError }}
-                  </p>
-                </section>
-
-                <USeparator />
-
-                <div class="flex justify-start">
-                  <UButton
-                    color="primary"
-                    icon="i-lucide-save"
-                    :loading="saving || timelineSaving"
-                    @click="saveSettings"
-                  >
-                    保存设置
-                  </UButton>
-                </div>
-
-                <USeparator />
-
-                <!-- 数据管理：低频操作，各自独立成卡片，说明与操作同处卡片正文、左对齐。
-                     不用卡片底栏也不加分隔线：卡片边框已经把这一项圈成整体，
-                     再切一条横线只会把「说明」和「操作」拆成两块。 -->
-                <div
-                  data-testid="data-section"
-                  class="space-y-3"
-                >
-                  <h3 class="text-sm font-semibold text-muted uppercase tracking-wide">
-                    数据
-                  </h3>
-
-                  <!--
-                    本地存储占用：数字来自 navigator.storage.estimate()，是**整个站点**
-                    在本浏览器的占用（IndexedDB + SW 预缓存 + localStorage），
-                    不是单个 PouchDB 库 —— 浏览器没有按库统计体积的接口，
-                    所以文案必须说「本站缓存」而不是「条目库」。
-                  -->
-                  <UCard v-if="storageEstimate.supported.value">
-                    <p class="text-sm font-medium">
-                      本地存储占用
-                    </p>
-                    <p class="mt-1 text-xs text-muted">
-                      <template v-if="storageEstimate.info.value">
-                        本站已用 {{ formatBytes(storageEstimate.info.value.usage) }}<template
-                          v-if="storageEstimate.info.value.quota"
-                        >
-                          ，浏览器配额 {{ formatBytes(storageEstimate.info.value.quota) }}（{{
-                            Math.round((storageEstimate.info.value.ratio ?? 0) * 100)
-                          }}%）
-                        </template>。含离线条目、图片与页面缓存{{
-                          storageEstimate.info.value.persisted === true
-                            ? '；已获得持久化授权，不会被浏览器自动清理'
-                            : storageEstimate.info.value.persisted === false
-                              ? '；尚未获得持久化授权，磁盘紧张时浏览器可能清理'
-                              : ''
-                        }}
-                      </template>
-                      <template v-else>
-                        正在读取…
-                      </template>
-                    </p>
-                    <div class="mt-3">
-                      <UButton
-                        color="neutral"
-                        variant="ghost"
-                        size="sm"
-                        icon="i-lucide-refresh-cw"
-                        label="重新读取"
-                        :loading="storageEstimate.loading.value"
-                        @click="storageEstimate.refresh()"
-                      />
-                    </div>
-                  </UCard>
-
-                  <!--
-                    其它账号的本地缓存：本地库按账号隔离且「换回来还能离线读」，所以每个登录过的
-                    账号各留一份整库副本。这里只报「检测到几个账号」——浏览器没有按库统计体积的
-                    接口（见上面占用卡的说明），清理后让用户看「本地存储占用」的回落。
-                  -->
-                  <UCard v-if="localDbCleanup.supported.value">
-                    <p class="text-sm font-medium">
-                      其它账号的本地缓存
-                    </p>
-                    <p class="mt-1 text-xs text-muted">
-                      <template v-if="localDbCleanup.scanning.value">
-                        正在检查本机的离线副本…
-                      </template>
-                      <template v-else-if="localDbCleanup.accountCount.value > 0">
-                        检测到 {{ localDbCleanup.accountCount.value }} 个其它账号的离线副本。本浏览器会为每个登录过的账号各保留一份，清理后这些账号下次登录需要重新同步；当前账号的缓存与服务器数据不受影响。
-                      </template>
-                      <template v-else>
-                        没有其它账号的离线副本。
-                      </template>
-                    </p>
-                    <div class="mt-3 flex items-center gap-2">
-                      <UButton
-                        v-if="localDbCleanup.canClean.value"
-                        color="error"
-                        variant="outline"
-                        size="sm"
-                        icon="i-lucide-trash-2"
-                        label="清理"
-                        :disabled="localDbCleanup.cleaning.value"
-                        @click="openCleanupConfirm"
-                      />
-                      <UButton
-                        v-else
-                        color="neutral"
-                        variant="ghost"
-                        size="sm"
-                        icon="i-lucide-refresh-cw"
-                        label="重新检测"
-                        :loading="localDbCleanup.scanning.value"
-                        @click="localDbCleanup.scan(userStore.user?.id ?? null)"
-                      />
-                    </div>
-                  </UCard>
-
-                  <UCard>
-                    <p class="text-sm font-medium">
-                      重置本地缓存
-                    </p>
-                    <p class="mt-1 text-xs text-muted">
-                      清空本地缓存的条目与图片并从服务器重新同步（不影响服务器数据）。本地数据异常（如图片/封面缺失）时使用。
-                    </p>
-                    <div class="mt-3">
-                      <!-- 破坏性操作：error 色 + 三角警告图标。真正执行前还要过弹窗确认，
-                           按钮本身不承担「防误触」职责（那会让第二次点击语义模糊） -->
-                      <UButton
-                        color="error"
-                        variant="outline"
-                        size="sm"
-                        icon="i-lucide-triangle-alert"
-                        label="重置"
-                        @click="openResetConfirm"
-                      />
-                    </div>
-                  </UCard>
-
-                  <!--
-                    同步日志：服务端的聚合过程（汇聚/清理/重建/失败）用户看不到，折叠在这里当调试面板。
-                    默认折叠、展开才拉：设置页是低频页面，不该在挂载时就多打一个接口。
-                  -->
-                  <UCard>
-                    <div class="flex items-start justify-between gap-3">
-                      <div>
-                        <p class="text-sm font-medium">
-                          同步日志
-                        </p>
-                        <p class="mt-1 text-xs text-muted">
-                          服务端聚合与源同步的过程记录：什么时候跑了一轮汇聚、退订清理了什么、重建过几次、哪个源失败了。聚合有 5 分钟冷却，所以常态是每 5 分钟一条；空转轮次也会记（用来确认聚合确实在跑）。只保留最近 2000 条。
-                        </p>
-                      </div>
-                      <UButton
-                        v-if="!timelineLogOpen"
-                        color="neutral"
-                        variant="ghost"
-                        size="sm"
-                        icon="i-lucide-scroll-text"
-                        label="查看"
-                        @click="openTimelineLog"
-                      />
-                    </div>
-
-                    <div
-                      v-if="timelineLogOpen"
-                      class="mt-3 space-y-3"
-                    >
-                      <!-- 概览：聚合心跳 / 源数 / 最近一次同步 / 失败与进行中 -->
-                      <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
-                        <span v-if="timelineHeartbeat">
-                          最近一轮聚合 {{ formatSince(timelineHeartbeat.at) }}<template v-if="timelineHeartbeat.quietRounds > 0">（连续 {{ timelineHeartbeat.quietRounds }} 轮无变化）</template>
-                        </span>
-                        <span>订阅源 {{ timelineSummary.total }} 个</span>
-                        <span>最近同步 {{ formatSince(timelineSummary.lastSyncedAt) }}</span>
-                        <span
-                          v-if="timelineSummary.syncing > 0"
-                          class="text-info"
-                        >同步中 {{ timelineSummary.syncing }}</span>
-                        <span
-                          v-if="timelineSummary.errors > 0"
-                          class="text-error"
-                        >失败 {{ timelineSummary.errors }}</span>
-                      </div>
-
-                      <div class="flex flex-wrap gap-2">
-                        <UButton
-                          color="neutral"
-                          variant="ghost"
-                          size="sm"
-                          icon="i-lucide-refresh-cw"
-                          label="刷新"
-                          :loading="timelineLogLoading"
-                          @click="loadTimelineLog"
-                        />
-                        <UButton
-                          color="neutral"
-                          variant="ghost"
-                          size="sm"
-                          icon="i-lucide-eraser"
-                          label="清空"
-                          :loading="timelineLogClearing"
-                          @click="clearTimelineLog"
-                        />
-                      </div>
-
-                      <p
-                        v-if="timelineLogError"
-                        class="text-xs text-error"
-                      >
-                        {{ timelineLogError }}
-                      </p>
-
-                      <p
-                        v-if="timelineEvents.length === 0 && !timelineLogLoading"
-                        class="text-xs text-muted"
-                      >
-                        还没有记录。下一轮聚合（受 5 分钟冷却限制）后会出现 —— 空转轮次也会记一条。
-                      </p>
-
-                      <ul
-                        v-else
-                        class="max-h-80 space-y-1.5 overflow-y-auto pr-1"
-                      >
-                        <li
-                          v-for="event in timelineEvents"
-                          :key="event.id"
-                          class="flex items-start gap-2 text-xs"
-                        >
-                          <span class="shrink-0 font-mono text-muted tabular-nums">
-                            {{ formatTimelineEventTime(event.at) }}
-                          </span>
-                          <UBadge
-                            :color="timelineEventColor(event.kind, event.level)"
-                            variant="subtle"
-                            size="xs"
-                            class="shrink-0"
-                          >
-                            {{ timelineEventLabel(event.kind) }}
-                          </UBadge>
-                          <span class="min-w-0 break-words">
-                            {{ event.message }}
-                            <span
-                              v-if="formatTimelineEventData(event.data)"
-                              class="text-muted"
-                            >· {{ formatTimelineEventData(event.data) }}</span>
-                          </span>
-                        </li>
-                      </ul>
-
-                      <UButton
-                        v-if="timelineLogCanLoadMore"
-                        color="neutral"
-                        variant="ghost"
-                        size="sm"
-                        icon="i-lucide-chevrons-down"
-                        label="加载更多"
-                        :loading="timelineLogLoading"
-                        @click="loadMoreTimelineLog"
-                      />
-
-                      <!-- 源级状态：这是"现在什么样"，不是流水；数据来自水位表 -->
-                      <details class="text-xs">
-                        <summary class="cursor-pointer text-muted">
-                          各源状态（{{ timelineSources.length }}）
-                        </summary>
-                        <ul class="mt-2 max-h-60 space-y-1 overflow-y-auto pr-1">
-                          <li
-                            v-for="source in timelineSources"
-                            :key="source.sourceId"
-                            class="flex items-center justify-between gap-2"
-                          >
-                            <span class="min-w-0 truncate">{{ source.title ?? source.sourceId }}</span>
-                            <span
-                              class="shrink-0 font-mono text-muted"
-                              :class="source.status === 'error' ? 'text-error' : ''"
-                            >
-                              {{ source.syncedAt ? formatTimelineEventTime(source.syncedAt) : '未同步' }} · {{ source.status }}
-                            </span>
-                          </li>
-                        </ul>
-                      </details>
-                    </div>
-                  </UCard>
-                </div>
+        <!-- 入口卡：设置与订阅管理不再是这一页的标签页，留一张卡交代它们去哪了 -->
+        <div class="grid gap-3 sm:grid-cols-2">
+          <UCard
+            class="cursor-pointer transition-colors hover:ring-primary/40"
+            @click="openSettings('general')"
+          >
+            <div class="flex items-start gap-3">
+              <UIcon
+                name="i-lucide-settings"
+                class="mt-0.5 size-5 shrink-0 text-primary"
+              />
+              <div class="min-w-0">
+                <p class="text-sm font-medium">
+                  设置
+                </p>
+                <p class="mt-1 text-xs text-muted">
+                  阅读偏好、正文字体与字号、AI 摘要、本地缓存与同步日志。
+                </p>
               </div>
-
-              <!-- AI 助手（MCP 接入） -->
-              <McpSetupPanel v-else-if="index === 2" />
-
-              <!-- 订阅源管理（管理员） -->
-              <AdminFeedManager v-else-if="isAdmin && index === 3" />
-
-              <!-- 站点设置（管理员） -->
-              <SiteSettingsManager v-else-if="isAdmin && index === 4" />
             </div>
-          </template>
-        </UTabs>
+          </UCard>
+
+          <UCard
+            class="cursor-pointer transition-colors hover:ring-primary/40"
+            @click="navigateTo('/subscriptions')"
+          >
+            <div class="flex items-start gap-3">
+              <UIcon
+                name="i-lucide-rss"
+                class="mt-0.5 size-5 shrink-0 text-primary"
+              />
+              <div class="min-w-0">
+                <p class="text-sm font-medium">
+                  订阅管理
+                </p>
+                <p class="mt-1 text-xs text-muted">
+                  搜索订阅、整理分组、批量导入导出（OPML）。
+                </p>
+              </div>
+            </div>
+          </UCard>
+        </div>
       </div>
-
-      <!-- 清理其它账号本地缓存的确认弹窗：删的是其它账号的整库副本，当前账号不受影响 -->
-      <UModal
-        v-model:open="cleanupOpen"
-        title="清理其它账号的本地缓存？"
-        :ui="{ footer: 'justify-end' }"
-      >
-        <template #body>
-          <div class="space-y-3">
-            <UAlert
-              color="warning"
-              variant="soft"
-              icon="i-lucide-triangle-alert"
-              title="会删除本机上其它账号的离线副本"
-            >
-              <template #description>
-                <ul class="list-disc pl-4 space-y-1 text-sm">
-                  <li>{{ localDbCleanup.accountCount.value }} 个其它账号在本机缓存的条目、图片与状态会被删除</li>
-                  <li>这些账号下次登录会重新全量同步，首次打开会慢一些</li>
-                  <li>当前账号的缓存与服务器上的数据都不受影响</li>
-                </ul>
-              </template>
-            </UAlert>
-            <UAlert
-              v-if="cleanupError"
-              color="error"
-              variant="soft"
-              icon="i-lucide-circle-alert"
-              :title="cleanupError"
-            />
-          </div>
-        </template>
-        <template #footer="{ close }">
-          <UButton
-            variant="outline"
-            color="neutral"
-            :disabled="localDbCleanup.cleaning.value"
-            @click="close"
-          >
-            取消
-          </UButton>
-          <UButton
-            color="error"
-            icon="i-lucide-trash-2"
-            :loading="localDbCleanup.cleaning.value"
-            @click="confirmCleanup"
-          >
-            确认清理
-          </UButton>
-        </template>
-      </UModal>
-
-      <!-- 重置本地缓存的确认弹窗：破坏性操作一律二次确认，并把后果写在正文里 -->
-      <UModal
-        v-model:open="resetOpen"
-        title="重置本地缓存？"
-        :ui="{ footer: 'justify-end' }"
-      >
-        <template #body>
-          <div class="space-y-3">
-            <UAlert
-              color="error"
-              variant="soft"
-              icon="i-lucide-triangle-alert"
-              title="这会清空本机上已下载的内容"
-            >
-              <template #description>
-                <ul class="list-disc pl-4 space-y-1 text-sm">
-                  <li>本地缓存的条目、图片与封面全部删除</li>
-                  <li>本地的已读 / 收藏标记与同步记录一并清空</li>
-                  <li>服务器上的数据不受影响，随后会重新全量同步</li>
-                  <li>重新下载全部缓存需要一些时间，期间请保持页面打开</li>
-                </ul>
-              </template>
-            </UAlert>
-            <UAlert
-              v-if="resetError"
-              color="error"
-              variant="soft"
-              icon="i-lucide-circle-alert"
-              :title="resetError"
-            />
-          </div>
-        </template>
-        <template #footer="{ close }">
-          <UButton
-            variant="outline"
-            color="neutral"
-            :disabled="resetting"
-            @click="close"
-          >
-            取消
-          </UButton>
-          <UButton
-            color="error"
-            icon="i-lucide-rotate-ccw"
-            :loading="resetting"
-            @click="confirmReset"
-          >
-            确认重置
-          </UButton>
-        </template>
-      </UModal>
     </template>
   </UDashboardPanel>
 </template>

@@ -22,7 +22,7 @@ function isTouchPrimary(): boolean {
  * 可以直接发到微信、Telegram 等任意应用。桌面浏览器或非安全上下文（http）没有这个 API，
  * 退回复制原文链接 —— 分享这个动作总要有个结果，不能点了没反应。
  *
- * 分享方式由通用设置里的「分享方式」（ShareMethod）控制：
+ * 分享方式由设置弹窗「常规」里的「分享方式」（ShareMethod）控制：
  *   - auto（默认）：触屏设备用系统面板（没有 API 时复制），桌面直接复制链接
  *   - system：始终尝试系统面板，不区分设备（没有 API 时仍回退复制）
  *   - clipboard：始终复制链接
@@ -34,7 +34,7 @@ function isTouchPrimary(): boolean {
 export function useEntryShare(getEntry: () => RssEntry | null | undefined) {
   const toast = useToast()
   const { copy } = useClipboard({ legacy: true })
-  // 分享方式由用户在「通用设置」里选：桌面端的系统分享面板往往不如复制顺手
+  // 分享方式由用户在「设置 → 常规」里选：桌面端的系统分享面板往往不如复制顺手
   const { settings } = useSettings()
   const shareBusy = ref(false)
 

@@ -1406,7 +1406,7 @@ export function usePouchDb() {
         if (isStorageFailure(err)) {
           // live 复制的 retry 会无限重试，存储坏掉时必须主动停下：否则会一直砸在同一块
           // 坏掉的库上（既写不进数据又把错误刷屏），唯一出路是让用户重置本地缓存
-          setStorageBroken('本地缓存写入失败（存储空间不足或数据库已损坏），已暂停同步。请到「我的 → 重置本地缓存」清理后重试')
+          setStorageBroken('本地缓存写入失败（存储空间不足或数据库已损坏），已暂停同步。请到「设置 → 数据 → 重置本地缓存」清理后重试')
           stopAllLiveSync()
           return
         }

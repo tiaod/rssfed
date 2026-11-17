@@ -2,7 +2,7 @@
  * 列表视图（版式）定义。
  *
  * 纯数据、无 Nuxt / 浏览器依赖：EntryList（版式）、ListViewSwitcher（切换菜单）、
- * 设置页（默认值选择）、订阅文档读取校验都从这里取同一份枚举，避免各处写字符串。
+ * 设置弹窗（默认值选择）、订阅文档读取校验都从这里取同一份枚举，避免各处写字符串。
  */
 
 export const LIST_VIEWS = ['social', 'masonry', 'blog', 'list', 'table', 'image'] as const
@@ -16,13 +16,13 @@ export const DEFAULT_LIST_VIEW: ListView = 'masonry'
  * 时间线的内置默认视图。
  *
  * 只作用于时间线：它把「各订阅源混在一起」的信息流按社交动态呈现最合身，其余页面
- * （单源 / 分组 / 收藏）兜底仍是瀑布流。全局设置（通用设置里的「默认列表视图」）优先，
+ * （单源 / 分组 / 收藏）兜底仍是瀑布流。全局设置（设置弹窗里的「默认列表视图」）优先，
  * 见 useTimelineView；用户没配过时全局值为 undefined（不是瀑布流），两者才区分得开。
  */
 export const TIMELINE_DEFAULT_VIEW: ListView = 'social'
 
 export interface ListViewMeta {
-  /** 切换菜单 / 设置页里的显示名，也是切换菜单的可访问名 */
+  /** 切换菜单 / 设置弹窗里的显示名，也是切换菜单的可访问名 */
   label: string
   /** 切换按钮与菜单项图标 */
   icon: string
@@ -43,7 +43,7 @@ export const LIST_VIEW_META: Record<ListView, ListViewMeta> = {
   image: { label: '图片', icon: 'i-lucide-images' }
 }
 
-/** 设置页下拉选项（含「跟随上级」由调用方自行追加） */
+/** 设置弹窗的下拉选项（含「跟随上级」由调用方自行追加） */
 export const LIST_VIEW_OPTIONS = LIST_VIEWS.map(value => ({
   value,
   label: LIST_VIEW_META[value].label

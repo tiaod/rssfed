@@ -3,7 +3,7 @@ import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import type { SubscriptionItem } from '~/types/rss'
 import type { FeedNavigationMenuItem } from '~/composables/useFeedNavigation'
 import { subscriptionsEqual } from '~/utils/subscriptionsEqual'
-// 显式导入而不是依赖自动导入：项目内 profile.vue / SubscriptionManager.vue 也是这么用的，
+// 显式导入而不是依赖自动导入：项目内 SettingsModal.vue / SubscriptionManager.vue 也是这么用的，
 // 组件清单扫描不到时不会静默退化成「Failed to resolve component」
 import FeedIcon from '~/components/FeedIcon.vue'
 

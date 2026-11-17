@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { PWA_DISPLAY_MODES } from '~/types/site'
-// 显式导入：与 profile.vue 引用本目录组件的写法保持一致，不依赖自动导入名的推断
+// 显式导入：与本目录内其它组件（SiteColorField）的引用写法保持一致，不依赖自动导入名的推断
 import SiteColorField from '~/components/admin/SiteColorField.vue'
 
 const api = useApi()

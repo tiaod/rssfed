@@ -4,6 +4,7 @@ import { useUserStore } from '~/stores/user'
 // 显式导入：新组件偶尔不在 dev server 已扫描到的组件清单里，隐式解析会静默渲染成空（见 UserMenu 的同类注释）
 import EntryReaderPane from '~/components/EntryReaderPane.vue'
 import AppIcon from '~/components/AppIcon.vue'
+import SettingsModal from '~/components/settings/SettingsModal.vue'
 
 const userStore = useUserStore()
 
@@ -91,12 +92,28 @@ const navItems = computed<NavigationMenuItem[]>(() => {
       onSelect: () => { open.value = false }
     },
     {
+      label: '订阅管理',
+      icon: 'i-lucide-rss',
+      to: '/subscriptions',
+      onSelect: () => { open.value = false }
+    },
+    {
       label: '我的',
       icon: 'i-lucide-user',
       to: '/profile',
       onSelect: () => { open.value = false }
     }
   ]
+
+  // 管理后台只在管理员出现：普通用户看到一条打不开的入口没有意义
+  if (userStore.isAdmin) {
+    items.push({
+      label: '管理后台',
+      icon: 'i-lucide-shield',
+      to: '/admin',
+      onSelect: () => { open.value = false }
+    })
+  }
 
   return items
 })
@@ -238,6 +255,10 @@ const mobileNavUi = {
 
     <!-- 第三栏：与 <slot />（页面面板）同级，构成「侧边栏 | 列表 | 正文」三栏 -->
     <EntryReaderPane v-if="readerPane" />
+
+    <!-- 设置弹窗：入口分散在用户菜单、账户页、订阅管理页与时间线侧栏，
+         挂在这一层是为了「在哪一页都能打开」，且不会因此离开当前列表 -->
+    <SettingsModal />
 
     <!-- 通知面板暂时下线，与底部通知按钮一起恢复
     <NotificationsSlideover v-model:open="notificationsOpen" />

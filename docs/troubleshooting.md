@@ -228,9 +228,9 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
 
 ### 重建之后内容回来了，但浏览器里看不见
 
-- **现象**：`POST /api/timeline/rebuild`（或设置页的「重建时间线」）之后，服务端新库里有条目，但页面上的时间线还是空的（或比预期的少）。
+- **现象**：`POST /api/timeline/rebuild`（或前端包装 `useTimelineSettings.rebuild()`）之后，服务端新库里有条目，但页面上的时间线还是空的（或比预期的少）。
 - **原因**：重建是**换一个空聚合库**（复制是变更投递不是投影，就地清空搬不回来），于是 ① 库名变了、客户端缓存的寻址信息还指着被删掉的旧库；② 本地为「被剪掉的条目」留着删除记录（tombstone，修订号更高），重建搬回来的内容在本地会被判成冲突、看不见。
-- **现状**：设置页的「重建时间线」会在请求成功后**等库名变过来**（最多 60s）再丢掉本地缓存重新全量拉一遍（[useTimelineSettings.ts](../packages/nuxt-client/app/composables/useTimelineSettings.ts)）。手工 `curl` 触发重建时没有这一步，浏览器要手动重开页面或清掉该站点的 IndexedDB。
+- **现状**：[useTimelineSettings.rebuild()](../packages/nuxt-client/app/composables/useTimelineSettings.ts) 会在请求成功后**等库名变过来**（最多 60s）再丢掉本地缓存重新全量拉一遍（[useTimelineSettings.ts](../packages/nuxt-client/app/composables/useTimelineSettings.ts)）。手工 `curl` 触发重建时没有这一步，浏览器要手动重开页面或清掉该站点的 IndexedDB。
 - **别手工 `DELETE /<用户库>`**：那会连用户写的订阅/已读收藏一起删。要收缩数据用窗口设置（剪枝），要整体重来用重建接口。
 
 ### 升级后每个账号都"重建"了一次：v1 → v2 换库重搬
@@ -632,7 +632,7 @@ JS
 
 - **现象**：侧边栏同步弹层显示「云端库 379.8 MB · 3861 条 / 本站缓存 647.3 MB」，看起来像本地存了两份。
 - **原因**：两个数字口径不同，不该直接比。云端是 CouchDB `GET /{db}` 的 `sizes.external`（该库**活文档**的 JSON + 附件解码字节，不含墓碑、旧修订与视图索引，见 [useTimelineCloudInfo.ts](../packages/nuxt-client/app/composables/useTimelineCloudInfo.ts)）；本地是 `navigator.storage.estimate()` 的**整站**占用（所有 IndexedDB + Service Worker 缓存 + localStorage，见 [useStorageEstimate.ts](../packages/nuxt-client/app/composables/useStorageEstimate.ts)）。多出来的部分通常是：① PouchDB 不 compact 时旧修订正文与**已删除条目的附件**不会回收（服务端在裁剪/墓碑 GC 后会 compact，见 [couchdb/retention.ts](../packages/hono-server/src/couchdb/retention.ts)，本地这份此前没人压）；② 两个 map view 各建一个 `-mrview-` 库，条目再存一份列表投影；③ IndexedDB 物理占用（LevelDB + blob 文件）比逻辑字节大 10%~30%；④ SW 的页面/静态资源缓存；⑤ 本浏览器登录过的其它账号各留一份整库副本（本地库按账号隔离且「换回来还能离线读」）。
-- **现状与解法**：客户端会在同步空闲后按天 `compact()` 本地库（回收已删条目残留），设置页「数据 → 其它账号的本地缓存」可一键清掉用不到的账号副本；两项都不影响服务器数据。想核对具体占用，DevTools → Application → IndexedDB 里看 `_pouch_rssfed-timeline-*` 与 `-mrview-*` 各库；清站点数据会丢掉本地缓存并整库重新同步。
+- **现状与解法**：客户端会在同步空闲后按天 `compact()` 本地库（回收已删条目残留），设置弹窗「数据 → 其它账号的本地缓存」可一键清掉用不到的账号副本；两项都不影响服务器数据。想核对具体占用，DevTools → Application → IndexedDB 里看 `_pouch_rssfed-timeline-*` 与 `-mrview-*` 各库；清站点数据会丢掉本地缓存并整库重新同步。
 
 ### 同一浏览器换账号后，看到（并写进了）上一个账号的数据
 

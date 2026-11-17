@@ -36,7 +36,7 @@ export interface ReaderFont {
 export const DEFAULT_READER_FONT_ID: ReaderFontId = 'inherit'
 
 /**
- * 清单顺序即设置页里的选项顺序。
+ * 清单顺序即设置弹窗里的选项顺序。
  *
  * 字体栈里的族名按「目标平台优先、通用族收底」排：
  *  - macOS / iOS：Songti SC / Kaiti SC / PingFang SC
@@ -74,7 +74,7 @@ export function isReaderFontId(value: unknown): value is ReaderFontId {
   return typeof value === 'string' && FONTS_BY_ID.has(value)
 }
 
-/** 归一化：未知值 / undefined / 非字符串一律回退默认（不抛错，脏数据不该让设置页打不开） */
+/** 归一化：未知值 / undefined / 非字符串一律回退默认（不抛错，脏数据不该让设置打不开） */
 export function normalizeReaderFontId(value: unknown): ReaderFontId {
   return isReaderFontId(value) ? value : DEFAULT_READER_FONT_ID
 }
