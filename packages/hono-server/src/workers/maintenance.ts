@@ -12,6 +12,7 @@ import { envInt, formatDuration } from "../env"
 import { pauseDormantUsers } from "../services/timeline-lifecycle"
 import { readAdaptiveRetentionConfig, runAdaptiveRetention } from "../services/feed-retention"
 import { resumeSubscribedAutoPaused } from "../services/feed-orphans"
+import { orphanPolicy, sweepOrphanFeeds } from "../services/feed-orphan-sweep"
 
 const isTestProcess = process.env.VITEST === "true" || process.env.NODE_ENV === "test"
 
@@ -34,8 +35,19 @@ const DORMANT_SCAN_INTERVAL_MS = envInt("TIMELINE_DORMANT_SCAN_INTERVAL_MS", 86_
  */
 const ORPHAN_RESUME_INTERVAL_MS = envInt("FEED_ORPHAN_RESUME_INTERVAL_MS", 3_600_000, { min: 300_000 })
 
+/**
+ * 孤儿源自动清理的扫描周期（默认 6 小时）。
+ *
+ * 一天跑几轮而不是一天一轮：每轮只处理 BATCH_LIMIT 条，跑得勤一点才能把积压消化掉，
+ * 又不会因为一次全量处理把 DB 打满。真正的门槛是 orphanSince 上的天数，不是扫描频率。
+ */
+const ORPHAN_SWEEP_INTERVAL_MS = envInt("FEED_ORPHAN_SWEEP_INTERVAL_MS", 21_600_000, { min: 600_000 })
+
 let dormantInterval: ReturnType<typeof setInterval> | null = null
 let orphanResumeInterval: ReturnType<typeof setInterval> | null = null
+let orphanSweepInterval: ReturnType<typeof setInterval> | null = null
+/** 上一轮没跑完就不叠下一轮（一轮要扫所有用户库） */
+let orphanSweepRunning = false
 let retentionInterval: ReturnType<typeof setInterval> | null = null
 let retentionInitialTimer: ReturnType<typeof setTimeout> | null = null
 /** 上一轮还没跑完就不叠第二轮（一轮要扫几百个库，可能超过间隔） */
@@ -129,15 +141,52 @@ export function startTimelineMaintenance(): void {
       })
   }, ORPHAN_RESUME_INTERVAL_MS)
   orphanResumeInterval.unref?.()
+
+  // 孤儿源自动清理：标记 → 冷静期后暂停 → 再一段冷静期后删除。
+  // 门槛看的是 orphanSince 上的天数，所以这个频率只影响"多久检查一次"，不影响语义。
+  const policy = orphanPolicy()
+  if (policy.enabled) {
+    const describe = [
+      policy.pauseAfterDays > 0 ? `零订阅满 ${policy.pauseAfterDays} 天暂停` : "不自动暂停",
+      policy.deleteAfterDays > 0 ? `暂停满 ${policy.deleteAfterDays} 天删除` : "永不自动删除",
+    ].join("，")
+    console.log(`[FeedOrphans] 自动清理已启用（${describe}）：每 ${formatDuration(ORPHAN_SWEEP_INTERVAL_MS)} 扫描一轮`)
+    orphanSweepInterval = setInterval(() => {
+      if (orphanSweepRunning) return
+      orphanSweepRunning = true
+      void sweepOrphanFeeds()
+        .then((r) => {
+          if (r.aborted) {
+            console.warn(`[FeedOrphans] 本轮跳过：${r.reason}`)
+            return
+          }
+          if (r.marked || r.cleared || r.paused || r.deleted) {
+            console.log(
+              `[FeedOrphans] 标记=${r.marked} 清除=${r.cleared} `
+              + `暂停=${r.paused} 删除=${r.deleted} 跳过=${r.skipped}`,
+            )
+          }
+        })
+        .catch((err) => {
+          console.error("[FeedOrphans] 自动清理失败（下一轮继续）：", (err as Error)?.message ?? err)
+        })
+        .finally(() => { orphanSweepRunning = false })
+    }, ORPHAN_SWEEP_INTERVAL_MS)
+    orphanSweepInterval.unref?.()
+  } else {
+    console.log("[FeedOrphans] 自动清理已禁用（两个天数都是 0）")
+  }
 }
 
 export function shutdownTimelineMaintenance(): void {
   if (dormantInterval) clearInterval(dormantInterval)
   if (orphanResumeInterval) clearInterval(orphanResumeInterval)
+  if (orphanSweepInterval) clearInterval(orphanSweepInterval)
   if (retentionInterval) clearInterval(retentionInterval)
   if (retentionInitialTimer) clearTimeout(retentionInitialTimer)
   dormantInterval = null
   orphanResumeInterval = null
+  orphanSweepInterval = null
   retentionInterval = null
   retentionInitialTimer = null
 }

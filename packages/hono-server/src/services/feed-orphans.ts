@@ -56,6 +56,11 @@ export interface OrphanScanResult {
   alreadyPaused: number
   /** 判断过程中读用户库失败的次数（大于 0 时结果不可全信） */
   scanFailures: number
+  /**
+   * feedId → 零订阅起始时刻（未标记则为 null）。
+   * 单独用 Map 而不是塞进 orphans 数组：手动暂停要按冷静期过滤，需要按 id 查。
+   */
+  orphansWithSince: Map<string, Date | null>
 }
 
 /**
@@ -114,6 +119,7 @@ export async function scanOrphanFeeds(options: { limit?: number } = {}): Promise
     title: feeds.title,
     status: feeds.status,
     pausedBySystem: feeds.pausedBySystem,
+    orphanSince: feeds.orphanSince,
     lastFetchedAt: feeds.lastFetchedAt,
   }).from(feeds)
 
@@ -133,6 +139,7 @@ export async function scanOrphanFeeds(options: { limit?: number } = {}): Promise
     activeOrphans: orphans.filter((f) => f.status === "active").length,
     alreadyPaused: orphans.filter((f) => f.pausedBySystem === true).length,
     scanFailures: failures,
+    orphansWithSince: new Map(orphans.map((f) => [f.id, f.orphanSince ?? null])),
   }
 }
 
@@ -158,7 +165,7 @@ export interface PauseOrphansResult {
  *      578 个源 × N 个库的规模下太贵，而这一层保护针对的是"扫描结果已经过期"的极端情况，
  *      真正的即时性由订阅路径的自动恢复兜底）。
  */
-export async function pauseOrphanFeeds(options: { limit?: number } = {}): Promise<PauseOrphansResult> {
+export async function pauseOrphanFeeds(options: { limit?: number, ignoreGrace?: boolean } = {}): Promise<PauseOrphansResult> {
   const scan = await scanOrphanFeeds({ limit: options.limit ?? 2000 })
 
   if (scan.scanFailures > 0) {
@@ -170,7 +177,24 @@ export async function pauseOrphanFeeds(options: { limit?: number } = {}): Promis
     }
   }
 
-  const candidates = scan.orphans.filter((f) => f.status !== "paused")
+  // 默认**遵守冷静期**：只暂停"零订阅已持续 ≥ FEED_ORPHAN_PAUSE_AFTER_DAYS"的源。
+  // 不这样做的话，手动入口会绕过自动机制的保护 —— 管理员点一下就把刚被退订 5 分钟的源停了。
+  // 需要立刻处理时前端显式传 ignoreGrace（对应请求体 force: true）。
+  let pool = scan.orphans
+  if (!options.ignoreGrace) {
+    const graceDays = Number(process.env.FEED_ORPHAN_PAUSE_AFTER_DAYS ?? 7)
+    if (graceDays > 0) {
+      const cutoff = Date.now() - graceDays * 86_400_000
+      // 还没有 orphanSince 的源说明"本轮才第一次发现零订阅"，未满冷静期 → 不暂停
+      const withSince = scan.orphansWithSince
+      pool = scan.orphans.filter((f) => {
+        const since = withSince.get(f.id)
+        return since !== undefined && since !== null && since.getTime() <= cutoff
+      })
+    }
+  }
+
+  const candidates = pool.filter((f) => f.status !== "paused")
   if (candidates.length === 0) return { paused: 0, skipped: 0, aborted: false }
 
   const ids = candidates.map((f) => f.id)

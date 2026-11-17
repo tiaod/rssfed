@@ -181,10 +181,23 @@ describe("pauseOrphanFeeds", () => {
     state.feeds = [feed("f1"), feed("f2")]
     state.returnedRows = [{ id: "f1" }, { id: "f2" }]
 
-    const result = await pauseOrphanFeeds()
+    // 默认遵守冷静期（零订阅满 FEED_ORPHAN_PAUSE_AFTER_DAYS 才暂停），
+    // 这里显式 ignoreGrace 对应接口的 force:true（管理员确认立刻处理）
+    const result = await pauseOrphanFeeds({ ignoreGrace: true })
 
     expect(result.paused).toBe(2)
     expect(state.updates).toContainEqual({ status: "paused", pausedBySystem: true })
+  })
+
+  it("默认遵守冷静期：刚变成孤儿的源不会被手动入口立刻暂停", async () => {
+    state.users = []
+    // 没有 orphanSince = 本轮才第一次发现零订阅，未满冷静期
+    state.feeds = [feed("f1")]
+    state.returnedRows = [{ id: "f1" }]
+
+    const result = await pauseOrphanFeeds()
+
+    expect(result.paused).toBe(0)
   })
 
   it("扫描有失败时整体放弃（不能误暂停别人的源）", async () => {

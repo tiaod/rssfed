@@ -106,12 +106,30 @@ export function useApi() {
         alreadyPaused: number
         scanFailures: number
       }>(`${base}/api/feeds/orphans?limit=${limit}`),
-      /** 管理员：批量暂停零订阅孤儿源 */
-      pauseOrphans: (limit?: number) =>
+      /** 管理员：批量暂停零订阅孤儿源（默认遵守冷静期，force 才立即处理） */
+      pauseOrphans: (options: { limit?: number, force?: boolean } = {}) =>
         apiFetch<{ paused: number, skipped: number, aborted: boolean, reason?: string }>(
           `${base}/api/feeds/orphans/pause`,
-          { method: 'POST', body: { limit } }
+          { method: 'POST', body: options }
         ),
+      /** 管理员：孤儿源自动清理策略（多久后暂停 / 多久后删除） */
+      orphanPolicy: () => apiFetch<{
+        pauseAfterDays: number
+        deleteAfterDays: number
+        batchLimit: number
+        enabled: boolean
+      }>(`${base}/api/feeds/orphans/policy`),
+      /** 管理员：立刻跑一轮自动清理（等同于定时任务那一轮） */
+      sweepOrphans: () =>
+        apiFetch<{
+          marked: number
+          cleared: number
+          paused: number
+          deleted: number
+          skipped: number
+          aborted: boolean
+          reason?: string
+        }>(`${base}/api/feeds/orphans/sweep`, { method: 'POST' }),
       /** 管理员：恢复那些曾自动暂停、但现在确实有人订阅的源 */
       resumeOrphans: () =>
         apiFetch<{ resumed: number }>(`${base}/api/feeds/orphans/resume`, { method: 'POST' }),

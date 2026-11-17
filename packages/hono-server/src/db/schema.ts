@@ -292,6 +292,19 @@ export const timelineEvents = pgTable("timeline_events", {
    * 手动恢复时清成 null。这样"谁按的"永远是最新那个动作说了算。
    */
   pausedBySystem: boolean("paused_by_system"),
+  /**
+   * 这个源**第一次被观察到没有任何订阅者**的时刻（零订阅孤儿清理的自动机制用）。
+   *
+   * 为什么需要单独一列：全自动清理不能在"发现零订阅"的当下就暂停 —— 用户可能刚退订、
+   * 正在重新订阅，或者多设备的订阅同步还在路上。必须确认"零订阅**持续**了一段冷静期"。
+   * 而退订时会删掉 `timeline_source_sync` 的水位行（见 services/timeline.ts），
+   * 所以"最后一次订阅消失的时间"在库里没有任何记录，只能自己记。
+   *
+   * 语义：null = 当前有人订阅（或从未被判定为孤儿）。
+   * 一旦某轮扫描发现零订阅且该列是 null，就写入当前时间；之后每轮扫描都**不清零**，
+   * 于是 `now - orphanSince` 就是"已经没人要了多久"。重新出现订阅者时清回 null。
+   */
+  orphanSince: timestamp("orphan_since"),
   /** 关联的 CouchDB 库名（首次 ensure 时生成随机库名并回写） */
   couchDbName: text("couch_db_name").unique(),
   // ── 图片缓存 per-feed 策略（管理员可覆盖全局默认，见 rss/entry-images.ts） ──

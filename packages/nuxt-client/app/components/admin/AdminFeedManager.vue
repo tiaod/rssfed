@@ -220,9 +220,48 @@ interface OrphanItem {
   lastFetchedAt: string | null
 }
 
+/** 自动清理策略（后端环境变量决定：零订阅满 N 天暂停、暂停满 M 天删除） */
+const orphanPolicyInfo = ref<{
+  pauseAfterDays: number
+  deleteAfterDays: number
+  batchLimit: number
+  enabled: boolean
+} | null>(null)
+/** 「立即执行一轮」进行中 */
+const orphanSweeping = ref(false)
+
 async function openOrphans() {
   orphansOpen.value = true
+  void loadOrphanPolicy()
   await scanOrphans()
+}
+
+async function loadOrphanPolicy() {
+  try {
+    orphanPolicyInfo.value = await api.feeds.orphanPolicy()
+  } catch {
+    // 策略只影响说明文案，取不到就退化成不显示
+  }
+}
+
+/** 立刻跑一轮自动清理（等价于定时任务那一轮，不等待冷静期） */
+async function runOrphanSweep() {
+  orphanSweeping.value = true
+  try {
+    const r = await api.feeds.sweepOrphans()
+    toast.add({
+      title: '已执行一轮自动清理',
+      description: `标记 ${r.marked}、清除 ${r.cleared}、暂停 ${r.paused}、删除 ${r.deleted}`,
+      color: 'success'
+    })
+    await scanOrphans()
+    await load()
+  } catch (e: unknown) {
+    const err = e as { data?: { error?: string } }
+    toast.add({ title: '执行失败', description: err.data?.error ?? errorMessage(e), color: 'error' })
+  } finally {
+    orphanSweeping.value = false
+  }
 }
 
 async function scanOrphans() {
@@ -283,13 +322,18 @@ function onOrphanScroll(e: Event) {
   }
 }
 
-async function pauseAllOrphans() {
+async function pauseAllOrphans(force = false) {
   orphansPausing.value = true
   try {
-    const res = await api.feeds.pauseOrphans()
+    // 默认遵守冷静期：只暂停"零订阅已持续足够久"的源。force 才跳过（管理员看过名单后确认）
+    const res = await api.feeds.pauseOrphans({ force })
     toast.add({
       title: `已暂停 ${res.paused} 个孤儿源`,
-      description: res.skipped > 0 ? `跳过 ${res.skipped} 个（已暂停或刚被订阅）` : '有人订阅时自动恢复',
+      description: force
+        ? '已跳过冷静期，有人订阅时仍会自动恢复'
+        : (res.skipped > 0
+            ? `跳过 ${res.skipped} 个（尚未满冷静期或刚被订阅）；未满天数的源会在后续自动轮次处理`
+            : '有人订阅时自动恢复'),
       color: 'success'
     })
     await scanOrphans()
@@ -600,6 +644,31 @@ onMounted(load)
             管理员手动暂停的源不会被自动恢复。
           </p>
 
+          <UAlert
+            v-if="orphanPolicyInfo"
+            color="info"
+            variant="soft"
+            icon="i-lucide-clock"
+            title="自动清理规则"
+          >
+            <template #description>
+              <p class="text-xs">
+                <template v-if="orphanPolicyInfo.pauseAfterDays > 0">
+                  零订阅满 <strong>{{ orphanPolicyInfo.pauseAfterDays }}</strong> 天 → 自动暂停抓取；
+                </template>
+                <template v-else>不自动暂停；</template>
+                <template v-if="orphanPolicyInfo.deleteAfterDays > 0">
+                  自动暂停后再满 <strong>{{ orphanPolicyInfo.deleteAfterDays }}</strong> 天仍无人订阅 → 自动删除。
+                </template>
+                <template v-else>永不自动删除。</template>
+              </p>
+              <p class="mt-1 text-xs text-muted">
+                天数看的是「持续无人订阅」的时长，不是某一刻没人订阅——避免误伤刚退订、正在重新订阅，
+                或多设备同步尚未完成的源。删除前会再确认一次确实无人订阅。
+              </p>
+            </template>
+          </UAlert>
+
           <div
             v-if="orphanScan"
             class="rounded-lg border border-default px-3 py-2 text-sm"
@@ -689,12 +758,24 @@ onMounted(load)
           关闭
         </UButton>
         <UButton
-          color="primary"
-          :loading="orphansPausing"
-          :disabled="!orphanScan || orphanScan.activeOrphans === 0 || orphanScan.scanFailures > 0"
-          @click="pauseAllOrphans"
+          variant="outline"
+          color="neutral"
+          icon="i-lucide-play"
+          :loading="orphanSweeping"
+          title="立即执行一轮自动清理（标记新的孤儿、暂停满冷静期的、删除满期限的）"
+          @click="runOrphanSweep"
         >
-          {{ orphanScan && orphanScan.activeOrphans === 0 ? '没有在抓的孤儿源' : '暂停全部孤儿源' }}
+          立即执行一轮
+        </UButton>
+        <UButton
+          v-if="orphanScan && orphanScan.activeOrphans > 0 && orphanScan.scanFailures === 0"
+          variant="ghost"
+          color="error"
+          :loading="orphansPausing"
+          title="跳过冷静期，立刻暂停所有仍在抓的孤儿源（仅在确认名单后使用）"
+          @click="pauseAllOrphans(true)"
+        >
+          强制全部暂停
         </UButton>
       </template>
     </UModal>
