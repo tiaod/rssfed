@@ -23,6 +23,7 @@ import SettingsGeneralSection from '~/components/settings/SettingsGeneralSection
 import SettingsDataSection from '~/components/settings/SettingsDataSection.vue'
 import SettingsNav from '~/components/settings/SettingsNav.vue'
 import McpSetupPanel from '~/components/settings/McpSetupPanel.vue'
+import { useAppSidebar } from '~/composables/useAppSidebar'
 import {
   SETTINGS_SECTIONS,
   useSettingsModal,
@@ -30,6 +31,7 @@ import {
 } from '~/composables/useSettingsModal'
 
 const { isOpen, section, pane } = useSettingsModal()
+const { close: closeSidebar } = useAppSidebar()
 
 const current = computed(
   () => SETTINGS_SECTIONS.find(item => item.value === section.value) ?? SETTINGS_SECTIONS[0]!
@@ -78,8 +80,13 @@ const modalUi = {
  *
  * 必须显式先关弹窗：弹窗挂在 default 布局上（不在页面里），跳页不会卸载它，
  * 不关的话新页面上会继续盖着一层设置。
+ *
+ * 侧边栏也要一起收起。窄屏下这个入口常常是从抽屉里的用户菜单进来的：抽屉关不关
+ * 原本指望「路由变化」触发（UDashboardSidebar 的 autoClose），但已经在订阅管理页时
+ * 同址跳转不产生路由变化，抽屉就留在了展开状态。
  */
 async function openSubscriptions(closeModal: () => void): Promise<void> {
+  closeSidebar()
   closeModal()
   await navigateTo('/subscriptions')
 }

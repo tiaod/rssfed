@@ -3,6 +3,7 @@ import type { DropdownMenuItem } from '@nuxt/ui'
 // 显式导入：与 FeedNavigation 的 FeedIcon 一致，避免组件清单扫描不到时静默退化
 import SyncStatusIndicator from '~/components/SyncStatusIndicator.vue'
 // 显式导入：设置弹窗的状态在 composable 里（弹窗本体挂在布局上）
+import { useAppSidebar } from '~/composables/useAppSidebar'
 import { useSettingsModal } from '~/composables/useSettingsModal'
 
 const userStore = useUserStore()
@@ -11,6 +12,8 @@ const user = computed(() => userStore.user)
 const isAdmin = computed(() => userStore.isAdmin)
 // 设置由弹窗承载（见 composables/useSettingsModal），菜单项不跳页
 const { open: openSettings } = useSettingsModal()
+// 用户菜单在侧边栏里；窄屏下侧边栏是抽屉，打开设置前得先收起来，否则弹窗盖在抽屉上
+const { close: closeSidebar } = useAppSidebar()
 
 // 明暗主题偏好（system / light / dark），由 @nuxtjs/color-mode 写入 localStorage
 const colorMode = useColorMode()
@@ -45,7 +48,10 @@ const items = computed<DropdownMenuItem[][]>(() => {
         icon: 'i-lucide-settings',
         // 打开设置弹窗，不跳页：用户通常正读到一半，跳页会丢掉列表与滚动位置
         // （弹窗与入口不同组件树，状态见 composables/useSettingsModal）
-        onSelect: () => { openSettings() }
+        onSelect: () => {
+          closeSidebar()
+          openSettings()
+        }
       }
     ]
   ]

@@ -13,9 +13,14 @@ import SettingsModal from '../../components/settings/SettingsModal.vue'
 
 const H = vi.hoisted(() => ({
   close: vi.fn(),
+  closeSidebar: vi.fn(),
   openUpdates: vi.fn(),
   section: { value: 'general' },
   pane: { value: 'menu' }
+}))
+
+vi.mock('~/composables/useAppSidebar', () => ({
+  useAppSidebar: () => ({ isOpen: { value: false }, close: H.closeSidebar })
 }))
 
 vi.mock('~/composables/useSettingsModal', async () => {
@@ -155,6 +160,7 @@ describe('SettingsModal 的订阅管理入口', () => {
   beforeEach(() => {
     H.openUpdates.mockClear()
     H.close.mockClear()
+    H.closeSidebar.mockClear()
     vi.mocked(navigateTo).mockClear()
   })
 
@@ -176,6 +182,19 @@ describe('SettingsModal 的订阅管理入口', () => {
     expect(H.openUpdates).toHaveBeenCalledWith(false)
     expect(navigateTo).toHaveBeenCalledWith('/subscriptions')
     expect(H.openUpdates.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(navigateTo).mock.invocationCallOrder[0]!
+    )
+  })
+
+  it('跳页时一并收起侧边栏：窄屏从抽屉进来时，同址跳转不会触发路由的 autoClose', async () => {
+    const wrapper = mountModal()
+
+    await subscriptionEntry(wrapper)!.trigger('click')
+    await flushPromises()
+
+    expect(H.closeSidebar).toHaveBeenCalledTimes(1)
+    // 关侧边栏与关弹窗都要在跳转之前完成，否则跳完还盖着一层
+    expect(H.closeSidebar.mock.invocationCallOrder[0]).toBeLessThan(
       vi.mocked(navigateTo).mock.invocationCallOrder[0]!
     )
   })

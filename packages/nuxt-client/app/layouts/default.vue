@@ -44,7 +44,8 @@ onBeforeUnmount(() => {
   window.removeEventListener('resize', syncCompactSidebar)
 })
 
-const open = ref(false)
+// 侧边栏开合走 composable：设置弹窗里的「订阅管理」跳页时也要能把它关上（见 useAppSidebar）
+const { isOpen: open, close: closeSidebar } = useAppSidebar()
 // 通知入口暂时下线，恢复底部通知按钮时一并取消注释
 // const notificationsOpen = ref(false)
 
@@ -65,38 +66,38 @@ const navItems = computed<NavigationMenuItem[]>(() => {
       label: '主页',
       icon: 'i-lucide-rabbit',
       to: '/',
-      onSelect: () => { open.value = false }
+      onSelect: () => { closeSidebar() }
     },
     {
       label: '时间线',
       icon: 'i-lucide-activity',
       to: '/timeline',
-      onSelect: () => { open.value = false }
+      onSelect: () => { closeSidebar() }
     },
     {
       label: 'Bot 广场',
       icon: 'i-lucide-bot',
       to: '/bots/explore',
-      onSelect: () => { open.value = false }
+      onSelect: () => { closeSidebar() }
     },
     {
       label: '收藏',
       icon: 'i-lucide-star',
       to: '/saved',
-      onSelect: () => { open.value = false }
+      onSelect: () => { closeSidebar() }
     },
     {
       label: '最近阅读',
       icon: 'i-lucide-history',
       to: '/history',
-      onSelect: () => { open.value = false }
+      onSelect: () => { closeSidebar() }
     },
     // 订阅管理不进主导航：它是低频的整理类操作，入口留在设置弹窗左侧导航与账户页
     {
       label: '我的',
       icon: 'i-lucide-user',
       to: '/profile',
-      onSelect: () => { open.value = false }
+      onSelect: () => { closeSidebar() }
     }
   ]
 
@@ -106,7 +107,7 @@ const navItems = computed<NavigationMenuItem[]>(() => {
       label: '管理后台',
       icon: 'i-lucide-shield',
       to: '/admin',
-      onSelect: () => { open.value = false }
+      onSelect: () => { closeSidebar() }
     })
   }
 
