@@ -67,10 +67,10 @@ const STUBS = {
   },
   UButton: {
     name: 'Button',
-    props: ['label', 'icon', 'trailingIcon', 'ariaLabel'],
+    props: ['label', 'icon', 'trailingIcon', 'ariaLabel', 'color', 'variant'],
     emits: ['click'],
     template:
-      '<button :data-icon="icon" :data-trailing="trailingIcon" :aria-label="ariaLabel" @click="$emit(\'click\')"><slot>{{ label }}</slot></button>'
+      '<button :data-icon="icon" :data-trailing="trailingIcon" :data-color="color" :data-variant="variant" :aria-label="ariaLabel" @click="$emit(\'click\')"><slot>{{ label }}</slot></button>'
   },
   UIcon: { name: 'Icon', template: '<i />' },
   SettingsGeneralSection: { name: 'SettingsGeneralSection', template: '<div class="general" />' },
@@ -130,6 +130,27 @@ describe('SettingsModal 窄屏分区列表', () => {
     }
     // 列表页没有返回键（已经在顶层）
     expect(backButton(wrapper)).toBeUndefined()
+  })
+
+  it('列表行不标选中态：这一级只是入口，高亮一条会被读成「已选中」', () => {
+    H.section.value = 'general'
+    const wrapper = mountModal()
+
+    for (const label of ['常规', 'AI 助手', '数据']) {
+      const row = listRow(wrapper, label)!
+      // 与未选中的宽屏行是同一种 ghost 按钮，不带 soft 底色
+      expect(row.attributes('data-variant')).toBe('ghost')
+      expect(row.attributes('aria-current')).toBeUndefined()
+    }
+  })
+
+  it('宽屏竖栏仍标当前分区：高亮说明右边显示的是哪一块', () => {
+    // 默认分区是「常规」（mock 里的 section 固定在构建时取值，所以断言默认态）
+    const wrapper = mountModal()
+
+    expect(asideRow(wrapper, '常规')?.attributes('data-variant')).toBe('soft')
+    expect(asideRow(wrapper, '常规')?.attributes('aria-current')).toBe('page')
+    expect(asideRow(wrapper, '数据')?.attributes('data-variant')).toBe('ghost')
   })
 
   it('点一行进入该分区详情，左侧导航不参与窄屏这两级', async () => {

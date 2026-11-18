@@ -119,6 +119,9 @@ async function openSubscriptions(closeModal: () => void): Promise<void> {
           窄屏第一级：与宽屏竖栏同一个 SettingsNav，不另做一套视觉 ——
           同一个弹窗在两种宽度下应当看起来是同一个东西。
           这里只负责外壳（标题行 + 可滚动区）与「点了去哪」。
+
+          不传 active：这一级是入口而不是「当前分区」的指示器，高亮一条会被读成
+          「已选中 / 已开启」（截图里「常规」的灰底就是这个误会）。选中态只在宽屏竖栏有意义。
         -->
         <div
           v-if="pane === 'menu'"
@@ -141,7 +144,7 @@ async function openSubscriptions(closeModal: () => void): Promise<void> {
 
           <nav class="min-h-0 flex-1 overflow-y-auto px-2 pb-6">
             <SettingsNav
-              :active="section"
+              :active="null"
               @select="openSection"
               @subscriptions="openSubscriptions(closeModal)"
             />

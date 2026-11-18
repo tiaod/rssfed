@@ -6,13 +6,15 @@
  * 和宽屏的 ghost 按钮列表不是一回事，同一个弹窗在两种宽度下像两个产品。
  * 所以这里不接任何「长什么样」的参数，只接选中态与两个动作。
  *
- * 选中态只标当前分区（`aria-current="page"`）：窄屏从详情退回列表时，
- * 用户还能看出刚刚进的是哪一项。
+ * 选中态只给宽屏的竖栏：那里的列表是「正在显示的分区」，高亮说明右边是什么。
+ * 窄屏这一级只是入口，点一行就离开列表进详情，弹窗里没有一个「当前」可标 ——
+ * 带上高亮反而像「这一项已被选中 / 已开启」。所以窄屏的调用方传 `active={null}`，
+ * 这里不做宽度判断（判定交给调用方的 sm 断点，组件本身不需要读窗口宽度）。
  */
 import { SETTINGS_SECTIONS, type SettingsSection } from '~/composables/useSettingsModal'
 
 defineProps<{
-  /** 当前分区；为 null 时不标任何一项 */
+  /** 当前分区（只有宽屏竖栏传）；为 null 时不标任何一项 */
   active?: SettingsSection | null
 }>()
 
