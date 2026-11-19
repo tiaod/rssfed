@@ -54,9 +54,13 @@ environment:
 # 超时会被判为部署失败，所以给足。
 timeout: 300
 
-# 即使 compose 未变也去核对 registry 上的镜像 digest。
-# 本方案用不可变 sha tag，理论上引用变化即可触发；开着是冗余保险。
-force_image_pull: true
+# **不要**开成 true。它会让每轮轮询都去 registry 核对 digest，而本栈里
+# postgres/redis/rsshub 这些 `alpine`/`latest` 标签的本地镜像 `RepoDigests` 为空，
+# doco-cd 于是判成「deployed image has no digest」→ 栈永远「偏离」→ 每轮都
+# `docker compose up -d` 整栈重建（实测 24 小时内 `deploying stack` 24 次，
+# 每次新建容器，容器内 `docker.ini` 随之丢失；见 docs/troubleshooting.md 的 401 一条）。
+# 我们的镜像用不可变 `sha-` tag，git 变更本身已能可靠触发部署，核对 digest 是多余的一步。
+force_image_pull: false
 
 # 部署后清理不再被使用的旧镜像，避免每次发布都堆一份 700MB+ 的镜像。
 # 代价：回滚到较早版本时需要重新从 ghcr 拉取（tag 仍在，可行）。
