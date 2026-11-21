@@ -18,6 +18,8 @@ const H = vi.hoisted(() => ({
   load: vi.fn(async () => {}),
   loadMore: vi.fn(),
   clear: vi.fn(),
+  loadBackgroundSync: vi.fn(async () => {}),
+  clearBackgroundSync: vi.fn(),
   consumeTimelineLogIntent: vi.fn()
 }))
 
@@ -81,6 +83,16 @@ nuxtGlobals.useTimelineLog = () => ({
   clear: H.clear
 })
 
+nuxtGlobals.useBackgroundSyncLog = () => ({
+  events: ref([]),
+  summary: ref({ ok: 0, failed: 0, lastOkAt: null, supported: null }),
+  loading: ref(false),
+  clearing: ref(false),
+  loaded: ref(false),
+  load: H.loadBackgroundSync,
+  clear: H.clearBackgroundSync
+})
+
 const STUBS = {
   UCard: { template: '<div><slot /></div>' },
   UButton: {
@@ -103,6 +115,7 @@ async function mountSection() {
 
 beforeEach(() => {
   H.load.mockReset().mockResolvedValue(undefined)
+  H.loadBackgroundSync.mockReset().mockResolvedValue(undefined)
   H.consumeTimelineLogIntent.mockReset()
 })
 
@@ -134,5 +147,42 @@ describe('SettingsDataSection（设置 → 数据）', () => {
     expect(H.consumeTimelineLogIntent).toHaveBeenCalledTimes(2)
     expect(H.load).not.toHaveBeenCalled()
     expect(second.text()).not.toContain('刷新')
+  })
+})
+
+/**
+ * 后台同步面板（本机 IndexedDB 日志）。
+ *
+ * 与上面的服务端日志面板是两块独立面板，各自的折叠状态互不影响：
+ * 「查看同步日志」的意图只该展开服务端那份，不该顺手把本机那份也拉一遍。
+ */
+describe('SettingsDataSection → 后台同步面板', () => {
+  it('默认折叠，且挂载时不读本地日志', async () => {
+    H.consumeTimelineLogIntent.mockReturnValue(false)
+    await mountSection()
+
+    expect(H.loadBackgroundSync).not.toHaveBeenCalled()
+  })
+
+  it('「查看同步日志」的意图不会连带展开后台同步面板', async () => {
+    H.consumeTimelineLogIntent.mockReturnValue(true)
+    await mountSection()
+
+    expect(H.load).toHaveBeenCalledTimes(1)
+    expect(H.loadBackgroundSync).not.toHaveBeenCalled()
+  })
+
+  it('点「查看」才读一次本地日志', async () => {
+    H.consumeTimelineLogIntent.mockReturnValue(false)
+    const wrapper = await mountSection()
+
+    // 两个面板各有一个「查看」，后台同步那个是第二个
+    const viewButtons = wrapper.findAll('button').filter(b => b.text() === '查看')
+    expect(viewButtons.length).toBeGreaterThanOrEqual(2)
+
+    await viewButtons[viewButtons.length - 1]!.trigger('click')
+    await flushPromises()
+
+    expect(H.loadBackgroundSync).toHaveBeenCalledTimes(1)
   })
 })

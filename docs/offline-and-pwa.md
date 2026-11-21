@@ -60,6 +60,33 @@
 
 实现见 `app/utils/backgroundSync.ts`（登记 + 消息）与 `public/sw.js` 末尾的 `sync` 监听。
 
+#### 怎么确认它到底触发没触发
+
+Background Sync 的整个生命周期都在页面视野之外（页面关着时浏览器照样派发 `sync` 事件），
+所以**必须自己记日志**，否则「没触发」和「触发了但没成功」完全无法区分。日志落在浏览器
+IndexedDB 的 `rssfed-background-sync-log` 库，在**设置 → 数据 →「后台同步」**里看。
+
+之所以不复用服务端那份「同步日志」（`timeline_events`）：那份记的是「服务端聚合干了什么」。
+后台同步没触发时它永远是安静的——因为聚合根本没被催到，这恰恰是最容易误判的情形。
+
+记录的事件（`app/utils/backgroundSyncLog.ts` 的 `BackgroundSyncEventKind`）：
+
+| kind | 含义 |
+| --- | --- |
+| `unsupported` | 浏览器没有 `registration.sync`（Safari/iOS、Firefox、非安全上下文） |
+| `armed` | 登记成功，等浏览器在恢复联网后触发 |
+| `arm-failed` | 登记被拒（隐私模式 / 用户关了后台同步） |
+| `sync-start` | SW 真的收到了 `sync` 事件（**这条才是「触发了」的证据**） |
+| `sync-ok` | 那次 `POST /api/timeline/refresh` 成功 |
+| `sync-failed` | 请求失败，或没登录（401/403，不重试） |
+
+**`public/sw.js` 里有一份独立实现**，它不能 `import` TS 模块（`public/` 下的静态文件不经打包）。
+两边共用库名 / store 名 / 保留条数 / kind 字符串这些数据形状，改任一处都要同步改另一处——
+`app/__tests__/utils/backgroundSyncLog.sw.test.ts` 会从 `sw.js` 源码里抠出这些字面量做比对，
+漂移了会直接测试失败（否则会静默写进两个库，面板只显示一半事件）。
+
+日志是**纯旁路**：`appendBackgroundSyncEvent` 承诺永不抛，写不进去（隐私模式、配额满）就静默放弃。
+
 ## PWA（安装到手机）
 
 站点可以装到手机主屏幕。应用名、图标、主题色全部取自管理员的「站点设置」，改配置不需要改代码或重新构建。

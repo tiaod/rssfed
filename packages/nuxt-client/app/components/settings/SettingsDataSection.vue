@@ -19,6 +19,12 @@ import {
   timelineEventColor,
   timelineEventLabel
 } from '~/utils/timelineLog'
+import {
+  backgroundSyncEventColor,
+  backgroundSyncEventLabel,
+  formatBackgroundSyncData,
+  formatBackgroundSyncTime
+} from '~/utils/backgroundSyncLogFormat'
 
 const userStore = useUserStore()
 const toast = useToast()
@@ -153,6 +159,27 @@ const {
   load: loadTimelineLog, loadMore: loadMoreTimelineLog, clear: clearTimelineLog
 } = useTimelineLog()
 const timelineLogOpen = ref(false)
+
+/**
+ * 后台同步日志（本机 IndexedDB，见 utils/backgroundSyncLog）。
+ *
+ * 与上面那份服务端日志分开成两块面板：一份说「服务端做了什么」，一份说「浏览器做了
+ * 什么」。排查「后台同步没触发」时前者永远是安静的 —— 因为聚合根本没被催到。
+ */
+const {
+  events: backgroundSyncEvents,
+  summary: backgroundSyncSummary,
+  loading: backgroundSyncLoading,
+  clearing: backgroundSyncClearing,
+  load: loadBackgroundSyncLog,
+  clear: clearBackgroundSyncLog
+} = useBackgroundSyncLog()
+const backgroundSyncOpen = ref(false)
+
+async function openBackgroundSyncLog(): Promise<void> {
+  backgroundSyncOpen.value = true
+  await loadBackgroundSyncLog()
+}
 
 /** 展开并（首次）拉取；已展开时再点是「刷新」 */
 async function openTimelineLog(): Promise<void> {
@@ -423,6 +450,108 @@ onMounted(() => {
             </li>
           </ul>
         </details>
+      </div>
+    </UCard>
+
+    <!--
+      后台同步：数据源与本机 IndexedDB 里的日志一致，但记的是「浏览器到底有没有在后台
+      唤醒 SW」—— 页面关着时也会写。它是回答「我的后台同步触发了吗」的唯一入口。
+      同样默认折叠：登记与触发都在后台发生，没有主动查看的必要。
+    -->
+    <UCard>
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <p class="text-sm font-medium">
+            后台同步
+          </p>
+          <p class="mt-1 text-xs text-muted">
+            断网时页面会登记一次后台同步，浏览器恢复联网后在后台唤醒 Service Worker 催服务端聚合（即使页面关着）。这里记的是本机发生的事：有没有登记成功、浏览器有没有真的触发、那一次请求的结果。只有 Chromium 系支持，Safari/iOS 与 Firefox 不会触发。
+          </p>
+        </div>
+        <UButton
+          v-if="!backgroundSyncOpen"
+          color="neutral"
+          variant="ghost"
+          size="sm"
+          icon="i-lucide-radio-tower"
+          label="查看"
+          @click="openBackgroundSyncLog"
+        />
+      </div>
+
+      <div
+        v-if="backgroundSyncOpen"
+        class="mt-3 space-y-3"
+      >
+        <div class="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted">
+          <span v-if="backgroundSyncSummary.supported === false">本浏览器不支持 Background Sync</span>
+          <span v-else-if="backgroundSyncSummary.supported === true">浏览器支持</span>
+          <span v-else>还没登记过</span>
+          <span>成功 {{ backgroundSyncSummary.ok }} 次</span>
+          <span
+            v-if="backgroundSyncSummary.failed > 0"
+            class="text-error"
+          >失败 {{ backgroundSyncSummary.failed }} 次</span>
+          <span>最近成功 {{ formatSince(backgroundSyncSummary.lastOkAt) }}</span>
+        </div>
+
+        <div class="flex flex-wrap gap-2">
+          <UButton
+            color="neutral"
+            variant="ghost"
+            size="sm"
+            icon="i-lucide-refresh-cw"
+            label="刷新"
+            :loading="backgroundSyncLoading"
+            @click="loadBackgroundSyncLog"
+          />
+          <UButton
+            color="neutral"
+            variant="ghost"
+            size="sm"
+            icon="i-lucide-eraser"
+            label="清空"
+            :loading="backgroundSyncClearing"
+            @click="clearBackgroundSyncLog"
+          />
+        </div>
+
+        <p
+          v-if="backgroundSyncEvents.length === 0 && !backgroundSyncLoading"
+          class="text-xs text-muted"
+        >
+          还没有记录。断网一次、再恢复联网，浏览器触发后台同步后这里就会出现记录。
+        </p>
+
+        <ul
+          v-else
+          class="max-h-60 space-y-1.5 overflow-y-auto pr-1"
+        >
+          <li
+            v-for="event in backgroundSyncEvents"
+            :key="event.id"
+            class="flex items-start gap-2 text-xs"
+          >
+            <span class="shrink-0 font-mono text-muted tabular-nums">
+              {{ formatBackgroundSyncTime(event.at) }}
+            </span>
+            <UBadge
+              :color="backgroundSyncEventColor(event.kind)"
+              variant="subtle"
+              size="xs"
+              class="shrink-0"
+            >
+              {{ backgroundSyncEventLabel(event.kind) }}
+            </UBadge>
+            <span class="min-w-0 break-words">
+              {{ event.message }}
+              <span
+                v-if="formatBackgroundSyncData(event.data)"
+                class="text-muted"
+              >· {{ formatBackgroundSyncData(event.data) }}</span>
+            </span>
+          </li>
+        </ul>
       </div>
     </UCard>
 

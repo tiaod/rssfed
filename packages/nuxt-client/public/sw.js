@@ -114,12 +114,101 @@ const BACKGROUND_SYNC_TAG = 'rssfed-sync'
 const BACKGROUND_SYNC_DONE = 'BACKGROUND_SYNC_DONE'
 const TIMELINE_REFRESH_URL = '/api/timeline/refresh'
 
-async function runBackgroundSync() {
+/**
+ * 后台同步的本地日志（与 app/utils/backgroundSyncLog.ts 同一套库名/字段）。
+ *
+ * 为什么 SW 里要单独写一份而不是 import 那个模块：本文件是 public/ 下的静态 JS，
+ * 不经过打包，`import` 一个 TS 模块在运行时根本不存在。两边共用的是**数据形状**
+ * （库名、store、kind 字符串），改任一处都要同步改另一处。
+ *
+ * 为什么要记：Background Sync 的整个生命周期都在页面视野之外 —— 页面关着时浏览器照样会
+ * 派发 sync 事件，而「到底有没有派发、POST 拿到几号状态码」用户完全无从得知。
+ * 这是唯一能回答「我的后台同步到底有没有触发」的地方。
+ */
+const SYNC_LOG_DB = 'rssfed-background-sync-log'
+const SYNC_LOG_STORE = 'events'
+const SYNC_LOG_KEEP = 200
+
+/** 追加一条同步日志。永不抛：写日志失败绝不能影响同步本身 */
+async function logBackgroundSync(kind, message, data) {
+  try {
+    const db = await new Promise((resolve, reject) => {
+      const request = indexedDB.open(SYNC_LOG_DB, 1)
+      request.onupgradeneeded = () => {
+        const opened = request.result
+        if (!opened.objectStoreNames.contains(SYNC_LOG_STORE)) {
+          opened.createObjectStore(SYNC_LOG_STORE, { keyPath: 'id', autoIncrement: true })
+        }
+      }
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error ?? new Error('open failed'))
+      request.onblocked = () => reject(new Error('blocked'))
+    })
+
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(SYNC_LOG_STORE, 'readwrite')
+      tx.oncomplete = () => resolve()
+      tx.onerror = () => reject(tx.error ?? new Error('tx failed'))
+      tx.onabort = () => reject(tx.error ?? new Error('tx aborted'))
+      tx.objectStore(SYNC_LOG_STORE).add({
+        at: new Date().toISOString(),
+        kind,
+        message,
+        ...(data ? { data } : {}),
+      })
+    })
+
+    // 裁剪：超过上限就删最旧的。放在写入路径上是因为 SW 里没有可靠的定时器
+    const count = await new Promise((resolve, reject) => {
+      const tx = db.transaction(SYNC_LOG_STORE, 'readonly')
+      const request = tx.objectStore(SYNC_LOG_STORE).count()
+      request.onsuccess = () => resolve(request.result)
+      request.onerror = () => reject(request.error ?? new Error('count failed'))
+    })
+    if (count > SYNC_LOG_KEEP) {
+      await new Promise((resolve) => {
+        const tx = db.transaction(SYNC_LOG_STORE, 'readwrite')
+        tx.oncomplete = () => resolve()
+        tx.onerror = () => resolve()
+        const request = tx.objectStore(SYNC_LOG_STORE).openCursor()
+        let deleted = 0
+        const excess = count - SYNC_LOG_KEEP
+        request.onsuccess = () => {
+          const cursor = request.result
+          if (!cursor || deleted >= excess) return
+          cursor.delete()
+          deleted += 1
+          cursor.continue()
+        }
+      })
+    }
+    db.close()
+  } catch {
+    // 静默放弃
+  }
+}
+
+async function runBackgroundSync(lastChance) {
+  await logBackgroundSync('sync-start', lastChance ? '浏览器触发了后台同步（最后一次机会）' : '浏览器触发了后台同步')
   const res = await fetch(TIMELINE_REFRESH_URL, { method: 'POST', credentials: 'include' })
   // 401/403 是「没登录 / 登录过期」：重试多少次都是同一个结果，别让浏览器反复唤醒
-  if (res.status === 401 || res.status === 403) return
+  if (res.status === 401 || res.status === 403) {
+    await logBackgroundSync('sync-failed', `后台同步未登录（HTTP ${res.status}），不再重试`, { status: res.status })
+    return
+  }
   // 其余非 2xx 一律当作这次没成功，交给浏览器退避重试
-  if (!res.ok) throw new Error(`[SW] 后台同步失败（HTTP ${res.status}）`)
+  if (!res.ok) {
+    await logBackgroundSync(
+      'sync-failed',
+      lastChance
+        ? `后台同步失败（HTTP ${res.status}），浏览器已放弃重试`
+        : `后台同步失败（HTTP ${res.status}），浏览器会退避重试`,
+      { status: res.status }
+    )
+    throw new Error(`[SW] 后台同步失败（HTTP ${res.status}）`)
+  }
+
+  await logBackgroundSync('sync-ok', '后台同步完成，服务端已聚合一轮')
 
   // 页面可能开着（被冻结）：告诉它服务端已经聚合过一轮，走与 online 相同的恢复路径
   const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' })
@@ -128,7 +217,10 @@ async function runBackgroundSync() {
 
 self.addEventListener('sync', (event) => {
   if (event.tag !== BACKGROUND_SYNC_TAG) return
-  event.waitUntil(runBackgroundSync())
+  // lastChance 为真表示浏览器已经决定「这次再失败就不再重试」。只把它作为文案传给
+  // runBackgroundSync，**不在这里单独记一条** —— 那样即使这次成功了，面板上也会留下
+  // 一条「浏览器将不再重试」，读起来像是失败了
+  event.waitUntil(runBackgroundSync(event.lastChance === true))
 })
 
 /** 网络优先：成功就顺手更新缓存，失败读缓存；都没有则返回 503 JSON */

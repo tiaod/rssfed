@@ -1,3 +1,5 @@
+import { errorMessage } from '~/utils/errorMessage'
+import { appendBackgroundSyncEvent } from '~/utils/backgroundSyncLog'
 import { isBrowserOffline, notifyNetworkRecovered } from '~/utils/networkState'
 
 /**
@@ -66,12 +68,28 @@ export async function armBackgroundSync(): Promise<boolean> {
   const registration = await getRegistration()
   // 没有 registration（开发环境主动注销了 SW、或注册失败）或没有 sync（Safari/Firefox）
   const sync = registration?.sync
-  if (!sync) return false
+  if (!sync) {
+    // 记下来：这是「我的后台同步为什么从来没触发」最常见的答案，
+    // 而且不记的话，面板上「什么都没发生」和「日志没工作」长得一模一样
+    void appendBackgroundSyncEvent(
+      'unsupported',
+      registration
+        ? '浏览器不支持 Background Sync（Safari/iOS、Firefox 均无），恢复联网后由页面自己同步'
+        : 'Service Worker 未注册，无法登记后台同步'
+    )
+    return false
+  }
   try {
     // 同一个 tag 重复登记是幂等的：浏览器合并成一个待触发任务，不会排出一串
     await sync.register(BACKGROUND_SYNC_TAG)
+    void appendBackgroundSyncEvent('armed', '已登记后台同步，等浏览器在恢复联网后触发')
     return true
-  } catch {
+  } catch (err) {
+    void appendBackgroundSyncEvent(
+      'arm-failed',
+      '登记后台同步被拒（隐私模式或后台同步被关闭）',
+      { error: errorMessage(err) }
+    )
     return false
   }
 }

@@ -196,3 +196,72 @@ describe('SW 消息', () => {
     expect(recovered).toHaveBeenCalledTimes(1)
   })
 })
+
+/**
+ * 登记路径要往本地日志里留下痕迹。
+ *
+ * 这组用例的意义在于：Background Sync 不触发时，用户唯一能查的就是这个面板。
+ * 如果「不支持」和「被拒」都不记，面板上会是一片空白 —— 而空白既可能是「没发生过」，
+ * 也可能是「记日志的代码没跑」，排查时会直接卡住。
+ */
+describe('登记时写本地日志', () => {
+  beforeEach(() => {
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    Reflect.deleteProperty(navigator, 'serviceWorker')
+    Reflect.deleteProperty(navigator, 'onLine')
+  })
+
+  /** 拦下 appendBackgroundSyncEvent，只关心调用参数 */
+  async function spyAppend() {
+    const log = await import('~/utils/backgroundSyncLog')
+    return vi.spyOn(log, 'appendBackgroundSyncEvent')
+  }
+
+  it('登记成功记 armed', async () => {
+    stubServiceWorker({ sync: { register: vi.fn().mockResolvedValue(undefined) } })
+    const { armBackgroundSync } = await loadBackgroundSync()
+    const spy = await spyAppend()
+
+    await armBackgroundSync()
+    // 日志是 fire-and-forget，给它一个回合
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(spy.mock.calls.some(([kind]) => kind === 'armed')).toBe(true)
+  })
+
+  it('浏览器没有 sync 记 unsupported（而不是静默返回 false）', async () => {
+    stubServiceWorker({})
+    const { armBackgroundSync } = await loadBackgroundSync()
+    const spy = await spyAppend()
+
+    await armBackgroundSync()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(spy.mock.calls.some(([kind]) => kind === 'unsupported')).toBe(true)
+  })
+
+  it('登记被拒记 arm-failed，并带上原因', async () => {
+    stubServiceWorker({ sync: { register: vi.fn().mockRejectedValue(new Error('denied')) } })
+    const { armBackgroundSync } = await loadBackgroundSync()
+    const spy = await spyAppend()
+
+    await armBackgroundSync()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    const call = spy.mock.calls.find(([kind]) => kind === 'arm-failed')
+    expect(call).toBeDefined()
+    expect(call![2]).toMatchObject({ error: 'denied' })
+  })
+
+  it('联网时不登记，也不写日志（否则每次进页面都多一条噪音）', async () => {
+    stubServiceWorker({ sync: { register: vi.fn().mockResolvedValue(undefined) } })
+    stubOnline(true)
+    const { armBackgroundSyncIfOffline } = await loadBackgroundSync()
+    const spy = await spyAppend()
+
+    await armBackgroundSyncIfOffline()
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(spy).not.toHaveBeenCalled()
+  })
+})
