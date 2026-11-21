@@ -6,6 +6,9 @@
  *   2. 页面导航走「网络优先」，断网时回退到缓存过的同路径 HTML，再回退到离线外壳 /offline；
  *   3. 少量只读接口（条目、站点配置、文件、会话）走「网络优先 + 落缓存」，断网时读缓存。
  *
+ * 外加一个 Background Sync 监听（见文件末尾）：断网期间页面登记了 tag，恢复联网后由浏览器
+ * 唤醒它催一次服务端聚合。它不碰缓存，也不做数据复制。
+ *
  * 缓存名带构建号（__BUILD_ID__ 在构建时被替换）：新版本装好并激活后旧缓存整体删除，
  * 避免旧 HTML 去引用已被删除的旧 chunk。
  *
@@ -89,6 +92,43 @@ self.addEventListener('activate', (event) => {
 // 页面确认可以更新后，激活等待中的新 SW（随后页面会收到 controllerchange 并刷新）
 self.addEventListener('message', (event) => {
   if (event.data?.type === 'SKIP_WAITING') void self.skipWaiting()
+})
+
+/**
+ * Background Sync：断网期间页面登记了这个 tag，浏览器在恢复联网后把 SW 唤醒。
+ *
+ * 这里只催服务端聚合（一个 202 就返回的 POST），**不**在 SW 里跑 PouchDB 复制。
+ * 不是做不到（PouchDB 的 idb/http 适配器在 SW 里能跑），而是代价不值得：
+ *   - 写进 IndexedDB 后页面不知道：PouchDB 的 changes 靠 localStorage 的 storage 事件唤醒，
+ *     那个事件不投递给 SW。复制完了开着的列表也不会更新，除非再搭一条 BroadcastChannel 通知链；
+ *   - 页面往往也开着，两边各挂一条 live 复制写同一个库的 checkpoint，PouchDB 没有跨上下文互斥；
+ *   - sync 事件只给几十秒、可被随时掐断，半路停下时 waitUntil 既不 resolve 也不 reject，
+ *     浏览器判断不了成败，重试语义就乱了。
+ * 服务端本来就每 5 分钟给所有非休眠用户跑一轮（TIMELINE_INTERVAL），这一下只是把用户
+ * 断网期间错过的那一轮提前。派生库写好之后，页面下次打开 live 复制一次就补齐。
+ *
+ * 失败要**抛出去**（= 让 event.waitUntil 的 Promise reject）：那是浏览器自己的重试信号，
+ * 它按指数退避再试。吞掉异常等于「这次断网白登记了」，而下次断网可能很久以后。
+ */
+const BACKGROUND_SYNC_TAG = 'rssfed-sync'
+const BACKGROUND_SYNC_DONE = 'BACKGROUND_SYNC_DONE'
+const TIMELINE_REFRESH_URL = '/api/timeline/refresh'
+
+async function runBackgroundSync() {
+  const res = await fetch(TIMELINE_REFRESH_URL, { method: 'POST', credentials: 'include' })
+  // 401/403 是「没登录 / 登录过期」：重试多少次都是同一个结果，别让浏览器反复唤醒
+  if (res.status === 401 || res.status === 403) return
+  // 其余非 2xx 一律当作这次没成功，交给浏览器退避重试
+  if (!res.ok) throw new Error(`[SW] 后台同步失败（HTTP ${res.status}）`)
+
+  // 页面可能开着（被冻结）：告诉它服务端已经聚合过一轮，走与 online 相同的恢复路径
+  const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' })
+  for (const client of clients) client.postMessage({ type: BACKGROUND_SYNC_DONE })
+}
+
+self.addEventListener('sync', (event) => {
+  if (event.tag !== BACKGROUND_SYNC_TAG) return
+  event.waitUntil(runBackgroundSync())
 })
 
 /** 网络优先：成功就顺手更新缓存，失败读缓存；都没有则返回 503 JSON */

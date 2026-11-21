@@ -1,7 +1,9 @@
+import { armBackgroundSyncIfOffline, initBackgroundSync } from '~/utils/backgroundSync'
+
 /**
  * 注册 Service Worker（见 public/sw.js），让站点在断网后仍能打开。
  *
- * 只做两件事：注册、以及在检测到新版本时提示用户刷新。
+ * 只做三件事：注册、在检测到新版本时提示用户刷新、挂上 Background Sync 的登记/消息。
  * 不自动 skipWaiting —— 新版 SW 一激活就会清掉旧缓存，若此时页面还在用旧 chunk 会直接白屏。
  */
 export default defineNuxtPlugin(() => {
@@ -68,6 +70,10 @@ export default defineNuxtPlugin(() => {
           }
         })
       })
+
+      // SW 装好了：首次访问时 initBackgroundSync 的登记取不到 registration 而落空，
+      // 这里补一次（只在断网时真的登记，见 utils/backgroundSync）
+      void armBackgroundSyncIfOffline()
     }).catch((error) => {
       console.warn('[SW] 注册失败，离线能力不可用', error)
     })
@@ -83,4 +89,10 @@ export default defineNuxtPlugin(() => {
   } else {
     window.addEventListener('load', register, { once: true })
   }
+
+  // Background Sync（Chromium 专有）：断网时登记，恢复联网后由 SW 催一次服务端聚合。
+  // 不支持的环境里 initBackgroundSync 静默降级，同步仍由页面自己的 online 监听负责。
+  // 放在注册之前调用：它在「当前就已经断网」时会立刻登记一次，不必等 SW 装好
+  // （getRegistration 取不到就返回 false，下一次 offline 事件还会再试）。
+  initBackgroundSync()
 })

@@ -17,6 +17,23 @@ const onlineListeners = new Set<() => void>()
 let onlineBound = false
 
 /**
+ * 广播一次「现在可以同步了」。
+ *
+ * 两个触发源：页面的 `online` 事件，以及 Service Worker 在后台同步跑完后发来的消息
+ * （见 utils/backgroundSync）。后者不能省：页面被冻结或关掉的那段时间网络可能已经恢复过，
+ * 而 `online` 事件不保证在解冻后补发，SW 的消息才是「确实通了」的确切信号。
+ */
+export function notifyNetworkRecovered(): void {
+  for (const fn of onlineListeners) {
+    try {
+      fn()
+    } catch {
+      // 单个订阅者出错不影响其它订阅者（退避清理是尽力而为的）
+    }
+  }
+}
+
+/**
  * 订阅「浏览器恢复联网」。
  *
  * 恢复联网是**必须**清掉各种退避的时刻：用户明明已经连上了还要等退避窗口走完，
@@ -28,13 +45,5 @@ export function onBrowserOnline(listener: () => void): void {
   // 只在真的挂上监听之后才记「已注册」：SSR 阶段（没有 window）不挂，浏览器端才能补挂
   if (onlineBound || typeof window === 'undefined') return
   onlineBound = true
-  window.addEventListener('online', () => {
-    for (const fn of onlineListeners) {
-      try {
-        fn()
-      } catch {
-        // 单个订阅者出错不影响其它订阅者（退避清理是尽力而为的）
-      }
-    }
-  })
+  window.addEventListener('online', notifyNetworkRecovered)
 }

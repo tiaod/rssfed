@@ -33,6 +33,33 @@
 - **favicon 不进预缓存、也不走缓存优先**：`/favicon.ico` 由后端按站点配置动态生成（见下），
   SW 对该路径直接放行，否则换图标后永远读到构建期的静态图。
 
+### Background Sync：关着页面也在同步（仅 Chromium）
+
+断网期间页面登记一个 tag（`rssfed-sync`），浏览器在**恢复联网**后把 SW 唤醒。它买到的是
+「关着页面也在同步」，但同步动作**不在 SW 里做**：
+
+- **SW 只做一件事**：`POST /api/timeline/refresh`（即发即忘的 202）催服务端聚合一轮。
+  服务端本来就每 5 分钟给所有非休眠用户跑一轮（`TIMELINE_INTERVAL`），这一下只是把用户
+  断网期间错过的那一轮提前。派生库写好之后，页面下次打开 live 复制一次就补齐。
+- **不在 SW 里跑 PouchDB 复制**。不是做不到——PouchDB 的 idb/http 适配器在 SW 里能跑
+  （不碰 `window`/`document`，http 适配器用 fetch + `credentials: 'include'`）。是三条代价：
+  1. **写进去了页面也不知道**：PouchDB 的 changes 靠 localStorage 的 `storage` 事件唤醒，
+     而那个事件不投递给 SW。复制完开着的列表不刷新，用户看到「网回来了但内容还是旧的」；
+  2. **两个上下文同时复制同一个库**：SW 醒来时页面往往也开着，各挂一条 live 复制各写
+     各的 checkpoint，PouchDB 内部没有跨上下文互斥；
+  3. **`sync` 事件不保证跑完**：只给几十秒且可随时掐断。分批 checkpoint 让进度能续
+     （`finishBatch` 每批写一次），但被掐断时 `waitUntil` 既不 resolve 也不 reject，
+     浏览器判断不了成败，重试语义就乱了。
+- **失败要抛**（让 `event.waitUntil` 的 Promise reject），那是浏览器自己的指数退避重试信号；
+  401/403 例外——没登录重试多少次都是同一个结果，直接放弃。
+- **只在断网时登记**：联网时登记会被立刻触发一次，等于每进一次页面白唤醒一次 SW。
+- **不支持就静默降级**：`registration.sync` 在 Safari/iOS、Firefox 上不存在，且必须是安全上下文。
+  这些环境下页面自己的 `online` 监听照旧负责同步（见 `app/utils/networkState.ts`），
+  两条路径最终汇到同一个恢复动作。SW 跑完还会给开着的页面发 `BACKGROUND_SYNC_DONE`，
+  走的是同一条恢复路径——页面被冻结期间 `online` 事件不保证补发，这条消息才是「确实通了」。
+
+实现见 `app/utils/backgroundSync.ts`（登记 + 消息）与 `public/sw.js` 末尾的 `sync` 监听。
+
 ## PWA（安装到手机）
 
 站点可以装到手机主屏幕。应用名、图标、主题色全部取自管理员的「站点设置」，改配置不需要改代码或重新构建。
