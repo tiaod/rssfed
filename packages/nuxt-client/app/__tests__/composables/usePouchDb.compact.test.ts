@@ -46,6 +46,11 @@ vi.mock('pouchdb', () => {
     close = async () => {}
     destroy = async () => {}
     allDocs = async () => ({ rows: [] })
+    // 空闲维护现在先跑一遍裁剪（见 utils/localTrim）：这里让它查不到任何源，
+    // 于是裁剪直接记个时间戳收工，不干扰本文件要验的「压缩时机」
+    query = async () => ({ rows: [] })
+    put = async () => ({ ok: true })
+    bulkDocs = async () => []
   }
   function makeTask(url: string, direction: 'pull' | 'push') {
     const listeners = new Map<string, Set<(arg: unknown) => void>>()

@@ -12,6 +12,7 @@ import { computeRemainingMs } from '~/utils/syncEta'
 import type { EtaBase } from '~/utils/syncEta'
 import {
   lastTimelineCompactKey,
+  lastTimelineTrimKey,
   lastTimelineUrlKey,
   localDbName,
   lastTimelineRefreshKey,
@@ -20,7 +21,8 @@ import {
   isLegacyLocalStorageKey,
   stripPouchNamePrefix
 } from '~/utils/localDbName'
-import { COMPACT_IDLE_DELAY_MS, shouldCompactNow } from '~/utils/localCompact'
+import { COMPACT_IDLE_DELAY_MS, shouldCompactNow, shouldTrimNow } from '~/utils/localCompact'
+import { chunkIds, excludeSaved, selectFeedsToTrim } from '~/utils/localTrim'
 import { mapWithLimit } from '~/utils/concurrency'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
 import { isListView, type ListView } from '~/utils/listViews'
@@ -474,10 +476,10 @@ const STATE_PUSH_ID = '__state_push__'
  *   - `entry:*` / `feed:*`：服务端聚合产物。推上去也会被服务端的 validate_doc_update 拒掉，
  *     但那样每次同步都白跑一趟并刷出 403，不如在源头就过滤掉。
  *
- * **按 `_id` 前缀判断，不能只按 `type`**：删除文档只剩 `_id` 与 `_deleted`，`type` 是 undefined，
- * `doc.type !== 'entry'` 会把它判成「可写」而推上去。服务端取的是 `oldDoc.type`
+ * **按 `_id` 前缀判断，不能按 `type`**：删除文档只剩 `_id` 与 `_deleted`，`type` 是 undefined，
+ * `doc.type !== 'entry'` 会判成「可写」而把条目墓碑推上去。服务端那边取的是 `oldDoc.type`
  * （见 hono-server 的 TIMELINE_VALIDATE_DOC_UPDATE），所以不会真的删掉服务端的条目，
- * 但每个条目墓碑都会白跑一趟并换回一个 403。
+ * 但本地裁剪（utils/localTrim）每删一批条目就会推一批必然被 403 的墓碑，日志里全是噪声。
  *
  * 传函数而不是设计文档名：push 的源库是本机 PouchDB，PouchDB 在本地求值过滤函数
  *（远端设计文档形式只适用于「源是远端」的拉取方向）。真正的安全边界不在这里，
@@ -967,6 +969,170 @@ export function usePouchDb() {
     cancelIdleCompact()
   }
 
+  // ── 空闲裁剪：删掉「已退订的源」留在本地的条目 ──
+  //
+  // 服务端裁剪用 `_purge`，而被 purge 的文档**不进 `_changes`** —— 浏览器永远收不到
+  // 「这条没了」的通知，于是本地这份只增不减（`compact()` 回收不了活文档的字节）。
+  // 退订一个源之后，它的条目在本地就成了无主数据：服务端不会再送，本地也不会删，
+  // 而且因为本地视图不按订阅集合过滤（见 utils/localViews），它们**还会出现在时间线上**。
+  //
+  // 只裁退订源的条目，不做「每源留 N 条」：理由见 utils/localTrim 的头注释。
+  // 收藏的条目即使来自退订源也保住（收藏是用户的明确意图）。
+
+  /** 上次裁剪完成的时间戳（localStorage，按账号隔离） */
+  function loadLastTrimmedAt(): number {
+    try {
+      return Number(localStorage.getItem(lastTimelineTrimKey(pouchState.dbUserId))) || 0
+    } catch {
+      return 0
+    }
+  }
+
+  function saveLastTrimmedAt(at: number): void {
+    try {
+      localStorage.setItem(lastTimelineTrimKey(pouchState.dbUserId), String(at))
+    } catch {
+      // localStorage 不可用时忽略：最坏结果是每次空闲都裁一遍（没有可删的就只读几个源）
+    }
+  }
+
+  /**
+   * 本地视图里出现过的源 id（含已退订的）。
+   *
+   * 用 `by_feed` 视图而不是扫 `_all_docs`：全库扫会把每条带正文的文档整份读进内存，
+   * 而这个视图只要 `include_docs: false`，回来的就只有 key（`[feedId, ms, id]`）——
+   * 一个源几十条、几百个源也就几百 KB，一次读完比分页省事（`skip` 在 PouchDB 里是
+   * O(偏移量)，深翻反而更慢）。
+   */
+  async function listLocalFeedIds(db: PouchDBBrowser.Database): Promise<string[]> {
+    const res = await db.query(BY_FEED_VIEW, { reduce: false, include_docs: false })
+    const seen = new Set<string>()
+    for (const row of res.rows as Array<{ key?: unknown }>) {
+      const key = row.key
+      if (Array.isArray(key) && typeof key[0] === 'string') seen.add(key[0])
+    }
+    return [...seen]
+  }
+
+  /** 本地订阅集合（只读 `subscription:` 前缀，不解析内容） */
+  async function listSubscribedFeedIds(db: PouchDBBrowser.Database): Promise<Set<string>> {
+    const res = await db.allDocs({
+      include_docs: true,
+      startkey: 'subscription:',
+      endkey: 'subscription:\uffff'
+    })
+    const ids = new Set<string>()
+    for (const row of res.rows as Array<{ doc?: { feedId?: unknown } }>) {
+      const feedId = row.doc?.feedId
+      if (typeof feedId === 'string' && feedId) ids.add(feedId)
+    }
+    return ids
+  }
+
+  /** 收藏过的条目 id（`saved === true`），裁剪时无条件跳过 */
+  async function listSavedEntryIds(db: PouchDBBrowser.Database): Promise<Set<string>> {
+    const res = await db.allDocs({
+      include_docs: true,
+      startkey: 'entry-state:',
+      endkey: 'entry-state:\uffff'
+    })
+    const ids = new Set<string>()
+    for (const row of res.rows as Array<{ doc?: { saved?: unknown, entryId?: unknown } }>) {
+      const doc = row.doc
+      if (doc?.saved === true && typeof doc.entryId === 'string' && doc.entryId) ids.add(doc.entryId)
+    }
+    return ids
+  }
+
+  /**
+   * 删掉某个源在本地留下的全部条目（保留收藏过的）。
+   *
+   * 退订时**立即**调用：本地视图不按订阅集合过滤，不删的话退订之后那些文章还会挂在时间线上
+   *（见 utils/localTrim 的头注释）。空闲裁剪是兜底，负责收拾历史遗留与漏网的情况。
+   *
+   * 返回真正删掉的条数。逐源读 `by_feed` 全桶（一个源受服务端保留策略约束，最多几十条），
+   * 比按前缀扫 `_all_docs` 精确，也不会把别的东西卷进来。
+   */
+  async function deleteFeedEntries(db: PouchDBBrowser.Database, feedId: string): Promise<number> {
+    const rows = (await db.query(BY_FEED_VIEW, {
+      reduce: false,
+      include_docs: true,
+      startkey: [feedId],
+      endkey: [feedId, {}]
+    })).rows as Array<{ doc?: { _id?: string, _rev?: string } }>
+    const candidates = rows
+      .map(row => row.doc)
+      .filter((doc): doc is { _id: string, _rev: string } =>
+        typeof doc?._id === 'string' && typeof doc._rev === 'string')
+    if (candidates.length === 0) return 0
+
+    const saved = await listSavedEntryIds(db)
+    const trimmable = new Set(excludeSaved(candidates.map(c => c._id), saved))
+    const byId = new Map(
+      candidates.filter(c => trimmable.has(c._id)).map(c => [c._id, c._rev])
+    )
+    let deleted = 0
+    for (const chunk of chunkIds([...byId.keys()])) {
+      const res = await db.bulkDocs(
+        chunk.map(id => ({ _id: id, _rev: byId.get(id), _deleted: true }))
+      )
+      // 单条 409/404 不算失败（并发同步改过、或已被删掉），下一轮自然收敛
+      deleted += (res as Array<{ ok?: boolean }>).filter(r => r?.ok).length
+    }
+    return deleted
+  }
+
+  /**
+   * 真正执行裁剪（空闲兜底）。
+   *
+   * 只做本地库维护：不碰同步状态、不递增 version —— 删掉的都是已退订源的条目，
+   * 而时间线本来就该看不见它们。删完之后必须 `compact()`，否则标准删除只留下墓碑，
+   * 字节一个都还不回来。
+   *
+   * 失败只是这轮白跑（下一轮空闲会再试），不打扰用户。
+   */
+  async function runIdleTrim(): Promise<void> {
+    const db = pouchState.entriesDb
+    const status = syncStatuses[TIMELINE_ID]
+    const should = shouldTrimNow({
+      now: Date.now(),
+      lastTrimmedAt: loadLastTrimmedAt(),
+      syncing: status?.status === 'syncing' || status?.status === 'queued',
+      paused: pouchState.paused.value,
+      storageBroken: pouchState.storageBroken.value !== null,
+      hasDb: db !== null
+    })
+    if (!should || !db) return
+
+    try {
+      await ensureLocalViews()
+      const [localFeedIds, subscribed] = await Promise.all([
+        listLocalFeedIds(db),
+        listSubscribedFeedIds(db)
+      ])
+      const doomed = selectFeedsToTrim(localFeedIds, subscribed)
+      if (doomed.length === 0) {
+        // 没有退订源：只记时间戳，省得每次空闲都重扫一遍源清单
+        saveLastTrimmedAt(Date.now())
+        return
+      }
+
+      let deleted = 0
+      for (const feedId of doomed) deleted += await deleteFeedEntries(db, feedId)
+
+      if (deleted > 0) {
+        await db.compact()
+        // 顺带记上「刚压过」：否则紧接着的 runIdleCompact 会按自己的日节流再压一遍全库
+        saveLastCompactedAt(Date.now())
+        console.info(`[PouchDB] 本地裁剪完成：删除 ${deleted} 条已退订源的条目并压缩`)
+      }
+      saveLastTrimmedAt(Date.now())
+    } catch (e: unknown) {
+      // 裁剪失败不影响使用（下一轮空闲会再试），不打扰用户
+      console.warn('[PouchDB] 本地裁剪失败，稍后再试：', errorMessage(e))
+    }
+  }
+
   // ── 空闲压缩：回收「云端已经回收、本地却一直留着」的字节 ──
   //
   // PouchDB 只有 compact 才会删除旧修订正文与不再被引用的附件（见 utils/localCompact 的说明）。
@@ -1001,12 +1167,23 @@ export function usePouchDb() {
     pouchState.compactTimer = null
   }
 
-  /** 排一次「空闲后压缩」：已排上的先取消再重排，保证计时从最后一次复制活动算起 */
+  /**
+   * 排一次「空闲后维护」：裁剪 + 压缩，都在同步安静下来之后跑。
+   *
+   * 裁剪排在压缩**之前**：压缩是把「已删的字节」真正还回去，先删后压才有意义；
+   * 反过来先压一遍、再删一批，等于刚还回去的又欠上。
+   *
+   * 两者各自按自己的间隔节流（裁剪一小时、压缩一天），所以这里两个都排上，
+   * 由 `runIdleTrim` / `runIdleCompact` 内部的闸门决定谁真的跑。
+   */
   function scheduleIdleCompact(): void {
     cancelIdleCompact()
     pouchState.compactTimer = setTimeout(() => {
       pouchState.compactTimer = null
-      void runIdleCompact()
+      void (async () => {
+        await runIdleTrim()
+        await runIdleCompact()
+      })()
     }, COMPACT_IDLE_DELAY_MS)
   }
 
@@ -2573,6 +2750,24 @@ export function usePouchDb() {
     pouchState.subscriptionsVersion.value += 1
     // 订阅集合变了，下次同步重新取寻址信息（服务端已删掉对应库名映射）
     invalidateTargets()
+
+    // 立刻把这个源的条目从本地删掉（收藏的除外）。
+    // 不删的话它们会一直挂在时间线上：本地视图的 key 只有 `[ms, _id]`，不看订阅集合，
+    // 而服务端也**不会**再通知这些条目消失（它是用 `_purge` 裁的，purge 不进 `_changes`）。
+    // 删除失败不影响退订本身（订阅文档已经删了），残留交给空闲裁剪兜底。
+    try {
+      const db = await getEntriesDb()
+      await ensureLocalViews()
+      const deleted = await deleteFeedEntries(db, feedId)
+      if (deleted > 0) {
+        // 紧跟着压一次：标准删除只留墓碑，不压的话字节还占着
+        await db.compact()
+        saveLastCompactedAt(Date.now())
+        console.info(`[PouchDB] 退订清理：删除 ${deleted} 条「${feedId}」的本地条目`)
+      }
+    } catch (e: unknown) {
+      console.warn('[PouchDB] 退订清理本地条目失败，交给空闲裁剪：', errorMessage(e))
+    }
   }
 
   /**
