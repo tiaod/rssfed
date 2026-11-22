@@ -1004,7 +1004,7 @@ export function usePouchDb() {
    * 一个源几十条、几百个源也就几百 KB，一次读完比分页省事（`skip` 在 PouchDB 里是
    * O(偏移量)，深翻反而更慢）。
    */
-  async function listLocalFeedIds(db: PouchDBBrowser.Database): Promise<string[]> {
+  async function listLocalFeedIds(db: PouchDB.Database): Promise<string[]> {
     const res = await db.query(BY_FEED_VIEW, { reduce: false, include_docs: false })
     const seen = new Set<string>()
     for (const row of res.rows as Array<{ key?: unknown }>) {
@@ -1015,7 +1015,7 @@ export function usePouchDb() {
   }
 
   /** 本地订阅集合（只读 `subscription:` 前缀，不解析内容） */
-  async function listSubscribedFeedIds(db: PouchDBBrowser.Database): Promise<Set<string>> {
+  async function listSubscribedFeedIds(db: PouchDB.Database): Promise<Set<string>> {
     const res = await db.allDocs({
       include_docs: true,
       startkey: 'subscription:',
@@ -1030,7 +1030,7 @@ export function usePouchDb() {
   }
 
   /** 收藏过的条目 id（`saved === true`），裁剪时无条件跳过 */
-  async function listSavedEntryIds(db: PouchDBBrowser.Database): Promise<Set<string>> {
+  async function listSavedEntryIds(db: PouchDB.Database): Promise<Set<string>> {
     const res = await db.allDocs({
       include_docs: true,
       startkey: 'entry-state:',
@@ -1053,7 +1053,7 @@ export function usePouchDb() {
    * 返回真正删掉的条数。逐源读 `by_feed` 全桶（一个源受服务端保留策略约束，最多几十条），
    * 比按前缀扫 `_all_docs` 精确，也不会把别的东西卷进来。
    */
-  async function deleteFeedEntries(db: PouchDBBrowser.Database, feedId: string): Promise<number> {
+  async function deleteFeedEntries(db: PouchDB.Database, feedId: string): Promise<number> {
     const rows = (await db.query(BY_FEED_VIEW, {
       reduce: false,
       include_docs: true,
