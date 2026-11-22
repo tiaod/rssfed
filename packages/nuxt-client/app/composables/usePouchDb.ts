@@ -469,17 +469,25 @@ const STATE_PUSH_ID = '__state_push__'
 /**
  * 回写通道的过滤函数：只推客户端可写的文档。
  *
- * 挡掉两类：
+ * 挡掉三类：
  *   - `_design/*`：本地库里的视图/索引设计文档（客户端自己装的），服务端既不需要也不允许写；
- *   - `entry` / `feed`：服务端聚合产物。推上去也会被服务端的 validate_doc_update 拒掉，
+ *   - `entry:*` / `feed:*`：服务端聚合产物。推上去也会被服务端的 validate_doc_update 拒掉，
  *     但那样每次同步都白跑一趟并刷出 403，不如在源头就过滤掉。
+ *
+ * **按 `_id` 前缀判断，不能只按 `type`**：删除文档只剩 `_id` 与 `_deleted`，`type` 是 undefined，
+ * `doc.type !== 'entry'` 会把它判成「可写」而推上去。服务端取的是 `oldDoc.type`
+ * （见 hono-server 的 TIMELINE_VALIDATE_DOC_UPDATE），所以不会真的删掉服务端的条目，
+ * 但每个条目墓碑都会白跑一趟并换回一个 403。
  *
  * 传函数而不是设计文档名：push 的源库是本机 PouchDB，PouchDB 在本地求值过滤函数
  *（远端设计文档形式只适用于「源是远端」的拉取方向）。真正的安全边界不在这里，
  * 而在服务端的 validate_doc_update —— 客户端改得了自己的过滤函数，改不了服务端的闸门。
  */
 function isClientWritableDoc(doc: { _id?: string, type?: string }): boolean {
-  if (doc._id?.startsWith('_design/')) return false
+  const id = doc._id ?? ''
+  if (id.startsWith('_design/')) return false
+  // 前缀是权威判据（删除文档也适用）；`type` 只是补充，兼容早期没有规范前缀的存量文档
+  if (id.startsWith('entry:') || id.startsWith('feed:')) return false
   return doc.type !== 'entry' && doc.type !== 'feed'
 }
 
