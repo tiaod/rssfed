@@ -48,3 +48,23 @@ export function findScrollableDescendant(root: HTMLElement | null): HTMLElement 
 export function resolveScrollContainer(anchor: HTMLElement | null): HTMLElement | null {
   return findScrollableDescendant(anchor) ?? findScrollParent(anchor)
 }
+
+/**
+ * 把承载列表的滚动容器滚回顶部：点了「查看」或「刷新」就是要看最新的一批。
+ *
+ * 找不到滚动容器时才轮到 window（见上面的说明：这套面板布局里页面本身通常不滚）。
+ * 滚动失败不影响数据上屏，一律吞掉。
+ */
+export function scrollListToTop(anchor: HTMLElement | null): void {
+  if (typeof window === 'undefined') return
+  try {
+    const scroller = resolveScrollContainer(anchor)
+    if (scroller) {
+      scroller.scrollTo({ top: 0, behavior: 'smooth' })
+    } else {
+      window.scrollTo({ top: 0, behavior: 'smooth' })
+    }
+  } catch {
+    // 滚动失败不影响数据上屏
+  }
+}

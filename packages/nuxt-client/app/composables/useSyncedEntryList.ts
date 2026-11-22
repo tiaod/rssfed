@@ -1,6 +1,6 @@
 import { computed, watch } from 'vue'
 import type { RssEntry } from '~/types/rss'
-import { resolveScrollContainer } from '~/utils/scrollContainer'
+import { scrollListToTop } from '~/utils/scrollContainer'
 
 export interface UseSyncedEntryListOptions {
   /** 按窗口大小查询本地集中库（时间线 / 单源 / 分组 / bot 产出各不同） */
@@ -236,25 +236,5 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
     refreshFromSync,
     applyNew,
     applyNewIfSyncAddedNothing
-  }
-}
-
-/**
- * 应用待更新后回到列表顶部（点了「查看」就是要看它）。
- *
- * 列表是自己滚的（EntryList 的 UScrollArea 在锚点子树里），不是页面级滚动，所以要靠
- * resolveScrollContainer 先在子树里找；它返回 null 才说明真的轮到 window。
- */
-function scrollListToTop(anchor: HTMLElement | null) {
-  if (typeof window === 'undefined') return
-  try {
-    const scroller = resolveScrollContainer(anchor)
-    if (scroller) {
-      scroller.scrollTo({ top: 0, behavior: 'smooth' })
-    } else {
-      window.scrollTo({ top: 0, behavior: 'smooth' })
-    }
-  } catch {
-    // 滚动失败不影响数据上屏
   }
 }
