@@ -24,7 +24,7 @@ const error = ref<string | null>(null)
 // 读的内容推走。时间线页就是全部订阅源，所以计数用全库口径（不传 feedIds）；
 // 单源 / 分组 / bot 页要把范围限定成自己那些源（见 usePouchDb.syncedEntryCount）。
 const {
-  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew,
+  entries, newCount, hasMore, listAnchorRef, applying, load, grow, refreshFromSync, applyNew,
   applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   query: limit => pouch.queryTimeline(limit),
@@ -150,6 +150,7 @@ watch(pouch.timelineVersion, () => refreshFromSync())
               floating
               :count="newCount"
               :visible="bannerVisible"
+              :loading="applying"
               @apply="applyNew"
             />
 

@@ -423,3 +423,75 @@ describe('useSyncedEntryList', () => {
     }
   })
 })
+
+/**
+ * 「查看」的加载态标记。
+ *
+ * 页面把它接到提示条上（NewEntriesBanner 的 loading），让那一次会卡几百毫秒的本地查询
+ * 有可见反馈。要盯两件事：它在整段查询期间都为真（不能早于查询返回就熄掉，否则转圈只闪
+ * 一帧），以及任何一条路径（包括查询抛错）都要收回来——按钮永远转下去比没有加载态更糟。
+ */
+describe('useSyncedEntryList：点「查看」的加载态', () => {
+  it('默认不在加载态', () => {
+    const list = useSyncedEntryList({ query: async () => [] })
+    expect(list.applying.value).toBe(false)
+  })
+
+  it('查询在途时为真，返回后收起来', async () => {
+    let release: (rows: RssEntry[]) => void = () => {}
+    const list = useSyncedEntryList({
+      query: () => new Promise<RssEntry[]>((resolve) => { release = resolve })
+    })
+
+    const pending = list.applyNew()
+    // 查询还没返回：这一刻必须已经亮着（用户就是在这段时间里「点了没反应」）
+    expect(list.applying.value).toBe(true)
+
+    release([makeEntry('a')])
+    await pending
+    expect(list.applying.value).toBe(false)
+  })
+
+  it('查询抛错也要收回加载态：不能让按钮永远转下去', async () => {
+    const list = useSyncedEntryList({
+      query: async () => { throw new Error('IndexedDB 抖了一下') }
+    })
+
+    await expect(list.applyNew()).rejects.toThrow('IndexedDB 抖了一下')
+    expect(list.applying.value).toBe(false)
+  })
+
+  it('手动同步后顺手展开也走同一段加载态（它也调 applyNew）', async () => {
+    let release: (rows: RssEntry[]) => void = () => {}
+    const docs = syncedCounter(0)
+    const list = useSyncedEntryList({
+      query: () => new Promise<RssEntry[]>((resolve) => { release = resolve }),
+      syncedDocs: docs.docs
+    })
+    // 基线是构造时取的值（0），同步之后才有待查看条目 —— 否则这个入口会直接返回
+    docs.count.value = 3
+
+    const pending = list.applyNewIfSyncAddedNothing({
+      added: 0, failed: 0, storageBroken: false
+    })
+    expect(list.applying.value).toBe(true)
+
+    release([makeEntry('a')])
+    await pending
+    expect(list.applying.value).toBe(false)
+  })
+
+  it('首屏 load 不点亮它：那是骨架屏的语义，后台刷新不该让按钮闪', async () => {
+    let release: (rows: RssEntry[]) => void = () => {}
+    const list = useSyncedEntryList({
+      query: () => new Promise<RssEntry[]>((resolve) => { release = resolve })
+    })
+
+    const pending = list.load()
+    expect(list.applying.value).toBe(false)
+
+    release([makeEntry('a')])
+    await pending
+    expect(list.applying.value).toBe(false)
+  })
+})

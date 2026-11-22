@@ -54,12 +54,21 @@ const props = withDefaults(
      * 因外部原因（如滚动方向）临时隐藏：为 false 时按「无新条目」折叠，过渡与焦点处理完全一致。
      */
     visible?: boolean
+    /**
+     * 「查看」的查询还在跑：按钮切成加载态，提示条在这段时间里保持展开。
+     *
+     * 这一次查询是本地库唯一会明显卡顿的查询 —— PouchDB 的视图索引是懒的，同步攒下的积压
+     * 要在这里现场补进索引（实测落后两千条时 880ms），期间没有任何反馈的话，用户会以为点了
+     * 一下没反应，往往再点一次。
+     */
+    loading?: boolean
   }>(),
   {
     // 必须显式声明默认值：Vue 会把**未传的 Boolean prop 填成 false**，靠 `visible !== false`
     // 兜底是错的——时间线 / 分类页 / Bot 产出页只传 count，会被整体折叠掉。
     floating: false,
-    visible: true
+    visible: true,
+    loading: false
   }
 )
 
@@ -67,7 +76,24 @@ const emit = defineEmits<{
   apply: []
 }>()
 
-const expanded = computed(() => props.count > 0 && props.visible)
+/**
+ * 展开条件里带上 `loading`：查询在途时 `count` 可能已经归零（基线在查询返回时就对齐了），
+ * 若只认 count，加载态会在按钮刚亮起来的同一帧被折叠掉 —— 用户看到的是「点了一下，
+ * 提示条消失，然后列表停住不动」，比没有加载态更让人困惑。
+ *
+ * `visible` 同理：滚动方向可能在这一刻把整条收起（例如点之前用户正往下滚），
+ * 而正在进行的加载必须让人看见。加载态结束就恢复常规判断，没有额外状态要清。
+ */
+const expanded = computed(() => props.loading || (props.count > 0 && props.visible))
+
+/**
+ * 左侧文案：平时报条数；只在「加载中且已经没条数可报」时改成进度话术。
+ * 不在加载时一律写「正在加载」—— 条数本身仍是有用的信息，而按钮上的转圈已经说明在忙了。
+ */
+const label = computed(() => {
+  if (props.loading && props.count === 0) return '正在载入'
+  return `已同步 ${props.count} 条`
+})
 
 /**
  * 点「查看」：先把焦点还给页面，再交给列表去刷新。
@@ -116,13 +142,14 @@ function handleApply(event?: MouseEvent) {
             class="size-3.5 text-primary"
           />
           <span class="text-sm text-primary">
-            已同步 {{ props.count }} 条
+            {{ label }}
           </span>
           <UButton
             label="查看"
             color="primary"
             variant="soft"
             size="xs"
+            :loading="props.loading"
             @click="handleApply"
           />
         </div>

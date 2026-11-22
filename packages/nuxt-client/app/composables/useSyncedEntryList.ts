@@ -1,4 +1,4 @@
-import { computed, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import { scrollListToTop } from '~/utils/scrollContainer'
 
@@ -197,9 +197,28 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
     if (kept.length !== entries.value.length) entries.value = kept
   }
 
+  /**
+   * 「用户点了查看、列表还没换成最新」——提示条据此把自己切成加载态。
+   *
+   * 为什么需要：这次查询是本地库唯一会「卡一下」的查询。PouchDB 的视图索引是懒的，同步
+   * 攒下的积压要在这一刻现场补进索引（实测落后两千条时 880ms），期间界面毫无反馈 ——
+   * 用户看到的是点了一下没反应，多半再点一次。有了这个标记，按钮能立刻变成转圈。
+   *
+   * 不用 load 里的 loading：那是首屏语义（骨架屏认它），而这里必须包住整次点击的等待，
+   * 且只有用户主动触发时才该亮 —— 后台同步永远不动列表，也就不该让按钮闪。
+   */
+  const applying = ref(false)
+
   /** 用户点「查看」：重新从本地库加载最新数据，并回到列表顶部 */
   async function applyNew(): Promise<void> {
-    await load()
+    applying.value = true
+    try {
+      await load()
+    } finally {
+      // load 内部会把查询异常吞成空结果，这里仍用 finally：任何一条抛出路径都不能让按钮
+      // 永远停在转圈上（那比没有加载态更糟 —— 用户会以为列表再也换不动了）
+      applying.value = false
+    }
     scrollListToTop(listAnchorRef.value)
   }
 
@@ -231,6 +250,7 @@ export function useSyncedEntryList(options: UseSyncedEntryListOptions) {
     newCount,
     hasMore,
     listAnchorRef,
+    applying,
     load,
     grow,
     refreshFromSync,

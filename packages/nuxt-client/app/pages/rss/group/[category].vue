@@ -33,7 +33,7 @@ const groupFeedIds = computed(() => groupFeeds.value.map(feed => feed.id))
 // 条目数据与同步刷新策略：同步只把新数据拉到本地并累计成「已同步 N 条」提示，一个字都不动
 // 列表；用户点「查看」才重新查一次本地库、整体换成最新并回到顶部（见 useSyncedEntryList）。
 const {
-  entries, newCount, hasMore, listAnchorRef, load, grow, refreshFromSync, applyNew,
+  entries, newCount, hasMore, listAnchorRef, applying, load, grow, refreshFromSync, applyNew,
   applyNewIfSyncAddedNothing
 } = useSyncedEntryList({
   // 从集中库查询该分组所有订阅源的条目，并补充分组内 feed 标题便于列表展示来源
@@ -161,6 +161,7 @@ watch(pouch.timelineVersion, () => refreshFromSync())
           floating
           :count="newCount"
           :visible="bannerVisible"
+          :loading="applying"
           @apply="applyNew"
         />
 

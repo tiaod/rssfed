@@ -19,9 +19,11 @@ const STUBS = {
   UIcon: { name: 'UIcon', props: ['name'], template: '<i class="icon" />' },
   UButton: {
     name: 'UButton',
-    props: ['label'],
+    // loading 必须声明：不声明的话 Vue 会把它当成普通 attribute 落到根元素上，
+    // 断言就成了「有没有渲染这个属性」，而不是「组件真的拿到了加载态」
+    props: ['label', 'loading'],
     emits: ['click'],
-    template: '<button class="view-btn" @click="$emit(\'click\', $event)">{{ label }}</button>'
+    template: '<button class="view-btn" :data-loading="loading" @click="$emit(\'click\', $event)">{{ label }}</button>'
   }
 }
 
@@ -31,7 +33,8 @@ const Host = defineComponent({
   props: {
     count: { type: Number, default: 0 },
     floating: { type: Boolean, default: false },
-    visible: { type: Boolean, default: true }
+    visible: { type: Boolean, default: true },
+    loading: { type: Boolean, default: false }
   },
   emits: ['apply'],
   template: `
@@ -40,6 +43,7 @@ const Host = defineComponent({
         :count="count"
         :floating="floating"
         :visible="visible"
+        :loading="loading"
         @apply="$emit('apply')"
       />
       <div class="list"><div class="filler" /></div>
@@ -210,5 +214,74 @@ describe('NewEntriesBanner', () => {
     await wrapper!.setProps({ visible: true })
     expect(bannerEl().className).toContain('grid-rows-[1fr]')
     expect(bannerEl().getAttribute('aria-hidden')).toBeNull()
+  })
+})
+
+/**
+ * 「查看」的加载态。
+ *
+ * 这一次查询是本地库唯一会明显卡顿的查询（PouchDB 的视图索引是懒的，同步攒下的积压要
+ * 在现场补进索引，实测落后两千条时 880ms）。加载态要解决的就是这段时间里的「点了没反应」，
+ * 所以除了按钮转圈，还得保证提示条**不会在查询途中消失**——否则用户看到的是
+ * 「点一下，提示条没了，列表停住」，比没有加载态更困惑。
+ */
+describe('NewEntriesBanner：点「查看」后的加载态', () => {
+  const btn = () => wrapper!.find('.view-btn')
+
+  it('加载中：按钮进加载态（交给 UButton 的 loading，而不是自己画个转圈）', async () => {
+    mountBanner(3, { loading: true })
+
+    expect(btn().attributes('data-loading')).toBe('true')
+  })
+
+  it('加载中即使条数已归零也保持展开：加载态不能在同一帧被折叠掉', async () => {
+    // 真实时序：applyNew 里 load() 先把基线对齐，count 立刻归零，查询还要再跑几百毫秒
+    mountBanner(0, { loading: true })
+
+    expect(bannerEl().className).toContain('grid-rows-[1fr]')
+    expect(bannerEl().className).toContain('opacity-100')
+    expect(bannerEl().getAttribute('aria-hidden')).toBeNull()
+    expect(bannerEl().hasAttribute('inert')).toBe(false)
+    // 浮层形态下收起会挂 pointer-events-none，加载中必须能点（其实是被 UButton 自己禁用的）
+    expect(bannerEl().className).not.toContain('pointer-events-none')
+  })
+
+  it('加载中即使滚动方向要求隐藏也保持展开', () => {
+    mountBanner(0, { loading: true, visible: false })
+
+    expect(bannerEl().className).toContain('grid-rows-[1fr]')
+  })
+
+  it('条数还报得出来时照旧报条数，加载态只体现在按钮上', () => {
+    mountBanner(3, { loading: true })
+
+    expect(wrapper!.text()).toContain('已同步 3 条')
+    expect(wrapper!.text()).not.toContain('正在载入')
+  })
+
+  it('加载中且已无条数可报：文案换成进度话术，不留「已同步 0 条」', () => {
+    mountBanner(0, { loading: true })
+
+    expect(wrapper!.text()).toContain('正在载入')
+    expect(wrapper!.text()).not.toContain('已同步 0 条')
+  })
+
+  it('加载结束回到常态：条数为 0 就收起', async () => {
+    mountBanner(0, { loading: true })
+    expect(bannerEl().className).toContain('grid-rows-[1fr]')
+
+    await wrapper!.setProps({ loading: false })
+
+    expect(bannerEl().className).toContain('grid-rows-[0fr]')
+    expect(bannerEl().getAttribute('aria-hidden')).toBe('true')
+  })
+
+  it('加载结束、条数还在：继续展开（查询没把新条目吃干净时提示条仍该在）', async () => {
+    mountBanner(2, { loading: true })
+
+    await wrapper!.setProps({ loading: false })
+
+    expect(bannerEl().className).toContain('grid-rows-[1fr]')
+    expect(btn().attributes('data-loading')).toBe('false')
   })
 })
