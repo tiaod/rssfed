@@ -15,15 +15,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import EntryDetail from '~/components/EntryDetail.vue'
 import EntryDetailSkeleton from '~/components/EntryDetailSkeleton.vue'
+import EntryToolbar from '~/components/EntryToolbar.vue'
 import { useEntryDetail } from '~/composables/useEntryDetail'
-// 分享：Web Share API 优先，桌面端退回复制「标题 + 原文链接」，与详情弹窗共用同一份口径
-import { useEntryShare } from '~/composables/useEntryShare'
 import { READER_PANE_MIN_REM, readerPaneMaxSizeRem } from '~/composables/useReaderLayout'
+import { entryShortcutOf, openOriginalInNewTab } from '~/utils/entryShortcuts'
 
 const { isOpen, currentEntry, entries, closeEntry, canGoPrev, canGoNext } = useEntryModal()
 const {
-  readBusy,
-  savedBusy,
+  // 顶栏按钮走 EntryToolbar（自带一份），这里要的是快捷键那条路径：m/s 直接调这两个
   toggleRead,
   toggleStar,
   detailEntry,
@@ -59,9 +58,6 @@ watch(
  */
 const active = computed(() => (isOpen.value ? currentEntry.value : null))
 
-// 分享当前这篇：分享的是原文链接，翻篇后自动跟着 active 走
-const { shareBusy, share } = useEntryShare(() => active.value)
-
 /** 顶栏标题与弹窗同口径：显示订阅源名字，源名缺失时回退文章标题，避免顶栏空白 */
 const title = computed(() => active.value?.feed?.title || active.value?.title || '')
 
@@ -74,7 +70,7 @@ const counterLabel = computed(() => {
 })
 
 /**
- * 宽屏键盘：←/→ 翻篇、Esc 退出阅读（回到占位态）。
+ * 宽屏键盘：←/→ 翻篇、Esc 退出阅读（回到占位态），m/s/o 切换已读、收藏、开原文。
  * 焦点在输入框/可编辑区时不拦截，否则侧边栏搜索框里按 Esc 会顺手把正文关掉。
  */
 function onKeydown(e: KeyboardEvent) {
@@ -84,14 +80,32 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === 'ArrowLeft') {
     e.preventDefault()
     navWithHint(-1)
-  } else if (e.key === 'ArrowRight') {
+    return
+  }
+  if (e.key === 'ArrowRight') {
     e.preventDefault()
     navWithHint(1)
-  } else if (e.key === 'Escape') {
+    return
+  }
+  if (e.key === 'Escape') {
     // 别的弹窗（编辑订阅、取消订阅确认、图片放大）自己也吃 Esc，别顺手把阅读栏一起关掉。
     // 图片放大件在 capture 阶段就 stopPropagation 了；这里管的是 reka 的 dialog。
     if (document.querySelector('[role="dialog"], [role="alertdialog"]')) return
     closeEntry()
+    return
+  }
+  const entry = active.value
+  if (!entry) return
+  const action = entryShortcutOf(e)
+  if (action === 'toggleRead') {
+    e.preventDefault()
+    void toggleRead()
+  } else if (action === 'toggleStar') {
+    e.preventDefault()
+    void toggleStar()
+  } else if (action === 'openOriginal') {
+    e.preventDefault()
+    openOriginalInNewTab(entry.url)
   }
 }
 
@@ -201,57 +215,12 @@ const paneUi = {
         class="shrink-0 text-xs tabular-nums text-muted"
       >{{ counterLabel }}</span>
 
-      <!--
-        已读 / 未读：图标与配色直接沿用列表页「只看未读」那个开关（ListActionsBar）——
-        已读 = 空心圈、未读 = 圈内实心点 + 主色软底。全站的已读态记号只此一套（列表里的圆点、
-        这里的按钮、弹窗工具栏的按钮），别再各写各的。
-      -->
-      <UButton
-        :icon="active?.read ? 'i-lucide-circle' : 'i-lucide-circle-dot'"
-        :color="active?.read ? 'neutral' : 'primary'"
-        :variant="active?.read ? 'ghost' : 'soft'"
-        :aria-label="active?.read ? '标为未读' : '标为已读'"
-        :title="active?.read ? '标为未读' : '标为已读'"
-        :loading="readBusy"
-        :disabled="!active"
+      <!-- 已读/收藏/阅读原文/分享：与详情弹窗共用同一个工具条（EntryToolbar） -->
+      <EntryToolbar
+        :entry="active"
         size="xs"
-        @click="toggleRead"
       />
-      <UButton
-        icon="i-lucide-star"
-        :color="active?.starred ? 'warning' : 'neutral'"
-        :variant="active?.starred ? 'soft' : 'ghost'"
-        :aria-label="active?.starred ? '取消收藏' : '收藏'"
-        :aria-pressed="active?.starred === true"
-        :title="active?.starred ? '取消收藏' : '收藏'"
-        :loading="savedBusy"
-        :disabled="!active"
-        size="xs"
-        @click="toggleStar"
-      />
-      <UButton
-        v-if="active"
-        :to="active.url"
-        target="_blank"
-        icon="i-lucide-external-link"
-        variant="ghost"
-        color="neutral"
-        size="xs"
-        aria-label="阅读原文"
-        title="阅读原文"
-      />
-      <!-- 分享：系统分享面板（Web Share API），桌面端退回复制「标题 + 原文链接」 -->
-      <UButton
-        v-if="active"
-        icon="i-lucide-share-2"
-        variant="ghost"
-        color="neutral"
-        size="xs"
-        aria-label="分享文章"
-        title="分享文章"
-        :loading="shareBusy"
-        @click="share"
-      />
+
       <UButton
         icon="i-lucide-x"
         variant="ghost"

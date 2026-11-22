@@ -134,9 +134,11 @@ beforeEach(() => {
 })
 
 const STUBS = {
+  // 动作按钮现在住在顶栏（EntryToolbar），桩必须把 header 也铺出来，否则点不到它们。
+  // data-slot="header" 与真实 UModal 一致，用例靠它区分「顶栏里的」和「正文里的」按钮
   UModal: {
     name: 'UModal',
-    template: '<div class="umodal"><slot name="body" /><slot name="footer" /></div>',
+    template: '<div class="umodal"><div data-slot="header"><slot name="header" /></div><div data-slot="body"><slot name="body" /></div></div>',
     props: ['open', 'fullscreen', 'scrollable', 'ui', 'title']
   },
   UButton: {
@@ -446,20 +448,24 @@ describe('EntryDetailModal 正文区的 pointerdown', () => {
    *     清掉「刚才点在层内」的标记，掐断了下一次点遮罩就会被吞掉（要点两次才关）。
    *   - 但要抵消遮罩层那一下 preventDefault：遮罩层挂着 `pointerdown + .left.prevent`，
    *     正文嵌在遮罩层里，不抵消的话浏览器不补发 mousedown，正文就没法用鼠标拖选。
+   *
+   * 只对「全屏 + 不固定顶/底栏」有意义：那是唯一还会走 scrollable 的档位（正文嵌在遮罩层里）。
+   * 居中弹窗不是 scrollable，正文不在遮罩层里，没有那次 preventDefault 要抵消。
    */
-  async function mountCentered() {
+  async function mountScrollable() {
     g.isOpen.value = true
     g.currentEntry.value = makeEntry(1)
     g.entries.value = [makeEntry(1)]
-    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
-    await flushPromises()
+    modalSize = 'fullscreen'
+    fixedBars = false
+    const wrapper = await mountFullscreenModal()
     return wrapper
   }
 
   it('不掐断冒泡：点正文的 pointerdown 仍会冒泡到祖先（reka-ui 靠它收尾外部点击状态）', async () => {
-    const wrapper = await mountCentered()
-    // 非全屏（scrollable）正文分支的根节点；祖先用 UModal 桩的根模拟遮罩层
-    const body = wrapper.get('.relative.min-h-full')
+    const wrapper = await mountScrollable()
+    // scrollable 档的正文根节点；祖先用 UModal 桩的根模拟遮罩层
+    const body = wrapper.get('.article-swiper')
     const ancestorSpy = vi.fn()
     wrapper.get('.umodal').element.addEventListener('pointerdown', ancestorSpy)
 
@@ -473,8 +479,8 @@ describe('EntryDetailModal 正文区的 pointerdown', () => {
   })
 
   it('抵消遮罩层那一次 preventDefault（鼠标左键）：浏览器才会补发 mousedown，正文可拖选', async () => {
-    const wrapper = await mountCentered()
-    const body = wrapper.get('.relative.min-h-full')
+    const wrapper = await mountScrollable()
+    const body = wrapper.get('.article-swiper')
     // 复刻 reka-ui DialogOverlayImpl 的处理器：pointerdown + .left.prevent
     wrapper.get('.umodal').element.addEventListener('pointerdown', (e: Event) => {
       if ((e as PointerEvent).button === 0) e.preventDefault()
@@ -644,5 +650,86 @@ describe('EntryDetailModal 的已读 / 收藏', () => {
 
     expect(entry.starred).toBe(false)
     expect(toastAdd).toHaveBeenCalledWith(expect.objectContaining({ color: 'error' }))
+  })
+})
+
+describe('EntryDetailModal 的动作按钮位置', () => {
+  /**
+   * 钉住这次改版的要点：动作按钮必须在顶栏。
+   *
+   * 它们原先在页脚，而页脚只有滚到文末才够得着 —— 桌面端最常见的「读一半想收藏」恰恰最难受。
+   * 现在顶栏常驻，正文自己在 body 内滚，按钮跟着卡片顶边不动。
+   */
+  it('已读 / 收藏 / 阅读原文 / 分享 / 关闭都在顶栏里，页脚不再有动作簇', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(1)
+    g.entries.value = [makeEntry(1)]
+
+    const wrapper = mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+
+    const header = wrapper.get('[data-slot="header"]')
+    for (const label of ['标为未读', '收藏', '阅读原文', '分享文章']) {
+      expect(header.find(`[aria-label="${label}"]`).exists(), `${label} 在顶栏`).toBe(true)
+    }
+    expect(header.text()).toContain('关闭')
+    // 顶栏同时承载源名与页码
+    expect(header.text()).toContain('源')
+    expect(header.text()).toContain('1 / 1')
+  })
+})
+
+describe('EntryDetailModal 的键盘快捷键', () => {
+  function press(key: string, mods: Partial<KeyboardEvent> = {}) {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, ...mods }))
+  }
+
+  it('m 切换已读、s 切换收藏、o 开原文（与工具栏按钮同一套动作）', async () => {
+    g.isOpen.value = true
+    const entry = makeEntry(1)
+    g.currentEntry.value = entry
+    g.entries.value = [makeEntry(1)]
+    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => null)
+
+    mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+    // 挂载时已自动标为已读，先清掉记录
+    H.markRead.mockClear()
+
+    try {
+      press('m')
+      await flushPromises()
+      expect(H.markRead).toHaveBeenCalledWith('entry-1', 'feed-1', false)
+      expect(entry.read).toBe(false)
+
+      press('s')
+      await flushPromises()
+      expect(H.toggleSaved).toHaveBeenCalledWith('entry-1', 'feed-1')
+
+      press('o')
+      expect(openSpy).toHaveBeenCalledWith('https://example.com/1', '_blank', 'noopener,noreferrer')
+    } finally {
+      openSpy.mockRestore()
+    }
+  })
+
+  it('焦点在输入框里时不拦截：否则在搜索框打 m 会把文章标成已读', async () => {
+    g.isOpen.value = true
+    g.currentEntry.value = makeEntry(1)
+    g.entries.value = [makeEntry(1)]
+
+    mount(EntryDetailModal, { global: { stubs: STUBS } })
+    await flushPromises()
+    H.markRead.mockClear()
+
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    try {
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'm', bubbles: true }))
+      await flushPromises()
+      expect(H.markRead).not.toHaveBeenCalled()
+    } finally {
+      input.remove()
+    }
   })
 })

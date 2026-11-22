@@ -195,10 +195,10 @@ const draftView = computed({
       </SettingsRow>
 
       <SettingsRow
-        label="固定顶部栏和底部栏"
+        label="固定顶部栏"
         icon="i-lucide-pin"
         tone="blue"
-        description="全屏时固定顶栏与底栏、仅正文滚动；关闭后随文章一起滚动"
+        description="全屏时固定顶栏、仅正文滚动；关闭后顶栏随文章一起滚走（居中弹窗与阅读栏的顶栏本来就常驻，不受此项影响）"
       >
         <USwitch v-model="draftSettings.fixedBars" />
       </SettingsRow>

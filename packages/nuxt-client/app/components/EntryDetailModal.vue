@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { nextTick, ref, computed, watch, reactive, onBeforeUnmount, defineAsyncComponent } from 'vue'
+import { nextTick, ref, computed, watch, reactive, onMounted, onBeforeUnmount, defineAsyncComponent } from 'vue'
 import type { RssEntry } from '~/types/rss'
+import EntryToolbar from '~/components/EntryToolbar.vue'
 // 打开即已读、全文懒取、上一篇/下一篇、工具栏的已读与收藏：与宽屏阅读栏共用同一份口径
 import { useEntryDetail } from '~/composables/useEntryDetail'
-// 分享：Web Share API 优先，桌面端退回复制「标题 + 原文链接」，与阅读栏共用同一份口径
-import { useEntryShare } from '~/composables/useEntryShare'
+import { entryShortcutOf, openOriginalInNewTab } from '~/utils/entryShortcuts'
 import 'swiper/css'
 
 // Swiper 仅在前端按需加载（ClientOnly 包裹 + 异步组件），避免拖慢首屏与 SSR 水合差异
@@ -27,8 +27,7 @@ const toast = useToast()
 
 // 详情相关的状态与动作（含「到尽头时的提示」）都在共享 composable 里，见 useEntryDetail
 const {
-  readBusy,
-  savedBusy,
+  // 顶栏按钮自己带一套（EntryToolbar），这里要的是快捷键那条路径：m/s 直接调这两个
   toggleRead,
   toggleStar,
   details,
@@ -46,19 +45,28 @@ const {
   navWithHint: navEntryWithHint
 } = useEntryDetail()
 
-// 分享当前这篇：分享的是原文链接，翻篇后自动跟着 currentEntry 走
-const { shareBusy, share } = useEntryShare(() => currentEntry.value)
-
 /** 翻页：尽头提示由共享 composable 发，弹窗这边额外把页码亮回来（正文滚动时它会被隐去） */
 function navWithHint(dir: -1 | 1) {
   if (navEntryWithHint(dir)) revealCounter()
 }
 
+/**
+ * 当前正在读的条目；关掉之后为 null。
+ *
+ * closeEntry() 只把 isOpen 置回 false，currentEntry 会留着上一篇（退场动画期间 DOM 还在）——
+ * 顶栏若直接读它，工具栏就会在关掉的那一刻仍作用到那篇上。所以顶栏一律认 active，
+ * 与宽屏阅读栏同一口径。
+ */
+const active = computed(() => (isOpen.value ? currentEntry.value : null))
+
 // 小屏设备（手机）始终全屏；大屏按设置：选「全屏」档时也全屏
 const isSmallScreen = ref(false)
 const isFullscreen = computed(() => isSmallScreen.value || settings.value.entryModalSize === 'fullscreen')
-// 非全屏（居中弹窗）或全屏但未固定顶/底栏时，整个模态随 overlay 滚动
-const isScrollable = computed(() => !isFullscreen.value || !settings.value.fixedBars)
+// 只有「全屏 + 不固定顶/底栏」才让整个模态随 overlay 滚动（那样顶/底栏本就该跟着文章走）。
+// 居中弹窗不走这条路：它曾经也是 scrollable，等于把整个卡片塞进 overlay 里滚，
+// 结果工具栏（页脚）要读到文末才够得着——桌面端最常见的那条路径恰恰最难受。
+// 改成非 scrollable 后，卡片自己定高、正文在 body 内滚，顶/底栏始终贴边。
+const isScrollable = computed(() => isFullscreen.value && !settings.value.fixedBars)
 
 let mql: MediaQueryList | null = null
 function onScreenChange(event: MediaQueryListEvent) {
@@ -67,8 +75,9 @@ function onScreenChange(event: MediaQueryListEvent) {
 
 // ── 上一篇/下一篇（非全屏路径保留原样）──
 
-// 正文滚动容器在不同展示模式下不同（居中弹窗为 overlay 滚动；全屏固定栏为 body 内部滚动），
-// 切换条目时把 window 与正文所在的所有可滚动祖先统一归零，避免停留在上一篇的阅读位置
+// 切换条目时把 window 与正文所在的所有可滚动祖先统一归零，避免停留在上一篇的阅读位置。
+// 居中弹窗的滚动容器是 body（UModal 非 scrollable 档由 body 内滚），全屏固定栏是 slide 内部，
+// 所以这里不认定某一个节点，而是从正文节点往上把每个可滚动祖先都归零。
 const bodyRef = ref<HTMLElement | null>(null)
 
 /**
@@ -125,7 +134,7 @@ function resetScroll() {
 /**
  * 正文区的 pointerdown：只抵消遮罩层那一次 preventDefault，不阻断冒泡。
  *
- * 背景：`scrollable` 的模态（居中弹窗，以及全屏但不固定顶/底栏）在 DOM 上把内容嵌在遮罩层里面，
+ * 背景：`scrollable` 的模态（全屏但不固定顶/底栏这一档）在 DOM 上把内容嵌在遮罩层里面，
  * 而 reka-ui 给遮罩层挂了 `pointerdown` + `.left.prevent`（原意只是「点遮罩本身别选中东西」）。
  * 事件从正文冒泡上去同样会被 preventDefault —— 浏览器随后就不再补发 mousedown，
  * 没有 mousedown，鼠标拖选根本不会开始，正文于是「选不中」。
@@ -375,14 +384,16 @@ function retrySlot(raw: RssEntry | null) {
   void hydrateOne(raw)
 }
 
-// 当前位置/总数（右上角页码）
+// 当前位置/总数（顶栏右侧页码）。列表上下文缺失（深链直接打开、条目已不在列表里）时不显示，
+// 而不是画一个「0 / 0」—— 与宽屏阅读栏同一口径
 const counterLabel = computed(() => {
   const i = idx.value
-  return `${i >= 0 ? i + 1 : 0} / ${entries.value.length}`
+  if (!active.value || i < 0) return ''
+  return `${i + 1} / ${entries.value.length}`
 })
 
-// 阅读时（正文向下滚动超过阈值）隐去右上角页码，滑回顶部或左右翻页结束时再浮出。
-// 全屏路径的滚动容器不唯一（固定顶栏时是 slide 内部滚动，不固定时是整个 overlay），
+// 阅读时（正文向下滚动超过阈值）隐去顶栏页码，滑回顶部或左右翻页结束时再浮出。
+// 滚动容器不唯一（居中弹窗是 body 内滚，全屏固定栏是 slide 内滚，全屏不固定栏是整个 overlay），
 // 但 scroll 事件在捕获阶段仍会向上传播，挂在 document 上用 capture 就能统一收齐。
 const COUNTER_HIDE_GAP = 24
 const showingCounter = ref(true)
@@ -451,7 +462,7 @@ watch(isOpen, (open, wasOpen) => {
   }
 })
 
-// 电脑端键盘 ←/→ 快速翻页（焦点在输入框/可编辑区时不拦截）
+// 电脑端键盘 ←/→ 快速翻页，m/s/o 切换已读、收藏、开原文（焦点在输入框/可编辑区时不拦截）
 function onKeydown(e: KeyboardEvent) {
   if (!isOpen.value) return
   const target = e.target as HTMLElement | null
@@ -459,61 +470,80 @@ function onKeydown(e: KeyboardEvent) {
   if (e.key === 'ArrowLeft') {
     e.preventDefault()
     navWithHint(-1)
-  } else if (e.key === 'ArrowRight') {
+    return
+  }
+  if (e.key === 'ArrowRight') {
     e.preventDefault()
     navWithHint(1)
+    return
+  }
+  const entry = active.value
+  if (!entry) return
+  const action = entryShortcutOf(e)
+  if (action === 'toggleRead') {
+    e.preventDefault()
+    void toggleRead()
+  } else if (action === 'toggleStar') {
+    e.preventDefault()
+    void toggleStar()
+  } else if (action === 'openOriginal') {
+    e.preventDefault()
+    openOriginalInNewTab(entry.url)
   }
 }
 
-if (import.meta.client) {
+// 全局监听统一在 onMounted 里挂：它本来只在客户端跑，不用再包 import.meta.client
+// （那样在单测里永远挂不上，快捷键与翻页的用例就测不到真实路径）。
+// scroll 用 capture 收：正文的滚动容器随展示档位变，捕获阶段才能不漏。
+onMounted(() => {
   mql = window.matchMedia('(max-width: 767px)')
   isSmallScreen.value = mql.matches
   mql.addEventListener('change', onScreenChange)
   window.addEventListener('popstate', onPopState)
   window.addEventListener('keydown', onKeydown)
   document.addEventListener('scroll', syncCounterOnScroll, { capture: true, passive: true })
-}
+})
 
 onBeforeUnmount(() => {
   mql?.removeEventListener('change', onScreenChange)
-  if (import.meta.client) {
-    window.removeEventListener('popstate', onPopState)
-    window.removeEventListener('keydown', onKeydown)
-    document.removeEventListener('scroll', syncCounterOnScroll, { capture: true })
-  }
+  window.removeEventListener('popstate', onPopState)
+  window.removeEventListener('keydown', onKeydown)
+  document.removeEventListener('scroll', syncCounterOnScroll, { capture: true })
   clearAlignTimer()
 })
-
-// 标题过长时省略号截断，并预留右侧关闭按钮空间（各模式通用）
-const TRUNCATE_UI = {
-  wrapper: 'min-w-0 flex-1 pe-10',
-  title: 'truncate'
-}
 
 // 弹窗内容节点的标记类：桌面端翻页浮钮靠它量出弹窗的左右边缘（见 syncNavInset）
 const MODAL_CONTENT_CLASS = 'entry-detail-modal-content'
 
-// 全屏 + 固定顶/底栏：content 铺满视口，body 内部滚动、header/footer 固定
-// 全屏 + 不固定：整个模态（含 header/footer）随 overlay 一起滚动，短内容至少铺满高度
-// 非全屏：按设置的宽度控制
+// 全屏 + 固定顶/底栏：content 铺满视口，body 内部滚动、顶栏固定
+// 全屏 + 不固定：整个模态（含顶栏）随 overlay 一起滚动，短内容至少铺满高度
+// 非全屏：按设置的宽度控制，卡片定高、正文在 body 内滚，顶栏固定（见 isScrollable 的注释）
+//
+// 三档都不再给 footer：动作按钮搬到了顶栏（EntryToolbar），底栏没有非它不可的东西，
+// 留着只会把「滚到文末才够得着」这件事重新做一遍。
 const modalUi = computed(() => {
   if (!isFullscreen.value) {
-    return { content: `${MODAL_CONTENT_CLASS} ${settings.value.entryModalSize}`, ...TRUNCATE_UI }
+    // 高度仍跟着内容走：短文章卡片就矮（UModal 的 scrollable=false 变体给了居中和
+    // max-h-[calc(100dvh-2rem)]，长文章到顶后由 body 内部滚动），所以别在这里写 h-dvh。
+    return {
+      content: `${MODAL_CONTENT_CLASS} ${settings.value.entryModalSize} flex flex-col`,
+      header: 'shrink-0 py-2 px-4 sm:px-6',
+      // body 基础类自带 flex-1 与 p-4 sm:p-6（这里的正文靠它留边，别再像全屏档那样清成 p-0）；
+      // 补 min-h-0（否则子项按内容撑高、overflow 不生效）与 overflow-y-auto，长文到顶后在此内滚
+      body: 'min-h-0 overflow-y-auto'
+    }
   }
   if (settings.value.fixedBars) {
     return {
       content: `${MODAL_CONTENT_CLASS} h-dvh flex flex-col`,
-      header: 'relative shrink-0 min-h-12 py-2.5 px-4 sm:px-6',
+      header: 'shrink-0 py-2 px-4 sm:px-6',
       // UModal body 基础类是 p-4 sm:p-6 且 ui 覆盖只做合并不会替换，必须显式 p-0 清掉，
       // 否则和 slide 内的 px-4 sm:px-6 叠出双倍水平边距
-      body: 'flex-1 min-h-0 p-0 sm:p-0',
-      footer: 'shrink-0 px-4 sm:px-6 py-2',
-      close: 'top-1/2 -translate-y-1/2',
-      ...TRUNCATE_UI
+      body: 'flex-1 min-h-0 p-0 sm:p-0'
     }
   }
   // 同样的原因，全屏不固定栏这条路径也要清掉 body 默认的内边距
-  return { content: `${MODAL_CONTENT_CLASS} min-h-dvh flex flex-col`, body: 'flex-1 p-0 sm:p-0', ...TRUNCATE_UI }
+  return { content: `${MODAL_CONTENT_CLASS} min-h-dvh flex flex-col`, body: 'flex-1 p-0 sm:p-0' }
 })
 
 // ── 电脑端翻页浮钮的横向落点 ──
@@ -647,7 +677,7 @@ if (import.meta.client) {
  * feed.title 已由 enrichEntries 换成用户在订阅列表里设置的名字（与侧边栏一致），
  * 仅当该源在本地完全没有数据时 title 为空，此时回退到文章标题，避免顶栏空白。
  */
-const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntry.value?.title)
+const modalTitle = computed(() => active.value?.feed?.title || active.value?.title || '')
 </script>
 
 <template>
@@ -659,6 +689,42 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
     :ui="modalUi"
     @after:enter="revealNav"
   >
+    <!--
+      顶栏：源名 + 页码 + 动作簇 + 关闭。
+
+      动作按钮原先在页脚，而页脚只有读到文末才够得着 —— 顶栏才是始终贴边的位置，
+      滚到哪儿都在。自定义 #header 会整块替换 UModal 的默认顶栏（连它自带的绝对定位关闭按钮
+      一起），所以标题和关闭都得在这里自己画；:title 仍然传着，那是给 VisuallyHidden 里
+      的无障碍标题用的（读屏仍能读到对话框名字）。
+    -->
+    <template #header>
+      <div class="min-w-0 flex-1">
+        <p class="truncate text-sm font-medium text-highlighted">
+          {{ modalTitle }}
+        </p>
+      </div>
+
+      <!-- 页码：读正文时隐去、翻篇或滑回顶部再浮出，与原先贴在正文右下角时同一套时机 -->
+      <Transition name="counter-fade">
+        <span
+          v-show="showingCounter && counterLabel"
+          class="shrink-0 text-xs tabular-nums text-muted"
+        >{{ counterLabel }}</span>
+      </Transition>
+
+      <EntryToolbar :entry="active" />
+
+      <UButton
+        color="neutral"
+        variant="outline"
+        icon="i-lucide-x"
+        size="sm"
+        @click="closeEntry"
+      >
+        关闭
+      </UButton>
+    </template>
+
     <template #body>
       <!--
         全屏（手机恒定全屏，桌面选全屏档也是）：Swiper 三槽划卡。
@@ -744,23 +810,17 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
             </SwiperSlideView>
           </SwiperView>
         </ClientOnly>
-
-        <Transition name="counter-fade">
-          <div
-            v-show="showingCounter"
-            class="pointer-events-none absolute bottom-1.5 right-2 z-10 rounded-full bg-white/70 px-2 py-0.5 text-xs text-muted backdrop-blur-sm dark:bg-gray-950/70"
-          >
-            {{ counterLabel }}
-          </div>
-        </Transition>
       </div>
 
-      <!-- 非全屏（桌面居中弹窗）：保持单条渲染与原有的触屏手势 -->
+      <!--
+        非全屏（桌面居中弹窗）：保持单条渲染与原有的触屏手势。
+        这一档不是 scrollable（见 isScrollable），正文不在遮罩层里，也就没有那次需要抵消的
+        preventDefault，所以不挂 neutralizeOverlayPreventDefault —— 只有全屏不固定栏那条路径才要。
+      -->
       <div
         v-else
         ref="bodyRef"
         class="relative min-h-full"
-        @pointerdown="neutralizeOverlayPreventDefault"
         @touchstart.passive="onTouchStart"
         @touchend.passive="onTouchEnd"
       >
@@ -847,71 +907,6 @@ const modalTitle = computed(() => currentEntry.value?.feed?.title || currentEntr
             name="i-lucide-chevron-right"
             class="size-6"
           />
-        </UButton>
-      </div>
-    </template>
-
-    <template #footer>
-      <div class="flex w-full items-center justify-between gap-2">
-        <div class="flex items-center gap-1">
-          <!--
-            已读 / 未读与收藏都只作用于当前这篇：打开任意一篇时已由 watch 自动标为已读，
-            这里给的是「标回未读」与「收藏」这两个手动动作；按钮状态直接读当前条目的字段。
-          -->
-          <!-- 同一套记号：图标与配色沿用列表页「只看未读」开关（见 EntryReaderPane 里的注释） -->
-          <UButton
-            v-if="currentEntry"
-            :icon="currentEntry.read ? 'i-lucide-circle' : 'i-lucide-circle-dot'"
-            :color="currentEntry.read ? 'neutral' : 'primary'"
-            :variant="currentEntry.read ? 'ghost' : 'soft'"
-            :aria-label="currentEntry.read ? '标为未读' : '标为已读'"
-            :title="currentEntry.read ? '标为未读' : '标为已读'"
-            :loading="readBusy"
-            size="sm"
-            @click="toggleRead"
-          />
-          <UButton
-            v-if="currentEntry"
-            icon="i-lucide-star"
-            :color="currentEntry.starred ? 'warning' : 'neutral'"
-            :variant="currentEntry.starred ? 'soft' : 'ghost'"
-            :aria-label="currentEntry.starred ? '取消收藏' : '收藏'"
-            :aria-pressed="currentEntry.starred === true"
-            :title="currentEntry.starred ? '取消收藏' : '收藏'"
-            :loading="savedBusy"
-            size="sm"
-            @click="toggleStar"
-          />
-          <UButton
-            v-if="currentEntry"
-            :to="currentEntry.url"
-            target="_blank"
-            label="阅读原文"
-            icon="i-lucide-external-link"
-            variant="outline"
-            size="sm"
-          />
-          <!-- 分享：系统分享面板（Web Share API），桌面端退回复制「标题 + 原文链接」 -->
-          <UButton
-            v-if="currentEntry"
-            icon="i-lucide-share-2"
-            variant="ghost"
-            color="neutral"
-            size="sm"
-            aria-label="分享文章"
-            title="分享文章"
-            :loading="shareBusy"
-            @click="share"
-          />
-        </div>
-        <UButton
-          color="neutral"
-          variant="outline"
-          icon="i-lucide-x"
-          size="sm"
-          @click="closeEntry"
-        >
-          关闭
         </UButton>
       </div>
     </template>

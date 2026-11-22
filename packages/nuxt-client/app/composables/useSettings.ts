@@ -24,7 +24,7 @@ export function isShareMethod(value: unknown): value is ShareMethod {
 export interface AppSettings {
   /** 条目详情模态弹窗宽度（Tailwind max-w 类） */
   entryModalSize: EntryModalSize
-  /** 全屏时固定顶部栏和底部栏（关闭后随正文一起滚动） */
+  /** 全屏时固定顶部栏（关闭后顶栏随正文一起滚走） */
   fixedBars: boolean
   /** 分享文章的方式（见 ShareMethod；默认 auto，老设置没有该字段时也按 auto 处理） */
   shareMethod: ShareMethod
