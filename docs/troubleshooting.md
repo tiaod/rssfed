@@ -608,6 +608,15 @@ JS
 - **原因**：[SyncStatusIndicator.vue](../packages/nuxt-client/app/components/SyncStatusIndicator.vue) 的明细行 `v-for` 原先拿**行文本**当 `:key`，而文本会重复 —— 并发上限是 2，两个源都还没报进度时两行都是「已同步 0%」。重复 key 会让 Vue 的 keyed diff 把两个旧节点解析到同一个新节点上，先被解析的那个节点从此没人引用，留在 DOM 里再也不会被清理（开发模式只在控制台打一条 `Duplicate keys found during update`）。
 - **解法**：明细行按位置取 key（`v-for="(line, i) in details"` + `:key="i"`）—— 这些行都是纯文本、没有身份。回归用例：`app/__tests__/components/SyncStatusIndicator.test.ts` 的「明细行会重复时：重渲染不留孤儿节点」。
 
+### 同步了几百条之后，点提示条的「查看」要卡几秒
+
+- **现象**：长时间没开页面、同步攒下几百条新条目后，点「已同步 N 条」上的「查看」，界面要僵住几秒才换成新列表；条数越多越久，第二次点又很快。同步本身是后台跑的，同步期间并不卡。
+- **原因**：PouchDB 的 map view 索引是**懒**的。`db.query` 不带 `stale` 时会先跑 `updateView()`，把 `view.seq` 之后的所有变更按 50 条一批补进索引（`pouchdb-abstract-mapreduce@9.0.0` 的 `lib/index.js`，`CHANGES_BATCH_SIZE = 50`）。同步写了几百上千条，这份积压就全压在用户点「查看」的那一次查询上。实测（`report/`，未纳入版本控制）：落后 600 条 179ms、1500 条 561ms、2000 条 880ms；索引热了之后 3–9ms。
+- **不是这个原因**：`view_update_changes_batch_size` 改批大小只是把同样的活切成不同块，实测 50→737ms / 200→779ms / 500→692ms / 1200→707ms（1200 条积压），没有区别；把 `VALUE_EXPR` 投影裁小同样量不出来（142ms vs 154ms）。`stale: 'ok'` / `'update_after'` 能跳过这次补索引，但代价是**刚同步下来的条目查不出来**——提示条刚说完「已同步 N 条」，点进去却看不到，不能用。
+- **解法**：既然总工作量固定，就把它从用户的点击里挪走 —— 空闲维护（`usePouchDb` 的 `runIdleIndexCatchup`）在同步静下来 30s、用户 8s 没操作时把 `timeline` 与 `by_feed` 各查一次（`limit: 1`）逼索引追上，十分钟最多一次；同时 `useSyncedEntryList` 置 `applying`，让「查看」立刻变成转圈 + 禁用（`NewEntriesBanner` 的 `loading`），加载期间提示条保持展开。
+- **排查手法**：Performance 面板里点「查看」，会看到一串 `updateView` 触发的长任务；或在控制台 `db.query('local_entries_v1/timeline', { limit: 1 })` 手动计时，第一次慢、第二次快就是本条。
+- **注意**：不要为了「同步时就追索引」在复制的 `change` 回调里加查询 —— 那等于把这段开销摊进同步本身，且每批都查一次反而更慢。追平只在空闲维护里做。
+
 ## 离线与 Service Worker
 
 ### 断网后页面完全打不开（连壳都没有）
