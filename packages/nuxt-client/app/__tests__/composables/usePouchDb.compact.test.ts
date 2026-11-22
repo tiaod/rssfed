@@ -94,6 +94,9 @@ vi.mock('~/utils/localDbName', () => ({
   localDbAccountKey: (uid: string | null) => uid ?? 'guest',
   lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
+  lastTimelineTrimKey: (uid: string | null) => `rssfed-test-trimmed-${uid ?? 'guest'}`,
+  lastTimelineIndexCatchupKey: (uid: string | null) => `rssfed-test-indexed-${uid ?? 'guest'}`,
+  lastTimelineUrlKey: (uid: string | null) => `rssfed-test-url-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []
 }))

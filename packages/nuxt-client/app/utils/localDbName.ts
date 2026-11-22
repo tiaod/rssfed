@@ -76,6 +76,17 @@ export function lastTimelineTrimKey(userId: string | null | undefined): string {
   return `rssfed-timeline-trimmed-${localDbAccountKey(userId)}`
 }
 
+/**
+ * 「上次追平本地视图索引」的时间戳（localStorage，按账号隔离）。
+ *
+ * 追平本身是幂等的（`limit: 1` 的查询只会把落后的变化补进索引），这个键只是节流记录：
+ * 丢了最多多追一次，而多追一次几乎不花时间 —— 索引已经是热的时候，updateView 发现
+ * `view.seq` 已跟上就直接返回。
+ */
+export function lastTimelineIndexCatchupKey(userId: string | null | undefined): string {
+  return `rssfed-timeline-indexed-${localDbAccountKey(userId)}`
+}
+
 /** 账号隔离之前使用的固定库名（升级时清理，见 usePouchDb 的 cleanupLegacyDbs） */
 export const LEGACY_LOCAL_DB_NAMES = ['rssfed-entries', 'rssfed-user-state'] as const
 

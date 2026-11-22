@@ -12,6 +12,7 @@ import { computeRemainingMs } from '~/utils/syncEta'
 import type { EtaBase } from '~/utils/syncEta'
 import {
   lastTimelineCompactKey,
+  lastTimelineIndexCatchupKey,
   lastTimelineTrimKey,
   lastTimelineUrlKey,
   localDbName,
@@ -21,7 +22,14 @@ import {
   isLegacyLocalStorageKey,
   stripPouchNamePrefix
 } from '~/utils/localDbName'
-import { COMPACT_IDLE_DELAY_MS, shouldCompactNow, shouldTrimNow } from '~/utils/localCompact'
+import {
+  COMPACT_IDLE_DELAY_MS,
+  decideIdleRun,
+  shouldCatchUpIndexNow,
+  shouldCompactNow,
+  shouldTrimNow
+} from '~/utils/localCompact'
+import { bindUserActivityTracking, isDocumentHidden, lastUserActivityAt } from '~/utils/userActivity'
 import { chunkIds, excludeSaved, selectFeedsToTrim } from '~/utils/localTrim'
 import { mapWithLimit } from '~/utils/concurrency'
 import { LOCAL_VIEWS, TIMELINE_VIEW, BY_FEED_VIEW, VIEW_MAX_TS } from '~/utils/localViews'
@@ -386,6 +394,15 @@ interface PouchDbState {
    */
   compactTimer: ReturnType<typeof setTimeout> | null
   /**
+   * 这轮空闲维护**第一次**该动手的时间（0 表示还没排上）。
+   *
+   * 让位给用户是有上限的（见 utils/localCompact 的 decideIdleRun）：用户连着用几分钟时
+   * 维护不能一直往后推，否则索引永远追不平、下一次点「查看」还是卡那几秒 —— 那正是这套
+   * 机制要解决的问题。所以记下起点，超过 IDLE_MAX_POSTPONE_MS 就不再等。
+   * 与 compactTimer 一样放共享状态：多个闭包共用同一轮维护。
+   */
+  idleDueSince: number
+  /**
    * 清理是否已经排进空闲窗口（并发调用只排一次的判据）。
    *
    * 与 compactTimer 同样的理由放在共享状态里：`getEntriesDb()` 在首屏会被调用几十次，
@@ -594,6 +611,7 @@ function createPouchState(): PouchDbState {
     stateVersion: ref(0),
     storageBroken: ref<string | null>(null),
     compactTimer: null,
+    idleDueSince: 0,
     cleanupScheduled: false,
     cleanupDone: false,
     cleanupPromise: null,
@@ -1160,31 +1178,112 @@ export function usePouchDb() {
     }
   }
 
-  /** 取消已排上的空闲压缩（暂停 / 换账号 / 重置 / 存储故障时） */
+  /** 取消已排上的空闲维护（暂停 / 换账号 / 重置 / 存储故障时） */
   function cancelIdleCompact(): void {
+    pouchState.idleDueSince = 0
     if (!pouchState.compactTimer) return
     clearTimeout(pouchState.compactTimer)
     pouchState.compactTimer = null
   }
 
   /**
-   * 排一次「空闲后维护」：裁剪 + 压缩，都在同步安静下来之后跑。
+   * 排一次「空闲后维护」：追平索引 + 裁剪 + 压缩，都在同步安静下来之后跑。
    *
-   * 裁剪排在压缩**之前**：压缩是把「已删的字节」真正还回去，先删后压才有意义；
-   * 反过来先压一遍、再删一批，等于刚还回去的又欠上。
+   * 顺序有讲究：
+   *   1. **追平索引放最前**：它是最便宜的一个（`limit: 1` 的查询），而且正是它把「点查看卡
+   *      几秒」的账提前结掉 —— 排在压缩后面就等于让最该早做的事等最重的活干完；
+   *   2. 裁剪在压缩之前：压缩是把「已删的字节」真正还回去，先删后压才有意义；
+   *      反过来先压一遍、再删一批，等于刚还回去的又欠上。
    *
-   * 两者各自按自己的间隔节流（裁剪一小时、压缩一天），所以这里两个都排上，
-   * 由 `runIdleTrim` / `runIdleCompact` 内部的闸门决定谁真的跑。
+   * 三者各自按自己的间隔节流（追平十分钟、裁剪一小时、压缩一天），所以这里都排上，
+   * 由 `runIdle*` 内部的闸门决定谁真的跑。
+   *
+   * **还要等用户停手**：同步 paused 不等于用户闲着，那往往正是他回来翻列表的时刻。
+   * 到点先问 decideIdleRun，没安静下来就推迟再问（见 utils/localCompact）。
    */
   function scheduleIdleCompact(): void {
     cancelIdleCompact()
+    pouchState.idleDueSince = Date.now() + COMPACT_IDLE_DELAY_MS
+    bindUserActivityTracking()
+    armIdleMaintenance(COMPACT_IDLE_DELAY_MS)
+  }
+
+  /** 按给定延迟排下一次空闲维护的检查（推迟重排时用短间隔，见 IDLE_RECHECK_MS） */
+  function armIdleMaintenance(delayMs: number): void {
     pouchState.compactTimer = setTimeout(() => {
       pouchState.compactTimer = null
+      const decision = decideIdleRun({
+        now: Date.now(),
+        lastActivityAt: lastUserActivityAt(),
+        documentHidden: isDocumentHidden(),
+        dueSince: pouchState.idleDueSince
+      })
+      if (!decision.run) {
+        // 用户还在动：让位，但只在「这轮维护的起点」上让（上限见 decideIdleRun）
+        armIdleMaintenance(decision.retryInMs)
+        return
+      }
+      pouchState.idleDueSince = 0
       void (async () => {
+        await runIdleIndexCatchup()
         await runIdleTrim()
         await runIdleCompact()
       })()
-    }, COMPACT_IDLE_DELAY_MS)
+    }, delayMs)
+  }
+
+  /**
+   * 追平本地视图索引：把「用户点查看时才补的那几百毫秒」提前到没人看的时候。
+   *
+   * PouchDB 的 map view 是懒的 —— 复制一直在写库，索引却一动不动，落后多少下次查询就要
+   * 现场补多少（实测落后 2000 条时首次查询 880ms，索引热了只要 7ms）。这里发一次
+   * `limit: 1` 的查询，只为触发 updateView 把积压扫进索引，结果直接丢掉。
+   *
+   * **必须走真查询而不是直接读 view**：`db.query` 才会做 updateView（`stale` 选项是关掉它
+   * 的开关，这里刻意不传）。两个视图都要追：时间线走 timeline，单源 / 分组走 by_feed，
+   * 而 by_feed 的积压只会在有人打开单源页时才被发现 —— 那同样是「点查看卡一下」。
+   */
+  async function runIdleIndexCatchup(): Promise<void> {
+    const db = pouchState.entriesDb
+    const status = syncStatuses[TIMELINE_ID]
+    const should = shouldCatchUpIndexNow({
+      now: Date.now(),
+      lastIndexCaughtUpAt: loadLastIndexCaughtUpAt(),
+      syncing: status?.status === 'syncing' || status?.status === 'queued',
+      paused: pouchState.paused.value,
+      storageBroken: pouchState.storageBroken.value !== null,
+      hasDb: db !== null
+    })
+    if (!should || !db) return
+
+    try {
+      await ensureLocalViews()
+      // 顺序无关紧要，但串行更省内存：两个视图各扫一遍 _changes，并发会把同一批文档读两遍
+      for (const view of [TIMELINE_VIEW, BY_FEED_VIEW]) {
+        await db.query(view, { limit: 1, reduce: false, include_docs: false })
+      }
+      saveLastIndexCaughtUpAt(Date.now())
+    } catch (e: unknown) {
+      // 追平失败不影响正确性：查询时 PouchDB 自己还会再补一次，只是那一次会卡用户
+      console.warn('[PouchDB] 本地视图索引追平失败，稍后再试：', errorMessage(e))
+    }
+  }
+
+  /** 上次追平视图索引的时间戳（localStorage，按账号隔离） */
+  function loadLastIndexCaughtUpAt(): number {
+    try {
+      return Number(localStorage.getItem(lastTimelineIndexCatchupKey(pouchState.dbUserId))) || 0
+    } catch {
+      return 0
+    }
+  }
+
+  function saveLastIndexCaughtUpAt(at: number): void {
+    try {
+      localStorage.setItem(lastTimelineIndexCatchupKey(pouchState.dbUserId), String(at))
+    } catch {
+      // 不可用时忽略：最坏结果是每次空闲都追一遍（索引热的时候这几乎不花时间）
+    }
   }
 
   /**
