@@ -66,6 +66,16 @@ export function lastTimelineCompactKey(userId: string | null | undefined): strin
   return `rssfed-timeline-compacted-${localDbAccountKey(userId)}`
 }
 
+/**
+ * 「上次裁剪本地库」的时间戳（localStorage，按账号隔离）。
+ *
+ * 与压缩**分开记**：两者的收益周期不同 —— 压缩回收的是已删修订，裁剪回收的是退订源的活条目。
+ * 共用一个键会变成「今天压过了，所以今天不裁」，退订后的条目要等到明天才消失。
+ */
+export function lastTimelineTrimKey(userId: string | null | undefined): string {
+  return `rssfed-timeline-trimmed-${localDbAccountKey(userId)}`
+}
+
 /** 账号隔离之前使用的固定库名（升级时清理，见 usePouchDb 的 cleanupLegacyDbs） */
 export const LEGACY_LOCAL_DB_NAMES = ['rssfed-entries', 'rssfed-user-state'] as const
 

@@ -48,3 +48,39 @@ export function shouldCompactNow(state: CompactGateState): boolean {
   if (!state.hasDb || state.syncing || state.paused || state.storageBroken) return false
   return state.now - state.lastCompactedAt >= COMPACT_MIN_INTERVAL_MS
 }
+
+/**
+ * 两次**裁剪**之间的最小间隔（一小时）。
+ *
+ * 比压缩的节流短得多，因为裁剪很便宜：它只是每个源读一页视图、算出差集，**没有**要删的东西时
+ * 一个写事务都不会开。而它的收益是「退订后条目尽快消失」—— 用户刚退订一个源，一小时内在时间线
+ * 上还看得见它的旧文章，是能被感知到的困扰。压缩（扫全库）就不同，所以它按天。
+ */
+export const TRIM_MIN_INTERVAL_MS = 60 * 60 * 1000
+
+export interface TrimGateState {
+  /** 当前时间（毫秒） */
+  now: number
+  /** 上次裁剪完成的时间；从未裁剪过为 0 */
+  lastTrimmedAt: number
+  /** 是否有同步在进行（syncing / queued） */
+  syncing: boolean
+  /** 用户是否手动暂停了同步 */
+  paused: boolean
+  /** 本地存储是否已熔断（配额/损坏） */
+  storageBroken: boolean
+  /** 本地库实例是否存在 */
+  hasDb: boolean
+}
+
+/**
+ * 现在能不能裁：与压缩同一组闸门，只有节流间隔不同。
+ *
+ * 同步中不裁是硬要求：裁剪会读订阅集合（要和正在被复制写入的库比对），在复制跑着的时候
+ * 算出的「退订源」可能只是订阅文档还没落库，删了就是误删 —— 下一轮同步也不会补回来
+ *（`_purge` 过的文档不进 `_changes`，条目本身也没变过，复制不会重发）。
+ */
+export function shouldTrimNow(state: TrimGateState): boolean {
+  if (!state.hasDb || state.syncing || state.paused || state.storageBroken) return false
+  return state.now - state.lastTrimmedAt >= TRIM_MIN_INTERVAL_MS
+}
