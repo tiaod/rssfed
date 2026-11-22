@@ -138,6 +138,21 @@ describe('ListActionsBar 菜单内容', () => {
   it('同步项把状态文案作为描述（上次同步时间 / 错误详情）', () => {
     expect(itemOf(mountBar(), '同步订阅').description).toBe('上次同步：3 分钟前')
   })
+
+  /**
+   * 未读列表是快照：读过的条目留在原位（见 useUnreadFilter），要它们让位就得有这一项。
+   * 只在未读模式下出现 —— 「显示全部」里已读条目本来就该留着，没有「刷新」这一说。
+   */
+  it('「刷新未读列表」只在只看未读时出现，并如实报出会移出几条', () => {
+    expect(labels(mountBar()).flat()).not.toContain('刷新未读列表')
+
+    expect(labels(mountBar({ unreadOnly: true, staleCount: 3 })).flat()).toContain('刷新未读列表')
+    expect(itemOf(mountBar({ unreadOnly: true, staleCount: 3 }), '刷新未读列表').description)
+      .toBe('移出 3 条已读，重新扫描未读')
+
+    // 还没读过任何一条：这一项照样在（刷新也会带回同步新到的未读），只是文案不带数字
+    expect(itemOf(mountBar({ unreadOnly: true }), '刷新未读列表').description).toBe('重新扫描未读')
+  })
 })
 
 describe('ListActionsBar 动作', () => {
@@ -158,6 +173,14 @@ describe('ListActionsBar 动作', () => {
 
     expect(wrapper.emitted('subscribe')).toHaveLength(1)
     expect(wrapper.emitted('unsubscribe')).toBeUndefined()
+  })
+
+  it('「刷新未读列表」抛 refresh-unread', () => {
+    const wrapper = mountBar({ unreadOnly: true, staleCount: 2 })
+
+    itemOf(wrapper, '刷新未读列表').onSelect?.(new Event('select'))
+
+    expect(wrapper.emitted('refresh-unread')).toHaveLength(1)
   })
 
   it('点同步项：结果原样抛出；空转（上一轮还在跑）不发事件', async () => {

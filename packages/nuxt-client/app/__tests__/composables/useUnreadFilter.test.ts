@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import { computed, nextTick, ref } from 'vue'
+import { nextTick, ref } from 'vue'
 import type { Ref } from 'vue'
 import { useUnreadFilter } from '../../composables/useUnreadFilter'
 import type { ScanCursor, ScanPage } from '../../composables/usePouchDb'
@@ -8,12 +8,13 @@ import type { RssEntry } from '../../types/rss'
 /**
  * 「只看未读」：扫描与上屏拆开。
  *
- * 盯五件事：
+ * 盯六件事：
  *   1. 扫描按游标深挖、**只收未读**，并且不经过 enrich（只给要上屏的几十条付这个成本）；
  *   2. 一页扫出的未读多于一屏时，剩下的留在缓冲区，下一轮先消化，不能丢；
  *   3. 单轮有 maxScan 上限：扫满就停，不能谎报「没有未读」，下一轮接着扫；
  *   4. 扫描上界是当前快照最新一条（同步进来的新条目不提前露面），快照换了要重扫；
- *   5. 筛选关掉/打开、读取中弹窗的那条怎么办。
+ *   5. 筛选关掉/打开时两种列表来源的切换；
+ *   6. **上屏的这批是快照**：读过的条目留在原位，只有 refreshUnread 才移出并重新扫。
  *
  * 用假 scan 复刻 usePouchDb 的分页语义：`after` 表示「这一行已消费」，从它的下一行开始。
  */
@@ -23,23 +24,6 @@ const stateCache = new Map<string, Ref<unknown>>()
 nuxtGlobals.useState = vi.fn(<T>(key: string, init: () => T) => {
   if (!stateCache.has(key)) stateCache.set(key, ref<T>(init()) as Ref<unknown>)
   return stateCache.get(key) as Ref<T>
-})
-
-const H = {
-  isOpen: ref(false),
-  currentEntry: ref<RssEntry | null>(null)
-}
-nuxtGlobals.useEntryModal = () => ({
-  isOpen: H.isOpen,
-  currentEntry: H.currentEntry,
-  entries: computed(() => []),
-  openEntry: vi.fn(),
-  closeEntry: vi.fn(),
-  goPrev: vi.fn(),
-  goNext: vi.fn(),
-  canGoPrev: computed(() => false),
-  canGoNext: computed(() => false),
-  isLastWithNoMore: () => false
 })
 
 function makeEntry(i: number): RssEntry {
@@ -101,6 +85,7 @@ interface HarnessOptions {
   scanBatch?: number
   maxScan?: number
   target?: number
+  anchor?: () => HTMLElement | null
 }
 
 function setup(options: HarnessOptions) {
@@ -119,7 +104,8 @@ function setup(options: HarnessOptions) {
     enrich,
     scanBatch: options.scanBatch,
     maxScan: options.maxScan,
-    target: options.target
+    target: options.target,
+    anchor: options.anchor
   })
 
   return { entries, world, readIds, scan, enrich, grow, filter }
@@ -129,8 +115,6 @@ const idsOf = (list: RssEntry[]) => list.map(e => e.id)
 
 beforeEach(() => {
   stateCache.clear()
-  H.isOpen.value = false
-  H.currentEntry.value = null
 })
 
 describe('useUnreadFilter：筛选关掉时走原始列表', () => {
@@ -288,24 +272,131 @@ describe('useUnreadFilter：扫描未读', () => {
     expect(scan).toHaveBeenCalledTimes(1)
   })
 
-  it('读取中弹窗里的那条即使已读也留在列表里，关闭后消失', async () => {
+  it('打开即已读的那条留在原位（读过的条目不当场消失）', async () => {
     const world = Array.from({ length: 3 }, (_, i) => makeEntry(i))
     const { filter } = setup({ entries: world, world })
 
     filter.toggleUnreadOnly()
     await settle()
-    const open = filter.visibleEntries.value[0]!
-    H.isOpen.value = true
-    H.currentEntry.value = open
 
-    // 自动标已读：弹窗里这条还得留着，否则「上一篇/下一篇」失去基准
-    open.read = true
+    // 打开详情会就地标已读（见 useEntryDetail）：列表一个字不动，只是这条淡显
+    filter.visibleEntries.value[0]!.read = true
     await settle()
-    expect(idsOf(filter.visibleEntries.value)).toContain(open.id)
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e1', 'e2'])
+    // 移出数量如实记下来，刷新入口据此报数
+    expect(filter.staleCount.value).toBe(1)
+  })
 
-    H.isOpen.value = false
+  it('refreshUnread 才移出已读的：从库头重扫一批最新的未读，并回到顶部', async () => {
+    const world = Array.from({ length: 3 }, (_, i) => makeEntry(i))
+    const readIds = new Set<string>()
+    // 真 DOM：滚动容器要靠 getComputedStyle + scrollHeight 判出来（见 utils/scrollContainer），
+    // 桩对象测不到；happy-dom 不做真实布局，尺寸只能手写。
+    const scroller = document.createElement('div')
+    scroller.style.overflowY = 'auto'
+    Object.defineProperty(scroller, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(scroller, 'clientHeight', { value: 300, configurable: true })
+    document.body.appendChild(scroller)
+    const scrollTo = vi.fn()
+    scroller.scrollTo = scrollTo as unknown as typeof scroller.scrollTo
+
+    const { filter, scan } = setup({ entries: world, world, readIds, anchor: () => scroller })
+
+    try {
+      filter.toggleUnreadOnly()
+      await settle()
+      expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e1', 'e2'])
+
+      // 读完 e0：留在原位
+      readIds.add('e0')
+      filter.visibleEntries.value[0]!.read = true
+      await settle()
+      expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e1', 'e2'])
+
+      await filter.refreshUnread()
+      await settle()
+
+      expect(idsOf(filter.visibleEntries.value)).toEqual(['e1', 'e2'])
+      expect(filter.staleCount.value).toBe(0)
+      // 刷新是一次完整重扫：游标从 null 重新开始
+      expect(scan.mock.calls.at(-1)![0]).toBeNull()
+      expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' })
+    } finally {
+      scroller.remove()
+    }
+  })
+
+  it('刷新会带回同步新到的未读（重扫不看原来的游标与缓冲区）', async () => {
+    const world = [makeEntry(1), makeEntry(2)]
+    const readIds = new Set<string>()
+    const scan = vi.fn(makeWorld(world, readIds))
+    const entries = ref<RssEntry[]>([...world])
+    const filter = useUnreadFilter<ScanCursor>({
+      entries,
+      hasMore: () => true,
+      grow: async () => true,
+      scan,
+      enrich: async list => list
+    })
+
+    filter.toggleUnreadOnly()
     await settle()
-    expect(idsOf(filter.visibleEntries.value)).not.toContain(open.id)
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e1', 'e2'])
+
+    // 同步把更新的 e0 写进本地库，并把 e1 读掉了
+    world.unshift(makeEntry(0))
+    readIds.add('e1')
+
+    await filter.refreshUnread()
+    await settle()
+
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e2'])
+  })
+
+  it('扫描在途时点刷新：刷新接管，不被「正在扫描」静默挡掉', async () => {
+    const world = Array.from({ length: 6 }, (_, i) => makeEntry(i))
+    const readIds = new Set<string>()
+    // 手动控制何时返回第一页：制造「刷新时还在扫」的现场
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const inner = makeWorld(world, readIds)
+    const scan = vi.fn(async (cursor: ScanCursor | null, limit: number) => {
+      if (!cursor) await gate
+      return inner(cursor, limit)
+    })
+    const filter = useUnreadFilter<ScanCursor>({
+      entries: ref<RssEntry[]>([...world]),
+      hasMore: () => true,
+      grow: async () => true,
+      scan,
+      enrich: async list => list
+    })
+
+    filter.toggleUnreadOnly()
+    expect(filter.probing.value).toBe(true)
+
+    readIds.add('e0')
+    const refreshed = filter.refreshUnread()
+    expect(filter.probing.value).toBe(true) // 接管之后新的那一轮已经在跑
+    release()
+
+    await refreshed
+    await settle()
+
+    expect(filter.probing.value).toBe(false)
+    // 首轮的结果被作废：上屏的是刷新那一轮扫到的（e0 已读，不该出现）
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e1', 'e2', 'e3', 'e4', 'e5'])
+  })
+
+  it('未读模式下点刷新之前，切回「显示全部」不受影响', async () => {
+    const world = Array.from({ length: 3 }, (_, i) => makeEntry(i))
+    const { filter } = setup({ entries: world, world })
+
+    // 没开未读：刷新什么都不做（页面上这一项也只在未读模式出现）
+    expect(await filter.refreshUnread()).toBe(false)
+    expect(idsOf(filter.visibleEntries.value)).toEqual(['e0', 'e1', 'e2'])
   })
 
   it('扫描中 probing 为 true（页面据此显示「正在扫描未读」而不是「没有未读」）', async () => {

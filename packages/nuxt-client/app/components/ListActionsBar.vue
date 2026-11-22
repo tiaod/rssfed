@@ -11,6 +11,11 @@
  * 这里只负责把它渲染成一个可点的开关：开着时图标变实心点 + 主色软底 + aria-pressed，
  * 页面据此过滤列表。按钮上不排文字，状态全靠图标与配色表达。
  *
+ * **「刷新未读列表」只在只看未读时出现在 ⋮ 菜单里**：未读列表是快照 —— 读过的条目留在原位
+ * （不当场消失，见 useUnreadFilter），要它们让位就得有这么一个明确的刷新动作。它是一次
+ * 「重新扫一遍本地库」的常规动作，不必占导航栏的位置，所以收进菜单；`staleCount` 顺便把
+ * 「有几条已读等着移出」写进菜单项的 description，用户不必猜这一下会挪走什么。
+ *
  * 「标记为已读」按钮：
  *   点击 → 就地在按钮旁弹出确认浮层（一次批量写、没有「全部撤销」，值得多一步），确认后才抛事件；
  *   同步中 → 转圈并禁用（正在写库，这时候也不该去标记）；
@@ -46,6 +51,8 @@ const props = withDefaults(defineProps<{
   subscribed?: boolean
   /** 「只看未读」是否开启（状态由页面持有，这里只渲染开关） */
   unreadOnly?: boolean
+  /** 未读模式下已读、下次刷新会移出的条数（菜单项里如实报数）；不传按 0 处理 */
+  staleCount?: number
   /** 反馈口径：只报这些源的同步条数（见文件头）；不传 = 全库（时间线页） */
   syncScope?: readonly string[]
 }>(), {
@@ -55,6 +62,7 @@ const props = withDefaults(defineProps<{
   entryCount: 0,
   subscribed: true,
   unreadOnly: false,
+  staleCount: 0,
   syncScope: undefined
 })
 
@@ -62,6 +70,7 @@ const emit = defineEmits<{
   'synced': [outcome: ManualSyncOutcome]
   'mark-all-read': []
   'toggle-unread-only': []
+  'refresh-unread': []
   'edit': []
   'subscribe': []
   'unsubscribe': []
@@ -105,6 +114,17 @@ const items = computed<DropdownMenuItem[][]>(() => {
       onSelect: () => { void handleSync() }
     }
   ]
+
+  // 未读列表是快照：读过的条目留在原位，靠这一项才让位（见文件头与 useUnreadFilter）。
+  // 只在未读模式下出现 —— 「显示全部」里已读条目本来就该留着，没有「刷新」这一说。
+  if (props.unreadOnly) {
+    actions.push({
+      label: '刷新未读列表',
+      description: props.staleCount > 0 ? `移出 ${props.staleCount} 条已读，重新扫描未读` : '重新扫描未读',
+      icon: 'i-lucide-rotate-cw',
+      onSelect: () => emit('refresh-unread')
+    })
+  }
 
   if (props.feedId) {
     actions.push({

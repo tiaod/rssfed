@@ -84,4 +84,36 @@ describe('useMarkAllRead', () => {
     expect(entries.value[0]!.read).toBe(false)
     expect(H.toast).toHaveBeenCalledWith(expect.objectContaining({ title: '标记失败', color: 'error' }))
   })
+
+  it('不传 afterMark 时不重查列表（显示全部时已读条目本来就该留着）', async () => {
+    H.markManyRead.mockResolvedValue(1)
+    const afterMark = vi.fn()
+    const entries = ref<RssEntry[]>([makeEntry('a')])
+
+    await useMarkAllRead(entries)()
+
+    expect(afterMark).not.toHaveBeenCalled()
+  })
+
+  it('传了 afterMark（未读模式）：标记成功后接着刷新，让位置给后面还没读的', async () => {
+    H.markManyRead.mockResolvedValue(1)
+    const afterMark = vi.fn(async () => {})
+    const entries = ref<RssEntry[]>([makeEntry('a')])
+
+    await useMarkAllRead(entries, { afterMark })()
+
+    expect(afterMark).toHaveBeenCalledTimes(1)
+    // 先落地已读、再刷新：刷新那一刻扫库看到的已经是读过的那批
+    expect(entries.value[0]!.read).toBe(true)
+  })
+
+  it('写入失败时也不刷新：列表不该为一次失败的标记换一批内容', async () => {
+    H.markManyRead.mockRejectedValue(new Error('磁盘满了'))
+    const afterMark = vi.fn()
+    const entries = ref<RssEntry[]>([makeEntry('a')])
+
+    await useMarkAllRead(entries, { afterMark })()
+
+    expect(afterMark).not.toHaveBeenCalled()
+  })
 })

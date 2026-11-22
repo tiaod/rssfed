@@ -2,8 +2,9 @@ import { computed, ref } from 'vue'
 import type { ComputedRef, Ref } from 'vue'
 import type { RssEntry } from '~/types/rss'
 import type { ScanCursor, ScanPage } from '~/composables/usePouchDb'
+import { scrollListToTop } from '~/utils/scrollContainer'
 
-/** 未读扫描的一页（由 usePouchDb 的 scan*Page 提供，只合已读态、未 enrich） */
+/** 未读扫描的一页（由 usePouchDb 的 scan*Page 提供，只合已读态、不 enrich） */
 export type UnreadScanPage<C> = ScanPage<C>
 
 export interface UnreadFilterOptions<C> {
@@ -17,6 +18,12 @@ export interface UnreadFilterOptions<C> {
   scan: (cursor: C | null, limit: number) => Promise<UnreadScanPage<C>>
   /** 只对要上屏的那批做 enrich（usePouchDb.enrichEntries） */
   enrich: (entries: RssEntry[]) => Promise<RssEntry[]>
+  /**
+   * 列表顶部锚点（页面传 useSyncedEntryList 的 listAnchorRef）：
+   * `refreshUnread()` 重新扫完之后据此找到滚动容器并回到顶部 —— 列表整体换了一批，
+   * 停在原来的滚动位置没有意义。
+   */
+  anchor?: () => HTMLElement | null
   /** 每页扫多少行（默认 300） */
   scanBatch?: number
   /** 一轮最多扫多少行，扫满还没凑够就停、留给下一轮（默认 10000） */
@@ -44,21 +51,28 @@ export interface UnreadFilterOptions<C> {
  * 也正因如此，「已同步 N 条」提示条在未读模式下整条收起（见 useEntriesBannerVisibility
  * 的 `suppressed`），计数不清零，切回全部时照旧出现。
  *
+ * **上屏的这批同样是快照：读过的条目不会自己消失**（这是本模块最容易被改错的一处）。
+ * 早先的实现在 `visibleEntries` 里实时按 `!entry.read` 过滤，于是打开详情的那一下
+ * 「打开即已读」就把这一条当场抽走，用户还在读、列表已经空出一格，关掉弹窗连自己读到哪儿
+ * 都找不到。现在的口径：
+ *   - 标记已读只让这一条淡显（与「显示全部」下完全一样），**留在原位**；
+ *   - 只有 `refreshUnread()`（动作区 ⋮ 菜单里的「刷新未读列表」）才真正移出，
+ *     同时重新从库头扫一批最新的未读上来（同步新到的也在内）并回到顶部；
+ *   - 「全部标记为已读」是明确的「这批我看完了」，标完当场走同一条刷新路径（见
+ *     useMarkAllRead 的 afterMark），不必再点一次刷新。
+ * 这样一来也不需要「正在读的那条即使已读也留着」这条特例了 —— 谁也不走。
+ *
  * 会话级状态（useState）：页面之间来回跳不丢，刷新即回到「显示全部」。切到别的模式会重置扫描
  * （读状态可能在别处变过），再打开时重新扫一遍。
- *
- * 正在弹窗里读的那一条，即使已被自动标为已读也继续留在列表里，否则它会当场消失、
- * 弹窗的「上一篇 / 下一篇」失去定位基准。
  */
 export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>) {
   const unreadOnly = useState<boolean>('entries-unread-only', () => false)
-  const { isOpen, currentEntry } = useEntryModal()
 
   const scanBatch = options.scanBatch ?? 300
   const maxScan = options.maxScan ?? 10000
   const target = options.target ?? 50
 
-  /** 扫描出来的未读条目（已 enrich、可直接上屏），按时间倒序 */
+  /** 扫描出来的未读条目（已 enrich、可直接上屏），按时间倒序；进来时是什么就是什么，不随已读态增删 */
   const unreadEntries = ref<RssEntry[]>([])
   /** 已扫描的行数：空态里如实告诉用户「扫了多少条」 */
   const scannedCount = ref(0)
@@ -74,10 +88,17 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
   /** 代次：重置时作废在途结果 */
   let generation = 0
 
+  /**
+   * 上屏的这批里已经有几条被标为已读（还没移出）。
+   *
+   * 只用来在刷新入口上如实报数（「移出 N 条已读」），不参与过滤 —— 一旦拿它去过滤，
+   * 就又回到「读完当场消失」的老路上了。
+   */
+  const staleCount = computed(() => unreadEntries.value.reduce((n, entry) => n + (entry.read ? 1 : 0), 0))
+
   const visibleEntries = computed<RssEntry[]>(() => {
     if (!unreadOnly.value) return options.entries.value
-    const openId = isOpen.value ? currentEntry.value?.id : undefined
-    return unreadEntries.value.filter(entry => !entry.read || entry.id === openId)
+    return unreadEntries.value
   })
 
   /** 当前模式下还有没有更多（EntryList 的页尾骨架与尽头提示都看它） */
@@ -97,45 +118,65 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
     exhausted = false
   }
 
-  /** 扫描一轮：先消化上一轮的遗留，再往下扫，直到凑够 target 或触到本轮上限 */
-  async function probeRound(): Promise<boolean> {
-    if (!unreadOnly.value || probing.value || exhausted) return false
+  /**
+   * 扫一轮：先消化上一轮的遗留，再往下扫，直到凑够 target 或触到本轮上限。
+   *
+   * `mode` 决定结果怎么落到列表上：
+   *   - `append`：接着上次的游标往下补（无限滚动）；
+   *   - `replace`：从库头重扫，整体换掉列表（刷新）。
+   *
+   * 刷新期间**旧列表继续显示**，新结果落地才替换：否则点一下刷新会先白一下再长回来。
+   * 游标 / 缓冲区 / 「已到底」的结论也是落地时才一起推进 —— 中途被重置（代次变了）的那一轮
+   * 不能把半截状态留在现场。
+   */
+  async function scanRound(mode: 'append' | 'replace'): Promise<boolean> {
+    if (!unreadOnly.value || probing.value) return false
+    if (mode === 'append' && exhausted) return false
+
     const gen = ++generation
     probing.value = true
+
+    let nextCursor: C | null = mode === 'replace' ? null : cursor
+    const nextPending: RssEntry[] = mode === 'replace' ? [] : pending.slice()
+    let nextExhausted = mode === 'replace' ? false : exhausted
+    let scanned = 0
     const collected: RssEntry[] = []
+
     try {
       // ① 上一轮扫出来但没上屏的（进缓冲区之后可能已被别处标已读，重新确认一遍）
-      while (pending.length && collected.length < target) {
-        const row = pending.shift()!
+      while (nextPending.length && collected.length < target) {
+        const row = nextPending.shift()!
         if (!row.read) collected.push(row)
       }
 
       // ② 沿游标往下扫
-      let scannedThisRound = 0
-      while (collected.length < target && !exhausted && scannedThisRound < maxScan) {
-        const page = await options.scan(cursor, scanBatch)
+      while (collected.length < target && !nextExhausted && scanned < maxScan) {
+        const page = await options.scan(nextCursor, scanBatch)
         if (gen !== generation) return false // 期间被重置：结果作废
         if (page.rows.length === 0) {
-          exhausted = true
+          nextExhausted = true
           break
         }
-        cursor = page.cursor
-        exhausted = page.exhausted
-        scannedThisRound += page.rows.length
-        scannedCount.value += page.rows.length
+        nextCursor = page.cursor
+        nextExhausted = page.exhausted
+        scanned += page.rows.length
         for (const row of page.rows) {
           if (row.read) continue
           if (collected.length < target) collected.push(row)
-          else pending.push(row)
+          else nextPending.push(row)
         }
       }
 
       if (gen !== generation) return false
-      if (collected.length) {
-        const enriched = await options.enrich(collected)
-        if (gen !== generation) return false
-        unreadEntries.value = [...unreadEntries.value, ...enriched]
-      }
+      const enriched = collected.length ? await options.enrich(collected) : []
+      if (gen !== generation) return false
+
+      // 结果有效才落地：游标、缓冲区、条目一起换
+      cursor = nextCursor
+      pending = nextPending
+      exhausted = nextExhausted
+      scannedCount.value = mode === 'replace' ? scanned : scannedCount.value + scanned
+      unreadEntries.value = mode === 'replace' ? enriched : [...unreadEntries.value, ...enriched]
       unreadHasMore.value = !exhausted || pending.length > 0
       return collected.length > 0
     } finally {
@@ -152,8 +193,29 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
    */
   async function loadMoreVisible(): Promise<boolean> {
     if (!unreadOnly.value) return await options.grow()
-    await probeRound()
+    await scanRound('append')
     return true
+  }
+
+  /**
+   * 刷新未读列表：把已经读过的那批移出，重新从库头扫一批最新的未读上来，并回到顶部。
+   *
+   * 这是**唯一**会让已读条目离开列表的动作（另一个入口是「全部标记为已读」，它标完直接
+   * 调这里）。扫描期间旧列表照旧显示，落地才替换。
+   *
+   * 刷新**接管**在途的那一轮扫描（比如用户正滚到底、续扫还没回来）：作废它，而不是安静地
+   * 什么都不做 —— 点了没反应比慢一点更糟。被作废的那一轮在 gen 检查处自行退出，
+   * 不会把半截结果或游标留在现场。
+   */
+  async function refreshUnread(): Promise<boolean> {
+    if (!unreadOnly.value) return false
+    if (probing.value) {
+      generation++
+      probing.value = false
+    }
+    const got = await scanRound('replace')
+    scrollListToTop(options.anchor?.() ?? null)
+    return got
   }
 
   function toggleUnreadOnly() {
@@ -161,7 +223,7 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
     // 两种模式的数据不是同一批对象：切走时留下的未读列表可能已被别处标读，直接丢掉重扫。
     // 打开的这一下就是一次完整刷新（不受列表快照约束），用户看到的一定是当下最新的未读。
     reset()
-    if (unreadOnly.value) void probeRound()
+    if (unreadOnly.value) void scanRound('append')
   }
 
   // 页面（重新）挂载后补扫：开关是会话级（useState），页面往返不会关掉它，但扫描结果
@@ -171,7 +233,7 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
   // 由页面在 scan 回调可用的时机调用，不在 setup 里自动跑：分组页的扫描范围依赖订阅列表，
   // 那时 feedIds 还是空的，扫出来的「已到底」是假结论。
   function resumeUnreadScan() {
-    if (unreadOnly.value) void probeRound()
+    if (unreadOnly.value) void scanRound('append')
   }
 
   return {
@@ -180,10 +242,13 @@ export function useUnreadFilter<C = ScanCursor>(options: UnreadFilterOptions<C>)
     visibleHasMore,
     loadMoreVisible,
     resumeUnreadScan,
+    refreshUnread,
     toggleUnreadOnly,
     /** 正在扫描未读 */
     probing,
     /** 本轮已扫描的行数（空态文案用） */
-    scannedCount
+    scannedCount,
+    /** 上屏的这批里有几条已经读过、下次刷新会移出（刷新入口据此报数） */
+    staleCount
   }
 }

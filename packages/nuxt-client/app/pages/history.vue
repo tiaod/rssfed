@@ -70,8 +70,9 @@ function handleOpen(entry: RssEntry) {
  * 历史是「读过什么」，所以条目被标为未读时应当当场从历史里消失（列表与详情共用同一个
  * 条目对象，就地改 read 就能生效，不用重查）。
  *
- * 正在弹窗里读的那一条例外：它被标未读后若也消失，「上一篇 / 下一篇」的基准列表就断了，
- * 与「只看未读」保留当前那篇是同一个口径（见 useUnreadFilter）。
+ * 正在弹窗里读的那一条例外：它被标未读后若也消失，「上一篇 / 下一篇」的基准列表就断了。
+ * 「只看未读」不需要这条特例 —— 那边的列表是快照，读过的条目本来就留在原位（见
+ * useUnreadFilter）。
  */
 const visibleEntries = computed(() => {
   const openId = isOpen.value ? currentEntry.value?.id : undefined

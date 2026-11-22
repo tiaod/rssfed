@@ -47,18 +47,21 @@ const { loading, showSkeleton, renderFirstPaint } = useListFirstPaint({
 })
 
 // 「只看未读」：不再过滤已加载的窗口，而是按游标深扫未读 —— 扫描只合已读态、不做 enrich，
-// 凑够一屏才 enrich 上屏（见 useUnreadFilter）。「全部标记为已读」作用在可见的那批上。
+// 凑够一屏才 enrich 上屏（见 useUnreadFilter）。上屏的这批是快照：读过的条目留在原位（不当场
+// 消失），要它们让位就点 ⋮ 里的「刷新未读列表」。「全部标记为已读」作用在可见的那批上，标完
+// 直接走同一条刷新。
 const {
   unreadOnly, visibleEntries, visibleHasMore, loadMoreVisible, resumeUnreadScan, toggleUnreadOnly,
-  probing, scannedCount
+  refreshUnread, probing, scannedCount, staleCount
 } = useUnreadFilter({
   entries,
   hasMore: () => hasMore.value,
   grow: () => grow(),
   scan: (cursor, limit) => pouch.scanTimelinePage(cursor, limit),
-  enrich: list => pouch.enrichEntries(list)
+  enrich: list => pouch.enrichEntries(list),
+  anchor: () => listAnchorRef.value
 })
-const markAllRead = useMarkAllRead(visibleEntries)
+const markAllRead = useMarkAllRead(visibleEntries, { afterMark: () => refreshUnread() })
 
 // 滚动到底部附近时加载下一批；loadMore 同时供文章弹窗尾部的自动预加载复用（单飞防重入）
 const { loadMore } = useInfiniteList(loadMoreVisible)
@@ -108,7 +111,9 @@ watch(pouch.timelineVersion, () => refreshFromSync())
           <ListActionsBar
             :entry-count="visibleEntries.length"
             :unread-only="unreadOnly"
+            :stale-count="staleCount"
             @toggle-unread-only="toggleUnreadOnly"
+            @refresh-unread="refreshUnread"
             @synced="applyNewIfSyncAddedNothing"
             @mark-all-read="markAllRead"
           />
