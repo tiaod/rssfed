@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextTick } from 'vue'
+import { nextTick, ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import EntryList from '../../components/EntryList.vue'
 import EntryListSkeleton from '../../components/EntryListSkeleton.vue'
@@ -41,16 +41,25 @@ const STUBS = {
   EntryCardItem: { name: 'EntryCardItem', template: '<div class="entry-item" />' },
   EntryBlogItem: { name: 'EntryBlogItem', template: '<div class="entry-item" />' },
   EntryRowItem: { name: 'EntryRowItem', template: '<div class="entry-item" />' },
-  EntryImageItem: { name: 'EntryImageItem', template: '<div class="entry-item" />' }
+  EntryImageItem: { name: 'EntryImageItem', template: '<div class="entry-item" />' },
+  /*
+   * 表格分支与条目里的头像：本文件跑的是 social / list 等非表格视图，压根不渲染它们，
+   * 但 Vue 会把模板里所有 resolveComponent 提到 render 开头，没桩就照样刷
+   * "Failed to resolve component"。桩成空壳即可，它们不参与任何断言。
+   */
+  UTable: { name: 'UTable', props: ['data', 'columns', 'meta', 'virtualize', 'ui', 'sticky', 'empty'], template: '<div class="table" />' },
+  UAvatar: { name: 'UAvatar', props: ['src', 'alt', 'text', 'size'], template: '<span class="avatar" />' }
 }
 
 /** 单测环境没有 Nuxt 自动导入：EntryList 挂载时会用到的全局这里只需空壳 */
 const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useEntryModal = () => ({
   openEntry: () => {},
-  isOpen: { value: false },
-  currentEntry: { value: null },
-  navigatedInDetail: { value: false }
+  // 必须是真 ref：EntryList 把 isOpen 当 watch 的数据源，普通对象会被 Vue 判成
+  // "Invalid watch source" 并刷警告（真实实现是 useState，就是个 ref）
+  isOpen: ref(false),
+  currentEntry: ref(null),
+  navigatedInDetail: ref(false)
 })
 testGlobals.useIntersectionObserver = () => ({ pause: () => {}, resume: () => {}, stop: () => {} })
 

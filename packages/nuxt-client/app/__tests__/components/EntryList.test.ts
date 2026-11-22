@@ -124,6 +124,13 @@ const STUBS = {
     props: ['name', 'to'],
     template: '<span class="user">{{ name }}</span>'
   },
+  // 条目组件（EntryBlogItem / EntryImageItem）里的占位图标：单测没有 Nuxt UI 的自动导入，
+  // 不桩的话每次渲染都会刷一条 "Failed to resolve component"，把真正的失败埋掉
+  UIcon: {
+    name: 'UIcon',
+    props: ['name'],
+    template: '<i class="icon" :data-name="name" />'
+  },
   /**
    * 图片放大组件：真的那个会 teleport 到 body，单测里换成把「可见 / 起点 / 图片组」挂成
    * data-* 的桩，这样不用去 body 里翻 DOM。点桩本身等价于组件的 hide 事件（EntryList 据此复位）。
