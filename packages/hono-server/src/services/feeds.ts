@@ -5,7 +5,6 @@ import type { OpmlFeed } from "../rss/opml"
 import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
 import { feedDocId } from "../couchdb/doc-ids"
 import { db, feeds, bots } from "../db"
-import { isUniqueViolation, uniqueViolationConstraint } from "../db/errors"
 import { resumeIfAutoPaused } from "./feed-orphans"
 import { enqueueFetch } from "../workers"
 
@@ -202,75 +201,42 @@ export async function setSubscriptionStatus(userId: string, feedId: string, stat
 }
 
 /**
- * 目标 URL 已被另一个订阅源占用。
+ * 用户对**自己这一个订阅**的个性化修改（显示名 / 分组）。
  *
- * `feeds.url` 是唯一列，且 feedId 由 URL 哈希派生（见 deriveFeedId）——「一个地址对一个源」
- * 是数据模型的前提。所以改地址撞到已注册的源时不能硬写库，只能如实拒绝；调用方据此给
- * 用户可操作的说法（换地址 / 直接订阅那一条），而不是一个 500。
- */
-export class FeedUrlTakenError extends Error {
-  constructor(
-    readonly url: string,
-    /** 已占用该地址的源：用于把提示写具体（查不到时为 null） */
-    readonly existing: { id: string, title: string } | null,
-  ) {
-    super(`feed url already registered: ${url}`)
-    this.name = "FeedUrlTakenError"
-  }
-}
-
-/** 查某个 URL 是否已被注册（用于把冲突提示写具体） */
-async function findFeedByUrl(url: string): Promise<{ id: string, title: string } | null> {
-  const [row] = await db
-    .select({ id: feeds.id, title: feeds.title })
-    .from(feeds)
-    .where(eq(feeds.url, url))
-    .limit(1)
-  return row ?? null
-}
-
-/** 把唯一约束冲突翻译成 FeedUrlTakenError；不是 URL 冲突则原样抛出 */
-async function throwOnUrlConflict(err: unknown, url: string | undefined): Promise<void> {
-  if (url && isUniqueViolation(err)) {
-    // 只认 feeds_url_unique：feeds 上还有 couch_db_name 的唯一约束，别把它的冲突也报成「地址重复」
-    const constraint = uniqueViolationConstraint(err)
-    if (constraint === null || constraint === "feeds_url_unique") {
-      throw new FeedUrlTakenError(url, await findFeedByUrl(url))
-    }
-  }
-  throw err
-}
-
-/**
- * 更新某 feed 的元信息（title/url/description/siteUrl/image），**仅当属于当前用户订阅时**。
+ * 写的是用户库里的 `subscription:<feedId>` 文档，与前端「编辑订阅」弹窗
+ * （`usePouchDb.updateSubscription`）完全同源 —— 客户端从用户库读的正是这份 title/category，
+ * 所以改完立刻可见。
  *
- * 改 URL 撞到已注册的源时抛 FeedUrlTakenError（见上）。
+ * 为什么不能复用「改 PostgreSQL `feeds` 表」的写法：那张表是**所有订阅者共享**的源注册表。
+ * 早先 MCP 的 `update_subscription` 就是直接写它，两个后果：
+ *   1. 改了之后用户在界面上看不到 —— 订阅列表的 title 来自订阅文档，不是注册表；
+ *   2. 它是全局写：任何持有 API token 的普通用户都能改掉别人看到的源信息，
+ *      连 `url` 都能改（等于替所有订阅者换源）。源级字段的修改在 REST 侧是 requireAdmin，
+ *      MCP 这边不该绕过。
+ *
+ * 因此这里只接受用户真正拥有的字段，`url` / `siteUrl` / `description` / `image` 一律不接受。
+ *
+ * @returns true=已写入；false=该 feed 不在当前用户的订阅里
  */
-export async function updateSubscriptionMeta(
+export async function updateUserSubscription(
   userId: string,
   feedId: string,
-  patch: Partial<{ title: string, url: string, description: string, siteUrl: string, image: string }>,
+  patch: { title?: string, category?: string },
 ): Promise<boolean> {
-  const subscribed = await getSubscribedFeedIds(userId)
-  if (!subscribed.has(feedId)) return false
-  const clean: Record<string, string> = {}
-  for (const key of ["title", "url", "description", "siteUrl", "image"]) {
-    const v = patch[key as keyof typeof patch]
-    if (v !== undefined) clean[key] = v
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
+  const docId = `subscription:${feedId}`
+  let doc: Record<string, any>
+  try {
+    doc = await userDb.get(docId) as Record<string, any>
+  } catch {
+    // 读不到 = 没订阅（或订阅文档已失效），不是"更新失败"
+    return false
   }
-  if (!Object.keys(clean).length) return false
-  const [before] = await db.select({ url: feeds.url }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
-  // 冲突时 throwOnUrlConflict 直接抛出（不会落到下面的空数组）
-  const updated = await db.update(feeds)
-    .set(clean)
-    .where(eq(feeds.id, feedId))
-    .returning({ id: feeds.id })
-    .catch(async (err: unknown): Promise<{ id: string }[]> => {
-      await throwOnUrlConflict(err, clean.url)
-      return []
-    })
-  if (!updated.length) return false
-  await requeueAfterUrlChange(feedId, before?.url, clean.url)
+  if (patch.title === undefined && patch.category === undefined) return false
+  // 只合入传入的字段：undefined 表示"不动这个字段"，与前端 updateSubscription 的语义一致
+  if (patch.title !== undefined) doc.title = patch.title
+  if (patch.category !== undefined) doc.category = patch.category
+  await userDb.insert(doc as any)
   return true
 }
 

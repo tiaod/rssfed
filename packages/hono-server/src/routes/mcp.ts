@@ -7,11 +7,10 @@ import {
   addSubscriptionByUrl,
   removeSubscription,
   setSubscriptionStatus,
-  updateSubscriptionMeta,
+  updateUserSubscription,
   refetchFeed,
   resolveFeedId,
   formatFeedError,
-  FeedUrlTakenError,
 } from "../services/feeds"
 import { parseFeedUrl } from "../rss/parser"
 import {
@@ -191,11 +190,12 @@ async function buildServer(ctx: McpRequestContext): Promise<McpServer> {
   server.registerTool(
     "update_subscription",
     {
-      title: "修改订阅信息",
-      description: "修改某个已订阅源的元信息（title/url/description/siteUrl/image），仅限当前用户订阅的源。",
+      title: "修改我的订阅信息",
+      description: "修改当前用户**自己这一条订阅**的显示名（title）与分组（category），只影响本人，不影响其他订阅同一个源的用户。源地址/站点地址等源级字段不可通过此工具修改。",
       inputSchema: z.object({
         feedId: z.string(),
-        title: z.string().optional(),
+        title: z.string().optional().describe("订阅列表里的显示名"),
+        category: z.string().optional().describe("所属分组"),
         url: z.string().url().optional(),
         description: z.string().optional(),
         siteUrl: z.string().url().optional(),
@@ -203,21 +203,21 @@ async function buildServer(ctx: McpRequestContext): Promise<McpServer> {
       }),
     },
     async ({ feedId, ...patch }) => {
-      try {
-        const ok = await updateSubscriptionMeta(userId, feedId, patch)
-        if (!ok) return errorContent(`cannot update: feed not subscribed or not found: ${feedId}`)
-        return textContent({ feedId, updated: true })
-      } catch (err) {
-        // 改地址撞到已注册源：说清楚占用者，模型才可能换个地址或提示用户去订阅那一条
-        if (err instanceof FeedUrlTakenError) {
-          return errorContent(
-            err.existing
-              ? `feed url already registered by "${err.existing.title}" (${err.existing.id}): ${err.url}`
-              : `feed url already registered: ${err.url}`,
-          )
-        }
-        throw err
+      // 源级字段（url/siteUrl/description/image）是**所有订阅者共享**的注册表属性，
+      // REST 侧改这些需要管理员（PUT /api/feeds/:feedId 挂着 requireAdmin）。
+      // MCP 的 token 属于普通用户，若照样写库就等于越权改别人的源，所以明确拒绝而不是静默忽略。
+      const globalFields = ["url", "description", "siteUrl", "image"].filter(
+        (k) => (patch as Record<string, unknown>)[k] !== undefined,
+      )
+      if (globalFields.length) {
+        return errorContent(
+          `cannot update source-level fields via this tool: ${globalFields.join(", ")}`
+            + " (only title/category are personal; source metadata is admin-managed)",
+        )
       }
+      const ok = await updateUserSubscription(userId, feedId, { title: patch.title, category: patch.category })
+      if (!ok) return errorContent(`cannot update: feed not subscribed or not found: ${feedId}`)
+      return textContent({ feedId, updated: true, title: patch.title, category: patch.category })
     },
   )
 
