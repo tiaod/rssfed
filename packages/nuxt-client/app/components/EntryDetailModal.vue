@@ -525,8 +525,12 @@ const modalUi = computed(() => {
   if (!isFullscreen.value) {
     // 高度仍跟着内容走：短文章卡片就矮（UModal 的 scrollable=false 变体给了居中和
     // max-h-[calc(100dvh-2rem)]，长文章到顶后由 body 内部滚动），所以别在这里写 h-dvh。
+    //
+    // max-h 要覆盖主题默认的 sm:max-h-[calc(100dvh-4rem)]（上下各留 32px）：ui 覆盖只合并、
+    // 同属性后写的类赢，所以把 sm: 那一档也一起写成 1.5rem。桌面上那圈留白是纯装饰，
+    // 正文能多出一整行高度更划算；手机上 UModal 本来就是 max-h-[calc(100dvh-2rem)]，不用管。
     return {
-      content: `${MODAL_CONTENT_CLASS} ${settings.value.entryModalSize} flex flex-col`,
+      content: `${MODAL_CONTENT_CLASS} ${settings.value.entryModalSize} max-h-[calc(100dvh-1.5rem)] sm:max-h-[calc(100dvh-1.5rem)] flex flex-col`,
       header: 'shrink-0 py-2 px-4 sm:px-6',
       // body 基础类自带 flex-1 与 p-4 sm:p-6（这里的正文靠它留边，别再像全屏档那样清成 p-0）；
       // 补 min-h-0（否则子项按内容撑高、overflow 不生效）与 overflow-y-auto，长文到顶后在此内滚
