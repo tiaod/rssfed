@@ -690,14 +690,28 @@ const modalTitle = computed(() => active.value?.feed?.title || active.value?.tit
     @after:enter="revealNav"
   >
     <!--
-      顶栏：源名 + 页码 + 动作簇 + 关闭。
+      顶栏：关闭 + 源名 + 页码 + 动作簇。
 
       动作按钮原先在页脚，而页脚只有读到文末才够得着 —— 顶栏才是始终贴边的位置，
       滚到哪儿都在。自定义 #header 会整块替换 UModal 的默认顶栏（连它自带的绝对定位关闭按钮
       一起），所以标题和关闭都得在这里自己画；:title 仍然传着，那是给 VisuallyHidden 里
       的无障碍标题用的（读屏仍能读到对话框名字）。
+
+      关闭放在最左、只留一个图标：它是「离开」这个动作，位置固定在左上角比挤在动作簇末尾
+      更好找，也不跟已读/收藏/分享那一排抢注意力。没有文字就必须给 aria-label，
+      否则读屏只会念出一个「按钮」。
     -->
     <template #header>
+      <UButton
+        color="neutral"
+        variant="ghost"
+        icon="i-lucide-x"
+        size="sm"
+        aria-label="关闭"
+        title="关闭"
+        @click="closeEntry"
+      />
+
       <div class="min-w-0 flex-1">
         <p class="truncate text-sm font-medium text-highlighted">
           {{ modalTitle }}
@@ -713,16 +727,6 @@ const modalTitle = computed(() => active.value?.feed?.title || active.value?.tit
       </Transition>
 
       <EntryToolbar :entry="active" />
-
-      <UButton
-        color="neutral"
-        variant="outline"
-        icon="i-lucide-x"
-        size="sm"
-        @click="closeEntry"
-      >
-        关闭
-      </UButton>
     </template>
 
     <template #body>

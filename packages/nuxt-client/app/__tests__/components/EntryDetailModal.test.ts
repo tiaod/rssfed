@@ -672,7 +672,12 @@ describe('EntryDetailModal 的动作按钮位置', () => {
     for (const label of ['标为未读', '收藏', '阅读原文', '分享文章']) {
       expect(header.find(`[aria-label="${label}"]`).exists(), `${label} 在顶栏`).toBe(true)
     }
-    expect(header.text()).toContain('关闭')
+    // 关闭是纯图标按钮：文字只剩 aria-label / title，读屏与悬停提示都靠它
+    const close = header.find('[aria-label="关闭"]')
+    expect(close.exists(), '关闭在顶栏').toBe(true)
+    expect(close.text()).toBe('')
+    // 位置在左上角：顶栏的第一个按钮
+    expect(header.findAll('button')[0]?.attributes('aria-label')).toBe('关闭')
     // 顶栏同时承载源名与页码
     expect(header.text()).toContain('源')
     expect(header.text()).toContain('1 / 1')

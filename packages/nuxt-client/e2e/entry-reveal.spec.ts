@@ -124,7 +124,7 @@ test.describe('关闭详情后回到刚读的那一条', () => {
     expect(moved && moved !== first, `窄屏弹窗：连点「下一篇」翻到了别的篇目 → ${moved.slice(0, 24)}`).toBe(true)
 
     await verifyReveal(appPage, '窄屏弹窗', async () => {
-      await appPage.locator(`${MODAL} button`, { hasText: '关闭' }).last().click()
+      await appPage.locator(`${MODAL} [aria-label="关闭"]`).first().click()
     })
   })
 

@@ -433,14 +433,17 @@ export async function clickFirstTableRow(page: Page) {
   return false
 }
 
-/** 关掉当前展示面：阅读栏挂的是 X，弹窗挂的是「关闭」——两个展示面互斥，按谁在就用谁 */
+/**
+ * 关掉当前展示面：阅读栏挂的是 X（aria-label「关闭阅读栏」），弹窗挂的是左上角图标按钮
+ * （aria-label「关闭」，见 EntryDetailModal 顶栏）—— 两个展示面互斥，按谁在就用谁。
+ */
 export async function closeAnyDetail(page: Page) {
   const paneClose = page.locator('[aria-label="关闭阅读栏"]')
   if ((await paneClose.count()) > 0) {
     await paneClose.first().click()
     return
   }
-  await page.locator(`${MODAL} button`, { hasText: '关闭' }).last().click()
+  await page.locator(`${MODAL} [aria-label="关闭"]`).first().click()
 }
 
 /** 连点「下一篇」：宽屏用键盘（阅读栏与弹窗都监听 ←/→），窄屏弹窗底部浮钮不渲染，同样走键盘 */
@@ -466,7 +469,7 @@ export async function resetToList(page: Page) {
     await paneClose.first().click({ timeout: 2_000 }).catch(() => {})
     await page.waitForTimeout(500)
   }
-  const modalClose = page.locator(`${MODAL} button`, { hasText: '关闭' }).last()
+  const modalClose = page.locator(`${MODAL} [aria-label="关闭"]`).first()
   if ((await modalClose.count()) > 0 && await modalClose.isEnabled().catch(() => false)) {
     await modalClose.click({ timeout: 2_000 }).catch(() => {})
     await page.waitForTimeout(500)
