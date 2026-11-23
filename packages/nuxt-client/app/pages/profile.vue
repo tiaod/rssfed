@@ -58,6 +58,11 @@ const handleLogout = async () => {
     <template #header>
       <UDashboardNavbar title="账户资料">
         <template #right>
+          <!--
+            这三个入口在手机上只留图标：顶栏在 lg 以下是 3rem、还要塞下开合按钮 + 标题，
+            三个带文字的按钮会把「账户资料」挤成「账户」（标题 slot 是 truncate）。
+            图标语义明确（RSS / 盾牌 / 齿轮），配 aria-label 不至于失去可访问名。
+          -->
           <UButton
             to="/subscriptions"
             icon="i-lucide-rss"
@@ -65,6 +70,8 @@ const handleLogout = async () => {
             variant="ghost"
             size="sm"
             label="订阅管理"
+            aria-label="订阅管理"
+            :ui="{ label: 'hidden lg:inline' }"
           />
           <UButton
             v-if="isAdmin"
@@ -74,6 +81,8 @@ const handleLogout = async () => {
             variant="ghost"
             size="sm"
             label="管理后台"
+            aria-label="管理后台"
+            :ui="{ label: 'hidden lg:inline' }"
           />
           <UButton
             icon="i-lucide-settings"
@@ -81,6 +90,8 @@ const handleLogout = async () => {
             variant="ghost"
             size="sm"
             label="设置"
+            aria-label="设置"
+            :ui="{ label: 'hidden lg:inline' }"
             @click="openSettings()"
           />
         </template>
