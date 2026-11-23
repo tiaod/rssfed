@@ -16,7 +16,10 @@ async function handleLogout() {
 
 <template>
   <div>
-    <UHeader>
+    <!-- 关掉 UHeader 的移动端菜单按钮：公开布局只有 logo / 深浅色 / 登录，没有可折叠的导航项。
+         开着的话点出来的是一个 menu 模式弹窗，而这里既没给 #body，弹窗里就只有「顶栏副本」，
+         标题还是未翻译的 header.title —— 纯噪音。将来公开页真的长出多条导航再连带 #body 一起加 -->
+    <UHeader :toggle="false">
       <template #left>
         <NuxtLink
           to="/"
