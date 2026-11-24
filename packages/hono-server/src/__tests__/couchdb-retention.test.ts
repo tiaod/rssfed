@@ -18,7 +18,6 @@ vi.mock("../couchdb/client", () => ({
     request: (opts: { path?: string, body?: unknown }) => couchMock.request!(opts),
   },
   /** retention.ts 只 import 了 createCouchDb，其余导出给别的模块用（这里不需要） */
-  authenticatedDbUrl: (db: string) => db,
 }))
 import {
   buildPurgeBody,
@@ -224,7 +223,7 @@ describe("trimSourceToLatestN：groupByFeed（汇聚库逐源保留）", () => {
     })
     expect(result).toEqual({ total: 400, deleted: 120, batches: 2 })
     expect(calls).toEqual([{
-      viewPath: "timeline-maintain/by-feed-date",
+      viewPath: "main/by-feed-date",
       n: 50,
       batchSize: DEFAULT_TRIM_BATCH,
       maxBatches: DEFAULT_TRIM_MAX_BATCHES,

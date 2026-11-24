@@ -55,8 +55,8 @@ async function toggleSubscribe(bot: PublicBot) {
         description: bot.description,
         image: bot.avatarUrl
       })
-      // 订阅后立即触发产出库复制，马上能看到产出
-      pouch.syncFeed()
+      // 订阅后立刻把该 Bot 已有的产出搬进用户库（服务端补这一步，见 useApi.syncBotSubscription）
+      await api.feeds.syncBotSubscription(bot.id).catch(() => {})
       subscribed.value.add(bot.id)
       toast.add({ title: '订阅成功', description: bot.name, color: 'success' })
     }

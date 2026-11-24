@@ -18,7 +18,6 @@ vi.mock("../couchdb/client", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../couchdb/client")>()
   return {
     ...actual,
-    ensureFeedDatabase: async (feedId: string) => `feed_${feedId}`,
     ensureBotDatabase: async (botId: string) => `bot_${botId}`,
     ensureTimelineDatabase: async (userId: string) => `user-timeline_${userId}`,
   }
@@ -27,8 +26,13 @@ vi.mock("../couchdb/client", async (importOriginal) => {
 const { app } = await import("../app")
 const { couchUrl } = await import("../couchdb/client")
 
-/** 合法库名：本服务前缀 + 24 位随机后缀（见 couchdb/client.ts 的生成规则） */
-const FEED_DB = `feed_${"a".repeat(24)}`
+/**
+ * 合法库名：本服务前缀 + 24 位随机后缀（见 couchdb/client.ts 的生成规则）。
+ *
+ * 只有 `bot_` 与 `user-timeline_` 两种前缀可代理 —— `feed_` 已随共享源库一起删除，
+ * 下面「拒绝非法库名」那组用例仍然拿 `feed_` 当反例，正是要钉住"它不再放行"。
+ */
+const FEED_DB = `bot_${"a".repeat(24)}`
 const BOT_DB = `bot_${"b".repeat(24)}`
 
 /** 被转发到 CouchDB 的那次请求（拦截 global fetch 捕获） */

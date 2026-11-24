@@ -1,12 +1,13 @@
 import { Hono, type Context, type Next } from "hono"
 import crypto from "node:crypto"
-import { db, bots, feeds, attachments, botFeeds, botFollowing, botInbox, type Bot } from "../db"
+import { db, bots, attachments, botFeeds, botFollowing, botInbox, type Bot } from "../db"
 import { isUniqueViolation as isUniqueViolationDb } from "../db/errors"
 import { eq, and, desc } from "drizzle-orm"
 import { auth } from "../auth"
 import { clearBotKv, followActor, unfollowActor } from "../bots"
 import { ApiError, cleanupAttachment, handleAvatarUpload } from "../avatar"
 import { createCouchDb, ensureBotDatabase, nanoServer } from "../couchdb/client"
+import { addBotFeed } from "../services/bots"
 
 type BotVariables = { bot: Bot; userId: string }
 
@@ -139,13 +140,16 @@ botsRouter.post("/:id/avatar", requireOwnedBot, async (c) => {
 
 botsRouter.post("/:id/feeds", requireOwnedBot, async (c) => {
   const id = c.req.param("id")!
+  const userId = c.get("userId")
   const { feedId } = await c.req.json()
+  if (typeof feedId !== "string" || !feedId) return c.json({ error: "feedId required" }, 400)
 
-  await db.insert(botFeeds).values({
-    id: `${id}:${feedId}`,
-    botId: id,
-    feedId,
-  }).onConflictDoNothing() // 重复关联时幂等跳过
+  // 走服务层：它会把订阅文档里的 url/标题拷进关联表（Bot 要独立抓取，见 addBotFeed）
+  const result = await addBotFeed(userId, id, feedId)
+  if (result === "feed-not-subscribed") {
+    return c.json({ error: "该源不在你的订阅里，Bot 无法关联", code: "feed_not_subscribed" }, 409)
+  }
+  if (result === "bot-not-owner") return c.json({ error: "bot not found" }, 404)
   return c.json({ success: true }, 201)
 })
 
@@ -153,13 +157,14 @@ botsRouter.post("/:id/feeds", requireOwnedBot, async (c) => {
 botsRouter.get("/:id/feeds", requireOwnedBot, async (c) => {
   const id = c.req.param("id")!
 
+  // title/url 存在关联表上（Bot 独立抓取，不再 join 一个全局源注册表）
   const rows = await db.select({
     feedId: botFeeds.feedId,
-    title: feeds.title,
-    url: feeds.url,
+    title: botFeeds.title,
+    url: botFeeds.url,
+    paused: botFeeds.paused,
   })
     .from(botFeeds)
-    .innerJoin(feeds, eq(feeds.id, botFeeds.feedId))
     .where(eq(botFeeds.botId, id))
 
   return c.json(rows)

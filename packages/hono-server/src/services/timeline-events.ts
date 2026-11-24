@@ -1,12 +1,5 @@
-import { and, desc, eq, inArray, sql } from "drizzle-orm"
-import {
-  bots as botsTable,
-  db,
-  feeds,
-  timelineEvents,
-  timelineReconcileHeartbeat,
-  timelineSourceSync,
-} from "../db"
+import { and, desc, eq, sql } from "drizzle-orm"
+import { db, timelineEvents, timelineReconcileHeartbeat } from "../db"
 
 /**
  * 聚合流水：把"这一轮到底发生了什么"从服务端控制台搬到用户能看见的地方（设置页 → 同步日志）。
@@ -56,55 +49,48 @@ export interface TimelineHeartbeat {
 }
 
 /**
- * 一轮聚合的结论（与 `TimelineReconcileResult` 对应，但这层不依赖服务层类型，
- * 避免 services/timeline → services/timeline-events 的循环引用）。
+ * 一轮抓取的结论（给同步日志看）。
+ *
+ * 新模型下"一轮"= 调度器枚举所有 owner、把到期的源入队；没有复制、没有脏源判定，
+ * 所以这里统计的是**抓取**的结果：多少个源到期、新增多少条、裁掉多少、失败多少。
  */
-export interface ReconcileRoundSummary {
-  /** 订阅源总数 */
+export interface FetchRoundSummary {
+  /** 本轮检查的订阅源总数 */
   sources: number
-  /** 判出来要搬的源数 */
-  dirty: number
-  /** 退订清理掉的水位行数 */
-  removedSyncs: number
-  /** 退订清理掉的条目数 */
-  removedEntries: number
-  /** 汇聚库保留清掉的过期条目数（逐源裁到最新 N 条） */
+  /** 判出来要抓的源数 */
+  due: number
+  /** 真正写进库的新条目数 */
+  newEntries: number
+  /** 裁掉的过期条目数 */
   trimmedEntries: number
-  /** 清掉的遗留常驻复制任务数 */
-  purgedReplications: number
   /** 本轮失败的源数 */
   failures: number
 }
 
 /** 这一轮是否"干了活"（决定进流水还是只更新心跳）—— 纯函数，便于单测 */
-export function isReconcileRoundMeaningful(round: ReconcileRoundSummary): boolean {
-  return round.dirty > 0
-    || round.removedSyncs > 0
-    || round.removedEntries > 0
-    || round.trimmedEntries > 0
-    || round.purgedReplications > 0
-    || round.failures > 0
+export function isRoundMeaningful(round: FetchRoundSummary): boolean {
+  return round.due > 0 || round.newEntries > 0 || round.trimmedEntries > 0 || round.failures > 0
 }
 
-/** 一轮汇聚的人话描述（给设置页的同步日志看） */
-export function describeReconcileRound(round: ReconcileRoundSummary, ms: number): string {
+/** 兼容旧名（旧调用方仍在用）：同 isRoundMeaningful */
+export const isReconcileRoundMeaningful = isRoundMeaningful
+
+/** 一轮的人话描述（给设置页的同步日志看） */
+export function describeRound(round: FetchRoundSummary, ms: number): string {
   const parts: string[] = []
-  if (round.dirty > 0) parts.push(`${round.dirty} 个源需搬运`)
-  if (round.removedSyncs > 0 || round.removedEntries > 0) {
-    parts.push(`退订清理 ${round.removedSyncs} 个源 / ${round.removedEntries} 条`)
-  }
-  if (round.trimmedEntries > 0) parts.push(`保留清理 ${round.trimmedEntries} 条过期条目`)
-  if (round.purgedReplications > 0) parts.push(`清掉 ${round.purgedReplications} 条遗留常驻复制`)
+  if (round.due > 0) parts.push(`${round.due} 个源到期`)
+  if (round.newEntries > 0) parts.push(`新增 ${round.newEntries} 条`)
+  if (round.trimmedEntries > 0) parts.push(`裁剪 ${round.trimmedEntries} 条`)
   if (round.failures > 0) parts.push(`${round.failures} 个源失败`)
-  const detail = parts.length > 0 ? parts.join("；") : "无需搬运"
-  return `汇聚：订阅 ${round.sources} 个源，${detail}（${ms}ms）`
+  const detail = parts.length > 0 ? parts.join("；") : "无需抓取"
+  return `抓取：订阅 ${round.sources} 个源，${detail}（${ms}ms）`
 }
 
-/** 合并后的描述：「连续 3 轮，共 15 个源需搬运」/「连续 5 轮无需搬运」 */
-function describeMergedRound(rounds: number, dirty: number, sources: number, failures: number): string {
-  const parts = [dirty > 0 ? `连续 ${rounds} 轮，共 ${dirty} 个源需搬运` : `连续 ${rounds} 轮无需搬运`]
+/** 合并后的描述：「连续 3 轮，共 15 个源到期」/「连续 5 轮无需抓取」 */
+function describeMergedRound(rounds: number, due: number, sources: number, failures: number): string {
+  const parts = [due > 0 ? `连续 ${rounds} 轮，共 ${due} 个源到期` : `连续 ${rounds} 轮无需抓取`]
   if (failures > 0) parts.push(`累计 ${failures} 个源失败`)
-  return `汇聚：订阅 ${sources} 个源，${parts.join("；")}`
+  return `抓取：订阅 ${sources} 个源，${parts.join("；")}`
 }
 
 /** 记一条流水（旁路：内部吞异常） */
@@ -133,17 +119,17 @@ export async function recordTimelineEvent(input: {
 }
 
 /**
- * 记一轮聚合：更新心跳 + 写一条流水（空转也写，合并窗口内并进上一条）。
+ * 记一轮抓取：更新心跳 + 写一条流水（空转也写，合并窗口内并进上一条）。
  *
  * 心跳与流水分开，是因为读法不同：心跳永远只有最新一次（覆盖写），流水是历史。
  */
-export async function recordReconcileRound(input: {
+export async function recordFetchRound(input: {
   userId: string
-  round: ReconcileRoundSummary
+  round: FetchRoundSummary
   ms: number
 }): Promise<void> {
   const { userId, round, ms } = input
-  const meaningful = isReconcileRoundMeaningful(round)
+  const meaningful = isRoundMeaningful(round)
   try {
     // ① 心跳：每轮都更新（空转 +1，有变化清零）
     const now = new Date()
@@ -159,23 +145,25 @@ export async function recordReconcileRound(input: {
         },
       })
     // ② 流水：空转也记（排查时要能区分"没触发"和"触发了但没变化"）；能并进上一条就并
-
-    if (await mergeIntoPreviousReconcile(userId, round)) return
+    if (await mergeIntoPreviousRound(userId, round)) return
     await db.insert(timelineEvents).values({
       userId,
       kind: "reconcile",
       level: round.failures > 0 ? "warn" : "info",
-      message: describeReconcileRound(round, ms),
+      message: describeRound(round, ms),
       data: { ...round, rounds: 1, ms },
     })
     await pruneTimelineEvents(userId)
   } catch (err) {
-    console.warn(`[Timeline] 写聚合流水失败（不影响聚合）：${(err as Error)?.message ?? err}`)
+    console.warn(`[Timeline] 写抓取流水失败（不影响抓取）：${(err as Error)?.message ?? err}`)
   }
 }
 
-/** 上一条 reconcile 还在合并窗口内 → 更新它（返回 true） */
-async function mergeIntoPreviousReconcile(userId: string, round: ReconcileRoundSummary): Promise<boolean> {
+/** 兼容旧名 */
+export const recordReconcileRound = recordFetchRound
+
+/** 上一条还在合并窗口内 → 更新它（返回 true） */
+async function mergeIntoPreviousRound(userId: string, round: FetchRoundSummary): Promise<boolean> {
   const [previous] = await db.select({
     id: timelineEvents.id,
     at: timelineEvents.at,
@@ -187,26 +175,22 @@ async function mergeIntoPreviousReconcile(userId: string, round: ReconcileRoundS
   if (!previous) return false
   if (Date.now() - new Date(previous.at).getTime() > RECONCILE_MERGE_WINDOW_MS) return false
 
-  const data = (previous.data ?? {}) as Partial<ReconcileRoundSummary> & { rounds?: number }
+  const data = (previous.data ?? {}) as Partial<FetchRoundSummary> & { rounds?: number }
   const rounds = (data.rounds ?? 1) + 1
-  const dirty = (data.dirty ?? 0) + round.dirty
-  const removedSyncs = (data.removedSyncs ?? 0) + round.removedSyncs
-  const removedEntries = (data.removedEntries ?? 0) + round.removedEntries
+  const due = (data.due ?? 0) + round.due
+  const newEntries = (data.newEntries ?? 0) + round.newEntries
   const trimmedEntries = (data.trimmedEntries ?? 0) + round.trimmedEntries
-  const purgedReplications = (data.purgedReplications ?? 0) + round.purgedReplications
   const failures = (data.failures ?? 0) + round.failures
   await db.update(timelineEvents).set({
     // 时间取"最近一轮"；排序按 at 走，合并行会浮到最上面
     at: new Date(),
     level: failures > 0 ? "warn" : "info",
-    message: describeMergedRound(rounds, dirty, round.sources, failures),
+    message: describeMergedRound(rounds, due, round.sources, failures),
     data: {
       sources: round.sources,
-      dirty,
-      removedSyncs,
-      removedEntries,
+      due,
+      newEntries,
       trimmedEntries,
-      purgedReplications,
       failures,
       rounds,
     },
@@ -244,7 +228,7 @@ export async function listTimelineEvents(userId: string, limit = 100): Promise<T
   return rows
 }
 
-/** 读心跳（没有过任何一轮聚合时是 null） */
+/** 读心跳（没有过任何一轮时是 null） */
 export async function readReconcileHeartbeat(userId: string): Promise<TimelineHeartbeat | null> {
   const [row] = await db.select({
     at: timelineReconcileHeartbeat.at,
@@ -258,61 +242,6 @@ export async function readReconcileHeartbeat(userId: string): Promise<TimelineHe
 /** 清空该用户的流水（设置页的「清空」；心跳不受影响） */
 export async function clearTimelineEvents(userId: string): Promise<void> {
   await db.delete(timelineEvents).where(eq(timelineEvents.userId, userId))
-}
-
-/** 源级**当前状态**（不是流水） */
-export interface TimelineSourceState {
-  /** 源 id：feedId 或 `bot:{botId}` */
-  sourceId: string
-  kind: "feed" | "bot"
-  /** 展示名（源标题 / bot 名）；查不到就是 null（源可能已被删） */
-  title: string | null
-  /** 上次同步**开始**的时刻；null = 还没同步成功过 */
-  syncedAt: Date | null
-  /** idle / syncing / error */
-  status: string
-  lastError: string | null
-}
-
-/**
- * 每个订阅源的当前同步状态（设置页「源状态」用）。
- *
- * 这部分**不落流水表** —— 它是状态不是事件：同一条信息每轮都会被覆盖，记成流水只会制造噪音。
- * 标题来自 `feeds` / `bots` 两张表（用户库里也有 FeedDoc 副本，但那是客户端可写的视图，不作权威）。
- */
-export async function listTimelineSources(userId: string): Promise<TimelineSourceState[]> {
-  const rows = await db.select({
-    sourceId: timelineSourceSync.sourceId,
-    syncedAt: timelineSourceSync.syncedAt,
-    status: timelineSourceSync.status,
-    lastError: timelineSourceSync.lastError,
-  }).from(timelineSourceSync).where(eq(timelineSourceSync.userId, userId))
-
-  const feedIds = rows.filter(row => !row.sourceId.startsWith("bot:")).map(row => row.sourceId)
-  const botIds = rows.filter(row => row.sourceId.startsWith("bot:")).map(row => row.sourceId.slice("bot:".length))
-  const titles = new Map<string, string>()
-  if (feedIds.length > 0) {
-    const found = await db.select({ id: feeds.id, title: feeds.title })
-      .from(feeds).where(inArray(feeds.id, feedIds))
-    for (const row of found) titles.set(row.id, row.title)
-  }
-  if (botIds.length > 0) {
-    const found = await db.select({ id: botsTable.id, name: botsTable.name })
-      .from(botsTable).where(inArray(botsTable.id, botIds))
-    for (const row of found) titles.set(`bot:${row.id}`, row.name)
-  }
-
-  return rows
-    .map(row => ({
-      sourceId: row.sourceId,
-      kind: (row.sourceId.startsWith("bot:") ? "bot" : "feed") as "feed" | "bot",
-      title: titles.get(row.sourceId) ?? null,
-      syncedAt: row.syncedAt,
-      status: row.status,
-      lastError: row.lastError,
-    }))
-    // 最近同步过的在前；从没同步过（syncedAt = null）的排后面
-    .sort((a, b) => (b.syncedAt?.getTime() ?? 0) - (a.syncedAt?.getTime() ?? 0))
 }
 
 /** 仅用于测试/排查：该用户当前有多少条流水（裁剪逻辑的断言） */

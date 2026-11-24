@@ -25,23 +25,27 @@ vi.mock("../auth", () => ({
 }))
 
 // Redis / PG / CouchDB 都不在单测范围内：这里只验证路由的流式协议
-vi.mock("../workers", () => ({ enqueueFetch: async () => {} }))
+vi.mock("../workers", () => ({ enqueueOwnerFetch: async () => {} }))
 
 vi.mock("../couchdb/client", () => ({
   createCouchDb: () => ({ insert: async () => ({}) }),
   ensureTimelineDatabase: async () => "db_user",
-  ensureFeedDatabase: async () => "db_feed",
+}))
+
+// feedId 现在是 url 的纯函数派生（没有注册表可查），所以直接按 url 造假 id
+vi.mock("../couchdb/subscription-doc", () => ({
+  deriveFeedId: (url: string) => `id_${url}`,
+  subscriptionDocId: (feedId: string) => `subscription:${feedId}`,
+  SUBSCRIPTION_TYPE: "subscription",
+  parseSubscription: () => ({ ok: false, reason: "missing-url" }),
 }))
 
 vi.mock("../services/feeds", () => ({
-  resolveFeedId: async (url: string) => `id_${url}`,
-  ensureFeedRegistered: async (item: { url: string }) => {
+  addSubscriptionIfAbsent: async (_db: unknown, item: { url: string }) => {
     state.calls.push(item.url)
     if (state.behavior.get(item.url) === "fail") throw new Error("boom")
-    return { feedId: `id_${item.url}`, title: item.url }
+    return state.behavior.get(item.url) !== "duplicate"
   },
-  addSubscriptionIfAbsent: async (_db: unknown, item: { url: string }) =>
-    state.behavior.get(item.url) !== "duplicate",
   listSubscriptionsForUser: async () => [],
 }))
 

@@ -10,7 +10,8 @@ import {
   ensureSystemDatabases,
 } from "./couchdb/client"
 import { verifyProxyAuthReady } from "./couchdb/proxy-auth"
-import { shutdownWorkers } from "./workers"
+import { shutdownFetchWorker } from "./workers"
+import { shutdownTimelineMaintenance, startTimelineMaintenance } from "./workers/maintenance"
 import { shutdownBots, ensureFedifySchema } from "./bots"
 import { bootstrapAdminFromEnv } from "./bootstrap-admin"
 import { startImageCacheGc } from "./images/cache-gc"
@@ -112,12 +113,16 @@ ensureFedifySchema().then(() => {
 // 图片缓存（抓取去重的中间产物）按 IMAGE_CACHE_TTL_DAYS 定期清理：异步跑，不阻塞启动
 startImageCacheGc()
 
+// 定时维护：休眠用户暂停抓取 + 每 (owner × 源) 的自适应保留条数（见 workers/maintenance.ts）
+startTimelineMaintenance()
+
 console.log(`Server running on http://localhost:${port}`)
 
 async function shutdown() {
   console.log("Shutting down gracefully...")
   server.close()
-  await Promise.allSettled([shutdownWorkers(), shutdownBots()])
+  shutdownTimelineMaintenance()
+  await Promise.allSettled([shutdownFetchWorker(), shutdownBots()])
   process.exit(0)
 }
 

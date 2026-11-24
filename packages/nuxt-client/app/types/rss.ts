@@ -73,28 +73,7 @@ export interface RssCategory {
 /** 订阅抓取状态：全部由注册表真实字段判定（status / errorMessage） */
 export type FeedStatus = 'active' | 'paused' | 'error'
 
-/** 管理员视角的订阅源注册表项（含 per-feed 图片缓存策略） */
-export interface AdminFeed {
-  id: string
-  url: string
-  title: string
-  description?: string
-  siteUrl?: string
-  image?: string
-  status: FeedStatus
-  errorMessage?: string
-  lastFetchedAt?: string
-  createdAt: string
-  // per-feed 图片缓存策略（见 rss/entry-images.ts）
-  cacheImages: boolean
-  maxImageCount: number | null
-  maxEntryImageBytes: number | null
-  maxImageWidth: number | null
-  avifQuality: number | null
-  maxSourceImageBytes: number | null
-}
-
-/** 订阅管理列表项：用户订阅信息 + 注册表抓取状态 */
+/** 订阅管理列表项：订阅信息 + 该用户自己的抓取状态（来自 _local/schedule） */
 export interface FeedSubscriptionItem {
   feedId: string
   title: string

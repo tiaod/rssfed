@@ -98,14 +98,18 @@ export const apiToken = pgTable("api_token", {
 ])
 
 /**
- * 每用户的时间线聚合设置 — 决定服务端往该用户的 `user-timeline_*` 派生库里写什么。
+ * 每用户的时间线设置。
  *
- * 权威在 PostgreSQL：服务端每次 reconcile 都要读它，而客户端只把它镜到 localStorage
- * 供离线显示（设置页的写入走 PATCH /api/timeline/settings）。**没有行 = 全部走全局默认**
- *（见 services/timeline.ts 的 DEFAULT_TIMELINE_SETTINGS），所以列一律可空。
+ * 权威在 PostgreSQL：服务端读它决定「要不要给这个用户的抓取让步」，客户端只镜像到
+ * localStorage 供离线显示（设置页的写入走 PATCH /api/timeline/settings）。
+ * **没有行 = 全部走全局默认**（见 services/timeline.ts 的 DEFAULT_TIMELINE_SETTINGS），
+ * 所以列一律可空。
  *
- * 这里**没有图片参数**：图片策略只有一份 per-feed 的（管理员维护，见 rss/entry-images.ts），
- * 抓取时就压好了；聚合只搬运成品，用户设置改不了附件。
+ * 这里**没有图片参数**：图片策略是抓取时的全局默认（见 rss/entry-images.ts），
+ * 用户设置改不了附件。
+ *
+ * 也**没有同步窗口 / 保底条数**：每源留多少条由 `(用户 × 源)` 的自适应保留策略决定，
+ * 存在用户库的 `_local/schedule` 文档里（见 services/owner-schedule.ts）。
  */
 export const userTimelineSettings = pgTable("user_timeline_settings", {
   userId: text("user_id").primaryKey().references(() => user.id, { onDelete: "cascade" }),
@@ -116,70 +120,17 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
    */
   aiSummaryEnabled: boolean("ai_summary_enabled"),
 
-  // ── 休眠用户的生命周期（见 services/timeline-lifecycle.ts）──────────────
-  // 长期不用的账号不再每 5 分钟被 reconcile 空转（服务端聚合 + 源库复制）+ 不推进水位；
-  // 回来时**重建**派生库而不是补增量 —— 只有这样才能安全地清理源库墓碑（GC 把休眠用户
-  // 当成"没有订阅者"）。三列都留在本表而不是 `user`（Better Auth 管的结构）里。
+  // ── 休眠用户（见 services/timeline-lifecycle.ts）──────────────────────────
+  // 新模型下用户库就是唯一真相、没有「派生库」可重建：休眠只是**停止为他抓取**，
+  // 省下 egress 与写库。回来时不需要任何重建 —— 下一轮调度照常抓他订阅的源，
+  // 本地缺的内容随这次抓取补上。
   /** 最近一次客户端调用时间线接口的时刻（上报有节流，只用于判断休眠） */
   lastActiveAt: timestamp("last_active_at"),
-  /** 非空 = 已休眠暂停聚合；恢复时置空并重建派生库 */
+  /** 非空 = 已休眠暂停抓取；下次打开应用时置空 */
   aggregationPausedAt: timestamp("aggregation_paused_at"),
-  /** 暂停后已恢复、等待重建（重建成功前不做增量，见 workers/timeline.ts） */
-  needsRebuild: boolean("needs_rebuild").notNull().default(false),
 
   updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
 })
-
-/**
- * 每个 (用户 × 订阅源) 的**同步水位** —— 决定"这个源现在要不要搬一次"。
- *
- * 为什么放 PostgreSQL 而不是用户库里的 `subscription:` 文档：
- *   - `subscription:` 是**客户端也会写**的文档（PouchDB 双向同步），服务端往上写水位会和
- *     用户的订阅编辑撞出修订冲突；
- *   - 放 PG 才能按 `source_id` 反查"谁订阅了这个源"：抓取到新内容时靠它**只叫醒订阅者**
- *     （见 `listSubscriberUserIds`）。早期是给所有用户广播，实测一个零订阅账号 4 小时被
- *     叫醒 332 次、每次只是空转。
- *
- * 为什么是"每 (用户 × 源)"一条而不是常驻复制：见 `couchdb/replicator.ts` 的头部。
- *
- * **这张表里没有"窗口下界"字段**（早先的 `bound_iso`）：复制不再带任何参数，保留策略的
- * 唯一权威是两侧各自的源库裁剪（见 `couchdb/retention.ts`）。别再往下界方案上加字段 ——
- * 那会让每次换窗口都等于换复制哈希、从 0 重扫源库。
- *
- * `synced_at` 记的是**复制开始**的时刻而不是完成时刻，这是为了堵一个丢数据的竞态：
- * 抓取 worker 在复制进行中写入新条目时，那条变更可能没被本次复制的 `_changes` 读到，
- * 但它的 `lastNewEntryAt` 会比"完成时刻"更早 —— 用完成时刻就会把这条判成"已同步过"，
- * 于是永远不再搬。用开始时刻则它一定还脏，下一轮补上（代价只是一次空转复制）。
- *
- * **行的生命周期**（没有触发器/视图，全部由应用在 reconcile 与同步任务里维护；
- * 订阅集合的权威始终是用户库里的 `subscription:` 文档）：
- *   - **新增**：reconcile 读到"订阅里有、水位里没有" → 判脏源 → 入队；
- *     **行是那次同步自己 upsert 的**（先写行再搬），不是订阅那一刻建的；
- *   - **删除**：退订写回用户库后的第一轮 reconcile 发现"水位里有、订阅里没有" →
- *     删该源条目 + 删行（写回是异步的，点了退订立刻看表里还在是正常的）；
- *   - **随用户删**：`user_id` 上的 `ON DELETE CASCADE`（数据库兜的）；
- *   - **作废**：聚合库整个换掉（重建、升级、手工删库）→ 清掉该用户全部行
- *     （`isDerivedDbFresh`），否则新库是空的、"源那边没新内容"的源永远不会被搬。
- * 队列里的同步任务还会先复查 `subscription:<sourceId>`：退订发生在入队之后时直接跳过。
- */
-export const timelineSourceSync = pgTable("timeline_source_sync", {
-  userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
-  /** 源 id：feeds 的 feedId，或 `bot:{botId}` */
-  sourceId: text("source_id").notNull(),
-  /** 上次同步**开始**的时刻；与 feeds/bots.lastNewEntryAt 比较决定是否还需要再搬 */
-  syncedAt: timestamp("synced_at"),
-  /** 上次同步结束时源库的 update_seq（诊断用；不参与判定，避免每源一次 info 请求） */
-  sourceSeq: text("source_seq"),
-  /** idle（上次同步成功）/ syncing / error */
-  status: text("status").notNull().default("idle"),
-  lastError: text("last_error"),
-  updatedAt: timestamp("updated_at").notNull().defaultNow().$onUpdate(() => new Date()),
-}, (table) => [
-  // 一个用户对一个源只有一行水位（并发入队时靠它做 upsert）
-  primaryKey({ columns: [table.userId, table.sourceId] }),
-  // 「谁订阅了这个源」的反查索引（将来做定向通知）
-  index("timeline_source_sync_source_idx").on(table.sourceId),
-])
 
 /**
  * 每用户一行的「聚合心跳」—— 最近一轮聚合是什么时候、连续多少轮什么都没发生。
@@ -227,101 +178,6 @@ export const timelineEvents = pgTable("timeline_events", {
   index("timeline_events_user_id_idx").on(table.userId, table.id),
 ])
 
-/** Feed 注册表 — 记录所有已知订阅源的元数据，供 Worker 定时抓取 */export const feeds = pgTable("feeds", {
-  id: text("id").primaryKey(),
-  url: text("url").notNull().unique(),
-  title: text("title").notNull(),
-  description: text("description"),
-  siteUrl: text("site_url"),
-  image: text("image"),
-  errorMessage: text("error_message"),
-  /**
-   * 上一次成功响应是否带回 ETag/Last-Modified（条件请求验证器）。
-   * 调度器据此对「每轮只能整份下载」的源提前一档降频（见 workers/fetch-schedule.ts）；
-   * null = 还没成功抓过（按有验证器处理，不提前降频，避免误伤新源）。
-   */
-  hasFetchValidators: boolean("has_fetch_validators"),
-  // ── 条件请求验证器（抓取中间状态，只给 worker 用）──────────────────────────
-  // 为什么不放 CouchDB 的 FeedDoc：FeedDoc 是**会复制进每个用户聚合库**的源元信息快照
-  // （客户端离线渲染用）。把 ETag 这类每轮都可能变的簿记放进去，等于每抓一次就给每个
-  // 订阅者的用户库写一版新修订（实测单源累计上千版），而这些字段客户端一个都不读。
-  // 现在 FeedDoc 只在 title/description/siteUrl/image 真的变化时才写，见 workers/feed-doc.ts。
-  /** 验证器来源的最终 URL（重定向链最后一跳） */
-  fetchValidatorUrl: text("fetch_validator_url"),
-  /** 上一次响应头里的 ETag（原样保存带引号的值） */
-  fetchEtag: text("fetch_etag"),
-  /** 上一次响应头里的 Last-Modified */
-  fetchLastModified: text("fetch_last_modified"),
-  /** 连续抓取失败次数：调度器按它指数退避；成功抓取一次归零（见 markFeedError / markFeedNotModified） */
-  errorStreak: integer("error_streak").notNull().default(0),
-  lastFetchedAt: timestamp("last_fetched_at"),
-  /** 最后抓到新条目的时间：Worker 抓取到新条目时更新，供前端"最后更新"展示 */
-  lastNewEntryAt: timestamp("last_new_entry_at"),
-  /**
-   * 源库内容**最后一次变化**的时间（新增**或裁剪删除**都算）。
-   *
-   * 脏源判定用它而不是 `lastNewEntryAt`：裁剪只删不增，只看新增的话删除永远触发不了同步，
-   * 用户库里就会永久留一条已从源库裁掉的条目（见
-   * `docs/notes/aggregation/source-side-retention-plan.md` §3.3 场景 B）。
-   * 回填值 = `last_new_entry_at`；bot 库不裁剪，仍用 `lastNewEntryAt`。
-   */
-  lastChangedAt: timestamp("last_changed_at"),
-  // ── 自适应保留条数（见 services/feed-retention.ts）──────────────────────────
-  // 保留策略的唯一权威仍是「源库裁剪」；这里只是把固定的 N=50 换成按源活跃度算出来的 N。
-  // 用户库依旧由复制镜像，用户侧没有任何覆盖项。
-  /**
-   * 该源当前保留的条数（10/20/30/50 四档，由每日任务按近 14 天新增字节/天重算）。
-   * null = 还没算过（首次上线）或自适应关闭 → 裁剪回退到 SOURCE_RETENTION_ENTRIES（50）。
-   */
-  retentionEntries: integer("retention_entries"),
-  /** 近 14 天折算的日均新增字节（含附件；诊断用，也是分档的输入） */
-  activityBytesPerDay: doublePrecision("activity_bytes_per_day"),
-  /** 上次计算活跃度的时刻 */
-  activityComputedAt: timestamp("activity_computed_at"),
-  createdAt: timestamp("created_at").notNull().defaultNow(),
-  /** 抓取状态：active 正常抓取 / paused 用户暂停（worker 跳过） */
-  status: text("status").notNull().default("active"),
-  /**
-   * 本次 `paused` 是不是**自动暂停**（零订阅孤儿源清理，见 services/feed-orphans.ts）。
-   *
-   * 为什么不能只看 `status = 'paused'`：管理员手动暂停的源也在 paused 里，两者混在一起后
-   * "有人订阅就自动恢复"会把管理员有意停掉的源重新打开。所以暂停原因要单独记一列：
-   * 自动恢复只碰 `status = 'paused' AND pausedBySystem = true`。
-   *
-   * 管理员手动暂停时写 `pausedBySystem = false`（覆盖掉之前的自动暂停标记），
-   * 手动恢复时清成 null。这样"谁按的"永远是最新那个动作说了算。
-   */
-  pausedBySystem: boolean("paused_by_system"),
-  /**
-   * 这个源**第一次被观察到没有任何订阅者**的时刻（零订阅孤儿清理的自动机制用）。
-   *
-   * 为什么需要单独一列：全自动清理不能在"发现零订阅"的当下就暂停 —— 用户可能刚退订、
-   * 正在重新订阅，或者多设备的订阅同步还在路上。必须确认"零订阅**持续**了一段冷静期"。
-   * 而退订时会删掉 `timeline_source_sync` 的水位行（见 services/timeline.ts），
-   * 所以"最后一次订阅消失的时间"在库里没有任何记录，只能自己记。
-   *
-   * 语义：null = 当前有人订阅（或从未被判定为孤儿）。
-   * 一旦某轮扫描发现零订阅且该列是 null，就写入当前时间；之后每轮扫描都**不清零**，
-   * 于是 `now - orphanSince` 就是"已经没人要了多久"。重新出现订阅者时清回 null。
-   */
-  orphanSince: timestamp("orphan_since"),
-  /** 关联的 CouchDB 库名（首次 ensure 时生成随机库名并回写） */
-  couchDbName: text("couch_db_name").unique(),
-  // ── 图片缓存 per-feed 策略（管理员可覆盖全局默认，见 rss/entry-images.ts） ──
-  /** 是否缓存全部正文图片（如漫画源全量离线；false/null 跟随全局默认限制数量） */
-  cacheImages: boolean("cache_images"),
-  /** 每篇最多缓存图片数（null=跟随全局默认；cacheImages 开启且未设置时视为不限制） */
-  maxImageCount: integer("max_image_count"),
-  /** 每篇附件总体积上限字节（null=跟随全局默认 MAX_ENTRY_IMAGE_BYTES，即 1MB） */
-  maxEntryImageBytes: integer("max_entry_image_bytes"),
-  /** 压缩后最大宽度 px（null=跟随全局默认 MAX_IMAGE_WIDTH） */
-  maxImageWidth: integer("max_image_width"),
-  /** AVIF 编码质量（null=跟随全局默认 AVIF_QUALITY） */
-  avifQuality: integer("avif_quality"),
-  /** 源图下载大小上限字节（null=跟随全局默认 MAX_SOURCE_IMAGE_BYTES） */
-  maxSourceImageBytes: integer("max_source_image_bytes"),
-})
-
 export const bots = pgTable("bots", {
   id: text("id").primaryKey(),
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
@@ -348,15 +204,38 @@ export const bots = pgTable("bots", {
   index("bots_user_id_idx").on(table.userId),
 ])
 
+/**
+ * Bot 关联的订阅源。
+ *
+ * ## 为什么这里存 `url` 而不只是 `feedId`
+ *
+ * 已经没有共享的 `feed_*` 库与 `feeds` 注册表了：抓取按 **owner**（用户 / Bot）各自进行，
+ * 直接写进各自的 CouchDB 库。Bot 要被调度抓取，就必须自己带一份「抓什么地址」——
+ * 这张表就是 Bot 那侧的订阅来源，`url` 是它的抓取目标。
+ *
+ * `feedId` 仍保留并与 `deriveFeedId(url)` 一致：条目的 doc id 形如 `entry:{feedId}:{hash}`，
+ * 换成 URL 就无法与用户库里的同名条目对齐（同一篇内容在 Bot 库里也叫这个名字）。
+ *
+ * 与用户订阅的区别：用户的订阅在用户库里（`subscription:` 文档，离线可改），
+ * Bot 没有客户端可写形态，所以放在 PG 是合理的 —— 它不会被离线合并，也不存在投影漂移。
+ */
 export const botFeeds = pgTable("bot_feeds", {
   id: text("id").primaryKey(),
   botId: text("bot_id").notNull().references(() => bots.id, { onDelete: "cascade" }),
+  /** 条目前缀用的源 id：`deriveFeedId(url)` */
   feedId: text("feed_id").notNull(),
+  /** 抓取地址（Bot 自力抓取的唯一依据） */
+  url: text("url").notNull(),
+  /** 展示名；抓取成功后由 FeedDoc 更新，失败时作为兜底标题 */
+  title: text("title").notNull(),
+  /** 用户暂停了这个源针对该 Bot 的抓取（true = 不抓） */
+  paused: boolean("paused").notNull().default(false),
   lastProcessedEntryId: text("last_processed_entry_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (table) => [
   index("bot_feeds_bot_id_idx").on(table.botId),
-  index("bot_feeds_feed_id_idx").on(table.feedId),
+  // 一个 Bot 对同一个源只有一条关联（重复关联幂等）
+  uniqueIndex("bot_feeds_bot_url_uniq").on(table.botId, table.url),
 ])
 
 /** Bot 的 ActivityPub 关注者（联邦侧订阅本 bot 的用户） */
@@ -467,8 +346,6 @@ export const botInboxRelations = relations(botInbox, ({ one }) => ({
 
 // ── 类型导出 ──
 
-export type Feed = typeof feeds.$inferSelect
-export type NewFeed = typeof feeds.$inferInsert
 export type UserTimelineSettings = typeof userTimelineSettings.$inferSelect
 export type NewUserTimelineSettings = typeof userTimelineSettings.$inferInsert
 export type ApiToken = typeof apiToken.$inferSelect

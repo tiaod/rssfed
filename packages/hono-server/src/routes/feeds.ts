@@ -1,26 +1,23 @@
 import { Hono, type Context, type Next } from "hono"
-import { eq } from "drizzle-orm"
-import { parseFeedUrl, formatFeedError, type ParsedFeed } from "../rss/parser"
+import { parseFeedUrl, formatFeedError } from "../rss/parser"
 import { parseOpml, type OpmlFeed } from "../rss/opml"
-import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
+import { createCouchDb, ensureTimelineDatabase } from "../couchdb/client"
+import { deriveFeedId } from "../couchdb/subscription-doc"
 import { feedDocId } from "../couchdb/doc-ids"
-import { db, feeds } from "../db"
-import { isUniqueViolation, uniqueViolationConstraint } from "../db/errors"
-import { enqueueFetch, fetchQueue } from "../workers"
-import { deleteFeed, listFeedSubscribers } from "../services/feed-deletion"
-import { validateFeedPatch } from "../services/feed-field-validation"
-import { pauseOrphanFeeds, resumeSubscribedAutoPaused, scanOrphanFeeds } from "../services/feed-orphans"
-import { loadOrphanPolicy, saveOrphanPolicy, sweepOrphanFeeds } from "../services/feed-orphan-sweep"
-import { DEFAULT_IMAGE_OPTIONS } from "../rss/entry-images"
 import {
-  resolveFeedId,
-  ensureFeedRegistered,
   addSubscriptionIfAbsent,
+  ensureFeedSubscribed,
   listSubscriptionsForUser,
-  requeueAfterUrlChange,
+  refetchFeed,
+  removeSubscription,
+  setSubscriptionPaused,
+  updateUserSubscription,
+  type FeedMeta,
 } from "../services/feeds"
+import { purgeSubscriptionContent } from "../services/timeline"
+import { purgeBotFromUser, syncBotEntriesToUser } from "../services/bot-subscription-sync"
 import { auth } from "../auth"
-import { requireAdmin } from "../middleware/require-admin"
+import { mapWithConcurrency } from "../utils/concurrency"
 
 type FeedsVariables = { userId: string }
 
@@ -34,29 +31,14 @@ async function requireAuth(c: Context<{ Variables: FeedsVariables }>, next: Next
 
 export const feedsRouter = new Hono<{ Variables: FeedsVariables }>()
 
-/** 获取全部订阅源注册表（仅管理员） */
-feedsRouter.get("/", requireAdmin, async (c) => {
-  const allFeeds = await db.select().from(feeds)
-  return c.json(allFeeds.map((f) => ({
-    id: f.id,
-    url: f.url,
-    title: f.title,
-    description: f.description,
-    siteUrl: f.siteUrl,
-    image: f.image,
-    status: f.status === "paused" ? "paused" : f.errorMessage ? "error" : "active",
-    errorMessage: f.errorMessage,
-    lastFetchedAt: f.lastFetchedAt?.toISOString(),
-    createdAt: f.createdAt.toISOString(),
-    // per-feed 图片缓存策略（见 rss/entry-images.ts）
-    cacheImages: f.cacheImages ?? false,
-    maxImageCount: f.maxImageCount ?? null,
-    maxEntryImageBytes: f.maxEntryImageBytes ?? null,
-    maxImageWidth: f.maxImageWidth ?? null,
-    avifQuality: f.avifQuality ?? null,
-    maxSourceImageBytes: f.maxSourceImageBytes ?? null,
-  })))
-})
+/**
+ * 订阅路由。
+ *
+ * **没有「全局源」这回事了**：旧模型的 `GET /`（管理员看全站源）、`PUT /:feedId`（改源信息）、
+ * `DELETE /:feedId`（删源）、`/orphans/*`（零订阅源清扫）全部删除 —— 那些操作的前提是
+ * 「一个源被多个人共享、有一个独立的源库」。现在每个用户只抓自己的东西，退订即停止；
+ * 源级操作（改名、分组、暂停）全是**订阅级**的，归 `/subscriptions/:feedId` 管。
+ */
 
 /**
  * 发现并订阅一个新 RSS 订阅源。
@@ -64,24 +46,33 @@ feedsRouter.get("/", requireAdmin, async (c) => {
  * **必须登录**：这个端点会让服务端按请求里的 URL 真实发一次 HTTP 请求，等于「替调用方
  * 访问任意地址」。没有会话时它就是一个免鉴权的 SSRF 入口（实测未登录 POST
  * `{"url":"http://127.0.0.1:5984/"}` 能拿到内网 CouchDB 的响应体，只是被当成"不是 feed"
- * 报格式错误）。前端 `FeedNavigation.vue` 本来就在登录态下调用，加鉴权不影响功能。
+ * 报格式错误）。
  *
  * 注意这只是**第一道**闸门：地址本身的合法性（拒绝私网/环回/链路本地）在 rss/ssrf-guard.ts，
  * 两道都要有 —— 光有鉴权，任何注册用户仍可拿它探内网。
+ *
+ * 返回的 `url` 会被客户端写进订阅文档，而抓取侧**每次都重新过一遍 SSRF 闸门**
+ * （订阅文档是客户端可写的，不能信任里面的地址）。
  */
 feedsRouter.post("/discover", requireAuth, async (c) => {
+  const userId = c.get("userId")
   const { url } = await c.req.json()
-  if (!url) return c.json({ error: "url required" }, 400)
+  if (!url || typeof url !== "string") return c.json({ error: "url required" }, 400)
 
   try {
+    // 先解析一次：既校验地址是否真是 feed，也拿到标题给订阅文档用
     const parsed = await parseFeedUrl(url)
-    // feedId 由完整 URL 哈希确定性派生（已注册过的 URL 复用其现有 ID）
-    const feedId = await resolveFeedId(url)
+    const feedId = deriveFeedId(url)
 
-    await registerFeed(feedId, url, parsed)
-    await seedFeedDoc(feedId, url, parsed)
-
-    return c.json({ feedId, title: parsed.title, items: parsed.items.length })
+    return c.json({
+      feedId,
+      url,
+      title: parsed.title,
+      siteUrl: parsed.link,
+      description: parsed.description,
+      image: parsed.image?.url,
+      items: parsed.items.length,
+    })
   } catch (err) {
     return c.json({ error: `Failed to parse feed: ${formatFeedError(url, err)}` }, 422)
   }
@@ -99,10 +90,10 @@ type ImportOpmlEvent =
   | { type: "error", message: string }
 
 /**
- * 导入 OPML：批量注册订阅源并按 OPML 分组结构为当前用户创建订阅。
+ * 导入 OPML：按 OPML 分组结构为当前用户创建订阅。
  *
- * 响应体是 **NDJSON 进度流**（每处理完一个源推一行），不是单个 JSON —— 导入要给每个源
- * 联网解析一次，几十上百个源会跑几分钟，单次 JSON 响应期间前端只能转圈、无法给出任何反馈。
+ * 响应体是 **NDJSON 进度流**（每处理完一个源推一行），不是单个 JSON ——
+ * 几十上百个源要逐个写订阅文档，单次 JSON 响应期间前端只能转圈、无法给出任何反馈。
  * 解析/去重等开流前的失败仍走普通 JSON 错误（带 HTTP 状态码）；开流之后的意外失败
  * 只能以 `error` 事件送达（此刻状态码已经发出去了），由前端抛成同样的错误。
  *
@@ -161,13 +152,17 @@ feedsRouter.post("/import-opml", requireAuth, async (c) => {
       try {
         send({ type: "start", total: unique.length })
 
-        // 3. 有限并发处理：注册 feed + 写入用户订阅，单个失败不影响其余
+        // 3. 有限并发处理：写订阅文档，单个失败不影响其余
         await mapWithConcurrency(unique, 5, async (item) => {
           if (clientGone) return
           try {
-            // 导入不做内联探测：标题用 OPML 的，内容交给 worker 首抓（几十上百个源同步下载会很慢，
-            // 且已注册的源还会因此白下一遍，见 ensureFeedRegistered 注释）
-            const meta = await ensureFeedRegistered(item, { probe: false })
+            // 导入不做内联探测：标题用 OPML 的，内容交给抓取（几十上百个源同步下载会很慢，
+            // 而且 worker 马上还要再抓一遍）
+            const meta: FeedMeta = {
+              feedId: deriveFeedId(item.url),
+              url: item.url,
+              title: item.title || item.url,
+            }
             const subscribed = await addSubscriptionIfAbsent(userDb, item, meta)
             if (subscribed) imported++
             else skipped++
@@ -198,298 +193,128 @@ feedsRouter.post("/import-opml", requireAuth, async (c) => {
 
   return c.body(stream, 200, {
     "Content-Type": "application/x-ndjson; charset=utf-8",
-    // 进度事件是即时数据：任何一层反代/浏览器缓存它都没有意义
+    // 进度流不能被任何中间层缓存或缓冲（否则前端看到的是一条明显的"卡住然后全出来"）
     "Cache-Control": "no-store",
-    // nginx 系反代默认缓冲响应体，缓冲会让进度条变成「结束后突然跳到 100%」
     "X-Accel-Buffering": "no",
   })
 })
 
-/** 有限并发处理任务（批量导入时避免并发打爆目标站点 / 数据库） */
-async function mapWithConcurrency<T>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<void>,
-) {
-  let index = 0
-  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (index < items.length) {
-      const current = index++
-      const item = items[current]
-      if (item === undefined) break
-      await fn(item)
-    }
-  })
-  await Promise.all(workers)
-}
-
-/** 写入 PostgreSQL feed 注册表（已存在则跳过） */
-async function registerFeed(feedId: string, url: string, parsed: ParsedFeed) {
-  await db.insert(feeds).values({
-    id: feedId,
-    url,
-    title: parsed.title ?? url,
-    description: parsed.description,
-    siteUrl: parsed.link,
-  }).onConflictDoNothing()
-}
-
-/** 首次发现时写入 FeedDoc 并立即加入抓取队列 */
-async function seedFeedDoc(feedId: string, url: string, parsed: ParsedFeed) {
-  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
-
-  // FeedDoc 已存在则跳过
-  try {
-    await feedDb.get(feedDocId(feedId))
-  } catch {
-    // 只写展示字段：抓取簿记（lastFetchedAt/验证器/错误）在 PostgreSQL `feeds` 表，
-    // 不写进 FeedDoc —— 这份文档会复制进每个用户聚合库（见 workers/feed-doc.ts）。
-    await feedDb.insert({
-      _id: feedDocId(feedId),
-      type: "feed",
-      url,
-      title: parsed.title ?? url,
-      description: parsed.description,
-      siteUrl: parsed.link,
-      createdAt: new Date().toISOString(),
-    } as any)
-    // 首次发现，立即加入抓取队列（enqueueFetch 内含 jobId 去重与旧记录清理）
-    await enqueueFetch(feedId, url)
-  }
-}
-
-/** 获取当前用户的订阅列表（feed + bot），合并注册表抓取状态（active/paused/error） */
+/** 获取当前用户的订阅列表（feed + bot），状态来自该用户的抓取调度状态 */
 feedsRouter.get("/subscriptions", requireAuth, async (c) => {
   const userId = c.get("userId")
   const subs = await listSubscriptionsForUser(userId)
   return c.json(subs)
 })
 
-/** 获取全局默认图片缓存参数（仅管理员），供前端展示输入框 placeholder 默认值 */
-feedsRouter.get("/image-defaults", requireAdmin, async (c) => {
-  return c.json(DEFAULT_IMAGE_OPTIONS)
-})
-
 /**
- * 扫描零订阅的"孤儿源"（仅管理员，只读）。
+ * 订阅一个源（等价于 discover + 写订阅）。
  *
- * 存在的原因：调度器只看 `feeds.status = 'active'`，不看有没有人订阅，于是被退订干净的源
- * 会永久占用抓取配额（实测线上 707 条源里 578 条是零订阅且都在跑）。这里只统计不写库，
- * 让管理员先看清规模再决定是否暂停。判定口径见 services/feed-orphans.ts。
- *
- * **必须注册在 `/:feedId` 之前**，否则 "orphans" 会被当成 feedId 匹配掉。
+ * 与 `POST /discover` 分开是因为两者语义不同：discover 只校验、不写；
+ * 这个接口会真的写订阅文档并触发首抓（OPML / MCP 之外的「确认订阅」入口）。
  */
-feedsRouter.get("/orphans", requireAdmin, async (c) => {
-  const limit = Number(c.req.query("limit") ?? 50)
-  const result = await scanOrphanFeeds({ limit: Number.isFinite(limit) ? limit : 50 })
-  return c.json(result)
-})
+feedsRouter.post("/subscriptions", requireAuth, async (c) => {
+  const userId = c.get("userId")
+  const body = await c.req.json().catch(() => null) as { url?: unknown, category?: unknown } | null
+  const url = typeof body?.url === "string" ? body.url.trim() : ""
+  if (!url) return c.json({ error: "url required" }, 400)
+  const category = typeof body?.category === "string" ? body.category : undefined
 
-/** 批量暂停零订阅孤儿源（仅管理员） */
-feedsRouter.post("/orphans/pause", requireAdmin, async (c) => {
-  const body = await c.req.json().catch(() => ({})) as { limit?: number, force?: boolean }
-  // 默认遵守冷静期（只暂停"零订阅已持续足够久"的源），force 才立即处理
-  const result = await pauseOrphanFeeds({ limit: body?.limit, ignoreGrace: body?.force === true })
-  if (result.aborted) {
-    // 503 而不是 200：什么都没做，且原因需要管理员看到（读用户库失败时不敢乱暂停）
-    return c.json({ error: result.reason, code: "scan_incomplete", paused: 0 }, 503)
-  }
-  return c.json(result)
-})
-
-/** 孤儿源自动清理策略（仅管理员）：前端据此说明"多久后会发生什么" */
-feedsRouter.get("/orphans/policy", requireAdmin, async (c) => {
-  return c.json(await loadOrphanPolicy())
-})
-
-/** 修改孤儿源自动清理策略（仅管理员）：存进 siteSettings.extras，无需重启 */
-feedsRouter.put("/orphans/policy", requireAdmin, async (c) => {
-  const body = await c.req.json().catch(() => ({}))
   try {
-    return c.json(await saveOrphanPolicy(body))
-  } catch (err) {
-    return c.json({ error: (err as Error)?.message ?? String(err) }, 422)
-  }
-})
-
-/** 立刻跑一轮自动清理（仅管理员，等价于定时任务那一轮；用于立刻见到效果） */
-feedsRouter.post("/orphans/sweep", requireAdmin, async (c) => {
-  const result = await sweepOrphanFeeds()
-  if (result.aborted) {
-    return c.json({ error: result.reason, code: "scan_incomplete", ...result }, 503)
-  }
-  return c.json(result)
-})
-
-/** 恢复所有"曾自动暂停、但现在确实有人订阅"的源（仅管理员，定时任务之外的即时入口） */
-feedsRouter.post("/orphans/resume", requireAdmin, async (c) => {
-  const resumed = await resumeSubscribedAutoPaused()
-  return c.json({ resumed })
-})
-
-/** 暂停/恢复订阅抓取（仅管理员） */
-feedsRouter.patch("/:feedId", requireAdmin, async (c) => {
-  const feedId = c.req.param("feedId")!
-  const { status } = await c.req.json()
-  if (status !== "active" && status !== "paused") {
-    return c.json({ error: "status must be 'active' or 'paused'" }, 400)
-  }
-  // 管理员的动作必须覆盖"自动暂停"标记：
-  //  - 手动暂停 → pausedBySystem=false，否则用户一订阅它就被自动恢复了；
-  //  - 手动恢复 → 清成 null。
-  // 谁按的永远是最新那个动作说了算（见 db/schema.ts 该列注释）。
-  const updated = await db.update(feeds)
-    .set({ status, pausedBySystem: null })
-    .where(eq(feeds.id, feedId))
-    .returning({ id: feeds.id })
-  if (!updated.length) return c.json({ error: "feed not found" }, 404)
-  return c.json({ feedId, status })
-})
-
-/** 修改订阅源信息（仅管理员）：title / url / description / siteUrl / image 及 per-feed 图片缓存策略 */
-feedsRouter.put("/:feedId", requireAdmin, async (c) => {
-  const feedId = c.req.param("feedId")!
-  const body = await c.req.json()
-  // 图片缓存策略字段（数值/布尔；传 null 表示重置回全局默认）
-  const imageKeys = ["maxImageCount", "maxEntryImageBytes", "maxImageWidth", "avifQuality", "maxSourceImageBytes"] as const
-  type ImageKey = typeof imageKeys[number]
-  const patch: Record<string, string | number | boolean | null> = {}
-  for (const key of ["title", "url", "description", "siteUrl", "image"] as const) {
-    if (typeof body[key] === "string") patch[key] = body[key]
-  }
-  if (typeof body.cacheImages === "boolean") patch.cacheImages = body.cacheImages
-  for (const key of imageKeys) {
-    const v = body[key]
-    if (v === null) {
-      patch[key] = null // 显式重置为全局默认
-    } else if (v !== undefined) {
-      const n = Number(v)
-      if (!Number.isNaN(n) && n >= 0) patch[key] = Math.floor(n)
-    }
-  }
-  if (!Object.keys(patch).length) {
-    return c.json({ error: "no fields to update" }, 400)
-  }
-  // URL 类字段校验：以前只判断 `typeof === "string"` 就写库，能存进 "abc"、
-  // "javascript:..." 这类值。其中 url / image 会被**服务端真的去请求**（抓取、图标缓存），
-  // 存进内网地址等于留一个 SSRF 入口，所以一并查内网。详见 services/feed-field-validation.ts
-  const fieldError = await validateFeedPatch(patch)
-  if (fieldError) {
-    return c.json({ error: fieldError.message, code: "invalid_field", field: fieldError.field }, 400)
-  }
-  // URL 是否真的变了要拿改之前的值比：updated 的 returning 只会给新值
-  const [before] = await db.select({ url: feeds.url }).from(feeds).where(eq(feeds.id, feedId)).limit(1)
-  if (!before) return c.json({ error: "feed not found" }, 404)
-  let updated: { id: string }[]
-  try {
-    updated = await db.update(feeds)
-      .set(patch)
-      .where(eq(feeds.id, feedId))
-      .returning({ id: feeds.id })
-  } catch (err) {
-    // feeds.url 有唯一约束：改成另一个已注册源正在用的地址会撞 23505。以前这里直接把
-    // Postgres 错误抛出去，前端只看到一行 `[PUT] ...: 500 Internal Server Error`，
-    // 既不知道是地址重复、也不知道该改什么。改成 409 + 具体占用者。
-    if (typeof patch.url === "string" && isUniqueViolation(err)) {
-      const constraint = uniqueViolationConstraint(err)
-      if (constraint === null || constraint === "feeds_url_unique") {
-        const [taken] = await db
-          .select({ id: feeds.id, title: feeds.title })
-          .from(feeds)
-          .where(eq(feeds.url, patch.url))
-          .limit(1)
-        return c.json({
-          error: taken
-            ? `该地址已被另一个订阅源「${taken.title}」使用（${taken.id}），请换一个地址，或直接订阅那一条`
-            : "该地址已被另一个订阅源使用，请换一个地址",
-          code: "feed_url_taken",
-          url: patch.url,
-          existingFeedId: taken?.id ?? null,
-          existingTitle: taken?.title ?? null,
-        }, 409)
-      }
-    }
-    throw err
-  }
-  if (!updated.length) return c.json({ error: "feed not found" }, 404)
-  // 改了 URL 就顺手清错 + 按新地址重建抓取任务，否则队列里压着的旧 URL job 会一直跑旧地址
-  const requeued = await requeueAfterUrlChange(feedId, before.url, typeof patch.url === "string" ? patch.url : undefined)
-  return c.json({ feedId, updated: true, requeued })
-})
-
-/**
- * 删除订阅源（仅管理员）。
- *
- * 破坏性操作，所以先做订阅者守卫：**还有别人订阅就拒绝**，把订阅者列出来让管理员
- * 先处理（让对方退订，或确认要强删）。
- *
- * 用 `?force=1` 显式强删：守卫的目的是"别在不知情时删掉别人在读的东西"，
- * 不是"永远不许删"——后者会让误建的源一旦被人误订阅就再也清不掉。
- *
- * 清理范围与顺序见 services/feed-deletion.ts 的头部注释：用户侧订阅/条目/FeedDoc →
- * 水位行 → bot 引用 → 源库 → 注册表行。
- */
-feedsRouter.delete("/:feedId", requireAdmin, async (c) => {
-  const feedId = c.req.param("feedId")!
-  const force = c.req.query("force") === "1"
-
-  const [feed] = await db.select({ id: feeds.id, url: feeds.url, title: feeds.title })
-    .from(feeds).where(eq(feeds.id, feedId)).limit(1)
-  if (!feed) return c.json({ error: "feed not found" }, 404)
-
-  const subscribers = await listFeedSubscribers(feedId)
-  if (subscribers.length > 0 && !force) {
-    // 409（而非 403）：这是「当前状态不允许」而不是「你没有权限」，前端据此渲染可操作提示
+    const { meta, added } = await ensureFeedSubscribed(userId, { url, title: url, category })
     return c.json({
-      error: `该源还有 ${subscribers.length} 个订阅者，删除会影响他们的阅读内容`,
-      code: "feed_has_subscribers",
-      feedId,
-      subscribers: subscribers.map((s) => ({ userId: s.userId, email: s.email, via: s.via })),
-      hint: "确认要删除请加 ?force=1",
-    }, 409)
+      feedId: meta.feedId,
+      url: meta.url,
+      title: meta.title,
+      added,
+    }, added ? 201 : 200)
+  } catch (err) {
+    return c.json({ error: `Failed to subscribe: ${formatFeedError(url, err)}` }, 422)
   }
-
-  const result = await deleteFeed(feedId, subscribers)
-
-  // 队列里可能还压着这个源的抓取 job：删掉，免得 worker 对着已删的数据继续跑。
-  // 放在路由层是因为 fetchQueue 由 workers 模块持有（服务层不该依赖 worker）。
-  try {
-    const job = await fetchQueue.getJob(feedId)
-    if (job) await job.remove()
-  } catch {
-    // 队列不可用：worker 取不到源会自己跳过，不影响删除结果
-  }
-
-  return c.json({
-    feedId,
-    title: feed.title,
-    deleted: true,
-    purgedUsers: result.purgedUsers,
-    forced: force && subscribers.length > 0,
-    failures: result.failures,
-  })
 })
 
-/** 立即重新抓取订阅源（仅管理员）：清空错误并加入抓取队列 */
-feedsRouter.post("/:feedId/refetch", requireAdmin, async (c) => {
+/**
+ * 删除一条订阅（退订）。
+ *
+ * 顺序见 `purgeSubscriptionContent`：先删订阅文档（退订的权威信号），再按前缀清条目，
+ * 最后清调度状态。用户已抓到的内容随条目一起删掉 —— 这是"退订"应有的语义，
+ * 保留内容才是意外的（会让用户以为还在订阅）。
+ */
+feedsRouter.delete("/subscriptions/:feedId", requireAuth, async (c) => {
+  const userId = c.get("userId")
   const feedId = c.req.param("feedId")!
-  const [feed] = await db.select().from(feeds).where(eq(feeds.id, feedId)).limit(1)
-  if (!feed) return c.json({ error: "feed not found" }, 404)
-
-  await db.update(feeds).set({ errorMessage: null }).where(eq(feeds.id, feedId))
-  // enqueueFetch：jobId 用 feedId 去重（BullMQ 不允许 jobId 含冒号），并清理旧记录
-  await enqueueFetch(feedId, feed.url)
-
-  return c.json({ feedId, queued: true })
+  // Bot 订阅（`bot:{botId}`）不是 RSS 源：没有抓取产物，但有**已经搬过来的条目**要清。
+  // 不清的话侧边栏没这个 Bot 了、时间线里还能翻到它的帖子。
+  if (feedId.startsWith("bot:")) {
+    const botId = feedId.slice("bot:".length)
+    const removed = await removeSubscription(userId, feedId)
+    const purged = await purgeBotFromUser(botId, userId)
+    if (!removed && purged === 0) return c.json({ error: "not found" }, 404)
+    return c.json({ ok: true, removedEntries: purged })
+  }
+  const removed = await removeSubscription(userId, feedId)
+  const cleanup = await purgeSubscriptionContent(userId, feedId)
+  if (!removed && cleanup.removedEntries === 0) return c.json({ error: "not found" }, 404)
+  return c.json({ ok: true, removedEntries: cleanup.removedEntries })
 })
 
-/** 获取单个订阅源信息 */
-feedsRouter.get("/:feedId", async (c) => {
-  const { feedId } = c.req.param()
-  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
+/**
+ * 订阅一个 Bot：把该 Bot 已有的产出立刻搬进用户库。
+ *
+ * 客户端写订阅文档是纯本地操作（离线也能做），所以**服务端要补这一手** ——
+ * 否则用户订阅完要等下一个 Bot 产出周期才看到东西（可能几小时）。
+ *
+ * 幂等：已搬过的条目按 `_id` 判存在跳过，重复调用只多一次库查询。
+ */
+feedsRouter.post("/bot-subscriptions/:botId/sync", requireAuth, async (c) => {
+  const userId = c.get("userId")
+  const botId = c.req.param("botId")!
+  const result = await syncBotEntriesToUser(botId, userId)
+  return c.json({ ok: true, ...result })
+})
 
+/** 修改一条订阅（仅显示名与分组；换源请重新订阅） */
+feedsRouter.patch("/subscriptions/:feedId", requireAuth, async (c) => {
+  const userId = c.get("userId")
+  const feedId = c.req.param("feedId")!
+  const body = await c.req.json().catch(() => ({})) as Record<string, unknown>
+  const patch: { title?: string, category?: string } = {}
+  if (typeof body.title === "string") patch.title = body.title
+  if (typeof body.category === "string") patch.category = body.category
+  if (Object.keys(patch).length === 0) return c.json({ error: "no fields to update" }, 400)
+
+  const ok = await updateUserSubscription(userId, feedId, patch)
+  return ok ? c.json({ ok: true }) : c.json({ error: "not subscribed" }, 404)
+})
+
+/**
+ * 暂停/恢复一条订阅的抓取。
+ *
+ * 写订阅文档的 `paused` 字段（客户端可写文档，走读改写 + 409 重试），
+ * 同时镜像进 `_local/schedule` 供调度器快速判断。
+ */
+feedsRouter.post("/subscriptions/:feedId/pause", requireAuth, async (c) => {
+  const ok = await setSubscriptionPaused(c.get("userId"), c.req.param("feedId")!, true)
+  return ok ? c.json({ ok: true, paused: true }) : c.json({ error: "not subscribed" }, 404)
+})
+
+feedsRouter.post("/subscriptions/:feedId/resume", requireAuth, async (c) => {
+  const ok = await setSubscriptionPaused(c.get("userId"), c.req.param("feedId")!, false)
+  return ok ? c.json({ ok: true, paused: false }) : c.json({ error: "not subscribed" }, 404)
+})
+
+/** 立即重新抓取一条订阅（清空失败计数并绕开缓存） */
+feedsRouter.post("/subscriptions/:feedId/refetch", requireAuth, async (c) => {
+  const ok = await refetchFeed(c.get("userId"), c.req.param("feedId")!)
+  return ok ? c.json({ ok: true, queued: true }) : c.json({ error: "not subscribed" }, 404)
+})
+
+/** 获取单个源的元信息（该用户自己库里的 FeedDoc 副本） */
+feedsRouter.get("/:feedId", requireAuth, async (c) => {
+  const userId = c.get("userId")
+  const feedId = c.req.param("feedId")!
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   try {
-    const feed = await feedDb.get(feedDocId(feedId))
+    const feed = await userDb.get(feedDocId(feedId))
     return c.json(feed)
   } catch {
     return c.json({ error: "feed not found" }, 404)

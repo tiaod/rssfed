@@ -2814,14 +2814,20 @@ export function usePouchDb() {
   }
 
   /**
-   * 添加订阅（写入本地 PouchDB，自动同步到远端 CouchDB）
+   * 添加订阅（写入本地 PouchDB，自动同步到远端 CouchDB）。
+   *
+   * **`url` 必须带上**：服务端抓取时就靠它（`feedId` 是 url 的哈希，不可逆），
+   * 没有 url 的订阅文档会被调度判成脏数据直接跳过（见 hono-server 的
+   * couchdb/subscription-doc.ts）。服务端在 `POST /api/feeds/discover` 的响应里给了它。
    */
-  async function addSubscription(feedId: string, info: { title: string, siteUrl?: string, description?: string, image?: string }, category?: string) {
+  async function addSubscription(feedId: string, info: { url: string, title: string, siteUrl?: string, description?: string, image?: string }, category?: string) {
     const stateDb = await getUserDb()
     await stateDb.put({
       _id: `subscription:${feedId}`,
       type: 'subscription',
       feedId,
+      // 抓取地址：服务端调度的唯一依据
+      url: info.url,
       title: info.title,
       siteUrl: info.siteUrl,
       description: info.description,

@@ -5,32 +5,23 @@ const state = vi.hoisted(() => ({
   settings: {
     settings: { aiSummaryEnabled: false },
   },
-  reconcileQueued: 0,
-  /** 入队 reconcile 时带的选项（force 逃生口） */
-  reconcileQueuedOptions: [] as Array<Record<string, unknown>>,
-  /** wait=1 直连 reconcile 时带的选项 */
-  reconcileOptions: [] as Array<Record<string, unknown>>,
-  rebuildQueued: 0,
-  /** wait=1 时拓扑对齐（reconcile）返回的订阅源数与其判定出来的脏源 */
-  inlineSources: 12,
-  inlineDirty: ["feed1"] as string[],
-  /** wait=1 时「等复制器送到」的结果；completed=false 模拟超时 */
+  /** 入队抓取时带的选项（bypassCache = 强制真正发请求） */
+  enqueueOptions: [] as Array<Record<string, unknown>>,
+  enqueueCalls: 0,
+  /** 入队时报告"有几个源入队了" */
+  enqueueCount: 12,
+  /** wait=1 时「等库安静下来」的替身结果；completed=false 模拟超时 */
   inlineSync: { completed: true, added: 7 } as { completed: boolean, added: number },
-  /** wait=1 时入队/等待的替身记录 */
-  inlineCalls: 0,
   syncCalls: 0,
   syncOptions: null as Record<string, unknown> | null,
-  enqueued: [] as Array<{ userId: string, sourceIds: string[] }>,
-  drained: true,
+  /** 休眠恢复是否触发 */
+  resumed: false,
   /** GET /events 的替身数据（真实实现在 services/timeline-events.ts，单测只验路由契约） */
   events: [
-    { id: 2, at: new Date("2026-10-17T06:04:30.000Z"), kind: "reconcile", level: "info", message: "汇聚：订阅 129 个源，无需搬运（800ms）", data: { sources: 129 } },
+    { id: 2, at: new Date("2026-10-17T06:04:30.000Z"), kind: "reconcile", level: "info", message: "抓取：订阅 129 个源，无需抓取（800ms）", data: { sources: 129 } },
     { id: 1, at: new Date("2026-10-16T22:00:00.000Z"), kind: "rebuild", level: "warn", message: "重建完成", data: null },
   ] as unknown[],
-  sources: [
-    { sourceId: "feed1", kind: "feed", title: "源一", syncedAt: new Date("2026-10-17T06:04:31.000Z"), status: "idle", lastError: null },
-  ] as unknown[],
-  /** 聚合心跳（GET /events 的第三段） */
+  /** 抓取心跳（GET /events 的第二段） */
   heartbeat: { at: new Date("2026-10-17T10:31:00.000Z"), quietRounds: 42 } as unknown,
   /** GET /events 收到的 limit 参数（验默认值/上限夹取） */
   eventLimits: [] as number[],
@@ -45,32 +36,18 @@ vi.mock("../auth", () => ({
 }))
 
 // 队列与 PG 都不在单测范围内：这里只验证路由的参数校验与「该入哪个队」的分支
-vi.mock("../workers/timeline", () => ({
-  enqueueTimelineReconcile: async (_userId: string, options: Record<string, unknown> = {}) => {
-    state.reconcileQueued++
-    state.reconcileQueuedOptions.push(options)
-  },
-  enqueueTimelineRebuild: async () => {
-    state.rebuildQueued++
+vi.mock("../workers", () => ({
+  enqueueOwnerSubscriptions: async (_owner: unknown, options: Record<string, unknown> = {}) => {
+    state.enqueueCalls++
+    state.enqueueOptions.push(options)
+    return state.enqueueCount
   },
   // metaValues 是给 app.ts → bullboard.ts 的 BullMQAdapter 看的：它只认真实 Queue 实例，
   // 或 metaValues.version 以 "bullmq" 开头的鸭子类型（不跑看板，所以不需要真队列方法）
-  timelineQueue: { getJob: async () => undefined, metaValues: { version: "bullmq@5" } },
-  timelineWorker: { close: async () => {} },
-  notifyTimelineStale: async () => {},
-  shutdownTimelineWorkers: async () => {},
-}))
-
-// 单源同步队列同样不进单测：这里只记「脏源有没有被交给队列」
-vi.mock("../workers/timeline-sync", () => ({
-  enqueueSourceSyncs: async (userId: string, sourceIds: string[]) => {
-    state.enqueued.push({ userId, sourceIds })
-    return sourceIds.map(sourceId => ({ id: sourceId }))
-  },
-  waitForSourceSyncs: async () => state.drained,
-  sourceSyncQueue: { getJob: async () => undefined, metaValues: { version: "bullmq@5" } },
-  sourceSyncWorker: { close: async () => {} },
-  shutdownSourceSyncWorker: async () => {},
+  fetchQueue: { getJob: async () => undefined, metaValues: { version: "bullmq@5" } },
+  worker: { close: async () => {} },
+  enqueueOwnerFetch: async () => {},
+  shutdownFetchWorker: async () => {},
 }))
 
 vi.mock("../services/timeline-events", () => ({
@@ -78,7 +55,6 @@ vi.mock("../services/timeline-events", () => ({
     state.eventLimits.push(limit)
     return state.events
   },
-  listTimelineSources: async () => state.sources,
   readReconcileHeartbeat: async () => state.heartbeat,
   clearTimelineEvents: async () => {
     state.clearedEvents++
@@ -88,12 +64,10 @@ vi.mock("../services/timeline-events", () => ({
 // 生命周期（活跃度上报 / 休眠恢复）不在单测范围内：替身保证路由中间件不碰 PG
 vi.mock("../services/timeline-lifecycle", () => ({
   touchTimelineActivity: async () => {},
-  resumeTimelineUser: async () => false,
-  readTimelineUserState: async () => ({
-    lastActiveAt: null,
-    aggregationPausedAt: null,
-    needsRebuild: false,
-  }),
+}))
+
+vi.mock("../services/owner-platform", () => ({
+  resumeOwner: async () => state.resumed,
 }))
 
 vi.mock("../services/timeline", async (importOriginal) => {
@@ -102,14 +76,8 @@ vi.mock("../services/timeline", async (importOriginal) => {
     ...actual,
     getTimelineSettings: async () => actual.normalizeTimelineSettings({ aiSummaryEnabled: false }),
     updateTimelineSettings: async () => state.settings,
-    // wait=1 的刷新分三步：取起始序号 → 本请求内对齐拓扑并把这批脏源交给同步队列 → 等它们跑完再数条数。
-    // 三个替身都不碰 CouchDB/Redis，覆盖「追平」与「超时」两条分支。
+    // wait=1 的刷新分两步：取起始序号 → 入队全部订阅 → 等库安静下来再数条数。
     readTimelineUpdateSeq: async () => 41,
-    reconcileUserTimeline: async (_userId: string, options: Record<string, unknown> = {}) => {
-      state.inlineCalls++
-      state.reconcileOptions.push(options)
-      return { sources: state.inlineSources, dirtySources: state.inlineDirty }
-    },
     waitForSync: async (_userId: string, _timeoutMs: number, options: Record<string, unknown>) => {
       state.syncCalls++
       state.syncOptions = options
@@ -125,18 +93,13 @@ beforeEach(() => {
   state.settings = {
     settings: { aiSummaryEnabled: false },
   }
-  state.reconcileQueued = 0
-  state.reconcileQueuedOptions = []
-  state.reconcileOptions = []
-  state.rebuildQueued = 0
-  state.inlineSources = 12
-  state.inlineDirty = ["feed1"]
+  state.enqueueOptions = []
+  state.enqueueCalls = 0
+  state.enqueueCount = 12
   state.inlineSync = { completed: true, added: 7 }
-  state.inlineCalls = 0
   state.syncCalls = 0
   state.syncOptions = null
-  state.enqueued = []
-  state.drained = true
+  state.resumed = false
   state.eventLimits = []
   state.clearedEvents = 0
 })
@@ -176,7 +139,7 @@ describe("/api/timeline", () => {
     const body = await res.json() as { details: string[] }
     expect(body.details).toHaveLength(1)
     expect(body.details[0]).toContain("aiSummaryEnabled")
-    expect(state.reconcileQueued + state.rebuildQueued).toBe(0)
+    expect(state.enqueueCalls).toBe(0)
   })
 
   it("空补丁返回 400", async () => {
@@ -189,98 +152,103 @@ describe("/api/timeline", () => {
     expect(res.status).toBe(400)
   })
 
-  it("开 AI 摘要：写入设置并让聚合跑一轮（不重建）", async () => {
+  it("开 AI 摘要：写入设置（新模型下不触发抓取 —— 设置不影响抓什么）", async () => {
     state.settings = { settings: { aiSummaryEnabled: true } }
     const res = await patch({ aiSummaryEnabled: true })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ settings: { aiSummaryEnabled: true } })
-    expect(state.reconcileQueued).toBe(1)
-    expect(state.rebuildQueued).toBe(0)
+    expect(state.enqueueCalls).toBe(0)
   })
 
   it("未知字段不被当真：空补丁一律 400，不会入任何队", async () => {
     const res = await patch({ maxImageCount: 2 })
     expect(res.status).toBe(400)
-    expect(state.reconcileQueued).toBe(0)
-    expect(state.rebuildQueued).toBe(0)
+    expect(state.enqueueCalls).toBe(0)
   })
 
-  it("POST /refresh 与 /rebuild 返回 202", async () => {
+  it("POST /refresh 与 /rebuild 返回 202，并把该用户的全部订阅入队", async () => {
     expect((await app.request("/api/timeline/refresh", { method: "POST" })).status).toBe(202)
+    expect(state.enqueueCalls).toBe(1)
+    // 默认走缓存：调度产生的抓取不该每次都真的打外网
+    expect(state.enqueueOptions).toEqual([{ bypassCache: false }])
+
     expect((await app.request("/api/timeline/rebuild", { method: "POST" })).status).toBe(202)
-    expect(state.reconcileQueued).toBe(1)
-    expect(state.rebuildQueued).toBe(1)
+    expect(state.enqueueCalls).toBe(2)
+    // 「重新同步」按钮要真的重抓：绕开抓取缓存
+    expect(state.enqueueOptions.at(-1)).toEqual({ bypassCache: true })
   })
 
-  it("POST /refresh?wait=1：本请求内对齐拓扑、把脏源交给同步队列、等它们跑完再数条数", async () => {
+  it("POST /refresh?wait=1：入队全部订阅、等库安静下来再数条数", async () => {
     const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({
       accepted: true,
       completed: true,
       added: 7,
-      sources: 12,
-      queued: 1,
+      queued: 12,
     })
-    // 直连处理了，就不该再入队（同一份工作不该跑两遍）
-    expect(state.reconcileQueued).toBe(0)
-    expect(state.inlineCalls).toBe(1)
-    expect(state.enqueued).toEqual([{ userId: "u1", sourceIds: ["feed1"] }])
+    expect(state.enqueueCalls).toBe(1)
     expect(state.syncCalls).toBe(1)
     // 起始序号必须在入队前取好传进来，否则条目已写完、会数成 0
-    expect(state.syncOptions).toMatchObject({ sinceSeq: 41, quietRounds: 1, minWaitMs: 0 })
+    expect(state.syncOptions).toMatchObject({ sinceSeq: 41, minWaitMs: 0 })
   })
 
-  it("POST /refresh?wait=1 没等到队排空：200 报 completed=false（同步仍在后台跑，不入队重跑）", async () => {
-    state.drained = false
+  it("POST /refresh?wait=1 没等到安静：200 报 completed=false（抓取仍在后台跑）", async () => {
     state.inlineSync = { completed: false, added: 2 }
     const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
     expect(res.status).toBe(200)
-    expect(await res.json()).toMatchObject({ accepted: true, completed: false, added: 2, sources: 12 })
-    expect(state.reconcileQueued).toBe(0)
+    expect(await res.json()).toMatchObject({ accepted: true, completed: false, added: 2 })
   })
 
-  it("force=1 跳过水位判定：wait=1 直连带上 force，非 wait 入队也带上", async () => {
+  it("force=1 绕开抓取缓存（运维逃生口：默认路径命中缓存不发请求）", async () => {
     const waited = await app.request("/api/timeline/refresh?wait=1&force=1", { method: "POST" })
     expect(waited.status).toBe(200)
-    expect(state.reconcileOptions).toEqual([{ force: true }])
+    expect(state.enqueueOptions).toEqual([{ bypassCache: true }])
 
     const queued = await app.request("/api/timeline/refresh?force=1", { method: "POST" })
     expect(queued.status).toBe(202)
-    expect(state.reconcileQueuedOptions).toEqual([{ force: true }])
+    expect(state.enqueueOptions.at(-1)).toEqual({ bypassCache: true })
   })
 
-  it("不带 force 时不会误开逃生口（默认路径必须走水位判定）", async () => {
+  it("不带 force 时不绕缓存（默认路径必须能复用抓取结果）", async () => {
     await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
     await app.request("/api/timeline/refresh", { method: "POST" })
-    expect(state.reconcileOptions).toEqual([{ force: false }])
-    expect(state.reconcileQueuedOptions).toEqual([{ force: false }])
+    expect(state.enqueueOptions).toEqual([{ bypassCache: false }, { bypassCache: false }])
   })
 
-  it("POST /refresh?wait=1 且没有脏源：不入任何同步 job，也不阻塞", async () => {
-    state.inlineDirty = []
+  it("没有订阅时也能正常返回（queued=0，不阻塞）", async () => {
+    state.enqueueCount = 0
     state.inlineSync = { completed: true, added: 0 }
     const res = await app.request("/api/timeline/refresh?wait=1", { method: "POST" })
     expect(res.status).toBe(200)
     expect(await res.json()).toMatchObject({ accepted: true, completed: true, added: 0, queued: 0 })
-    expect(state.enqueued).toEqual([{ userId: "u1", sourceIds: [] }])
+  })
+
+  it("休眠用户回来时清掉休眠标记（新模型下不需要重建）", async () => {
+    state.resumed = true
+    const res = await app.request("/api/timeline/settings")
+    expect(res.status).toBe(200)
+    // 恢复本身不进响应：它是中间件的副作用，这里只确认请求没被它打断
+    expect(await res.json()).toMatchObject({ settings: { aiSummaryEnabled: false } })
   })
 })
 
 describe("同步日志 /api/timeline/events", () => {
-  it("返回流水与各源当前状态；limit 默认 120", async () => {
+  it("返回流水与心跳；limit 默认 120", async () => {
     const res = await app.request("/api/timeline/events")
     expect(res.status).toBe(200)
     const body = await res.json() as {
       events: Array<{ message: string }>
-      sources: Array<{ title: string }>
       heartbeat: { quietRounds: number } | null
+      sources?: unknown
     }
     expect(body.events).toHaveLength(2)
-    expect(body.events[0]!.message).toContain("汇聚")
-    expect(body.sources[0]!.title).toBe("源一")
-    // 心跳是"聚合还在不在跑"的唯一展示口径（空转轮次不进流水）
+    expect(body.events[0]!.message).toContain("抓取")
+    // 心跳是"抓取还在不在跑"的唯一展示口径（空转轮次不进流水）
     expect(body.heartbeat?.quietRounds).toBe(42)
+    // `sources`（每源同步水位）已随水位表一起删掉：现在每个源的抓取状态在 `_local/schedule` 里，
+    // 客户端要展示的话走订阅列表接口，不再由这里下发
+    expect(body).not.toHaveProperty("sources")
     expect(state.eventLimits).toEqual([120])
   })
 

@@ -6,7 +6,7 @@ import {
   listSubscriptionsForUser,
   addSubscriptionByUrl,
   removeSubscription,
-  setSubscriptionStatus,
+  setSubscriptionPaused,
   updateUserSubscription,
   refetchFeed,
   resolveFeedId,
@@ -167,7 +167,7 @@ async function buildServer(ctx: McpRequestContext): Promise<McpServer> {
       inputSchema: z.object({ feedId: z.string() }),
     },
     async ({ feedId }) => {
-      const ok = await setSubscriptionStatus(userId, feedId, "paused")
+      const ok = await setSubscriptionPaused(userId, feedId, true)
       if (!ok) return errorContent(`cannot pause: feed not subscribed or not found: ${feedId}`)
       return textContent({ feedId, status: "paused" })
     },
@@ -181,7 +181,7 @@ async function buildServer(ctx: McpRequestContext): Promise<McpServer> {
       inputSchema: z.object({ feedId: z.string() }),
     },
     async ({ feedId }) => {
-      const ok = await setSubscriptionStatus(userId, feedId, "active")
+      const ok = await setSubscriptionPaused(userId, feedId, false)
       if (!ok) return errorContent(`cannot resume: feed not subscribed or not found: ${feedId}`)
       return textContent({ feedId, status: "active" })
     },
@@ -203,9 +203,10 @@ async function buildServer(ctx: McpRequestContext): Promise<McpServer> {
       }),
     },
     async ({ feedId, ...patch }) => {
-      // 源级字段（url/siteUrl/description/image）是**所有订阅者共享**的注册表属性，
-      // REST 侧改这些需要管理员（PUT /api/feeds/:feedId 挂着 requireAdmin）。
-      // MCP 的 token 属于普通用户，若照样写库就等于越权改别人的源，所以明确拒绝而不是静默忽略。
+      // 源级字段（url/siteUrl/description/image）一律不接受：
+      //   - `url` 决定抓取目标，改它等于换源，而且会让 feedId 与 url 不再匹配
+      //     （抓取侧会判成脏订阅直接跳过，见 couchdb/subscription-doc.ts）；
+      //   - 其余字段是抓取时从 RSS 解析出来的展示信息，由抓取路径维护，手改会被下一轮覆盖。
       const globalFields = ["url", "description", "siteUrl", "image"].filter(
         (k) => (patch as Record<string, unknown>)[k] !== undefined,
       )

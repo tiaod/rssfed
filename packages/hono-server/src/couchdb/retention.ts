@@ -38,12 +38,14 @@ export const DEFAULT_TRIM_MAX_BATCHES = 10
 /** 源库 view：`_design/main/entries-by-date`，key = publishedAt */
 export const DEFAULT_TRIM_VIEW = "main/entries-by-date"
 /**
- * 汇聚库（`user-timeline_*`）用的 view：`_design/timeline-maintain/by-feed-date`。
+ * owner 库（用户库 / Bot 库）用的 view：`_design/main/by-feed-date`。
  *
  * 用户库里的条目来自多个源，裁剪要**按源分组**各留 N 条（不是全库留 N 条）。
- * 这个视图是后加的，存量库由 `ensureTimelineDesignDoc` 补装（进程内按库名缓存）。
+ * 视图定义与配额在 `couchdb/client.ts` 的 `OWNER_DESIGN_DOC_VIEWS` 里，两份必须一致 ——
+ * 设计文档 id 是 `_design/main`（旧模型里用户库用的是 `_design/timeline-maintain`，
+ * 那份随"共享源库 + 复制"一起删除了）。
  */
-export const USER_TIMELINE_TRIM_VIEW = "timeline-maintain/by-feed-date"
+export const USER_TIMELINE_TRIM_VIEW = "main/by-feed-date"
 /** 汇聚库逐源裁剪时每次从视图读多少行（一页里按 feedId 分组处理） */
 const PER_FEED_TRIM_PAGE = 5_000
 
@@ -267,6 +269,53 @@ export function createTrimDb(dbName: string): TrimDb {
       await db.compact()
     },
   }
+}
+
+/**
+ * 只裁**一个源**：把该 owner 库里 `feedId` 那一组裁到最新 N 条。
+ *
+ * 与 `trimSourceToLatestN({ groupByFeed: true })` 的区别：那个一次遍历库里所有源
+ * （适合定时整库收敛），这个只处理一个源、成本 O(N)，适合**抓完顺手裁**。
+ * 新模型下用户库一个库里装着几百个源，抓取路径用整库裁剪会让每次抓取都退化成 O(全库)。
+ *
+ * 为什么用视图整组读而不是分页：见 `trimSourceToLatestN` 里 groupByFeed 那段说明
+ * （分页会把同一个源切在两页之间，按半截裁会误删本该保留的条目）。
+ *
+ * @returns 实际清掉的条数
+ */
+export async function trimOwnerFeedToLatestN(
+  dbName: string,
+  feedId: string,
+  n: number,
+  options: { batchSize?: number, maxBatches?: number, viewPath?: string } = {},
+): Promise<number> {
+  const batchSize = options.batchSize ?? DEFAULT_TRIM_BATCH
+  const maxBatches = options.maxBatches ?? DEFAULT_TRIM_MAX_BATCHES
+  const [design, view] = (options.viewPath ?? USER_TIMELINE_TRIM_VIEW).split("/") as [string, string]
+  const db = createCouchDb(dbName)
+  let deleted = 0
+
+  for (let batch = 0; batch < maxBatches; batch++) {
+    const res = await db.view(design, view, {
+      startkey: [feedId, ""],
+      endkey: [feedId, {}],
+      include_docs: true,
+      limit: PER_FEED_TRIM_PAGE,
+    }) as unknown as { rows?: Array<{ doc?: { _id?: string, _rev?: string } }> }
+    const docs = (res.rows ?? [])
+      .map((row) => row.doc)
+      .filter((doc): doc is { _id: string, _rev: string } => Boolean(doc?._id && doc?._rev))
+    const excess = docs.length - n
+    if (excess <= 0) break
+    const victims = docs.slice(0, Math.min(excess, batchSize))
+    const body = buildPurgeBody(victims)
+    const purged = await purgeRequest(dbName, body)
+    const removed = countPurged(purged, body)
+    deleted += removed
+    // 一条都没清掉说明撞上并发（文档刚被改过、rev 不匹配）：停手，下一轮再来
+    if (removed === 0) break
+  }
+  return deleted
 }
 
 /**

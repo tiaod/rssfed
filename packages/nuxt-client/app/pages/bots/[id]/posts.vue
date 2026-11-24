@@ -156,8 +156,8 @@ async function toggleSubscribe() {
         description: bot.value?.description,
         image: bot.value?.avatarUrl
       })
-      // 订阅后立即触发产出库复制
-      pouch.syncFeed()
+      // 订阅后立刻把该 Bot 已有的产出搬进用户库
+      await api.feeds.syncBotSubscription(botId).catch(() => {})
       toast.add({ title: '订阅成功', color: 'success' })
     }
     subscribed.value = !subscribed.value

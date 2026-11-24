@@ -1,120 +1,118 @@
-import crypto from "node:crypto"
-import { eq, inArray } from "drizzle-orm"
+import { inArray } from "drizzle-orm"
 import { parseFeedUrl, formatFeedError, type ParsedFeed } from "../rss/parser"
 import type { OpmlFeed } from "../rss/opml"
-import { createCouchDb, ensureFeedDatabase, ensureTimelineDatabase } from "../couchdb/client"
+import { createCouchDb, ensureTimelineDatabase } from "../couchdb/client"
+import {
+  deriveFeedId,
+  parseSubscription,
+  SUBSCRIPTION_TYPE,
+  subscriptionDocId,
+  type SubscriptionDoc,
+} from "../couchdb/subscription-doc"
 import { feedDocId } from "../couchdb/doc-ids"
-import { db, feeds, bots } from "../db"
-import { resumeIfAutoPaused } from "./feed-orphans"
-import { enqueueFetch } from "../workers"
+import { db, bots } from "../db"
+import { enqueueOwnerFetch } from "../workers"
+import { readSchedule, dropSourceSchedule, mergeSourceSchedule, type ScheduleState } from "./owner-schedule"
+import { touchTimelineActivity } from "./timeline-lifecycle"
 
 /**
- * 用户级订阅服务层。
+ * 订阅服务层 —— 订阅关系的**唯一权威**是用户库里的 `subscription:{feedId}` 文档。
  *
- * 这里集中「按用户身份 + 归属校验」的订阅读写逻辑，供两类调用方复用：
- *  1. REST 路由（feeds.ts 里的用户订阅相关端点）
- *  2. MCP 工具（list_subscriptions / add / remove / pause / resume / update / refetch）
+ * ## 为什么订阅在 CouchDB 而不在 PostgreSQL
  *
- * 原则：所有函数都以 userId 为边界，只操作该用户的数据；
- * 涉及「改 feed 全局状态」的操作（pause/resume/update/refetch）必须先校验
- * 该 feed 确属当前用户的订阅，绝不暴露 admin 级全局操作。
+ * 离线优先：用户断网时也要能订阅/退订，这些改动先落浏览器 PouchDB，联网后与服务端合并。
+ * 关系型表没有对应的客户端副本与冲突合并机制，跨端修改无法收敛。
+ *
+ * ## 这份文档为什么必须带 `url`
+ *
+ * 抓取按 **owner**（用户 / Bot）各自进行，没有共享的 `feeds` 注册表了。调度读到订阅文档后
+ * 必须能直接拿到抓取地址 —— `feedId` 是 `sha256(url)` 截断，不可逆。
+ *
+ * 代价：`url` 是**客户端可写**的，所以它属于不可信输入。写入时（discover）校验过一次，
+ * 但用户能直接改本地 PouchDB 再同步上来，因此**每次抓取前都要重新过 SSRF 闸门**
+ * （`rss/parser.ts` 的 `assertFetchableUrl`，含重定向逐跳校验）。
+ *
+ * ## 原则
+ *
+ * 所有函数都以 userId 为边界，只操作该用户的数据；不提供任何 admin 级全局源操作
+ * （"全局源"这个概念已经不存在了）。
  */
 
 /** 注册后的 feed 元信息，用于写入订阅文档 */
 export interface FeedMeta {
   feedId: string
+  /** 抓取地址（订阅文档的 url 字段，调度据此抓取） */
+  url: string
   title: string
   siteUrl?: string
   description?: string
+  image?: string
 }
 
-/**
- * 由 URL 确定性派生 feedId：对完整 URL 做 sha256 后取 base64url 前 16 位。
- * （历史实现用 base64url(URL).slice(0,12)，前缀相同会撞 ID；改用完整 URL 哈希避免冲突。）
- */
-export function deriveFeedId(url: string): string {
-  return crypto.createHash("sha256").update(url).digest("base64url").slice(0, 16)
-}
+/** 由 URL 确定性派生 feedId（实现见 couchdb/subscription-doc.ts，这里转出以保持既有导入路径） */
+export { deriveFeedId }
 
 /**
- * 解析 feedId：URL 已注册时复用其现有 ID（兼容历史短 ID 数据），
- * 否则按完整 URL 哈希派生新 ID。
+ * 解析 feedId：URL 已出现在该用户的订阅里时复用它，否则按完整 URL 哈希派生。
+ *
+ * 与旧的 `resolveFeedId` 不同：以前查的是全局 `feeds` 注册表，现在没有注册表了 ——
+ * 同一个 URL 在任何 owner 那里派生的 id 都相同（纯函数），所以这里其实是纯派生。
+ * 保留这个函数名是因为 MCP / 路由层都在用，语义（可能查一下现有订阅）保持不变。
  */
 export async function resolveFeedId(url: string): Promise<string> {
-  const existing = await db.query.feeds.findFirst({
-    where: eq(feeds.url, url),
-    columns: { id: true },
-  })
-  return existing?.id ?? deriveFeedId(url)
+  return deriveFeedId(url)
 }
 
 /**
- * 确保 feed 已登记：PostgreSQL 注册表 + per-feed CouchDB 库。
+ * 确保该用户的订阅存在（含 url），并按需触发一次抓取。
  *
- * 对**已注册**的 feed：不再联网探测（注册表里已有元信息），也不重复入队抓取 ——
- * 调度器本来就在轮询它，重复入队只会让同一个源多下一次。OPML 重复导入时这能省掉
- * 「每个源先内联下载一遍 + worker 再下载一遍」的两份浪费。
+ * 对**已订阅**的源：不重复写文档、不重复入队（调度器本来就在轮询）。
+ * 对**新**订阅：写订阅文档 + 入队一次首抓；标题用解析结果或 OPML 里的兜底。
  *
- * 对**新** feed：默认内联探测一次拿标题/描述（单次添加需要即时确认），
- * `probe: false` 时跳过 —— OPML 导入用 OPML 里的标题兜底，真正的抓取交给 worker，
- * 不必在导入请求里同步下载几十上百个源（首轮解析失败也不阻塞，错误状态由 worker 标记）。
+ * @param options.probe 是否内联解析一次拿标题（单条添加要即时确认；OPML 导入关掉，
+ *   几十上百个源同步下载会很慢，而且 worker 马上还要再抓一遍）
  */
-export async function ensureFeedRegistered(
+export async function ensureFeedSubscribed(
+  userId: string,
   item: OpmlFeed,
   options: { probe?: boolean } = {},
-): Promise<FeedMeta> {
+): Promise<{ meta: FeedMeta, added: boolean }> {
   const probe = options.probe ?? true
-  // 一次查询同时拿到 id 与「是否已注册」，避免 resolveFeedId 之后再查一遍
-  const existing = await db.query.feeds.findFirst({ where: eq(feeds.url, item.url) })
-  const feedId = existing?.id ?? deriveFeedId(item.url)
+  const feedId = deriveFeedId(item.url)
 
   let parsed: ParsedFeed | null = null
-  if (!existing && probe) {
+  if (probe) {
     try {
       parsed = await parseFeedUrl(item.url)
     } catch {
-      // 忽略：用标题兜底，错误状态由 Worker 抓取时标记
+      // 忽略：用标题兜底，错误状态由 worker 抓取时标记（订阅本身不因一次探测失败而失败）
     }
   }
 
-  const title = parsed?.title ?? existing?.title ?? item.title ?? item.url
-  await db.insert(feeds).values({
-    id: feedId,
-    url: item.url,
-    title,
-    description: parsed?.description,
-    siteUrl: parsed?.link,
-  }).onConflictDoNothing()
-
-  const feedDb = createCouchDb(await ensureFeedDatabase(feedId))
-  try {
-    await feedDb.get(feedDocId(feedId))
-  } catch {
-    // 只写展示字段：抓取簿记（lastFetchedAt/验证器/错误）在 PostgreSQL `feeds` 表，
-    // 不写进 FeedDoc —— 这份文档会复制进每个用户聚合库（见 workers/feed-doc.ts）。
-    await feedDb.insert({
-      _id: feedDocId(feedId),
-      type: "feed",
-      url: item.url,
-      title,
-      description: parsed?.description,
-      siteUrl: parsed?.link,
-      createdAt: new Date().toISOString(),
-    } as any)
-  }
-
-  // 只有新 feed 需要首抓；已注册的由调度器按轮次抓（手动「立即抓取」走 refetchFeed）
-  if (!existing) await enqueueFetch(feedId, item.url)
-
-  return {
+  const meta: FeedMeta = {
     feedId,
-    title,
-    siteUrl: parsed?.link ?? existing?.siteUrl ?? undefined,
-    description: parsed?.description ?? existing?.description ?? undefined,
+    url: item.url,
+    title: parsed?.title ?? item.title ?? item.url,
+    siteUrl: parsed?.link,
+    description: parsed?.description,
+    image: parsed?.image?.url,
   }
+
+  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
+  const added = await addSubscriptionIfAbsent(userDb, item, meta)
+  if (added) {
+    // 首抓：新订阅立刻抓一次，用户不用等下一轮调度
+    await enqueueOwnerFetch({ owner: { kind: "user", id: userId }, feedId, url: item.url }).catch(() => {})
+  }
+  return { meta, added }
 }
 
-/** 为用户写入订阅文档；已订阅过（_id 冲突 409）则跳过并返回 false */
+/**
+ * 写入订阅文档；已订阅过（id 冲突 409）则跳过并返回 false。
+ *
+ * 文档里同时更新 FeedDoc（展示字段）—— 订阅列表的标题/图标来自它，
+ * 而 FeedDoc 由抓取路径维护，首抓之前先放一份占位，避免界面空白。
+ */
 export async function addSubscriptionIfAbsent(
   userDb: ReturnType<typeof createCouchDb>,
   item: OpmlFeed,
@@ -122,64 +120,81 @@ export async function addSubscriptionIfAbsent(
 ): Promise<boolean> {
   try {
     await userDb.insert({
-      _id: `subscription:${meta.feedId}`,
-      type: "subscription",
+      _id: subscriptionDocId(meta.feedId),
+      type: SUBSCRIPTION_TYPE,
       feedId: meta.feedId,
+      // 抓取地址：调度与 worker 的唯一依据（见文件头）
+      url: meta.url,
       title: meta.title,
       siteUrl: meta.siteUrl,
       description: meta.description,
+      image: meta.image,
       category: item.category,
+      paused: false,
       createdAt: new Date().toISOString(),
-    } as any)
-    // 订阅成功 = 这个源重新"有人关注"了。若它是被孤儿清理自动暂停的，立刻恢复抓取
-    // （只动 pausedBySystem=true 的，管理员手动暂停的不会被打开，见 services/feed-orphans.ts）。
-    // 放在这里而不是各调用方，是因为 OPML 导入 / 单条添加 / MCP 都汇聚到这一个写入口。
-    await resumeIfAutoPaused(meta.feedId).catch(() => {})
-    return true
-  } catch (err: any) {
-    // CouchDB 文档冲突 = 该用户已订阅过，跳过
-    if (err?.statusCode === 409 || err?.error === "conflict") return false
+    } as never)
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 409) return false
     throw err
   }
+  // 占位 FeedDoc：首抓成功后会由抓取路径覆盖成解析结果
+  try {
+    await userDb.get(feedDocId(meta.feedId))
+  } catch {
+    await userDb.insert({
+      _id: feedDocId(meta.feedId),
+      type: "feed",
+      url: meta.url,
+      title: meta.title,
+      description: meta.description,
+      siteUrl: meta.siteUrl,
+      image: meta.image,
+      createdAt: new Date().toISOString(),
+    } as never).catch(() => {})
+  }
+  return true
 }
 
 /**
- * 按 URL 为单个用户添加订阅（内联 discover）。
- * 返回结果：{ feedId, title, added }，added=false 表示已订阅过。
+ * 读取用户的全部订阅文档（原始形状）。
+ *
+ * 读失败的区分很重要：404 类错误只可能是"这个用户还没有库"，返回空数组；
+ * 其它错误必须抛 —— 一次 CouchDB 抖动被当成"没有订阅"，会让上游把这些源全判成退订。
  */
-export async function addSubscriptionByUrl(userId: string, url: string, category?: string) {
-  const item: OpmlFeed = { title: url, url, category }
-  const meta = await ensureFeedRegistered(item)
-  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
-  const added = await addSubscriptionIfAbsent(userDb, item, meta)
-  return { feedId: meta.feedId, title: meta.title, added }
-}
-
-/** 读取当前用户已订阅的 feedId 集合（用于归属校验，避免全量读文档） */
-export async function getSubscribedFeedIds(userId: string): Promise<Set<string>> {
+export async function listSubscriptionDocs(userId: string): Promise<Array<SubscriptionDoc & { kind?: unknown }>> {
   const userDb = createCouchDb(await ensureTimelineDatabase(userId))
   const { rows } = await userDb.list({
     startkey: "subscription:",
     endkey: "subscription:\uffff",
     include_docs: true,
   })
+  return rows.map((row) => row.doc as SubscriptionDoc & { kind?: unknown }).filter(Boolean)
+}
+
+/** 当前用户的订阅 feedId 集合（含 bot 订阅；调用方自己按 `bot:` 前缀区分） */
+export async function getSubscribedFeedIds(userId: string): Promise<Set<string>> {
+  const docs = await listSubscriptionDocs(userId)
   return new Set(
-    rows
-      .map((r) => (r.doc as any)?.feedId)
-      .filter((v: unknown): v is string => typeof v === "string"),
+    docs
+      .map((doc) => doc.feedId)
+      .filter((value): value is string => typeof value === "string" && value.length > 0),
   )
 }
 
 /**
  * 删除当前用户的某个订阅（用户库里的 subscription 文档）。
- * @returns true=已删除，false=未找到该订阅
+ *
+ * 只删订阅文档：条目由调用方的退订清理按前缀 purge（见 `purgeSubscriptionContent`），
+ * `_local/schedule` 里的状态也一并清掉，避免重新订阅时继承旧的 lastFetchedAt。
  */
 export async function removeSubscription(userId: string, feedId: string): Promise<boolean> {
-  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
-  const docId = `subscription:${feedId}`
+  const dbName = await ensureTimelineDatabase(userId)
+  const userDb = createCouchDb(dbName)
+  const docId = subscriptionDocId(feedId)
   try {
     const doc = await userDb.get(docId) as { _id: string, _rev: string }
     await userDb.destroy(docId, doc._rev)
+    await dropSourceSchedule(dbName, feedId)
     return true
   } catch {
     return false
@@ -187,34 +202,47 @@ export async function removeSubscription(userId: string, feedId: string): Promis
 }
 
 /**
- * 设置某 feed 的抓取状态（active/paused），**仅当该 feed 属当前用户订阅时**。
- * @returns true=已更新，false=该 feed 非当前用户订阅或不存在
+ * 暂停/恢复某条订阅的抓取。
+ *
+ * 写的是订阅文档的 `paused` 字段（客户端可写文档，所以必须读改写 + 409 重试），
+ * 同时镜像进 `_local/schedule` —— 调度器每轮读的是 schedule，不必再去解析每个订阅文档。
+ *
+ * @returns true=已写入；false=该用户没订阅这个源
  */
-export async function setSubscriptionStatus(userId: string, feedId: string, status: "active" | "paused"): Promise<boolean> {
-  const subscribed = await getSubscribedFeedIds(userId)
-  if (!subscribed.has(feedId)) return false
-  const updated = await db.update(feeds)
-    .set({ status })
-    .where(eq(feeds.id, feedId))
-    .returning({ id: feeds.id })
-  return updated.length > 0
+export async function setSubscriptionPaused(userId: string, feedId: string, paused: boolean): Promise<boolean> {
+  const dbName = await ensureTimelineDatabase(userId)
+  const userDb = createCouchDb(dbName)
+  const docId = subscriptionDocId(feedId)
+
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let doc: Record<string, unknown>
+    try {
+      doc = await userDb.get(docId) as unknown as Record<string, unknown>
+    } catch {
+      // 读不到 = 没订阅（或订阅文档已失效），不是"更新失败"
+      return false
+    }
+    try {
+      await userDb.insert({ ...doc, paused } as never)
+      await mergeSourceSchedule(dbName, feedId, { paused })
+      return true
+    } catch (err) {
+      if ((err as { statusCode?: number })?.statusCode !== 409) throw err
+      // 409：客户端同时改了这条文档，重读重算
+    }
+  }
+  return false
 }
 
 /**
  * 用户对**自己这一个订阅**的个性化修改（显示名 / 分组）。
  *
- * 写的是用户库里的 `subscription:<feedId>` 文档，与前端「编辑订阅」弹窗
+ * 写的是用户库里的 `subscription:{feedId}` 文档，与前端「编辑订阅」弹窗
  * （`usePouchDb.updateSubscription`）完全同源 —— 客户端从用户库读的正是这份 title/category，
  * 所以改完立刻可见。
  *
- * 为什么不能复用「改 PostgreSQL `feeds` 表」的写法：那张表是**所有订阅者共享**的源注册表。
- * 早先 MCP 的 `update_subscription` 就是直接写它，两个后果：
- *   1. 改了之后用户在界面上看不到 —— 订阅列表的 title 来自订阅文档，不是注册表；
- *   2. 它是全局写：任何持有 API token 的普通用户都能改掉别人看到的源信息，
- *      连 `url` 都能改（等于替所有订阅者换源）。源级字段的修改在 REST 侧是 requireAdmin，
- *      MCP 这边不该绕过。
- *
- * 因此这里只接受用户真正拥有的字段，`url` / `siteUrl` / `description` / `image` 一律不接受。
+ * **`url` 不在可改字段里**：它决定抓取目标，改它等于换源；而且改了 url 会让
+ * `feedId` 与 url 不再匹配（`parseSubscription` 会拒掉这条订阅）。换源请重新订阅。
  *
  * @returns true=已写入；false=该 feed 不在当前用户的订阅里
  */
@@ -224,143 +252,144 @@ export async function updateUserSubscription(
   patch: { title?: string, category?: string },
 ): Promise<boolean> {
   const userDb = createCouchDb(await ensureTimelineDatabase(userId))
-  const docId = `subscription:${feedId}`
-  let doc: Record<string, any>
-  try {
-    doc = await userDb.get(docId) as Record<string, any>
-  } catch {
-    // 读不到 = 没订阅（或订阅文档已失效），不是"更新失败"
-    return false
+  const docId = subscriptionDocId(feedId)
+  for (let attempt = 0; attempt < 5; attempt++) {
+    let doc: Record<string, any>
+    try {
+      doc = await userDb.get(docId) as Record<string, any>
+    } catch {
+      return false
+    }
+    if (patch.title === undefined && patch.category === undefined) return false
+    // 只合入传入的字段：undefined 表示"不动这个字段"，与前端 updateSubscription 的语义一致
+    if (patch.title !== undefined) doc.title = patch.title
+    if (patch.category !== undefined) doc.category = patch.category
+    try {
+      await userDb.insert(doc as never)
+      return true
+    } catch (err) {
+      if ((err as { statusCode?: number })?.statusCode !== 409) throw err
+    }
   }
-  if (patch.title === undefined && patch.category === undefined) return false
-  // 只合入传入的字段：undefined 表示"不动这个字段"，与前端 updateSubscription 的语义一致
-  if (patch.title !== undefined) doc.title = patch.title
-  if (patch.category !== undefined) doc.category = patch.category
-  await userDb.insert(doc as any)
-  return true
-}
-
-/** 清掉错误状态并按当前 URL 重建抓取任务（enqueueFetch 会替换掉队列里旧 URL 的 job） */
-async function resetAndEnqueue(feedId: string, url: string): Promise<void> {
-  await db.update(feeds).set({ errorMessage: null }).where(eq(feeds.id, feedId))
-  await enqueueFetch(feedId, url)
+  return false
 }
 
 /**
- * 丢弃条件请求验证器。
+ * 触发某条订阅立即重新抓取（清空调度里的失败计数并入队）。
  *
- * 换地址后旧的 ETag/Last-Modified 属于**旧资源**，带给新地址只会两种下场：服务端拿它
- * 和自家资源比对后回一个 304（等于新地址永远抓不到内容），或者干脆无视。多数源没这问题，
- * 但 `fetch_validator_url` 为 null 的老数据没有这项保护 —— parser 只在
- * `validatorUrl === 当前 url` 时才带条件头，url 缺失时会按「第一跳」放行（见 rss/parser.ts）。
- * 所以改地址时把三列一起清空，让下一轮走一次干净的全量下载。
+ * @returns true=已入队；false=该用户没订阅这个源
  */
-async function clearFetchValidators(feedId: string): Promise<void> {
-  await db.update(feeds).set({
-    fetchValidatorUrl: null,
-    fetchEtag: null,
-    fetchLastModified: null,
-    // 清成 null 而不是 false：null = 「还没成功抓过」，调度器按有验证器处理，不会提前降频
-    hasFetchValidators: null,
-  }).where(eq(feeds.id, feedId))
-}
-
-/**
- * URL 变更后的收尾：清错 + 丢弃旧验证器 + 按新地址重建抓取任务。
- *
- * 这一步不能省：enqueueFetch 按 jobId 去重，队列里若还压着一个旧 URL 的 job，
- * 不先清掉的话新地址根本进不了队列（静默无效），表现就是「改了 URL、点了立即抓取，
- * 源还是没数据，也不报错」。返回是否真的触发了重建。
- */
-export async function requeueAfterUrlChange(
-  feedId: string,
-  oldUrl: string | undefined,
-  newUrl: string | undefined,
-): Promise<boolean> {
-  if (!newUrl || newUrl === oldUrl) return false
-  await clearFetchValidators(feedId)
-  await resetAndEnqueue(feedId, newUrl)
-  return true
-}
-
-/** 触发某 feed 立即重新抓取（清空错误），**仅当属于当前用户订阅时** */
 export async function refetchFeed(userId: string, feedId: string): Promise<boolean> {
-  const subscribed = await getSubscribedFeedIds(userId)
-  if (!subscribed.has(feedId)) return false
-  const [feed] = await db.select().from(feeds).where(eq(feeds.id, feedId)).limit(1)
-  if (!feed) return false
-  await resetAndEnqueue(feedId, feed.url)
+  const docs = await listSubscriptionDocs(userId)
+  const doc = docs.find((item) => item.feedId === feedId && item.kind !== "bot")
+  if (!doc) return false
+  const parsed = parseSubscription(doc)
+  if (!parsed.ok) return false
+
+  const dbName = await ensureTimelineDatabase(userId)
+  // 清掉失败计数与"刚抓过"的时间，让这一轮立刻入队并真正发请求
+  await mergeSourceSchedule(dbName, feedId, { errorStreak: 0, lastFetchedAt: undefined })
+  await enqueueOwnerFetch({
+    owner: { kind: "user", id: userId },
+    feedId: parsed.feedId,
+    url: parsed.url,
+    title: parsed.title,
+    // 立即抓取要真的发一次网络请求：缓存命中会让"点了没反应"变成常态
+    bypassCache: true,
+  })
   return true
 }
 
-/** 当前用户订阅列表（feed + bot），合并注册表抓取状态（active/paused/error） */
+/** 当前用户订阅列表（feed + bot），状态来自 `_local/schedule` 与 bots 表 */
 export async function listSubscriptionsForUser(userId: string) {
-  const userDb = createCouchDb(await ensureTimelineDatabase(userId))
-  const { rows } = await userDb.list({
-    startkey: "subscription:",
-    endkey: "subscription:\uffff",
-    include_docs: true,
-  })
-  const docs = rows.map((r) => r.doc).filter(Boolean) as any[]
-
-  // 脏订阅文档防御：feedId 必须是非空字符串。
-  // 若把 feedId 为空的文档返回给前端，它既取不到对应的 CouchDB 库名
-  // （/api/couchdb/targets 的映射里没有这个 key），也定位不到任何远端库。
-  const hasValidFeedId = (d: any) => typeof d.feedId === "string" && d.feedId.length > 0
-  const feedDocs = docs.filter((d: any) => d.kind !== "bot" && hasValidFeedId(d))
-  const botDocs = docs.filter((d: any) => d.kind === "bot" && hasValidFeedId(d))
-  const feedIds = feedDocs.map((d: any) => d.feedId).filter(Boolean)
-  const botIds = botDocs.map((d: any) => String(d.feedId).replace(/^bot:/, "")).filter(Boolean)
-
-  const [feedRegistry, botRegistry] = await Promise.all([
-    feedIds.length ? db.select().from(feeds).where(inArray(feeds.id, feedIds)) : [],
-    botIds.length ? db.select().from(bots).where(inArray(bots.id, botIds)) : [],
+  const dbName = await ensureTimelineDatabase(userId)
+  const [docs, schedule] = await Promise.all([
+    listSubscriptionDocs(userId),
+    readSchedule(dbName).catch(() => null as ScheduleState | null),
   ])
-  const feedById = new Map(feedRegistry.map((f) => [f.id, f]))
-  const botById = new Map(botRegistry.map((b) => [b.id, b]))
+
+  const feedDocs = docs.filter((doc) => doc.kind !== "bot")
+  const botDocs = docs.filter((doc) => doc.kind === "bot")
+  const botIds = botDocs
+    .map((doc) => String(doc.feedId ?? "").replace(/^bot:/, ""))
+    .filter(Boolean)
+
+  const botRegistry = botIds.length
+    ? await db.select().from(bots).where(inArray(bots.id, botIds))
+    : []
+  const botById = new Map(botRegistry.map((bot) => [bot.id, bot]))
 
   return [
-    ...feedDocs.map((d: any) => {
-      const reg = feedById.get(d.feedId)
-      const status = reg?.status === "paused" ? "paused"
-        : reg?.errorMessage ? "error"
-        : "active"
+    ...feedDocs.map((doc) => {
+      const entry = doc.feedId ? schedule?.sources?.[doc.feedId] : undefined
+      const status = doc.paused === true || entry?.paused === true
+        ? "paused" as const
+        : entry?.lastErrorAt && (entry.errorStreak ?? 0) > 0 ? "error" as const : "active" as const
       return {
-        feedId: d.feedId,
+        feedId: doc.feedId,
         kind: "feed" as const,
-        title: d.title,
-        siteUrl: d.siteUrl,
-        image: d.image,
-        description: d.description,
-        category: d.category,
-        createdAt: d.createdAt,
+        title: doc.title,
+        siteUrl: doc.siteUrl,
+        image: doc.image,
+        description: doc.description,
+        category: doc.category,
+        createdAt: doc.createdAt,
         status,
-        errorMessage: reg?.errorMessage ?? undefined,
-        lastFetchedAt: reg?.lastFetchedAt?.toISOString() ?? undefined,
-        lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
+        errorMessage: status === "error" ? lastErrorLabel(entry) : undefined,
+        lastFetchedAt: entry?.lastFetchedAt,
+        lastNewEntryAt: entry?.lastNewEntryAt,
         // 抓取地址：编辑订阅弹窗只读展示（前端离线时回退本地 FeedDoc）
-        feedUrl: reg?.url ?? undefined,
+        feedUrl: doc.url,
       }
     }),
-    ...botDocs.map((d: any) => {
-      const botId = String(d.feedId).replace(/^bot:/, "")
+    ...botDocs.map((doc) => {
+      const botId = String(doc.feedId ?? "").replace(/^bot:/, "")
       const reg = botById.get(botId)
       return {
-        feedId: d.feedId,
+        feedId: doc.feedId,
         kind: "bot" as const,
-        title: d.title ?? reg?.name,
+        title: doc.title ?? reg?.name,
         siteUrl: undefined,
-        image: d.image ?? reg?.avatarUrl,
-        description: d.description ?? reg?.description,
-        category: d.category,
-        createdAt: d.createdAt,
-        status: reg?.isActive === false ? "paused" : "active",
-        lastNewEntryAt: reg?.lastNewEntryAt?.toISOString() ?? undefined,
+        image: doc.image ?? reg?.avatarUrl,
+        description: doc.description ?? reg?.description,
+        category: doc.category,
+        createdAt: doc.createdAt,
+        status: reg?.isActive === false ? "paused" as const : "active" as const,
+        lastNewEntryAt: reg?.lastNewEntryAt?.toISOString(),
         // bot 没有 RSS 地址：前端用它在编辑订阅弹窗里拼联邦地址 `@用户名@域名`
-        preferredUsername: reg?.preferredUsername ?? undefined,
+        preferredUsername: reg?.preferredUsername,
       }
     }),
   ]
+}
+
+/**
+ * 错误信息。
+ *
+ * 旧模型里具体错误（超时、404、解析失败）存在 `feeds.error_message`，现在只存了
+ * 「上次失败时刻」与连续次数 —— 具体原因随 worker 日志走。
+ * 保留这个函数是为了前端 `FeedSubscriptionItem.errorMessage` 字段不出现 "undefined"。
+ */
+function lastErrorLabel(entry: { lastErrorAt?: string, errorStreak?: number } | undefined): string | undefined {
+  if (!entry?.lastErrorAt) return undefined
+  const times = entry.errorStreak && entry.errorStreak > 1 ? `（连续 ${entry.errorStreak} 次）` : ""
+  return `最近一次抓取失败于 ${new Date(entry.lastErrorAt).toLocaleString()}${times}`
+}
+
+/** MCP / 路由用的「订阅一个 URL」组合操作 */
+export async function addSubscriptionByUrl(
+  userId: string,
+  url: string,
+  category?: string,
+): Promise<{ feedId: string, added: boolean, title: string }> {
+  // probe 默认开：单条添加要即时给出标题；解析失败的源也照样订阅（错误由 worker 标记）
+  const { meta, added } = await ensureFeedSubscribed(userId, {
+    url,
+    title: url,
+    category,
+  })
+  void touchTimelineActivity(userId)
+  return { feedId: meta.feedId, added, title: meta.title }
 }
 
 /** 复用格式错误导出，供 MCP 工具在解析失败时返回可读信息 */

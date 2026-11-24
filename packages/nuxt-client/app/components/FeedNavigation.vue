@@ -164,12 +164,20 @@ async function addFeed() {
   submitting.value = true
   addError.value = null
   try {
-    // 1. 后端解析并注册该订阅源，写入 per-feed 库并触发首轮抓取
-    const { feedId, title } = await api.feeds.discover(url)
+    // 1. 后端解析校验该订阅源，返回 feedId 与规范化后的 url
+    const discovered = await api.feeds.discover(url)
+    const feedId = discovered.feedId
     // 源没给标题时退回 URL，避免订阅列表里出现空标题
-    const feedTitle = title ?? url
-    // 2. 在本地 PouchDB 写入订阅关系（自动同步到远端，出现在侧边栏）
-    await pouch.addSubscription(feedId, { title: feedTitle })
+    const feedTitle = discovered.title ?? url
+    // 2. 在本地 PouchDB 写入订阅关系（自动同步到远端，出现在侧边栏）。
+    //    url 必须带上：服务端就靠它抓取（feedId 是 url 的哈希，不可逆）
+    await pouch.addSubscription(feedId, {
+      url: discovered.url ?? url,
+      title: feedTitle,
+      siteUrl: discovered.siteUrl,
+      description: discovered.description,
+      image: discovered.image,
+    })
     toast.add({ title: '订阅成功', description: feedTitle, color: 'success' })
     addOpen.value = false
     feedUrl.value = ''
