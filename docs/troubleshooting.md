@@ -87,115 +87,33 @@
 - **原因**：代理只接受真实库名，旧版前端仍按业务 id 拼地址（`/api/couchdb/proxy/feed/<feedId>`）；旧页面还跑着旧 JS（新版 SW 先待命，等用户点更新才激活，见 [offline-and-pwa.md](offline-and-pwa.md)）。
 - **解法**：刷新页面即可，错误响应里的 `hint` 也写了这条。
 
-### 服务器被打满、站点 502：几百条**常驻**复制一起追赶（已改为按需搬运）
+### 服务器被打满、站点 502：几百条**常驻**复制一起追赶（**该形态已整体删除**）
 
-- **现象**：站点间歇 502，`uptime` 显示 2 核负载 20+、swap 用满；CouchDB 日志成片
+- **现象**（仅旧版本）：站点间歇 502，`uptime` 显示 2 核负载 20+、swap 用满；CouchDB 日志成片
   `replication_auth_error ... _session ... sel_conn_closed`、`changes_reader_died`、
-  `filter_fetch_error: Could not open source database`；`GET /_scheduler/docs/_replicator`
-  里 running 几百条、pending 几百条、error/crashing 一片，而目标库 3 分钟只涨十几条。
-- **原因**：当时的拓扑是「每个 (用户 × 订阅源) 一条**常驻**复制」—— 一个 625 个源的账号就是 625 条。
-  同时追赶时每条都要拉起 couchjs 在源端跑 `timeline` 过滤器，2 核机连源库都打不开；而用 `max_jobs`
-  压并发必然**饿死**（常驻任务跑到 running 就永不结束、不释放槽位，实测 running=50 / pending=573 一直不动）。
-  结论：`max_jobs` 怎么调都无解，问题在「常驻」这个形态本身。
-- **解法**（现行实现）：改成**按需的一次性复制** —— 只在「源那边上次同步之后有过新内容」时对该源跑一次
-  `POST /_replicate`（不经过复制器调度器），并发由 `rss-timeline-sync` 队列控制（`TIMELINE_SYNC_CONCURRENCY`，
-  默认 4）。升级后每个账号的第一轮聚合会自动清掉遗留的常驻任务并打标记（`_local/state.replicatorsPurged`）：
+  `filter_fetch_error: Could not open source database`。
+- **原因**（仅旧版本）：「每个 (用户 × 订阅源) 一条**常驻**复制」—— 一个 625 个源的账号就是 625 条。
+  用 `max_jobs` 压并发必然**饿死**（常驻任务跑到 running 就永不结束、不释放槽位）。
+- **现状**：整条链路（常驻复制 → 按需一次性复制 → **共享源库本身**）已经删除。
+  新模型里**没有 CouchDB 复制**、**没有 `_replicator` 任务**、**没有 PostgreSQL 水位表**：
+  抓取按 owner 各自进行，直接写进各自用户库（见 [ARCHITECTURE.md](../ARCHITECTURE.md#同步架构分层)）。
+  如果现在的部署里还能看到 `_replicator` 文档或 `timeline_source_sync` 表，
+  说明还有旧数据残留 —— 跑一次 `scripts/reset-to-owner-model.ts`：
   ```bash
-  curl -s -u admin:admin "http://localhost:5984/_scheduler/docs/_replicator" | head -c 300  # jobs 应为空
-  curl -s -u admin:admin "http://localhost:5984/user-timeline_xxx/_local/state"              # replicatorsPurged: true
+  cd packages/hono-server
+  npx tsx scripts/reset-to-owner-model.ts --dry-run   # 先看会删什么
+  npx tsx scripts/reset-to-owner-model.ts --yes       # 真删
   ```
-- **代价与前提**：单源空转一次也要 ~1.3s（会话建立占大头，实测见
-  [notes/aggregation/on-demand-replication.md](notes/aggregation/on-demand-replication.md)），所以水位判定是
-  **必需**而不是优化：稳态下一轮聚合一个复制请求都不发（`refresh?wait=1` 返回 `queued: 0`）。
 
-### 重建 / 新订阅时一次写入几千到几万条：墓碑重放（新方案已从机制上消除）
+### 重建 / 新订阅时一次写入几千到几万条：墓碑重放（**机制上已不可能**）
 
-- **现象**：`[Timeline] 同步源 xxx（用户=…）写入 4782 份、5070ms` 这类日志出现在**新订阅、重建、换设备首拉**时；
-  日常增量只有几十条。源库 `doc_del_count` 很大，用户库墓碑数也一路涨。
-  注意：旧版本这行份数取的是 CouchDB 复制任务 history 里的**累计值**（无变化时还会返回上一次会话的旧值），
-  数字会虚高；现在这行已改成**单次增量**（见 `couchdb/replicator.ts` 的 `summarizeReplicationSession`）。
-- **原因**（旧方案）：保留策略用标准 delete 留墓碑，且**删除随复制传播**；首搬从 0 重扫时复制会把源库
-  全部历史墓碑再搬一遍。
-- **现状**：这条链路的三个前提都已不存在 ——
-  1. 复制改用 **Mango selector**，墓碑根本进不了复制（`couchdb/replicator.ts`）；
-  2. 两侧保留都用 **`_purge`**，库里不再产生墓碑（`couchdb/retention.ts`）；
-  3. 原来的后台墓碑 GC（`tombstone-gc` 脚本、`timeline_source_tombstone` 表、维护定时器）**已整体删除**。
-- **如果仍然看到墓碑堆积**，先确认跑的是不是新版本：
-  ```bash
-  curl -s -u admin:admin "http://localhost:5984/<user-timeline 库名>" | grep doc_del_count   # 新版本应稳定不涨
-  ```
-  历史遗留的墓碑（旧版本产生的）不会自己消失，需要一次性清理 —— 见下节。
-
-### 一次性清掉存量墓碑（升级后执行一次）
-
-旧版本在用户库里留下了大量墓碑（实测一个 600 源账号 4.7 万条活文档配 4.2 万个墓碑，占 90%）。
-新版本不再产生新墓碑，但**存量不会自动消失**，做一次全量 purge 可以显著降低客户端首拉成本
-（实测首次全量同步 21.7s → 10.1s、读取文档数 48,207 → 6,304）：
-
-```bash
-# 逐个 user-timeline_* 库：扫 _changes 收集墓碑 rev → 每 500 个一批 _purge → compact
-# 只读 + 幂等：某条墓碑已被清掉时 CouchDB 返回空数组，重复跑不会出错
-DB=user-timeline_xxx
-since=0
-while :; do
-  page=$(curl -s -u admin:pass "http://localhost:5984/$DB/_changes?since=$since&style=all_docs&limit=2000")
-  body=$(echo "$page" | python3 -c '
-import json,sys
-d=json.load(sys.stdin); out={}
-for r in d.get("results",[]):
-    if r.get("deleted") and len(r.get("changes",[]))==1:
-        out.setdefault(r["id"],[]).append(r["changes"][0]["rev"])
-print(json.dumps(out))')
-  [ "$body" = "{}" ] || curl -s -u admin:pass -X POST "http://localhost:5984/$DB/_purge" \
-    -H 'Content-Type: application/json' -d "$body" > /dev/null
-  since=$(echo "$page" | python3 -c 'import json,sys; d=json.load(sys.stdin); print(json.dumps(d["last_seq"]))')
-  n=$(echo "$page" | python3 -c 'import json,sys; print(len(json.load(sys.stdin).get("results",[])))')
-  [ "$n" = "0" ] && break
-done
-curl -s -u admin:pass -X POST "http://localhost:5984/$DB/_compact" -H 'Content-Type: application/json' > /dev/null
-curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_count'
-```
-
-**注意**：`_purge` 掉的文档**不会进入任何复制**（这一点对服务端→用户库、用户库→浏览器都成立），
-所以被 purge 的墓碑不会以"删除"的形式传到浏览器。结果是**任何**客户端——不只是落后的那些——
-本地都会留着这些条目的副本（幽灵条目）。这不是 bug，是「墓碑静默丢失」的直接后果：过期条目
-本来就不指望靠删除传播来清，而由两侧各自的保留策略回收。
-
-浏览器的回收分两条路，都在 `packages/nuxt-client/app/utils/localTrim.ts`：
-退订时**立刻**删掉该源的条目（`removeSubscription` → `deleteFeedEntries`），空闲时再兜底扫一遍
-「本地有、订阅里没有」的源（`runIdleTrim`，与空闲压缩共用同一条 `paused` 通道，各按自己的间隔节流）。
-因为 PouchDB 的 IndexedDB adapter **没有实现 `_purge`**，客户端只能走标准删除 + `compact()`。
-
-清理时应选在用户活跃度低的时段；存量幽灵条目会在下次空闲维护时自动收敛，不必再让用户手动重置缓存。
-
-### 时间线一直空、提示条停在「已同步 0 条」：这一轮还没把内容搬过来
-
-- **现象**：登录正常、订阅列表有内容、`GET /api/couchdb/sync-targets` 也下发了 `user-timeline_xxx`，但时间线始终空白（或只出现几条），`POST /api/timeline/refresh?wait=1` 返回 `{"accepted":true,"completed":false}`。
-- **原因**：搬运是**按需的一次性复制**，一轮聚合只做「判定哪些源脏了 → 把脏源交给单源同步队列 → 剪枝」。`wait=1` 会等这批单源 job 跑完（上限 `TIMELINE_REFRESH_WAIT_MS`，默认 15s）再数「本轮新增 N 条」，超时就返回 `completed:false`，同步仍在后台继续。若返回 `queued: 0`，那是**服务端认为源那边没有新内容**（水位判定的正常结果），不是卡住。
-- **排查**：
-  ```bash
-  docker logs <server 容器> | grep '\[Timeline\]'                      # 「源=… 脏源=…（已入队 N 个单源同步）」
-  docker exec <redis 容器> redis-cli keys 'bull:rss-timeline-sync:*' | head   # 队列里有哪些单源同步
-  curl -s -u admin:admin "http://localhost:5984/<user-timeline 库名>" | grep doc_count
-  ```
-  每个源上次同步到哪儿、成功没有，看 PostgreSQL 的 `timeline_source_sync`（`status` = `idle` / `syncing` / `error`，`last_error` 带原文，`synced_at` 是复制**开始**时刻）。
-- **解法**：等它搬完；或 `POST /api/timeline/refresh?wait=1&force=1` **跳过水位**把当前订阅的源全部重扫一遍（外部直接往源库写过东西、没经过抓取 worker 时，`lastNewEntryAt` 不会动，只有这条路能触发）。整库搬不动时用 `POST /api/timeline/rebuild`：换一个空聚合库重搬，同时作废全部水位、清掉旧 checkpoint。
-
-### `POST /api/timeline/refresh` 直接 500：CouchDB 的 JS 查询服务卡死了
-
-- **现象**：客户端一条内容都同步不到（订阅列表还在，因为那是客户端推上去的），`POST /api/timeline/refresh?wait=1` 返回 500；用户库里的 `_design/timeline-maintain` 与 `_local/state` 也不存在。（`_replicator` 里没有任务**是正常的** —— 按需搬运不往那儿写文档。）
-- **原因**：聚合这条链路处处要用 CouchDB 的 **JS 查询服务**（写设计文档要编译 JS、剪枝查 `by_published_at` 视图、复制过滤器在源端执行）。`couch_proc_manager` 一旦卡死，这些操作全部超时：日志里是
-  `rexi_server: ... mfa: fabric_rpc:update_docs/3 exit:{timeout,{gen_server,call,[couch_proc_manager,{get_proc,{client,undefined,undefined,<<"javascript">>,...}},5000]}}`，
-  请求侧是 `POST /<库名> 500`（写设计文档）或 `GET .../_view/... timeout`。
-  于是 `ensureTimelineDesignDoc` 装不上设计文档（旧实现还把这次失败吞掉并缓存成"已就位"）→ 这一步的失败会让 reconcile 抛 500，**脏源一个都不入队**，客户端自然拉不到东西。（剪枝那一步现在降级成告警：它是清理动作，不该拦住搬运。）
-- **怎么确认**（dev 实测）：
-  ```bash
-  curl -s -u admin:admin "http://localhost:5984/_node/_local/_system" | head -c 200   # beam 本身健康
-  curl -s -u admin:admin "http://localhost:5984/<任意 feed 库>/_design/main/_view/entries-by-date?limit=1"  # {"error":"timeout"} = JS 查询服务卡死
-  curl -s -u admin:admin "http://localhost:5984/<库名>/_design/timeline-maintain"     # 404 = 没装上
-  docker logs <couchdb 容器> --tail 2000 2>&1 | grep couch_proc_manager
-  ```
-- **解法**：重启 couchdb（`docker restart <couchdb 容器>`；不能只 `up -d` 别的服务）。**根因通常是 fd 不够**：容器默认 `nofile=1024`，实测 beam 在几十条复制下就占到 900+，调度器里开始报 `{conn_failed,{error,emfile}}` / `sel_conn_closed` / `req_timedout`，`open_port` 起 couchjs 失败后 `couch_proc_manager` 就永久卡住了。两个 compose 的 couchdb 服务已加 `ulimits.nofile: 65536`（配合 `deploy/couchdb-replicator.ini` 的 `max_dbs_open`），改完要**重建**容器（`docker compose up -d couchdb`）才生效，`docker restart` 不会应用新的 ulimit。重启后服务端会自己补装设计文档与过滤器（`ensure*` 失败不再进缓存），不需要手工修库；下一轮聚合会把脏源重新入队。
+- **现象**（仅旧版本）：`[Timeline] 同步源 xxx（用户=…）写入 4782 份、5070ms` 出现在新订阅/重建时；
+  用户库 `doc_del_count` 一路涨。
+- **现状**：产生墓碑的两条前提都不存在了 ——
+  1. 没有复制，所以没有「从 0 重扫把源库墓碑再搬一遍」；
+  2. 保留只用 **`_purge`**（`couchdb/retention.ts`），库里不产生墓碑。
+- **如果仍然看到 `doc_del_count` 上涨**，那是旧版本留下的存量墓碑，不是新产生的。
+  新模型下直接删库重建更省事（用户重新订阅即可）；历史清墓碑脚本已随旧链路删除。
 
 ### 条目没有配图：抓取时图片压缩失败
 
@@ -237,105 +155,74 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
 - **现状**：[useTimelineSettings.rebuild()](../packages/nuxt-client/app/composables/useTimelineSettings.ts) 会在请求成功后**等库名变过来**（最多 60s）再丢掉本地缓存重新全量拉一遍（[useTimelineSettings.ts](../packages/nuxt-client/app/composables/useTimelineSettings.ts)）。手工 `curl` 触发重建时没有这一步，浏览器要手动重开页面或清掉该站点的 IndexedDB。
 - **别手工 `DELETE /<用户库>`**：那会连用户写的订阅/已读收藏一起删。要收缩数据用窗口设置（剪枝），要整体重来用重建接口。
 
-### 升级后每个账号都"重建"了一次：v1 → v2 换库重搬
+### 升级后每个账号都"重建"了一次：v1 → v2 换库重搬（**代码已删除**）
 
-- **现象**：升级之后，日志出现一行 `[Timeline] 用户=… 换库重搬：user-timeline_old → user-timeline_new（搬走用户状态 N 条）`（外加可能的一行 `清理遗留常驻复制 M 条`），每个已有账号一次，用户库名变了。
-- **原因**：v1 的聚合库是**我们自己按窗口写进去的**（文档带我们的修订谱系），复制器按源库谱系落库会在同一个 `_id` 上撞出两条互不相干的修订 → 冲突；而"就地清空 + 重建任务"搬不回来（目标端删过的 rev 复制器不会再送）。所以 v1 → v2 走的是**换库重搬**：另建空库、把用户写的状态文档搬过去、旧库删掉，复制器从 0 扫源库。
-- **注意**：这是**一次性**的（新库的状态文档写 `version: 2`），代价是每个账号的窗口内容重搬一遍、客户端重新全量拉一次；内容与订阅/已读收藏都不丢。**换库同时作废全部同步水位**（新库是空的，还信水位的话"源那边没新内容"的源永远不会被搬），所以换库后所有订阅源会重扫一遍。旧库名变新库名后，客户端若还指着旧库，参照上一条处理。
+这条只对应旧版本的一次性迁移（`_local/state.version` 从 1 升到 2 时换库重搬）。
+新模型里**没有派生库**，也就没有"换库重搬"这条链路：`STATE_VERSION` 那套判断与抓取路径里的调用
+已随扇出一起删除（`rederiveUserTimeline` 现在只剩"抢救档案损坏"一个用途）。
+
+从旧版本升级上来时，跑一次 `scripts/reset-to-owner-model.ts` 即可 ——
+它会清掉旧库内容，客户端重新订阅一次就回到干净状态。
 
 ### 某个订阅源的页面永远是「暂无条目」，但源站明明有文章
 
-- **现象**：`/rss/feed/<feedId>` 一直空。源库（`feed_*`）里有 entry，`feeds.last_fetched_at` 一直在更新、
-  `error_message` 为空，而用户库（`user-timeline_*`）里这个源只有 FeedDoc 副本与 `subscription:` 文档、
-  `entry:<feedId>:*` **一条都没有**。
-- **先排除两种"看起来像、其实不是"的情况**：
-  1. **源库本身是空的** —— 抓取失败或源站就没内容。查源库活文档数
-     （`curl -s -u ... "http://localhost:5984/<feed 库名>" | grep doc_count`）。源库空的话问题在抓取，不在聚合。
-  2. **用户库里其实有，只是前端有缓存** —— 见上面「重建之后内容回来了，但浏览器里看不见」。
-
-- **原因**（按概率排）：现在**没有"时间线窗口"这层过滤了**，条目能不能进用户库只取决于三件事：
+- **现象**：`/rss/feed/<feedId>` 一直空，而源站有文章。
+- **新模型下只有三道闸门**（没有窗口过滤、没有"脏源"、没有复制）：
 
   | 闸门 | 判据 | 怎么查 |
   | --- | --- | --- |
-  | ① 订阅还在 | 复制前先读 `subscription:<sourceId>`，404 就跳过 | 用户库里 `GET /<user-timeline 库>/subscription:<feedId>` |
-  | ② 该源被判成"脏" | 没有水位行 / 上次同步失败 / 源在**上次同步开始之后**有变化 | PG 的 `timeline_source_sync`（`status`、`synced_at`、`last_error`） |
-  | ③ 源库确实有这些条目 | selector 只搬活文档，源库已 `_purge` 的搬不到 | 源库 `_all_docs` 对数 |
+  | ① 订阅文档有效 | 有 `url` 且 `feedId === sha256(url)` 截断 | 用户库里的 `subscription:<feedId>`；日志里 `[Fetch] 跳过脏订阅` |
+  | ② 该源到期了 | `_local/schedule` 里的 `lastFetchedAt` + 自适应间隔 | `GET /<user-timeline 库>/_local/schedule` |
+  | ③ 抓取真的成功了 | 条目数 > 0，且没被保留策略立刻裁掉 | 日志 `[Fetch] ... 新增=N 裁剪=M`；`by-feed-date` 视图 |
 
-  ②最常踩：水位判定看 `feeds.lastChangedAt`（新增**或裁剪删除**都会 bump）。**外部直接往源库写数据**
-  （脚本、手工导入、另一个实例）不会动这一列，于是服务端认为"这个源没变化"、一个复制请求都不发。
-
-- **诊断**（起一个 `wait=1&force=1`，跳过水位判定把该源重扫一遍）：
+  最多人踩的是 ①：**重构前写入的订阅文档没有 `url`**，调度读到直接跳过。
+- **诊断**：
   ```bash
-  curl -s -b "<cookie>" -X POST "http://localhost:3001/api/timeline/refresh?wait=1&force=1"
+  # 订阅文档有没有 url（输出为空 = 老订阅，必须重新订阅）
   curl -s -u "$COUCHDB_USER:$COUCHDB_PASSWORD" \
-    "http://localhost:5984/<user-timeline 库名>/_all_docs?startkey=%22entry%3A<feedId>%3A%22&endkey=%22entry%3A<feedId>%3A%EF%BF%BF%22" | grep -c '"id"'
+    "http://localhost:5984/<user-timeline 库名>/subscription:<feedId>" | grep -o '"url":"[^"]*"'
+  # 这个源抓过没有
+  curl -s -u "$COUCHDB_USER:$COUCHDB_PASSWORD" \
+    "http://localhost:5984/<user-timeline 库名>/_local/schedule" | head -c 600
+  # 手动强抓一次（绕开缓存与"刚抓过"判定）
+  curl -s -b "<cookie>" -X POST "http://localhost:3001/api/feeds/subscriptions/<feedId>/refetch"
   ```
-  `force=1` 之后有内容 → 就是 ②；仍然没有 → 查 ①（订阅文档在不在）和源库有没有这些条目。
+- **解法**：缺 url → 重新订阅；没到期 → 等或 refetch；抓取失败 → 看日志里这个源的错误。
+  **「重订之后历史没回来」在新模型里不再是问题**：没有 checkpoint 也不会只补增量，
+  重新订阅会按发布方**当前还列着**的条目重新抓一遍（最多到保留条数 N）。
 
-- **解法**：
-  - ② 的常规情形：等下一轮聚合（默认 5 分钟）或 `force=1` 手动催一次；持续性不搬看
-    `timeline_source_sync.last_error`。
-  - ① 订阅文档丢了：重新订阅一次。
-  - 库整体搬不动：`POST /api/timeline/rebuild`（换空库重搬，顺带作废全部水位）。
+### 某个订阅源一直不搬东西（水位 / 脏源 —— **该机制已删除**）
 
-- **注意「重订之后历史没回来」**：退订清理会 `_purge` 掉条目、删掉 FeedDoc 副本与水位行，但**不清
-  checkpoint**（它在两端的 `_local/<哈希>` 里）。重新订阅后该源会从 checkpoint 之后继续，
-  也就是**只收到新内容，退订期间一直没动过的历史不会再补**。要拿回历史只能 `POST /api/timeline/rebuild`。
+旧版本用 PostgreSQL `timeline_source_sync` 记每 (用户 × 源) 的同步水位，
+再用 `feeds.lastChangedAt` 判断"源那边有没有变化"。**整套已删除**：
+没有复制、没有水位、没有脏源判定，抓取是按 owner 各自跑的。
 
-### 某个订阅源一直不搬东西（水位行是 error / 一轮聚合没把它算成脏源）
+现在遇到"这个源不更新"，看三处就够：
+1. `_local/schedule` 里这个源的 `lastFetchedAt` / `errorStreak`（抓没抓、失败几次）；
+2. 服务端日志里的 `[Fetch] ... 源=<feedId>`（新增/裁剪/缓存命中）；
+3. 订阅文档的 `paused` 字段（用户自己暂停了）。
 
-- **现象**：某个源在用户库里始终没有内容；`timeline_source_sync` 里这一行的 `status` 是 `error`、
-  `last_error` 有原文，或者干脆没有这一行（说明从来没成功同步过）。旧版本里等价的现象是
-  `_scheduler/docs/_replicator` 里那条常驻任务 `crashing` / `error` —— **新实现不再有这种文档**
-  （按需一次性复制，跑完即止，临时任务不出现在 `_scheduler` 里）。
-- **原因**（按出现频率）：
-  1. **复制请求失败**：源/目标必须是带完整凭据的 URL（裸库名会被当远端地址解析，报
-     `replication_auth_error`，见 [replicator.ts](../packages/hono-server/src/couchdb/replicator.ts)），
-     或 CouchDB 太忙导致超时（`TIMELINE_REPLICATION_TIMEOUT_MS`，默认 120s）。失败会清空 `synced_at`，
-     下一轮自动重试。
-  2. **这个源被判成"没更新"**：水位判定看 `feeds.lastChangedAt` / `bots.lastNewEntryAt`。
-     **外部直接往源库写过东西**（脚本、手工导入）不会动这一列 → 用 `refresh?wait=1&force=1` 强制重扫。
-  3. **目标库被手工删了 / `_security` 改坏** → 复制反复失败（见上面「库名还登记着，库却没了」）。
-  4. **订阅文档不在**：复制任务入队前先读 `subscription:<sourceId>`，读不到直接判"已退订"跳过。
-- **解法**：先看 `timeline_source_sync.last_error` 与日志里的 `[Timeline]` 行。要"让代码重新对齐"，
-  首选 `POST /api/timeline/rebuild`（换库重搬 + 作废全部水位）；
-  **不要手工编辑 `_local/<hash>` checkpoint** —— 它就是"这次从哪个序号接着搬"的依据，
-  改坏了要么漏搬、要么全量重扫一次。
+**不要手工编辑 `_local/schedule`** —— 它是"上次什么时候抓过"的唯一依据，
+改坏了要么重复抓、要么长期不抓。要立刻重抓就 `POST /api/feeds/subscriptions/<feedId>/refetch`。
 
-> 旧版本这一节还列过两条现在**已不存在**的原因：源库设计文档缺 `filters.timeline`（复制改用
-> Mango selector 后不再安装过滤器），以及 `query_params` 里出现叫 `since` 的参数导致窗口失效
-> （参数方案已整体废弃）。看到这两条说明文档过旧，现行机制见 `ARCHITECTURE.md`。
+### 管理后台「编辑订阅源」改 Feed URL 报 500 `Internal Server Error`（**该入口已删除**）
 
-### 管理后台「编辑订阅源」改 Feed URL 报 500 `Internal Server Error`
+旧版本后台有「订阅源管理」页，可以对全局源改标题/地址/图片参数。新模型里**没有全局源**，
+那个页面与它的全部端点（`GET /api/feeds`、`PUT/DELETE /api/feeds/:feedId`、`PATCH` 暂停、
+`/orphans/*` 孤儿清扫）已整体删除。
 
-- **现象**：改 Feed URL 点保存，弹窗里出现一片红色
-  `[PUT] "http://localhost:3001/api/feeds/<feedId>": 500 Internal Server Error`，
-  改别的字段（标题 / 描述 / 图片参数）都正常。服务端日志是一整段 `DrizzleQueryError`，
-  `cause` 为 `PostgresError: duplicate key value violates unique constraint "feeds_url_unique"`，
-  `detail: Key (url)=(...) already exists.`
-- **原因**：`feeds.url` 是**唯一列**（`db/schema.ts`），而 feedId 由 URL 哈希派生 ——
-  「一个地址对应一个源」是数据模型的前提。把 A 源的地址改成 B 源**已在用**的地址时，
-  `UPDATE feeds SET url=...` 必然撞 23505。旧实现没有接住这个错误，直接抛给 Hono 的默认
-  errorHandler，于是变成一行没有任何信息的 500。典型触发场景是把 RSSHub 公共实例地址
-  （`https://rsshub.app/...`）换成本地实例（`http://rsshub:1200/...`）时，**那个地址此前已经
-  按本地地址订阅过一条**，两条就撞在一起了（`select id,url,title from feeds where url like '%bilibili/weekly%'`
-  能看到两个同路径的源）。
-- **解法**：
-  - 现在的行为：`PUT /api/feeds/:id` 捕获 23505 并返回 **409**，body 带
-    `code: "feed_url_taken"`、`url`、`existingFeedId`、`existingTitle`，弹窗直接显示
-    「该地址已被另一个订阅源「X」使用（feedId），请换一个地址，或直接订阅那一条」。
-  - 要保留旧源的历史就**不要改地址**，而是把要用的那种地址作为新订阅另起一条；
-    确认要合并的话没有内置入口（没有删源 API），直接在库里处理并清掉多余那条的
-    `feed_*` 库与用户库里的 `subscription:` 文档。
-  - 409 只对**改地址**生效：只改标题不会走到这里。
-- **连带修掉的两处**（改地址之后才会发现，都是「改了但没生效」）：
-  1. **FeedDoc 仍留旧地址**。`mergeFeedDocDisplay` 原来写 `url: existing?.url ?? feedUrl`，
-     旧文档永远胜出；而前端编辑弹窗的地址读的正是 FeedDoc（`usePouchDb.getFeedUrl`），
-     于是界面上一直是旧地址。现在 url 取注册表那份，`feedDocDisplayChanged` 也比 url，
-     下一轮抓取就会重写文档。
-  2. **旧地址的 ETag/Last-Modified 会带到新地址**。换地址时 `requeueAfterUrlChange`
-     现在一并清空 `fetch_validator_url` / `fetch_etag` / `fetch_last_modified`
-     （`has_fetch_validators` 重置为 null），避免新地址被回一个 304、永远抓不到内容。
+现在源级操作全是**订阅级**的：
+
+| 想做的事 | 新入口 |
+| --- | --- |
+| 改显示名 / 分组 | `PATCH /api/feeds/subscriptions/:feedId`（或前端「编辑订阅」弹窗） |
+| 暂停 / 恢复抓取 | `POST /api/feeds/subscriptions/:feedId/{pause,resume}` |
+| 立即重抓 | `POST /api/feeds/subscriptions/:feedId/refetch` |
+| 退订 | `DELETE /api/feeds/subscriptions/:feedId` |
+
+**换源地址请重新订阅**：`url` 决定抓取目标，改了它 `feedId` 就对不上（`feedId === sha256(url)`，
+抓取侧会判成 `url-feed-id-mismatch` 直接跳过）。所以 `url` 不在可改字段里 —— 这不是限制没做，
+而是刻意不让改。
 
 ### 订阅源/正文图片指向内网地址：SSRF 防护
 
@@ -363,108 +250,45 @@ curl -s -u admin:pass "http://localhost:5984/$DB" | grep -E 'doc_count|doc_del_c
 - **开关**：`SSRF_GUARD_ALLOW_PRIVATE=1` 放行全部内网地址，**仅供测试**（单测大量依赖
   `127.0.0.1` 的临时 HTTP 服务，见 `vitest.config.ts`）。生产开启等于这层防护不存在。
 
-### 删除订阅源后，用户那边「列表里还在、点进去空白」
+### 删除订阅源后，用户那边「列表里还在、点进去空白」（**该场景已不存在**）
 
-- **现象**：管理员在「订阅源管理」删掉一个源，其他用户（或自己）的侧边栏里仍挂着它，
-  点进去永远没有条目；聚合日志里该源反复报错或静默不搬。
-- **原因**：一个 feed 的内容散在五处，只删 PostgreSQL 的 `feeds` 那一行是不够的：
+旧模型里一个 feed 的内容散在五处（注册表、水位表、`bot_feeds`、各用户库、共享源库），
+所以"删一个源"要按顺序清五处，漏一处就留幽灵。**新模型没有共享源，这个问题从结构上消失**：
 
-  | 位置 | 不清的后果 |
-  | --- | --- |
-  | `feeds` 注册表 | 调度器继续抓 —— 幽灵源 |
-  | `timeline_source_sync` 水位 | 退订清理靠「水位有、订阅没有」触发；行没了就永不触发，用户库条目永久残留 |
-  | `bot_feeds`（裸 text，无外键） | 孤儿行，Bot 继续引用已删源 |
-  | 用户库 `subscription:` / 条目 / FeedDoc 副本 | 订阅列表里还挂着，但源库没了 → 同步永久失败 |
-  | 源库 `feed_*` | 磁盘残留；同 feedId 再建时摸到旧数据 |
+- 一个用户退订 = 只清他自己的库（订阅文档 → `entry:{feedId}:*` 前缀 `_purge` → FeedDoc 副本 →
+  `_local/schedule` 里那条状态），见 `services/timeline.ts` 的 `purgeSubscriptionContent`；
+- 别人订阅同一个 URL 时**完全不受影响**（他们有自己的条目副本与订阅文档）；
+- `bot_feeds` 里有引用时，Bot 照旧抓它那份 —— 也没有"该删谁"的问题。
 
-- **解法**：`DELETE /api/feeds/:feedId`（仅管理员）按固定顺序清理：
-  用户侧订阅/条目/FeedDoc → 水位行 → bot 引用 → 源库 → **注册表行最后删**。
-  顺序是刻意的：任一步失败都还能重试；先删注册表行的话，后续清理就失去「该源存在过」的依据。
-  条目用 `_purge` 而非 delete（不留墓碑，理由见 `couchdb/retention.ts`）。
-- **订阅者守卫**：还有别人订阅时返回 `409 + code: "feed_has_subscribers"` 并列出订阅者，
-  确认要删须显式加 `?force=1`。守卫查的是**权威来源**：
-  水位表命中就直接采信（快路径）；水位表为空时**回落枚举用户库的 `subscription:` 文档**复核
-  —— 休眠账号（`aggregation_paused_at` 非空）在暂停期间照常能订阅，但聚合被跳过、永远不建水位行，
-  只查水位表会把它误判成「没人订阅」而误删。`bot_feeds` 无论如何都查。
+**唯一残留的风险是条目没清干净**（比如清理过程中进程被杀）。表现为"侧边栏没这个源了，
+但时间线里还能翻到它的旧条目"。修法：再退订一次（清理是幂等的），或者
+`DELETE /api/feeds/subscriptions/<feedId>`。
 
 ### 编辑订阅源时能存进非法地址 / `javascript:` 链接
 
-- **现象**：管理端「编辑订阅源」把 Feed URL 改成 `abc`、把站点链接改成 `javascript:alert(1)`，
-  保存成功且写进了库；之后抓取一直失败，或点「访问网站」执行了脚本。
-- **原因**：`PUT /api/feeds/:feedId` 原本只判断 `typeof body[key] === "string"` 就写库，
-  完全没有 URL 校验。而 MCP 的 `update_subscription` 却有 `z.string().url()`，两条路径行为不一致。
-- **为什么四个字段不能一视同仁**（见 `services/feed-field-validation.ts`）：
+- **现象**：把 `url` 改成 `abc`、把 `siteUrl` 改成 `javascript:alert(1)` 能存进去；
+  之后抓取一直失败，或点「访问网站」执行了脚本。
+- **现状**：**这个入口已经没了** —— `url` / `siteUrl` / `image` 不再接受用户修改
+  （源级字段由抓取时的解析结果维护，见 `services/feeds.ts` 的 `updateUserSubscription`）。
+- **但校验仍然必须存在，而且理由更强了**：订阅文档里的 `url` 是**客户端可写**的
+  （PouchDB 双向同步），用户能绕过所有接口直接改本地库再同步上来。所以：
+  - 写入路径（`POST /api/feeds/discover` / `subscriptions`）过一遍 `assertFetchableUrl`；
+  - **抓取路径每次再验一遍**（`rss/parser.ts` 的 `fetchFeed` 第一句，含重定向逐跳校验），
+    这是真正兜底的那道 —— 不能因为"写入时校验过"就跳过。
+  校验规则见 `rss/ssrf-guard.ts`（内网/环回/链路本地/云元数据地址全拦）。
 
-  | 字段 | 谁来消费 | 该查什么 |
-  | --- | --- | --- |
-  | `url` | 服务端抓取 | http(s) + 拦内网（否则是 SSRF 入口） |
-  | `image`（图标） | **服务端下载**（`cacheSingleImage`） | 同上：worker 真的会去取 |
-  | `siteUrl` | 前端 `<a href>` 跳转 | 只查协议（`javascript:` 点开就是 XSS），**不拦内网** |
-  | `title` / `description` | 纯文本 | 不是 URL，不校验 |
+### 抓取配额被没人订阅的源占满：孤儿源清理（**该问题已不存在**）
 
-- **`siteUrl` 为什么不拦内网**：它只做展示跳转，服务端不会去访问。现有数据里就有
-  `site_url = http://localhost:8099/` 的源（`arQo7BMXRjpAFtXb`、`KEwHKZQWBgrM5IGP`），
-  若一并按内网拦，这些源**改任何字段（哪怕只改标题）都会被卡住**。
-- **空串是合法的**：表示"清空该字段"（编辑弹窗清空输入框就是这个语义），库里本来就有空的 `image`。
-- **不做归一化**：不会把 `rsshub:1200` 自动改写成 `rsshub.app` —— 那属于行为变更，且
-  `rsshub:1200` 在容器内部署下是合法地址。校验只保证"存进去的值能用"，不替用户猜意图。
-- **报错形状**：`400 + code: "invalid_field" + field`，前端弹窗直接显示 message。
+旧模型里抓取调度只看 `feeds.status = 'active'`，不看有没有人订阅 —— 实测 707 条源里
+**578 条（82%）是零订阅孤儿**，全都还在打外网、写库、占抓取配额。所以要有一整套
+「标记 → 暂停 → 删除」的三级清理，还带 `orphan_since` 冷静期与管理员后台。
 
-### 抓取配额被没人订阅的源占满：孤儿源清理
+**新模型从结构上消除它**：没有全局源表，调度就是枚举各 owner 自己的订阅文档 ——
+没人订阅 = 没有那条文档 = 没人抓。退订即时停止（最多多抓一轮在途的 job）。
 
-- **现象**：`feeds` 注册表里几百条源在定时抓取，日志里 `[Fetch] 调度: N/M 个源到期` 的 M 很大，
-  但实际只有少数几个用户、订阅关系远少于源数；外网流量与 CPU 被大量"抓了没人看"的源消耗。
-- **原因**：抓取调度器只看 `feeds.status = 'active'`（`workers/index.ts` 的 `.where(eq(feeds.status, "active"))`），
-  **完全不看有没有人订阅**。任何被退订干净的源都会永久留在调度里。实测线上：707 条源，
-  只有 129 条被订阅引用，**578 条（82%）是零订阅孤儿且全部在跑**。
-- **解法**：管理后台「订阅源管理」→「清理孤儿源」：
-  1. 先扫描（只读）看规模与名单；
-  2. 再批量**暂停**（不是删除 —— 保留注册表与已抓内容，避免重新订阅时重新首抓）；
-  3. 有人重新订阅时**自动恢复**。
-- **判定"零订阅"的口径**：必须回到权威来源（枚举各用户库的 `subscription:` 文档），
-  **不能只看 `timeline_source_sync`** —— 那张表的行是"那次同步自己 upsert 的"，新订阅要等聚合跑完才有行；
-  休眠账号（`aggregation_paused_at` 非空）在暂停期间能订阅但聚合被跳过，永远不建行。
-  另外 `bot_feeds` 的引用也算"有人关注"，同样排除。
-- **安全护栏**：
-  - 扫描时**任何一个用户库读失败就整体拒绝执行**（503），否则会把那个库里的订阅源误判成孤儿；
-  - 恢复只看 `pausedBySystem = true` 的行，**管理员手动暂停的源不会被自动恢复**
-    （手动暂停时该列被清成 null，见 `db/schema.ts`）；
-  - 恢复有两条路径：订阅写入点即时恢复（`addSubscriptionIfAbsent` 里调用），
-    以及每小时兜底扫描（`FEED_ORPHAN_RESUME_INTERVAL_MS`）——后者是为了覆盖
-    "客户端离线同步进来的订阅文档"这种不经过服务端接口的情况。
-
-### 孤儿源全自动分级清理（无人订阅 → 暂停 → 删除）
-
-上一条讲的是**手动**清理。这里是不需要人工介入的机制，三级状态机：
-
-```
-有人订阅 ──退订──▶ orphanSince=now（只打标记，不动抓取）
-                       │ 持续 ≥ FEED_ORPHAN_PAUSE_AFTER_DAYS（默认 7 天）
-                       ▼
-                  status=paused + pausedBySystem=true
-                       │ 持续 ≥ FEED_ORPHAN_DELETE_AFTER_DAYS（默认 30 天）
-                       ▼
-                    删除（用户侧订阅/条目 → 水位 → bot 引用 → 源库 → 注册表）
-```
-
-- **为什么需要 `feeds.orphan_since` 这一列**：退订时会删掉 `timeline_source_sync` 的水位行
-  （见 `services/timeline.ts` 的退订清理），所以"最后一次订阅什么时候消失"在库里没有任何痕迹。
-  没有这列就只能"发现零订阅就当孤儿"，等于取消冷静期。
-- **为什么每一级都要"持续多久"而不是"此刻"**：退订后马上又想订回来、多设备同步延迟、
-  客户端离线同步尚未完成——都表现为"此刻零订阅"。立即暂停会打断这些正常操作。
-- **删除这一级为什么敢自动做**：删除前**重新扫一遍订阅关系复核**，此刻仍有引用就放弃并清标记。
-  不可逆动作永远建立在"刚刚亲眼确认过没人订阅"之上，而不是"相信几天前的判断"。
-- **管理员手动暂停的源完全不参与**：`pausedBySystem` 为空的 paused 行不在任何候选里。
-- **护栏**：任何一个用户库读取失败 → 整轮放弃（`aborted`），不做任何标记/暂停/删除。
-  宁可晚一天清理，也不能误删别人的源。
-- **积压消化**：每轮最多 `FEED_ORPHAN_BATCH_LIMIT`（默认 500）条，首次上线靠多轮跑完。
-- **手动入口也遵守冷静期**：`POST /api/feeds/orphans/pause` 默认只暂停满冷静期的源，
-  要立即处理须传 `force: true`（界面上是「强制全部暂停」）。
-- **规则可在界面上调，不必改环境变量重启**：管理后台「订阅源管理 → 清理孤儿源」里的
-  「自动清理规则」可直接改天数（存进 `site_settings.extras.orphanPolicy`，保存即生效）。
-  环境变量只是"从未在界面上改过"时的默认值；接口 `GET/PUT /api/feeds/orphans/policy`
-  返回的 `source` 字段会说明当前值来自 `settings` 还是 `env`。
-- **立刻看效果**：`POST /api/feeds/orphans/sweep`（界面「立即执行一轮」）等价于定时任务那一轮。
+顺带一并删掉的还有：`feeds.orphan_since` / `paused_by_system` 两列、
+`services/feed-orphans.ts`、`services/feed-orphan-sweep.ts`、`/api/feeds/orphans/*` 全部端点、
+以及后台「孤儿源清理」面板。
 
 ## 反向代理与网络
 

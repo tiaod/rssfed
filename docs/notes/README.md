@@ -25,7 +25,12 @@
 | [`sync-tooltip-stale-progress.md`](sync/sync-tooltip-stale-progress.md) | 同步弹层残留「已同步 0%」的定位与验证 |
 | [`sync-window-anchor.md`](sync/sync-window-anchor.md) | 同步窗口为什么用固定锚点，而不是每次现算 `now - N 天` |
 
-### `aggregation/` —— 服务端聚合
+### `aggregation/` —— 服务端聚合（**整组已作废**）
+
+> ⚠️ **2026-11-24 起这三份全部失效**：共享源库 + 复制扇出那一整套拓扑已经整体删除，
+> 现在抓取按 owner（用户 / Bot）各自进行、直接写各自的库，没有 `_replicator`、没有水位表、
+> 没有脏源判定、没有源库。下面的文档只保留「当时量到了什么」的历史价值，
+> 现行机制见 [ARCHITECTURE.md](../../ARCHITECTURE.md#同步架构分层)。
 
 | 文档 | 记录了什么问题 |
 | --- | --- |
