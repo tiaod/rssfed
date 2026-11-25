@@ -137,8 +137,12 @@ timelineRouter.post("/refresh", async (c) => {
  * 同步日志：给设置页的「同步日志」面板用。
  *
  * 两段数据配着看才有用 ——
- *   - `events`：**发生过什么**（干了活的抓取轮次、失败），空转轮次不进流水；
+ *   - `events`：**这一轮抓到了什么**（订阅几个源、几个到期、新增/裁剪/失败各多少），
+ *     空转轮次也记一条（能区分「没触发调度」和「触发了但所有源都没到期」）；
  *   - `heartbeat`：**抓取还在不在跑**（最近一轮的时刻 + 连续多少轮无事发生）。
+ *
+ * 每个源**当前**的抓取状态（上次抓取时刻、失败原因）不在这里：它随抓取直接写在用户库的
+ * `_local/schedule` 里，用户订阅列表接口（`GET /api/feeds/subscriptions`）会带出来。
  */
 timelineRouter.get("/events", async (c) => {
   const userId = c.get("userId")

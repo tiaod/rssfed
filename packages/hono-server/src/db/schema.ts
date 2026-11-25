@@ -133,17 +133,17 @@ export const userTimelineSettings = pgTable("user_timeline_settings", {
 })
 
 /**
- * 每用户一行的「聚合心跳」—— 最近一轮聚合是什么时候、连续多少轮什么都没发生。
+ * 每用户一行的「抓取心跳」—— 最近一轮抓取是什么时候、连续多少轮什么都没发生。
  *
- * 为什么单独一张表而不是往流水里记：定时器 5 分钟一轮，空转占绝大多数（实测 4 小时里
- * 564/671 条是"无需搬运"）。把它们记成流水会把有价值的事件淹掉；但完全不记又看不见
- * "聚合到底还在不在跑"。所以空转只更新这一行（每用户一行、覆盖写），流水只记真正干了活的轮次。
+ * 为什么单独一张表而不是往流水里记：抓取一轮几百个源，绝大多数轮次什么都不会发生。
+ * 全记成流水会把有价值的事件淹掉；但完全不记又看不见"抓取到底还在不在跑"。
+ * 所以空转只更新这一行（每用户一行、覆盖写），流水按轮次记（见 services/timeline-events.ts）。
  */
 export const timelineReconcileHeartbeat = pgTable("timeline_reconcile_heartbeat", {
   userId: text("user_id").primaryKey().references(() => user.id, { onDelete: "cascade" }),
-  /** 最近一轮聚合的完成时刻（不论有没有事发生） */
+  /** 最近一轮抓取的完成时刻（不论有没有事发生） */
   at: timestamp("at").notNull().defaultNow(),
-  /** 连续多少轮"无事发生"；有搬运/清理/失败的那一轮清零 */
+  /** 连续多少轮"无事发生"；有新增/裁剪/失败的那一轮清零 */
   quietRounds: integer("quiet_rounds").notNull().default(0),
 }, (table) => [
   // 主键就是 userId，不需要额外索引
@@ -151,21 +151,24 @@ export const timelineReconcileHeartbeat = pgTable("timeline_reconcile_heartbeat"
 ])
 
 /**
- * 用户时间线同步的**事件流水** —— 设置页「同步日志」直接读它。
+ * 抓取的**轮次流水** —— 设置页「同步日志」直接读它。
  *
- * 为什么单独存一张表，而不是往控制台打日志：聚合结果只由服务端产生，用户在浏览器里看不到
- * "什么时候跑了一轮汇聚、判了几个脏源、退订清理了几条、什么时候重建过"。把这些离散动作
- * 落一行留档，排查"我的时间线怎么不动了"时不用再翻服务端控制台。
+ * 为什么单独存一张表，而不是往控制台打日志：抓取结果只由服务端产生，用户在浏览器里看不到
+ * "这一轮订阅了多少源、几个到期、新增与裁剪了多少条、哪些源失败了"。把每轮结论落一行留档，
+ * 排查"我的时间线怎么不动了"时不用再翻服务端控制台。
  *
- * 刻意**不**给每个源同步都记一条（一轮 100+ 条会把流水刷爆）：源级的"现在什么状态"直接读
- * `timeline_source_sync`（它本来就是每源一行），这里只记**离散动作**与失败。
- * 每用户只保留最近 `TIMELINE_EVENT_KEEP` 条（见 services/timeline-events.ts 的裁剪）。
+ * 刻意**不**给每个源都记一条（一轮几百条会把流水刷爆）：源级的"现在什么状态"（上次抓取时刻、
+ * 连续失败次数）随抓取写在用户库的 `_local/schedule` 里，客户端经订阅列表接口读取，
+ * 不在这里重复一份。每用户只保留最近 `TIMELINE_EVENT_KEEP` 条（见 services/timeline-events.ts）。
  */
 export const timelineEvents = pgTable("timeline_events", {
   id: serial("id").primaryKey(),
   userId: text("user_id").notNull().references(() => user.id, { onDelete: "cascade" }),
   at: timestamp("at").notNull().defaultNow(),
-  /** reconcile（一轮汇聚）/ rebuild（重建聚合库）/ source-sync（首搬）/ error */
+  /**
+   * fetch（一轮抓取）。历史行还可能是重构前的 reconcile / rebuild / source-sync / error，
+   * 客户端按原标签显示，新行不再产生这些。
+   */
   kind: text("kind").notNull(),
   /** info / warn / error */
   level: text("level").notNull().default("info"),

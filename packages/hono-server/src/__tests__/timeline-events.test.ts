@@ -15,7 +15,7 @@ const mocks = vi.hoisted(() => ({
   inserts: [] as Array<{ table: string, values: Record<string, unknown> }>,
   /** db.update(...).set(...) 的记录（合并上一条） */
   updates: [] as Array<Record<string, unknown>>,
-  /** 上一条 reconcile 流水（null = 没有） */
+  /** 上一条 fetch 流水（null = 没有） */
   previousReconcile: null as null | { id: number, at: Date, data: unknown },
   /** 心跳行（readReconcileHeartbeat 用） */
   heartbeatRow: null as null | { at: Date, quietRounds: number },
@@ -83,7 +83,7 @@ const {
   isRoundMeaningful,
   readReconcileHeartbeat,
   recordFetchRound,
-  RECONCILE_MERGE_WINDOW_MS,
+  FETCH_ROUND_MERGE_WINDOW_MS,
 } = await import("../services/timeline-events")
 
 type FetchRoundSummary = import("../services/timeline-events").FetchRoundSummary
@@ -138,7 +138,7 @@ describe("recordFetchRound", () => {
     expect(mocks.inserts.map(i => i.table)).toEqual(["timelineReconcileHeartbeat", "timelineEvents"])
     expect(mocks.inserts[0]!.values).toMatchObject({ userId: "u1", quietRounds: 1 })
     expect(mocks.inserts[1]!.values).toMatchObject({
-      kind: "reconcile",
+      kind: "fetch",
       level: "info",
       message: "抓取：订阅 129 个源，无需抓取（15ms）",
     })
@@ -149,7 +149,7 @@ describe("recordFetchRound", () => {
     expect(mocks.inserts.map(i => i.table)).toEqual(["timelineReconcileHeartbeat", "timelineEvents"])
     expect(mocks.inserts[1]!.values).toMatchObject({
       userId: "u1",
-      kind: "reconcile",
+      kind: "fetch",
       message: "抓取：订阅 129 个源，2 个源到期（30ms）",
     })
     expect(mocks.pruned).toBe(1)
@@ -171,7 +171,7 @@ describe("recordFetchRound", () => {
     })
   })
 
-  it("窗口内的连续空转：合并成「连续 N 轮无需搬运」", async () => {
+  it("窗口内的连续空转：合并成「连续 N 轮无需抓取」", async () => {
     mocks.previousReconcile = {
       id: 9,
       at: new Date(Date.now() - 30_000),
@@ -188,7 +188,7 @@ describe("recordFetchRound", () => {
   it("上一条超出合并窗口：另起一条", async () => {
     mocks.previousReconcile = {
       id: 7,
-      at: new Date(Date.now() - RECONCILE_MERGE_WINDOW_MS - 1_000),
+      at: new Date(Date.now() - FETCH_ROUND_MERGE_WINDOW_MS - 1_000),
       data: { sources: 129, due: 3, rounds: 2 },
     }
     await recordFetchRound({ userId: "u1", round: round({ due: 1 }), ms: 22 })
@@ -198,7 +198,7 @@ describe("recordFetchRound", () => {
 
   it("失败轮次标成 warn", async () => {
     await recordFetchRound({ userId: "u1", round: round({ failures: 2 }), ms: 22 })
-    expect(mocks.inserts[1]!.values).toMatchObject({ kind: "reconcile", level: "warn" })
+    expect(mocks.inserts[1]!.values).toMatchObject({ kind: "fetch", level: "warn" })
   })
 })
 

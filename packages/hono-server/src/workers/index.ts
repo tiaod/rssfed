@@ -1,9 +1,7 @@
 import { Worker, Queue, type Job } from "bullmq"
-import crypto from "node:crypto"
 import { eq } from "drizzle-orm"
 import { createCouchDb, ensureBotDatabase, ensureTimelineDatabase } from "../couchdb/client"
-import { getFeedContent } from "../rss/fetch-cache"
-import { db, botFeeds, bots as botsTable, user } from "../db"
+import { db, botFeeds, user } from "../db"
 import { connection, createWorkerConnection } from "./connection"
 import { envInt } from "../env"
 import { fetchOwnerFeed, normalizeRetention } from "../services/owner-fetch"
@@ -12,6 +10,8 @@ import { isFeedDue, feedJitterMs, type FetchScheduleOptions } from "./fetch-sche
 import { parseSubscription, deriveFeedId } from "../couchdb/subscription-doc"
 import { collectScheduleTargets } from "../services/owner-platform"
 import { listBotSubscribers, syncBotEntriesToUser } from "../services/bot-subscription-sync"
+import { recordFetchRound } from "../services/timeline-events"
+import { createFetchRoundBook, roundKey } from "./fetch-round"
 
 /**
  * 抓取队列 —— 一个 job = **(owner, 源)** 的一次抓取。
@@ -35,6 +35,14 @@ import { listBotSubscribers, syncBotEntriesToUser } from "../services/bot-subscr
 export const fetchQueue = new Queue("rss-fetch", { connection })
 
 /**
+ * 本轮记账簿（进程内，见 ./fetch-round.ts）。
+ *
+ * 放在模块级是因为调度器与 worker 都在这个文件里、都只用这一份：job 靠令牌认领自己那一轮。
+ * 单测不碰它 —— 测试进程里 worker 为 null，没有人会写进来。
+ */
+const fetchRounds = createFetchRoundBook()
+
+/**
  * 抓取并发度：单个源最慢要拖满 10s（没有代理时直连被墙站点必然超时），串行跑几百个 job
  * 会让队列永远追不上调度间隔（实测积压 600+，一条 refetch 要排十几分钟）。
  * 默认 4，可用 FETCH_CONCURRENCY 调整。
@@ -52,6 +60,13 @@ export interface FetchJobData {
   title?: string
   /** 绕开抓取缓存（"立即抓取"按钮用；调度产生的 job 不传） */
   bypassCache?: boolean
+  /**
+   * 所属调度轮次的令牌（见 ./fetch-round.ts）。
+   *
+   * 只有定时调度会带：手动同步 / 订阅后首抓是用户触发的，不该混进「这一轮抓取了什么」。
+   * **不参与 jobId** —— 带上它会让同一 (owner, 源) 在每轮都变成不同的 job，去重就失效了。
+   */
+  roundToken?: string
 }
 
 /** jobId：BullMQ 不允许冒号，两侧都编码 */
@@ -81,7 +96,7 @@ export const worker: Worker | null = isTestProcess ? null : new Worker("rss-fetc
 export async function runFetchJob(job: Job<FetchJobData>): Promise<{
   owner: FetchOwnerJob, feedId: string, newEntries: number, trimmed: number, networkFetch: boolean, skipped?: string
 }> {
-  const { owner, feedId, url, title, bypassCache } = job.data
+  const { owner, feedId, url, title, bypassCache, roundToken } = job.data
   const ownerDbName = await resolveOwnerDbName(owner)
   const startedAt = new Date()
 
@@ -105,6 +120,13 @@ export async function runFetchJob(job: Job<FetchJobData>): Promise<{
     if (result.skipped) {
       return { owner, feedId, newEntries: 0, trimmed: 0, networkFetch: false, skipped: result.skipped }
     }
+
+    // 记进本轮记账簿（见 ./fetch-round.ts）：只加数字，不写库。令牌对不上（迟到/手动触发的 job）
+    // 会被安静丢弃 —— 同步日志是给人看的，不该为记账再引入一次写入失败的可能。
+    fetchRounds.note(roundKey(owner.kind, owner.id), roundToken, {
+      newEntries: result.newEntries,
+      trimmedEntries: result.trimmed,
+    })
 
     // 抓取成功（含"没新内容"）：归零失败计数，记下验证器能力（自适应降频的输入）
     const hasValidators = await detectValidators(url)
@@ -149,6 +171,8 @@ export async function runFetchJob(job: Job<FetchJobData>): Promise<{
       lastErrorAt: startedAt.toISOString(),
       errorStreak: previous + 1,
     }).catch(() => {})
+    // 失败同样记进本轮：同步日志里「失败 N 个源」就是靠这一行
+    fetchRounds.note(roundKey(owner.kind, owner.id), roundToken, { failures: 1 })
     throw err
   }
 }
@@ -321,6 +345,11 @@ export const fetchScheduleOptions: FetchScheduleOptions = {
  * 这一轮的成本 = 每个 owner 2 个 CouchDB 请求（订阅区间查询 + `_local/schedule`）。
  * 相比旧实现的一条 `SELECT * FROM feeds WHERE status='active'` 是变贵了，
  * 但它换来的是**没有订阅关系的投影表**（那张表必须从客户端可写文档同步、会漂移）。
+ *
+ * 每一轮都顺手把**上一轮**的记账结算成一条同步日志（见 ./fetch-round.ts）：
+ * 调度时只能定下「订阅多少源 / 到期多少源」，新增与失败要等 job 跑完才知道，
+ * 所以流水总是晚一个 tick 出现 —— 它记的是「上一轮抓取干了什么」，不是「这一轮正在干什么」。
+ * 心跳同样在结算时更新，「正在跑」这件事由本轮的 job 自己体现（列表顶部有同步指示器）。
  */
 export async function scheduleOwnerFetches(): Promise<void> {
   const targets = await collectScheduleTargets()
@@ -329,7 +358,16 @@ export async function scheduleOwnerFetches(): Promise<void> {
   let sourceTotal = 0
 
   for (const target of targets) {
+    // 先结算上一轮，再判休眠：休眠用户的未结算轮次也不能永远挂在记账簿里。
+    // 记账只针对用户 —— 流水表按 userId 归属，Bot 没有对应的用户行（Bot 抓取失败只进服务端日志）。
+    const bookKey = target.owner.kind === "user" ? roundKey("user", target.owner.id) : null
+    const settled = bookKey ? fetchRounds.settle(bookKey, now) : null
+    if (settled) {
+      void recordFetchRound({ userId: target.owner.id, round: settled.round, ms: settled.ms })
+    }
+
     if (target.paused) continue
+
     const sources = await collectOwnerSources(target.owner).catch((err) => {
       console.warn(`[Fetch] 读取 ${target.owner.kind}=${target.owner.id} 的订阅失败：${(err as Error)?.message ?? err}`)
       return [] as OwnerSource[]
@@ -350,6 +388,12 @@ export async function scheduleOwnerFetches(): Promise<void> {
         hasFetchValidators: entry?.hasValidators ?? null,
       }, fetchScheduleOptions, now)
     })
+
+    // 到期为 0 也要开一轮：空转本身是答案（「跑过但没有要抓的」≠「没跑」）。
+    // 少记一条由 recordFetchRound 的合并窗口负责，调度这边不省。
+    const roundToken = bookKey
+      ? fetchRounds.begin(bookKey, { sources: sources.length, due: due.length, now })
+      : undefined
     if (due.length === 0) continue
     dueTotal += due.length
 
@@ -359,6 +403,8 @@ export async function scheduleOwnerFetches(): Promise<void> {
         feedId: source.feedId,
         url: source.url,
         title: source.title,
+        // 令牌只为结算服务：手动触发的 job 不带它，于是不会混进定时轮次的账
+        ...(roundToken ? { roundToken } : {}),
       }, {
         // 错峰：一个 tick 内到期的几百个源不必同一秒开跑（延迟按 jobId 确定性哈希）
         delay: feedJitterMs(fetchJobId(target.owner, source.feedId), FETCH_JITTER_SPAN_MS),
@@ -385,34 +431,6 @@ export async function shutdownFetchWorker(): Promise<void> {
   await fetchQueue.close()
 }
 
-/** 供测试与工具重置（模块级定时器由 shutdownFetchWorker 清理） */
-export function __resetFetchScheduleForTests(): void {
-  if (fetchInterval) clearInterval(fetchInterval)
-}
-
-/**
- * 兼容导出：旧代码用 `buildEntry` 的等价实现来判断条目 id。
- *
- * 条目 id 规则（`entry:{feedId}:{sha256(guid).slice(0,12)}`）现在只存在于 `owner-fetch.ts`，
- * 这里不重复实现 —— 需要构造 id 的地方请直接用 `owner-fetch` 的写入路径。
- */
-export function entryDocIdFor(feedId: string, guid: string): string {
-  return `entry:${feedId}:${crypto.createHash("sha256").update(guid).digest("hex").slice(0, 12)}`
-}
-
-/** Bot 与 feed 的关联变更后立即抓一次（关联时不带内容，用户点「立即抓取」才补） */
-export async function fetchBotFeedNow(botId: string, feedId: string): Promise<void> {
-  const [row] = await db.select().from(botFeeds)
-    .where(eq(botFeeds.id, `${botId}:${feedId}`)).limit(1)
-  if (!row) return
-  await enqueueOwnerFetch({
-    owner: { kind: "bot", id: botId },
-    feedId: row.feedId,
-    url: row.url,
-    title: row.title,
-  })
-}
-
 /**
  * 把某个 Bot 的最新产出同步给它所有的用户订阅者。
  *
@@ -429,11 +447,6 @@ async function syncBotEntryToSubscribers(botId: string): Promise<void> {
       console.log(`[Bot] ${botId} 产出同步给 user=${userId}：${result.copied} 条`)
     }
   }
-}
-
-/** Bot 产出库所属的 Bot 行（发布链路用） */
-export async function listActiveBots() {
-  return await db.select().from(botsTable).where(eq(botsTable.isActive, true))
 }
 
 /** 解析并规范化一条订阅文档（导出给路由/工具复用） */
