@@ -12,17 +12,11 @@
  * 现在每个用户只抓自己的东西、用户库就是唯一真相，所以休眠只是**不再抓**，
  * 回来时下一轮调度照常抓、缺的内容随那次抓取补上。没有 `needsRebuild` 这回事了。
  */
-import { eq } from "drizzle-orm"
 import { db, userTimelineSettings } from "../db"
 
 /** 活跃度上报的写库节流：同一个用户一小时内最多写一次 `last_active_at` */
 const ACTIVITY_WRITE_INTERVAL_MS = 60 * 60 * 1000
 const activityWriteCache = new Map<string, number>()
-
-/** 测试用：清掉进程内节流缓存，避免用例之间互相影响 */
-export function resetTimelineActivityThrottle(): void {
-  activityWriteCache.clear()
-}
 
 /**
  * 记录"这个用户最近还在用"。

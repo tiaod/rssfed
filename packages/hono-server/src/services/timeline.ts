@@ -18,7 +18,8 @@ import { dropSourceSchedule } from "./owner-schedule"
  *
  *   1. 每用户设置（AI 摘要开关等）；
  *   2. **退订清理**：把某源的订阅文档、条目、FeedDoc 副本、调度状态一起清掉；
- *   3. **换库**：档案损坏时另起一个空库，用户状态文档搬过去。
+ *   3. **换库**：档案损坏时另起一个空库，用户状态文档搬过去。**目前只有脚本在用**
+ *      （`scripts/reset-user-timelines.ts`），没有路由入口。
  *
  * ## 一条必须成立的性质
  *
@@ -177,29 +178,6 @@ export async function purgeSubscriptionContent(
   return result
 }
 
-/**
- * 批量退订清理（OPML 覆盖式导入、账号清理等场景）。
- *
- * 串行执行而不是并发：同一个库上的 `_purge` 并发只会互相竞争，收益接近零。
- */
-export async function purgeSubscriptionsContent(
-  userId: string,
-  feedIds: string[],
-): Promise<{ removedEntries: number, sources: number }> {
-  let removedEntries = 0
-  let sources = 0
-  for (const feedId of feedIds) {
-    try {
-      const result = await purgeSubscriptionContent(userId, feedId)
-      removedEntries += result.removedEntries
-      sources += 1
-    } catch (err) {
-      console.warn(`[Timeline] 退订清理 ${feedId} 失败：${(err as Error)?.message ?? err}`)
-    }
-  }
-  return { removedEntries, sources }
-}
-
 // ── 换库（抢救） ──
 
 /** 换库时每批搬运的文档数（`_all_docs` 一页 + `_bulk_docs` 一次） */
@@ -225,6 +203,10 @@ function shouldCopyToNewDb(id: string): boolean {
  * 只在「档案损坏、需要从零开始」时用。与旧模型的区别：抓取产物不再从别处搬
  * （没有源库了），所以新库里一开始**没有条目**，要等下一轮抓取才慢慢填回来。
  * 这是抢救场景的已知代价。
+ *
+ * **当前没有任何调用方**：一次性迁移用 `scripts/reset-user-timelines.ts`（它自己调
+ * `createTimelineDatabase` 换库），路由层的「清空并重建」入口已随旧模型删除。
+ * 留着是因为它是唯一能在进程内换库的实现，真要抢救时不必重写；但别以为有现成按钮。
  */
 export async function rederiveUserTimeline(userId: string, oldDbName: string): Promise<string> {
   const newDbName = await createTimelineDatabase(userId)
@@ -259,41 +241,6 @@ export async function rederiveUserTimeline(userId: string, oldDbName: string): P
   return newDbName
 }
 
-/** 清掉某用户库里的服务端抓取产物（条目与 FeedDoc 副本），保留订阅与阅读状态 */
-export async function purgeFetchedContent(userId: string): Promise<number> {
-  const dbName = await ensureTimelineDatabase(userId)
-  const scope = createCouchDb(dbName)
-  let deleted = 0
-
-  // 条目：`entry:` 整个前缀（含 bot 条目 `entry:bot:...`）
-  deleted += await purgeByPrefix(dbName, scope, "entry:", "entry:\uffff")
-
-  // FeedDoc 副本：id 是裸 feedId 或 `feed`+feedId（没有统一前缀，只能按 type 找）。
-  // 每轮清一批并重新查询 —— `_purge` 之后 find 的结果集自然收缩，直到找不到为止。
-  for (let round = 0; round < 200; round++) {
-    let docs: Array<{ _id: string, _rev: string }>
-    try {
-      const res = await scope.find({
-        selector: { type: "feed" },
-        fields: ["_id", "_rev"],
-        limit: 500,
-      })
-      docs = (res.docs ?? []) as unknown as Array<{ _id: string, _rev: string }>
-    } catch {
-      break
-    }
-    if (docs.length === 0) break
-    const body = buildPurgeBody(docs.map((doc) => ({ _id: doc._id, _rev: doc._rev })))
-    const purged = await purgeRequest(dbName, body)
-    const removed = countPurged(purged, body)
-    deleted += removed
-    // 一条都没清掉 = 撞上并发，停手
-    if (removed === 0) break
-  }
-  return deleted
-}
-
-/** 该用户库当前的 update_seq（客户端手动同步用它锁定"从哪儿开始数新增条目"） */
 export async function readTimelineUpdateSeq(userId: string): Promise<string | number> {
   const dbName = await ensureTimelineDatabase(userId)
   const scope = createCouchDb(dbName)
@@ -362,26 +309,3 @@ export async function waitForSync(
   return { completed: false, added }
 }
 
-/** 该用户是否处于休眠（休眠期间不抓取） */
-export async function isUserAggregationPaused(userId: string): Promise<boolean> {
-  const [row] = await db.select({ pausedAt: userTimelineSettings.aggregationPausedAt })
-    .from(userTimelineSettings)
-    .where(eq(userTimelineSettings.userId, userId))
-    .limit(1)
-  return row?.pausedAt != null
-}
-
-/** 供路由使用的「清空并重建」入口（换库 + 清抓取产物） */
-export async function resetUserTimeline(userId: string): Promise<{ dbName: string, removedEntries: number }> {
-  const oldDbName = await ensureTimelineDatabase(userId)
-  const removedEntries = await purgeFetchedContent(userId)
-  const dbName = await rederiveUserTimeline(userId, oldDbName)
-  return { dbName, removedEntries }
-}
-
-/** 兼容旧名：旧调用方按 "reconcile" 语义引用的地方只是想要一次设置读取 */
-export const reconcileUserTimeline = async (userId: string) => ({ userId, settings: await getTimelineSettings(userId) })
-export type TimelineReconcileResult = Awaited<ReturnType<typeof reconcileUserTimeline>>
-
-/** 兼容旧名：旧调用方用它在用户库里"读订阅源"；现在是 owner-fetch 的 collectOwnerSources */
-export { entryIdPrefix as sourceEntryPrefix }

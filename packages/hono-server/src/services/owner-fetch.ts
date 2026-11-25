@@ -13,7 +13,6 @@ import { getFeedContent } from "../rss/fetch-cache"
 import { cacheEntryImages, cacheSingleImage, FEED_ICON_CACHE_VERSION, type EntryImageOptions } from "../rss/entry-images"
 import { selectNewestItems } from "../workers/entry-selection"
 import { buildFeedDoc, feedDocDisplayChanged, mergeFeedDocDisplay, shouldCacheFeedIcon, shouldWriteFeedDoc } from "../workers/feed-doc"
-import { mergeSourceSchedule } from "./owner-schedule"
 
 /**
  * 按 **owner** 抓取一个源并直接写进 owner 自己的库。
@@ -61,8 +60,6 @@ export interface FetchOwnerFeedInput {
   retentionEntries?: number | null
   /** 图片策略（当前只有全局默认，留参数是为了 Bot 库将来能单独调） */
   imageOptions?: EntryImageOptions
-  /** 当前时间注入（测试用） */
-  now?: Date
 }
 
 export interface FetchOwnerFeedResult {
@@ -206,7 +203,6 @@ async function updateFeedDoc(
  */
 export async function fetchOwnerFeed(input: FetchOwnerFeedInput): Promise<FetchOwnerFeedResult> {
   const startedAt = Date.now()
-  const now = input.now ?? new Date()
   const { owner, url, feedId } = input
 
   if (input.paused) {
@@ -284,33 +280,3 @@ export function normalizeRetention(value: number | null | undefined): number {
   return Math.floor(value)
 }
 
-/**
- * 抓取成功/失败后更新该源的调度状态（供调度器判断到期与退避）。
- *
- * 单独拆出来是因为失败路径也要记（`errorStreak` 是退避的唯一输入），
- * 而失败时数据面什么都没写成，不能只依赖 `fetchOwnerFeed` 的返回值。
- */
-export async function recordFetchOutcome(
-  dbName: string,
-  feedId: string,
-  outcome: { ok: true, newEntries: number, hasValidators: boolean, retentionEntries?: number | null }
-    | { ok: false },
-  now: Date = new Date(),
-): Promise<void> {
-  if (outcome.ok) {
-    await mergeSourceSchedule(dbName, feedId, {
-      lastFetchedAt: now.toISOString(),
-      ...(outcome.newEntries > 0 ? { lastNewEntryAt: now.toISOString() } : {}),
-      errorStreak: 0,
-      hasValidators: outcome.hasValidators,
-      ...(outcome.retentionEntries !== undefined ? { retentionEntries: outcome.retentionEntries } : {}),
-    })
-    return
-  }
-  // 失败也算"抓过一次"：否则坏源会在同一轮里被反复重试，把队列堵死。
-  // errorStreak 由调用方读出来 +1 后传进来（这里不知道上一次的值）。
-  await mergeSourceSchedule(dbName, feedId, {
-    lastFetchedAt: now.toISOString(),
-    lastErrorAt: now.toISOString(),
-  })
-}

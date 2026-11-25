@@ -1,5 +1,3 @@
-import type { FeedViewType } from "./constants"
-
 /**
  * CouchDB 文档的形状（服务端与前端共用）。
  *

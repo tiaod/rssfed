@@ -1,9 +1,7 @@
 import { and, eq, isNull, sql } from "drizzle-orm"
 import { db, user, bots as botsTable, userTimelineSettings } from "../db"
-import { ensureBotDatabase, ensureTimelineDatabase } from "../couchdb/client"
 import type { FetchOwnerJob } from "../workers"
-import { fetchIntervalMs, type FeedScheduleState, type FetchScheduleOptions } from "../workers/fetch-schedule"
-import { readSchedule, writeSchedule, type ScheduleState } from "./owner-schedule"
+import { readSchedule, writeSchedule } from "./owner-schedule"
 import {
   computeActivityBytesPerDay,
   nextRetentionEntries,
@@ -237,19 +235,4 @@ export async function recomputeOwnerRetention(
     await writeSchedule(dbName, { version: schedule?.version ?? 1, sources })
   }
   return result
-}
-
-/** 计算某源下次该用的抓取间隔（诊断/日志用；调度实际走 isFeedDue） */
-export function nextFetchInterval(
-  state: FeedScheduleState,
-  options: FetchScheduleOptions,
-  now = Date.now(),
-): number {
-  return fetchIntervalMs(state, options, now)
-}
-
-/** 该 owner 库里已知的源数（统计用） */
-export async function countOwnerSources(dbName: string): Promise<number> {
-  const state: ScheduleState | null = await readSchedule(dbName).catch(() => null)
-  return Object.keys(state?.sources ?? {}).length
 }

@@ -55,7 +55,6 @@ export const feedsRouter = new Hono<{ Variables: FeedsVariables }>()
  * （订阅文档是客户端可写的，不能信任里面的地址）。
  */
 feedsRouter.post("/discover", requireAuth, async (c) => {
-  const userId = c.get("userId")
   const { url } = await c.req.json()
   if (!url || typeof url !== "string") return c.json({ error: "url required" }, 400)
 

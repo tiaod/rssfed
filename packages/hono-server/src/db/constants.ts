@@ -20,4 +20,3 @@ export const COUCHDB_BOT_PREFIX = "bot_"
  * 合并的原因与写方向边界见 couchdb/client.ts 的 TIMELINE_DESIGN_DOC。
  */
 export const COUCHDB_USER_TIMELINE_PREFIX = "user-timeline_"
-export const CLEANUP_DAYS = 30

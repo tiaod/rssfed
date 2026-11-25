@@ -109,9 +109,6 @@ export function ownerDesignDocViewsMatch(existing: unknown): boolean {
   return stableStringify(existing ?? null) === stableStringify(OWNER_DESIGN_DOC_VIEWS)
 }
 
-/** 兼容旧名：视图比较的唯一实现在上面 */
-export const timelineDesignDocViewsMatch = ownerDesignDocViewsMatch
-
 const ensuredOwnerDesignDocs = new Set<string>()
 
 /**

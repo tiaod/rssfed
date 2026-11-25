@@ -1,11 +1,6 @@
 import type { CachedImage } from "../db/types"
 import { getCompressedImage, type CompressedImageResult } from "../images/cache"
-import {
-  DEFAULT_AVIF_QUALITY,
-  DEFAULT_MAX_IMAGE_WIDTH,
-  DEFAULT_MAX_SOURCE_IMAGE_BYTES,
-  type ImageFailReason,
-} from "../images/fetch"
+import type { ImageFailReason } from "../images/fetch"
 import { envInt } from "../env"
 
 /**
@@ -18,9 +13,9 @@ import { envInt } from "../env"
  */
 
 // ── 条目图片缓存的全局默认（环境变量可覆盖，见 .env.example） ──
-// 每个 feed 可在 PostgreSQL feeds 表上按源覆盖这些默认值（管理员维护，见 cacheEntryImages
-// 的 options 参数）。这是**唯一**一处图片策略：抓取时按它把正文图压成附件写进源库，
-// 聚合只把成品搬进各用户库（见 services/timeline.ts），用户没有自己的图片参数。
+// 这是**唯一**一处图片策略：抓取时按它把正文图压成附件写进各自的 owner 库，用户没有
+// 自己的图片参数。（原先「订阅源管理」里还能按源覆盖，那个页面随共享源库一起删掉了，
+// 所以下面 options 里的 per-feed 字段现在恒为 undefined —— 留着是为了不把签名改来改去。）
 
 /**
  * 每篇 entry 最多缓存的图片数（默认 6）。
@@ -29,7 +24,7 @@ import { envInt } from "../env"
  * 另有「每篇附件总体积预算」（见 DEFAULT_MAX_ENTRY_IMAGE_BYTES）兜住大图 ——
  * 单张体积压完才知道，按批累计超预算即停止缓存后续图片。
  *
- * 图片密集的源可在「订阅源管理」里按源调高，或开启「缓存全部图片」跳过两道限制。
+ * 图片密集的源现在只能靠调全局环境变量（没有 per-feed 入口了）。
  */
 const DEFAULT_MAX_IMAGE_COUNT = envInt("MAX_IMAGE_COUNT", 6)
 /**
@@ -43,18 +38,11 @@ const DEFAULT_MAX_ENTRY_IMAGE_BYTES = envInt("MAX_ENTRY_IMAGE_BYTES", 1024 * 102
 /** 下载并发上限 */
 const DOWNLOAD_CONCURRENCY = 3
 
-/** 全局默认图片缓存参数（环境变量可覆盖），供前端展示 placeholder 默认值 */
-export const DEFAULT_IMAGE_OPTIONS = {
-  maxImageCount: DEFAULT_MAX_IMAGE_COUNT,
-  maxEntryImageBytes: DEFAULT_MAX_ENTRY_IMAGE_BYTES,
-  maxImageWidth: DEFAULT_MAX_IMAGE_WIDTH,
-  avifQuality: DEFAULT_AVIF_QUALITY,
-  maxSourceImageBytes: DEFAULT_MAX_SOURCE_IMAGE_BYTES,
-} as const
-
 /**
- * 单条目图片缓存的可覆盖配置（per-feed，来自 feeds 表的 image 缓策略字段）。
- * 未提供的字段回退到上方全局默认。
+ * 单条目图片缓存的可覆盖配置。未提供的字段回退到 `images/fetch.ts` 的全局默认。
+ *
+ * 目前**没有调用方传它**（per-feed 覆盖随「订阅源管理」删除）。保留是因为
+ * `cacheEntryImages` 与 `fetchOwnerFeed` 的签名已经稳定，删掉再为 Bot 库加回来更麻烦。
  */
 export interface EntryImageOptions {
   /** 每篇最多缓存的图片数（张数硬顶）；cacheAll 时视为不限制 */
