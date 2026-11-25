@@ -16,16 +16,16 @@ import type { TimelineSettings as TimelineSettingsPayload } from '~/utils/timeli
 import { resolveApiBase } from '~/utils/apiBase'
 import { importOpmlStreaming, type OpmlImportEvent } from '~/utils/opmlImport'
 
-/** 催促聚合的响应（POST /api/timeline/refresh） */
+/** 催促抓取的响应（POST /api/timeline/refresh） */
 export interface TimelineRefreshResult {
   /** 是否已受理（永远为 true；服务端拒绝的情况走 HTTP 错误） */
   accepted: boolean
-  /** 服务端是否在本请求内跑完了聚合（未带 wait 时为 undefined） */
+  /** 服务端是否在本请求内完成了等待（未带 wait 时为 undefined） */
   completed?: boolean
-  /** 本轮写入派生库的新条目数（仅 completed 时有意义） */
+  /** 本轮写进用户库的新条目数（仅 completed 时有意义） */
   added?: number
-  /** 该用户的订阅源总数 */
-  sources?: number
+  /** 本次入队的抓取任务数（= 该用户当前有效订阅里没被暂停的那些） */
+  queued?: number
 }
 
 function apiFetch<T>(url: string, options: Parameters<typeof $fetch<T>>[1] = {}) {
@@ -107,43 +107,45 @@ export function useApi() {
         importOpmlStreaming(`${base}/api/feeds/import-opml`, opml, options)
     },
     /**
-     * 服务端时间线聚合（每用户一个派生库）。
+     * 服务端时间线（每用户一个库）。
      *
-     * 条目本身走 CouchDB 的 live 复制，不经这些接口；它们只负责设置与「催一次聚合」。
+     * 条目本身走 CouchDB 的 live 复制，不经这些接口；它们只负责设置、催一次抓取与日志。
      */
     timeline: {
       /** 读取当前设置（顺带下发服务端默认值） */
       settings: () => apiFetch<{ settings: TimelineSettingsPayload, defaults: TimelineSettingsPayload }>(
         `${base}/api/timeline/settings`
       ),
-      /** 更新设置（只影响「往用户库里聚合什么」，服务端会顺手催一次聚合） */
+      /** 更新设置（设置不影响抓什么，服务端只落库） */
       updateSettings: (body: Partial<TimelineSettingsPayload>) => apiFetch<{ settings: TimelineSettingsPayload }>(
         `${base}/api/timeline/settings`,
         { method: 'PATCH', body }
       ),
       /**
-       * 催一次聚合（订阅/退订/打开列表/手动同步时调用）。
+       * 催一次抓取（订阅/退订/打开列表/手动同步时调用）。
        *
-       * `wait: 1` 时服务端会在本请求内跑完一轮 reconcile 再返回（有服务端超时上限），
-       * 于是手动同步能拿到确切的「本轮新增 N 条」；不传则立即 202，数据靠 live 复制到端。
+       * `wait: 1` 时服务端会在本请求内等用户库安静下来（有服务端超时上限），
+       * 于是手动同步能拿到确切的「本轮新增 N 条」；不传则立即 202，条目靠 live 复制到端。
        */
       refresh: (params?: { wait?: 1 }) => apiFetch<TimelineRefreshResult>(
         `${base}/api/timeline/refresh`,
         { method: 'POST', params }
       ),
-      /** 重建派生库（运维兜底入口，见 useTimelineSettings.rebuild） */
+      /** 立即重新抓取全部订阅（运维兜底入口，见 useTimelineSettings.rebuild） */
       rebuild: () => apiFetch<{ accepted: boolean }>(`${base}/api/timeline/rebuild`, { method: 'POST' }),
       /**
        * 同步日志（设置弹窗 → 数据 →「同步日志」调试面板）。
        *
-       * 返回两段：`events` = 服务端落下的流水（汇聚/重建/首搬/失败），
-       * `sources` = 每个订阅源的当前同步状态（读水位表，不是流水）。
+       * 返回两段：`events` = 服务端每一轮抓取干了什么（新增/裁剪/失败），
+       * `heartbeat` = 抓取还在不在跑（最近一轮时刻 + 连续空转轮数）。
+       *
+       * 各源**当前**状态不在这里：它在用户库的 `_local/schedule`，由订阅列表接口带出来。
        */
       events: (limit?: number) => apiFetch<TimelineLogPayload>(
         `${base}/api/timeline/events`,
         { params: limit ? { limit } : undefined }
       ),
-      /** 清空流水（源状态不受影响） */
+      /** 清空流水（心跳不受影响） */
       clearEvents: () => apiFetch<{ ok: boolean }>(`${base}/api/timeline/events`, { method: 'DELETE' })
     },
     bots: {

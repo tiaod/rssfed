@@ -1,14 +1,22 @@
-import type { TimelineSourceState } from '~/types/timeline-log'
-
 /**
- * 同步日志面板的纯展示逻辑（格式化 / 徽标映射 / 汇总）。
+ * 同步日志面板的纯展示逻辑（格式化 / 徽标映射 / 源状态汇总）。
  *
  * 抽出来是为了能单测：时间格式与"同一个 kind 在不同 level 下显示什么颜色"这类东西
  * 在页面里写死很容易各处不一致，而它们又是排查时最先看的东西。
+ *
+ * 面板里的「一轮」现在是**抓取**（新模型没有聚合扇出，见 ARCHITECTURE.md）：
+ * 服务端每一轮只记「订阅几个源、几个到期、新增/裁剪/失败各多少」。
  */
+import type { TimelineSourceState } from '~/types/timeline-log'
 
-/** kind → 徽标文案（服务端新增 kind 时这里没命中就原样显示） */
+/**
+ * kind → 徽标文案（服务端新增 kind 时这里没命中就原样显示）。
+ *
+ * `reconcile` / `rebuild` / `source-sync` / `error` 是**旧模型的历史行**：重构后不再产生，
+ * 但老记录还在库里，标签保持原样，免得用户看到一排「unknown」。
+ */
 const EVENT_LABELS: Record<string, string> = {
+  'fetch': '抓取',
   'reconcile': '汇聚',
   'rebuild': '重建',
   'source-sync': '首搬',
@@ -19,10 +27,11 @@ export function timelineEventLabel(kind: string): string {
   return EVENT_LABELS[kind] ?? kind
 }
 
-/** 徽标颜色：失败/警告一律按 level 走，其余按类型区分（汇聚是日常，不上色） */
+/** 徽标颜色：失败/警告一律按 level 走，其余按类型区分（日常轮次不上色） */
 export function timelineEventColor(kind: string, level: string): 'neutral' | 'info' | 'warning' | 'error' {
   if (level === 'error') return 'error'
   if (level === 'warn') return 'warning'
+  // 只剩历史行会命中：新模型没有"首搬"
   if (kind === 'source-sync') return 'info'
   return 'neutral'
 }
@@ -30,7 +39,7 @@ export function timelineEventColor(kind: string, level: string): 'neutral' | 'in
 const pad = (value: number): string => String(value).padStart(2, '0')
 
 /**
- * 事件时间：今天只显示 `HH:MM:SS`（一轮汇聚的具体时刻），更早的带上 `MM-DD`。
+ * 事件时间：今天只显示 `HH:MM:SS`（一轮抓取的具体时刻），更早的带上 `MM-DD`。
  *
  * 用 Date 的本地时间取值手拼，不用 `toLocaleTimeString` —— 后者的输出受运行环境 locale 影响，
  * 单测里没法稳定断言。
@@ -76,28 +85,29 @@ export function formatTimelineEventData(data: Record<string, unknown> | null | u
 export interface TimelineSourceSummary {
   total: number
   errors: number
-  syncing: number
-  /** 最近一次同步时刻（ISO）；没有任何源同步过就是 null */
-  lastSyncedAt: string | null
+  /** 最近一次抓取时刻（ISO）；没有任何源抓过就是 null */
+  lastFetchedAt: string | null
 }
 
-/** 源状态汇总（面板概览行用） */
+/**
+ * 源状态汇总（面板概览行用）。
+ *
+ * 输入是订阅列表里的当前状态（用户自己库里的 `_local/schedule`），**不是**轮次流水：
+ * 流水说「这一轮失败了 2 个」，这里说「现在还有哪几个坏着」，两件事都要能回答。
+ */
 export function summarizeTimelineSources(sources: TimelineSourceState[]): TimelineSourceSummary {
   let errors = 0
-  let syncing = 0
   let last: number | null = null
   for (const source of sources) {
-    if (source.status === 'error') errors += 1
-    if (source.status === 'syncing') syncing += 1
-    if (source.syncedAt) {
-      const time = new Date(source.syncedAt).getTime()
+    if (source.status === 'error' || source.errorMessage) errors += 1
+    if (source.lastFetchedAt) {
+      const time = new Date(source.lastFetchedAt).getTime()
       if (!Number.isNaN(time) && (last === null || time > last)) last = time
     }
   }
   return {
     total: sources.length,
     errors,
-    syncing,
-    lastSyncedAt: last === null ? null : new Date(last).toISOString()
+    lastFetchedAt: last === null ? null : new Date(last).toISOString()
   }
 }

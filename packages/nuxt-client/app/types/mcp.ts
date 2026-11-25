@@ -27,9 +27,3 @@ export interface McpTokenCreated {
   expiresAt: string | null
   createdAt: string
 }
-
-/** 前端「AI 助手接入」页用到的 MCP 端点信息（由运行时配置推导） */
-export interface McpEndpointInfo {
-  /** MCP 端点完整地址，如 http://localhost:3001/mcp */
-  url: string
-}

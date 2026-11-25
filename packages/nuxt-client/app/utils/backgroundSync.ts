@@ -22,9 +22,9 @@ import { isBrowserOffline, notifyNetworkRecovered } from '~/utils/networkState'
  *      复制停在半路，`waitUntil` 的 Promise 既不 resolve 也不 reject，浏览器无法判断成败、
  *      重试语义就乱了。
  *
- * 而催聚合这条路没有这些代价：服务端本来就每 5 分钟给所有非休眠用户跑一轮
- * （`TIMELINE_INTERVAL`），SW 这一下只是把「用户刚好在断网期间」的那一轮提前，
- * 派生库写好之后页面下次打开 live 复制一次就补齐 —— RSS 需要的「后台同步」就是这个。
+ * 而催抓取这条路没有这些代价：服务端本来就每 `FETCH_INTERVAL`（默认 15 分钟）调度一轮，
+ * SW 这一下只是把「用户刚好在断网期间」的那一轮提前，用户库写好之后页面下次打开
+ * live 复制一次就补齐 —— RSS 需要的「后台同步」就是这个。
  *
  * 只有 Chromium 系有 `sync` 事件（Safari/iOS、Firefox 都没有），且必须是安全上下文。
  * 不支持时这里全部静默降级 —— 页面自己的 `online` 监听照旧负责「回到前台就同步」

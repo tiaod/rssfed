@@ -12,12 +12,14 @@ import type { TimelineSourceState } from '~/types/timeline-log'
 /**
  * 同步日志面板的纯展示逻辑。
  *
- * 这类东西出错不会报错、只会"看起来对但读错"（把失败显示成汇聚、把昨天的时间显示成今天），
+ * 这类东西出错不会报错、只会"看起来对但读错"（把失败显示成普通轮次、把昨天的时间显示成今天），
  * 而它恰恰是排查时第一眼要看的东西，所以把映射与格式化钉住。
  */
 
 describe('timelineEventLabel / timelineEventColor', () => {
   it('已知类型给中文徽标，未知类型原样显示（服务端以后加 kind 不会显示空白）', () => {
+    // fetch 是新模型唯一的 kind；其余四个是重构前留下的历史行，老记录还在库里
+    expect(timelineEventLabel('fetch')).toBe('抓取')
     expect(timelineEventLabel('reconcile')).toBe('汇聚')
     expect(timelineEventLabel('rebuild')).toBe('重建')
     expect(timelineEventLabel('source-sync')).toBe('首搬')
@@ -26,18 +28,18 @@ describe('timelineEventLabel / timelineEventColor', () => {
   })
 
   it('level 优先决定颜色：error/warn 不管什么类型都刺眼', () => {
-    expect(timelineEventColor('reconcile', 'error')).toBe('error')
+    expect(timelineEventColor('fetch', 'error')).toBe('error')
     expect(timelineEventColor('source-sync', 'warn')).toBe('warning')
     expect(timelineEventColor('source-sync', 'info')).toBe('info')
+    expect(timelineEventColor('fetch', 'info')).toBe('neutral')
     expect(timelineEventColor('reconcile', 'info')).toBe('neutral')
-    expect(timelineEventColor('rebuild', 'info')).toBe('neutral')
   })
 })
 
 describe('formatTimelineEventTime', () => {
   const now = new Date(2026, 9, 17, 12, 0, 0) // 本地时间 2026-10-17 12:00
 
-  it('当天只显示时分秒（一轮汇聚的具体时刻）', () => {
+  it('当天只显示时分秒（一轮抓取的具体时刻）', () => {
     expect(formatTimelineEventTime(new Date(2026, 9, 17, 6, 4, 30), now)).toBe('06:04:30')
     expect(formatTimelineEventTime(new Date(2026, 9, 17, 23, 59, 5), now)).toBe('23:59:05')
   })
@@ -89,30 +91,35 @@ describe('formatTimelineEventData', () => {
 
 describe('summarizeTimelineSources', () => {
   const source = (over: Partial<TimelineSourceState>): TimelineSourceState => ({
-    sourceId: 'f1',
-    kind: 'feed',
+    feedId: 'f1',
     title: '源',
-    syncedAt: null,
-    status: 'idle',
-    lastError: null,
+    status: 'active',
     ...over
   })
 
-  it('统计总数、失败、进行中，并取最近的同步时刻', () => {
+  it('统计总数与失败的源，并取最近一次抓取时刻', () => {
     const summary = summarizeTimelineSources([
-      source({ sourceId: 'a', syncedAt: '2026-10-17T06:00:00.000Z' }),
-      source({ sourceId: 'b', syncedAt: '2026-10-17T06:04:31.000Z' }),
-      source({ sourceId: 'c', status: 'error', syncedAt: '2026-10-17T05:00:00.000Z' }),
-      source({ sourceId: 'd', status: 'syncing' })
+      source({ feedId: 'a', lastFetchedAt: '2026-10-17T06:00:00.000Z' }),
+      source({ feedId: 'b', lastFetchedAt: '2026-10-17T06:04:31.000Z' }),
+      source({ feedId: 'c', status: 'error', lastFetchedAt: '2026-10-17T05:00:00.000Z' })
     ])
-    expect(summary.total).toBe(4)
+    expect(summary.total).toBe(3)
     expect(summary.errors).toBe(1)
-    expect(summary.syncing).toBe(1)
-    expect(summary.lastSyncedAt).toBe('2026-10-17T06:04:31.000Z')
+    expect(summary.lastFetchedAt).toBe('2026-10-17T06:04:31.000Z')
   })
 
-  it('一个源都没同步过时 lastSyncedAt 是 null', () => {
-    const summary = summarizeTimelineSources([source({ sourceId: 'a' })])
-    expect(summary.lastSyncedAt).toBeNull()
+  it('状态回到 active 但还挂着上次的错误文案，也算失败', () => {
+    // 服务端的 status 是按 errorStreak 算的，成功一次就清零；而 errorMessage 反映的是
+    // 「最近一次抓取失败过」。后者还挂着就该提醒，否则用户永远不知道这个源刚坏过。
+    const summary = summarizeTimelineSources([source({ errorMessage: '超时' })])
+    expect(summary.errors).toBe(1)
+  })
+
+  it('一个源都没抓过时 lastFetchedAt 是 null', () => {
+    expect(summarizeTimelineSources([source({ feedId: 'a' })]).lastFetchedAt).toBeNull()
+  })
+
+  it('空列表不炸', () => {
+    expect(summarizeTimelineSources([])).toEqual({ total: 0, errors: 0, lastFetchedAt: null })
   })
 })

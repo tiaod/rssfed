@@ -163,14 +163,15 @@ const dotClass = computed(() => {
 
       <!--
         有问题的源单独列出来：这张卡真正的价值就在这 —— 汇总数字在左下角指示器里也有，
-        但「哪个源悄悄失败了」只有这里会说。
+        但「哪个源悄悄失败了」只有这里会说。数据来自订阅列表（用户自己库里的
+        `_local/schedule`），没读到之前整块不显示：空着会被读成「一个失败都没有」。
       -->
       <div
-        v-if="problemSources.items.length"
+        v-if="problemSources.known && problemSources.items.length"
         class="mt-3 border-t border-default/60 pt-3"
       >
         <p class="text-xs font-medium text-error">
-          有源同步失败
+          有源抓取失败
         </p>
         <ul class="mt-1.5 space-y-1">
           <li

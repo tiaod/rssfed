@@ -71,7 +71,6 @@ nuxtGlobals.usePouchDb = () => ({
 nuxtGlobals.useTimelineLog = () => ({
   events: ref([]),
   sources: ref([]),
-  summary: ref({ total: 0, syncing: 0, errors: 0, lastSyncedAt: null }),
   heartbeat: ref(null),
   loaded: ref(false),
   loading: ref(false),
