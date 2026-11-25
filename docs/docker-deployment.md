@@ -188,7 +188,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 - **没有 CouchDB 复制**：抓取按 owner（用户 / Bot）各自进行，直接写进各自的库，不存在"源库 → 用户库"的搬运。所以 `_scheduler/docs/_replicator` 里**应当完全没有本服务的任务**，看到任务说明跑的是旧版本（或升级后残留），跑一次 `scripts/reset-to-owner-model.ts` 清理。Redis 里也只有一个队列 `bull:rss-fetch:*`（旧版的 `rss-timeline` / `rss-timeline-sync` / `rss-bot-copy` 都已删除）。
 - **`deploy/couchdb-replicator.ini` 仍然要挂**：它现在只管**自动压缩阈值**（smoosh 的 `ratio_dbs` 通道，`sizes.file / sizes.active ≥ 1.25` 才 compact —— CouchDB 默认门槛是 2.0，我们的库到不了，死修订会一直留在文件里）。文件名沿用旧称，实际与复制无关；`_replicator` 是系统库，**升级/回滚后不要手工清空**。
 - **抓取并发与去重**：`FETCH_CONCURRENCY`（默认 4）控制同时抓几个 (owner, 源)；同一个 URL 的并发抓取由 `rss/fetch-cache.ts` 的进程内单飞合并成一次网络请求，TTL 内连请求都不发（`FETCH_CACHE_TTL_MS`，默认 10 分钟）。**多副本部署时单飞只在副本内生效**，跨副本的重复请求无法合并 —— 要合并得换 Redis 锁，当前单进程部署不需要。
-- **存储量随用户数增长**：用户库是每个用户自己的条目 + 附件（同一个源被 N 个用户订阅就是 N 份 AVIF），用户多了要先看 CouchDB 数据卷。两个对象存储前缀都是**可丢弃的中间产物**、体积有界：`image-cache/` 按 `IMAGE_CACHE_TTL_DAYS`（默认 7 天）清理，`fetch-cache/` 按 `FETCH_CACHE_TTL_DAYS`（默认 10 分钟）清理 —— 后者每个 URL 只有一份正文（gzip 后通常几十 KB），总量 ≈ 活跃源数 × 大小。
+- **存储量随用户数增长**：用户库是每个用户自己的条目 + 附件（同一个源被 N 个用户订阅就是 N 份 AVIF），用户多了要先看 CouchDB 数据卷。两个对象存储前缀都是**可丢弃的中间产物**、体积有界：`image-cache/` 按 `IMAGE_CACHE_TTL_DAYS`（默认 7 天）清理；`fetch-cache/` 每个 URL 只有一个固定 key、每次抓取覆盖写，所以总量 ≈ 「曾经订阅过的不同 URL 数 × 一份正文（gzip 后通常几十 KB）」，**没有后台 GC** —— 需要回收就按前缀整体删掉，代价只是首轮重抓。
 
 ## 7. 代码层生产开关（已完成）
 

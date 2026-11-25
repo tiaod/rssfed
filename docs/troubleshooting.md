@@ -119,7 +119,7 @@
 
 - **现象**：worker 日志里出现 `[EntryImages] … 失败 N 张 原因[…]`，对应条目照常入库、只是没有图片附件。
 - **原因**：看 `reason`（取值见 `images/fetch.ts` 的 `ImageFailReason`）——`http-status`（403 防盗链 / 404 / 5xx）、`content-type`（返回的不是图片）、`too-large`（源图超过 `maxSourceImageBytes`）、`timeout` / `network`（连不上或读取超时）、`redirect-limit`（跳转超过 3 次）、`decode`（sharp 解不出来）、`invalid-url`（地址不合法或不是 http(s)）。这条链路只在**抓取**时跑，失败只记数不阻塞，聚合不会再重试。
-- **解法**：先直接 `curl -I <源图 URL>` 确认可达；大图调大 `MAX_SOURCE_IMAGE_BYTES`，或在该 feed 的图片策略里单独调（订阅源管理页 / `feeds` 表的图片列）。同一张图 + 同一组参数只会失败一次，不会反复重试拖慢抓取；已经入库的条目要等下次抓到新条目或按源重抓才会带上图。
+- **解法**：先直接 `curl -I <源图 URL>` 确认可达；大图调大 `MAX_SOURCE_IMAGE_BYTES`（全局唯一入口 —— 按源覆盖的图片参数随「订阅源管理」一起删除了）。同一张图 + 同一组参数只会失败一次，不会反复重试拖慢抓取；已经入库的条目要等下次抓到新条目或按源重抓才会带上图。
 
 ### 同步全报 `Database does not exist`：库名还登记着，库却没了
 
@@ -148,12 +148,16 @@
   [`utils/feedDocId.ts`](../packages/nuxt-client/app/utils/feedDocId.ts) 有一份同样的实现，两边必须同步改。
 - **排查**：`select id from feeds where id like '\_%'` 能列出受影响的源。
 
-### 重建之后内容回来了，但浏览器里看不见
+### 「重建」之后内容回来了，但浏览器里看不见（**该现象已不存在**）
 
-- **现象**：`POST /api/timeline/rebuild`（或前端包装 `useTimelineSettings.rebuild()`）之后，服务端新库里有条目，但页面上的时间线还是空的（或比预期的少）。
-- **原因**：重建是**换一个空聚合库**（复制是变更投递不是投影，就地清空搬不回来），于是 ① 库名变了、客户端缓存的寻址信息还指着被删掉的旧库；② 本地为「被剪掉的条目」留着删除记录（tombstone，修订号更高），重建搬回来的内容在本地会被判成冲突、看不见。
-- **现状**：[useTimelineSettings.rebuild()](../packages/nuxt-client/app/composables/useTimelineSettings.ts) 会在请求成功后**等库名变过来**（最多 60s）再丢掉本地缓存重新全量拉一遍（[useTimelineSettings.ts](../packages/nuxt-client/app/composables/useTimelineSettings.ts)）。手工 `curl` 触发重建时没有这一步，浏览器要手动重开页面或清掉该站点的 IndexedDB。
-- **别手工 `DELETE /<用户库>`**：那会连用户写的订阅/已读收藏一起删。要收缩数据用窗口设置（剪枝），要整体重来用重建接口。
+- **旧现象**：`POST /api/timeline/rebuild` 之后，服务端新库里有条目，但页面上的时间线还是空的。
+- **旧原因**：旧模型的重建是**换一个空聚合库**，于是 ① 库名变了、客户端缓存的寻址信息还指着被删掉的旧库；② 本地为「被剪掉的条目」留着删除记录（tombstone），重建搬回来的内容在本地会被判成冲突。
+- **现状**：`/api/timeline/rebuild` **不再换库**，它只是「绕开缓存、把该用户的全部订阅入队抓一遍」
+  （与 `POST /refresh?force=1` 等价）。用户库就是唯一真相，新抓到的条目照常走 live 复制到端，
+  所以不存在"库名变了要重挂"这一步，客户端也不再有那段等库名的轮询。
+  前端若还留着 `useTimelineSettings.rebuild()`，它现在只是发一次请求。
+- **别手工 `DELETE /<用户库>`**：那会连用户写的订阅/已读收藏一起删。要整体重来用
+  `scripts/reset-user-timelines.ts`（换新库并让客户端重拉）。
 
 ### 升级后每个账号都"重建"了一次：v1 → v2 换库重搬（**代码已删除**）
 

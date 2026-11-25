@@ -143,7 +143,7 @@ Bot "AI 动态"  → 源 A、D、E   ├──▶  每个 Bot 一个产出库（
 | CouchDB bot:{botId}     | Bot 自己抓到的产出文档（ActivityPub outbox 的内容源） | Bot 分发与 outbox 查询 |
 | PouchDB（浏览器）           | 上述用户库的本地副本（条目 + 订阅 + 已读收藏）           | 离线阅读、离线订阅管理、跨源聚合查询        |
 | 存储后端 `image-cache/` 前缀 | 正文图压缩结果的去重缓存（key = URL + 参数的内容寻址，只是中间产物） | 重复图片不重复下载/编码；按 TTL 清理，可随时重建 |
-| 存储后端 `fetch-cache/` 前缀 | feed 正文 + 条件请求验证器（key = URL 的哈希，只是中间产物） | 多个 owner 订阅同源时只出一次网；按 TTL 清理 |
+| 存储后端 `fetch-cache/` 前缀 | feed 正文 + 条件请求验证器（key = URL 的哈希，只是中间产物） | 多个 owner 订阅同源时只出一次网；同 URL 覆盖写，可整体删除 |
 ### 为什么订阅关系在 CouchDB 而不在 PostgreSQL
 
 最初的设计是把订阅关系放进 PostgreSQL，但它**与离线优先目标冲突**：离线阅读要求用户断网时也能
