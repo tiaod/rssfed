@@ -176,7 +176,7 @@ async function addFeed() {
       title: feedTitle,
       siteUrl: discovered.siteUrl,
       description: discovered.description,
-      image: discovered.image,
+      image: discovered.image
     })
     toast.add({ title: '订阅成功', description: feedTitle, color: 'success' })
     addOpen.value = false
