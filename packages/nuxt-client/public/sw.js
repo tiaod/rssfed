@@ -7,7 +7,7 @@
  *   3. 少量只读接口（条目、站点配置、文件、会话）走「网络优先 + 落缓存」，断网时读缓存。
  *
  * 外加一个 Background Sync 监听（见文件末尾）：断网期间页面登记了 tag，恢复联网后由浏览器
- * 唤醒它催一次服务端聚合。它不碰缓存，也不做数据复制。
+ * 唤醒它催一次服务端抓取。它不碰缓存，也不做数据复制。
  *
  * 缓存名带构建号（__BUILD_ID__ 在构建时被替换）：新版本装好并激活后旧缓存整体删除，
  * 避免旧 HTML 去引用已被删除的旧 chunk。
@@ -97,15 +97,15 @@ self.addEventListener('message', (event) => {
 /**
  * Background Sync：断网期间页面登记了这个 tag，浏览器在恢复联网后把 SW 唤醒。
  *
- * 这里只催服务端聚合（一个 202 就返回的 POST），**不**在 SW 里跑 PouchDB 复制。
+ * 这里只催服务端抓取（一个 202 就返回的 POST），**不**在 SW 里跑 PouchDB 复制。
  * 不是做不到（PouchDB 的 idb/http 适配器在 SW 里能跑），而是代价不值得：
  *   - 写进 IndexedDB 后页面不知道：PouchDB 的 changes 靠 localStorage 的 storage 事件唤醒，
  *     那个事件不投递给 SW。复制完了开着的列表也不会更新，除非再搭一条 BroadcastChannel 通知链；
  *   - 页面往往也开着，两边各挂一条 live 复制写同一个库的 checkpoint，PouchDB 没有跨上下文互斥；
  *   - sync 事件只给几十秒、可被随时掐断，半路停下时 waitUntil 既不 resolve 也不 reject，
  *     浏览器判断不了成败，重试语义就乱了。
- * 服务端本来就每 5 分钟给所有非休眠用户跑一轮（TIMELINE_INTERVAL），这一下只是把用户
- * 断网期间错过的那一轮提前。派生库写好之后，页面下次打开 live 复制一次就补齐。
+ * 服务端本来就按 FETCH_INTERVAL（默认 15 分钟）调度一轮，这一下只是把用户断网期间
+ * 错过的那一轮提前。用户库写好之后，页面下次打开 live 复制一次就补齐。
  *
  * 失败要**抛出去**（= 让 event.waitUntil 的 Promise reject）：那是浏览器自己的重试信号，
  * 它按指数退避再试。吞掉异常等于「这次断网白登记了」，而下次断网可能很久以后。
@@ -208,9 +208,9 @@ async function runBackgroundSync(lastChance) {
     throw new Error(`[SW] 后台同步失败（HTTP ${res.status}）`)
   }
 
-  await logBackgroundSync('sync-ok', '后台同步完成，服务端已聚合一轮')
+  await logBackgroundSync('sync-ok', '后台同步完成，服务端已抓取一轮')
 
-  // 页面可能开着（被冻结）：告诉它服务端已经聚合过一轮，走与 online 相同的恢复路径
+  // 页面可能开着（被冻结）：告诉它服务端已经抓取过一轮，走与 online 相同的恢复路径
   const clients = await self.clients.matchAll({ includeUncontrolled: true, type: 'window' })
   for (const client of clients) client.postMessage({ type: BACKGROUND_SYNC_DONE })
 }
