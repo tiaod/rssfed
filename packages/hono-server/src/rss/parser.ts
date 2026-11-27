@@ -513,11 +513,6 @@ function rememberRoute(host: string, prefer: "proxy" | "direct"): void {
   if (host) routeMemos.set(host, { prefer, at: Date.now() })
 }
 
-/** 测试用：清空路由记忆（生产不需要调用） */
-export function clearRouteMemo(): void {
-  routeMemos.clear()
-}
-
 /**
  * 按「该域名的路由记忆 → 网络级失败再切另一条」的顺序取一次 URL，取数逻辑交给 request(useProxy)。
  *

@@ -195,12 +195,11 @@ function keyTime(key: unknown): string | undefined {
  */
 export async function recomputeOwnerRetention(
   dbName: string,
-  options: { dryRun?: boolean, now?: Date, maxSources?: number } = {},
+  options: { dryRun?: boolean, maxSources?: number } = {},
 ): Promise<{ sources: number, changed: number, shrunk: number, trimmed: number }> {
   const schedule = await readSchedule(dbName).catch(() => null)
   const sources = schedule?.sources ?? {}
   const feedIds = Object.keys(sources)
-  const now = options.now ?? new Date()
   const result = { sources: 0, changed: 0, shrunk: 0, trimmed: 0 }
 
   const limited = options.maxSources ? feedIds.slice(0, options.maxSources) : feedIds
@@ -216,11 +215,8 @@ export async function recomputeOwnerRetention(
     if (next < (previous ?? DEFAULT_SOURCE_RETENTION_ENTRIES)) result.shrunk += 1
     if (options.dryRun) continue
 
-    sources[feedId] = {
-      ...sources[feedId],
-      retentionEntries: next,
-      retentionComputedAt: now.toISOString(),
-    }
+    // 只写 N：没有"上次算的时刻"字段 —— 跳过重算靠的是 next === previous 这个比较本身
+    sources[feedId] = { ...sources[feedId], retentionEntries: next }
     // 缩小 N 时立刻裁：否则要等到下一次抓取这个源才会收敛
     if (next < (previous ?? DEFAULT_SOURCE_RETENTION_ENTRIES)) {
       try {

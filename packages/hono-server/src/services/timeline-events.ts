@@ -40,20 +40,18 @@ export const TIMELINE_EVENT_KEEP = 2000
  */
 export const FETCH_ROUND_MERGE_WINDOW_MS = 2 * 60_000
 
-/**
- * 流水类型。
- *
- * 新模型只有 `fetch`（一轮抓取）。旧模型写过的 `reconcile` / `rebuild` / `source-sync` /
- * `error` 仍在库里，客户端按原标签显示（汇聚 / 重建 / 首搬 / 失败），但服务端不再产生 ——
- * 没有派生库可重建、没有逐源搬运。所以读出来的 `kind` 是 string，不设闭集。
- */
-export type TimelineEventKind = "fetch"
-export type TimelineEventLevel = "info" | "warn" | "error"
-
 export interface TimelineEventRow {
   id: number
   at: Date
+  /**
+   * 流水类型。新模型只写 `fetch`（一轮抓取）。
+   *
+   * 旧模型写过的 `reconcile` / `rebuild` / `source-sync` / `error` 仍在库里，客户端按原标签
+   * 显示（汇聚 / 重建 / 首搬 / 失败），但服务端不再产生 —— 没有派生库可重建、没有逐源搬运。
+   * 所以这里是 `string` 而不是闭集：读到老行要能原样透出。
+   */
   kind: string
+  /** info / warn / error（同样是 string：老行不会有新取值，但也不该让读取侧崩掉） */
   level: string
   message: string
   /** 结构化补充（数字/源 id 等），客户端可以展开看 */

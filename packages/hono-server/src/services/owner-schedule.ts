@@ -43,8 +43,6 @@ export interface SourceScheduleEntry {
   hasValidators?: boolean
   /** 该源在这个库里保留多少条（自适应算出；null/缺失 = 全局默认） */
   retentionEntries?: number | null
-  /** 上次算保留条数的时刻（每日任务用，避免每轮重算） */
-  retentionComputedAt?: string
   /** 用户暂停了这条订阅（镜像订阅文档的 paused，供调度快速判断） */
   paused?: boolean
 }

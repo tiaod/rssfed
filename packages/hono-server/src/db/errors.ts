@@ -11,14 +11,3 @@ export function isUniqueViolation(err: unknown): boolean {
   const e = err as { code?: string, cause?: { code?: string } } | null | undefined
   return e?.code === "23505" || e?.cause?.code === "23505"
 }
-
-/**
- * 命中的唯一约束名（如 `feeds_url_unique`）。
- *
- * 一张表可能有多条唯一约束（`feeds` 有 url 与 couch_db_name），只知道「撞了唯一约束」
- * 没法给用户可读提示，得靠它区分到底撞的是哪一个。
- */
-export function uniqueViolationConstraint(err: unknown): string | null {
-  const e = err as { constraint_name?: string, cause?: { constraint_name?: string } } | null | undefined
-  return e?.constraint_name ?? e?.cause?.constraint_name ?? null
-}
