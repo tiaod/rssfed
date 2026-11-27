@@ -402,37 +402,55 @@ compose 里这两条 bind 现在是长语法 + `create_host_path: false`：源�
 所有人重新注册。要保留账号与 Bot 走的是另一条路（`scripts/backfill-subscription-urls.ts` 补 url，
 再 `reset-to-owner-model.ts` 清旧库），本文不展开。
 
-**顺序很关键**：先让 master 带上新版本、等 CI 把 `deploy/release.env` 写成新 sha，再清空 —— 否则
-doco-cd 会拿旧镜像重新拉起一个空库，你还得再来一遍。
+**顺序很关键：先 push，后清数据。反过来的话，push 之前 master 还指在旧版本上，doco-cd 会先把
+旧代码拉到空库上跑起来** —— 那段时间注册出来的账号、订阅出来的源都是旧格式（订阅文档没有 `url`），
+等新版本上来还得再清一遍。
 
-> 中间会出现**两次部署**，都正常：push 一落地 doco-cd 就先按**旧的** `release.env` 部署了一次
-> （镜像还是上一版，`migrate` 也是旧 schema，对老数据没有破坏动作）；约 4 分钟后 CI 把
-> `release.env` 改成新 sha，它再部署一次，这次才是新的 `migrate` + 新镜像。
-> 等 `deploy/release.env` 里出现新的 `sha-` 且 `docker compose ... ps` 全是新容器，再往下走。
+清数据之前先**把 doco-cd 停掉**（只停部署器，应用容器照常跑着，站点不停）：
+
+- 不停它：push 一落地它就会先按**旧的** `release.env` 部署一次（旧镜像 + 旧 `migrate`），
+  等 CI 约 4 分钟后写完新 sha 再部署一次 —— 中间新代码会先跑在**旧数据**上；
+- 停了它：新代码第一次启动面对的就是空库，`migrate` 直接建出新 schema，没有中间态。
+
+所以完整顺序是「停 doco-cd → push → 等新 sha → 清卷 → 拉起 doco-cd」。
 
 ```bash
+# ── 服务器上，push 之前 ──
+cd ~/rssfed
+docker compose -f doco-cd.yml down
+docker compose --env-file .env.production -f docker-compose.prod.yml ps   # 应用仍在跑,站点没停
+```
+
+```bash
+# ── 本地 ──
+git push origin master
+# 等 CI 构建完（约 4 分钟）。构建成功才会由 record-release 往 master 提交新指针：
+git fetch origin && git log -1 --oneline origin/master
+# 要看到「chore(deploy): 记录镜像版本 sha-<新 hash> [skip ci]」，且 hash 不是上一次那个
+```
+
+```bash
+# ── 服务器上，指针落地之后 ──
 cd ~/rssfed
 
-# ① 先停 doco-cd：它每 180s 轮询一次，且会监听 unhealthy 事件重启容器。
-#    不停它的话，你在删卷的同时它可能把 stack 又拉起来（删到一半的卷最难收拾）。
-docker compose -f doco-cd.yml down
-
-# ② 停应用栈（down 不带 -v：先只停容器，卷留给我们逐个显式删）
+# ① 停应用栈（down 不带 -v：先只停容器，卷留给我们逐个显式删）
+#    这里**故意不加 --profile tls**：caddy 属于 tls profile，不带它就不会被动到，
+#    证书文件留在 caddy-data 里、不清空也就不会触发重新签发（维护窗口内它只是回 502，无副作用）
 docker compose --env-file .env.production -f docker-compose.prod.yml down
 
-# ③ 确认要删的卷名（project 名是 rssfed-prod，别凭记忆手打）
+# ② 确认要删的卷名（project 名是 rssfed-prod，别凭记忆手打）
 docker volume ls | grep rssfed-prod
 
-# ④ 删数据卷。四个必须删：pg / couchdb / redis / uploads
+# ③ 删数据卷。四个必须删：pg / couchdb / redis / uploads
 docker volume rm rssfed-prod_postgres-data rssfed-prod_couchdb-data \
                  rssfed-prod_redis-data     rssfed-prod_uploads-data
 # 用过 s3 后端再补一个：docker volume rm rssfed-prod_seaweedfs-data
 
-# ⑤ 确认 .env.production 里 ADMIN_EMAIL / ADMIN_PASSWORD 是设置好的
+# ④ 确认 .env.production 里 ADMIN_EMAIL / ADMIN_PASSWORD 是设置好的
 #    账号表也是空的 —— 没有引导管理员就没人进得去后台
 grep -E '^(ADMIN_EMAIL|ADMIN_PASSWORD)=' .env.production
 
-# ⑥ 拉起 doco-cd，它会按 release.env 的 sha 重新部署（migrate 建全新的空表）
+# ⑤ 拉起 doco-cd，它按 release.env 的 sha 部署新版本，migrate 建全新的空表
 docker compose -f doco-cd.yml up -d
 ```
 
