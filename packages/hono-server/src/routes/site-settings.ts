@@ -86,7 +86,8 @@ function normalizeUpdate(body: unknown): NormalizedUpdate {
   }
 
   // ── PWA 字段（校验规则与 pwa/manifest.ts 的读取期回退一致） ──────────────
-  const { pwaShortName, pwaDisplay, pwaThemeColor, pwaBackgroundColor } = src
+  // 两个颜色字段走下面的循环（读的是 src[key]），不在这里解构
+  const { pwaShortName, pwaDisplay } = src
   if (pwaShortName !== undefined) {
     if (pwaShortName === null) patch.pwaShortName = null
     else if (typeof pwaShortName !== "string"
