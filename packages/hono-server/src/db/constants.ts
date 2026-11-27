@@ -1,6 +1,8 @@
 // CouchDB 库名仅允许小写字母/数字及 _ $ ( ) + - /，冒号非法
-// 前缀与随机部分用下划线分隔，避免与前缀内部的连字符混淆（user-timeline_xxx / feed_xxx）
-export const COUCHDB_FEED_PREFIX = "feed_"
+// 前缀与随机部分用下划线分隔，避免与前缀内部的连字符混淆（user-timeline_xxx / bot_xxx）
+//
+// 旧模型的共享源库前缀 `feed_` 已不存在：那一批库由 `scripts/reset-to-owner-model.ts`
+// 整体删除，抓取改为按 owner 直接写各自的库。该脚本自己持有 `feed_` 字面量用于清理存量。
 export const COUCHDB_BOT_PREFIX = "bot_"
 /**
  * 每用户的库前缀：一个用户一个库，里面既有服务端按订阅聚合出的条目，
