@@ -405,6 +405,11 @@ compose 里这两条 bind 现在是长语法 + `create_host_path: false`：源�
 **顺序很关键**：先让 master 带上新版本、等 CI 把 `deploy/release.env` 写成新 sha，再清空 —— 否则
 doco-cd 会拿旧镜像重新拉起一个空库，你还得再来一遍。
 
+> 中间会出现**两次部署**，都正常：push 一落地 doco-cd 就先按**旧的** `release.env` 部署了一次
+> （镜像还是上一版，`migrate` 也是旧 schema，对老数据没有破坏动作）；约 4 分钟后 CI 把
+> `release.env` 改成新 sha，它再部署一次，这次才是新的 `migrate` + 新镜像。
+> 等 `deploy/release.env` 里出现新的 `sha-` 且 `docker compose ... ps` 全是新容器，再往下走。
+
 ```bash
 cd ~/rssfed
 
