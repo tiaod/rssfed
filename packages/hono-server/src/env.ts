@@ -26,11 +26,3 @@ export function envInt(
   if (!Number.isFinite(parsed) || parsed < min || parsed > max) return fallback
   return parsed
 }
-
-/** 把毫秒数格式化成紧凑可读形式（启动日志用） */
-export function formatDuration(ms: number): string {
-  if (ms >= 3_600_000 && ms % 3_600_000 === 0) return `${ms / 3_600_000}h`
-  if (ms >= 60_000 && ms % 60_000 === 0) return `${ms / 60_000}m`
-  if (ms >= 1000 && ms % 1000 === 0) return `${ms / 1000}s`
-  return `${ms}ms`
-}
