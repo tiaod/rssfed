@@ -175,11 +175,16 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
   pnpm exec drizzle-kit push --verbose
 ```
 
+**切到「按 owner 直接抓」模型那一次**（2026-11）是更大的一刀：`migrate` 会 DROP 掉 `feeds` 与
+`timeline_source_sync` 两张表，以及 `bot_feeds.paused` / `last_processed_entry_id` 两列。
+如果按 [「换数据模型上线」](#换数据模型上线清空线上数据重来) 清空数据卷重来，这些表本来就是空的，
+`push` 无损失；**不清数据而直接升级**则等于静默丢弃旧的源表与水位表 —— 那种情况必须先读那一节。
+
 ## 6. 运维备注
 
 - **部署目录要带 `deploy/`**：compose 会挂载 `deploy/couchdb-proxy-auth.ini` 到 CouchDB 的 `local.d/`（缺了它 CouchDB 不会挂载 proxy 认证 handler，`/api/couchdb/proxy/*` 全部 401，前端看不到订阅内容，见 [troubleshooting](troubleshooting.md)）。手工同步文件的部署方式（只 scp `docker-compose.prod.yml` + `.env.production`）必须连 `deploy/` 目录一起传，否则容器起不来或功能残缺。注意这个挂载**不能加 `:ro`**（entrypoint 会 chown，只读挂载会让容器无日志 exit 1），而且容器首次启动后宿主机的该文件属主会变成 `couchdb(5984)`，后续更新它要用 `sudo`。
 - **单副本**：抓取调度与 BotKit 轮询是进程内 `setInterval`，worker 与 API 同进程。`server` 不要 `--scale` 超过 1，否则会重复入队、重复发布 ActivityPub 活动。
-- **持久化**：`postgres-data`、`couchdb-data`、`redis-data`、`seaweedfs-data`、`caddy-data` 五个命名卷必须纳入备份。CouchDB 每个订阅源一个库，是数据主体，别只备份 PostgreSQL；`seaweedfs-data` 存的是正文图片与头像附件。
+- **持久化**：`postgres-data`、`couchdb-data`、`redis-data`、`uploads-data`、`seaweedfs-data`、`caddy-data` 六个命名卷必须纳入备份。CouchDB 是数据主体（每个用户一个 `user-timeline_*` 库），别只备份 PostgreSQL；`uploads-data`（`STORAGE_DRIVER=fs`）与 `seaweedfs-data`（s3）存的是头像 / Bot 头像 / 站点 logo。
 - **日志**：compose 里统一配了 `json-file` 轮转（单文件 10MB × 3）。要集中收集就改 `x-logging` 锚点，或把 `docker logs` 接到 Loki/CloudWatch。
 - **更新发布**：push 到 master 后 CI 构建并推送镜像，然后在服务器执行 `docker compose --env-file .env.production -f docker-compose.prod.yml pull && docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build` —— 镜像没变时 `up -d` 不会重建容器，变了则会先跑 migrate 再滚动应用。回滚方式见第 10 节。
 - **构建缓存**：镜像分层与 pnpm store 都走 BuildKit 缓存，首次构建后再次构建很快。缓存占用的磁盘可用 `docker builder prune` 回收（代价是下次构建重新下载依赖）。
@@ -381,6 +386,90 @@ ssh ubuntu@<服务器> 'sudo cp /tmp/couchdb-*.ini /home/ubuntu/rssfed/deploy/ &
 ```
 
 compose 里这两条 bind 现在是长语法 + `create_host_path: false`：源不存在时部署**硬失败**（`bind source path does not exist`），不会再悄悄建目录。看到这条报错就是上面这步没做。
+
+### 换数据模型上线：清空线上数据重来
+
+> **一次性操作**（2026-11 那次「共享源库 + 复制扇出」→「按 owner 直接写用户库」）。日常发布不需要看这一节。
+
+这次合并把订阅抓取从「`feed_*` 共享源库 + 复制扇出」换成「按 owner 直接写各自的用户库」，
+**旧数据不能平移**，硬迁只会留下一堆口径不一致的残留：
+
+- 旧订阅文档 `subscription:{feedId}` **没有 `url`**（地址当年在 PG `feeds` 表里），而新模型抓取完全依赖它 → 老订阅一律被抓取跳过；
+- `feed_*` 库、`_replicator` 残留任务、PG 的 `feeds` / `timeline_source_sync` 表在新模型里都不存在；
+- `bot_feeds.paused` / `last_processed_entry_id` 两列已从 schema 删除，`migrate` 会 DROP。
+
+所以要干净模型就**清空数据卷重来**。代价要说清：**账号、订阅、阅读记录、Bot 及其联邦身份（私钥）全部归零**，
+所有人重新注册。要保留账号与 Bot 走的是另一条路（`scripts/backfill-subscription-urls.ts` 补 url，
+再 `reset-to-owner-model.ts` 清旧库），本文不展开。
+
+**顺序很关键**：先让 master 带上新版本、等 CI 把 `deploy/release.env` 写成新 sha，再清空 —— 否则
+doco-cd 会拿旧镜像重新拉起一个空库，你还得再来一遍。
+
+```bash
+cd ~/rssfed
+
+# ① 先停 doco-cd：它每 180s 轮询一次，且会监听 unhealthy 事件重启容器。
+#    不停它的话，你在删卷的同时它可能把 stack 又拉起来（删到一半的卷最难收拾）。
+docker compose -f doco-cd.yml down
+
+# ② 停应用栈（down 不带 -v：先只停容器，卷留给我们逐个显式删）
+docker compose --env-file .env.production -f docker-compose.prod.yml down
+
+# ③ 确认要删的卷名（project 名是 rssfed-prod，别凭记忆手打）
+docker volume ls | grep rssfed-prod
+
+# ④ 删数据卷。四个必须删：pg / couchdb / redis / uploads
+docker volume rm rssfed-prod_postgres-data rssfed-prod_couchdb-data \
+                 rssfed-prod_redis-data     rssfed-prod_uploads-data
+# 用过 s3 后端再补一个：docker volume rm rssfed-prod_seaweedfs-data
+
+# ⑤ 确认 .env.production 里 ADMIN_EMAIL / ADMIN_PASSWORD 是设置好的
+#    账号表也是空的 —— 没有引导管理员就没人进得去后台
+grep -E '^(ADMIN_EMAIL|ADMIN_PASSWORD)=' .env.production
+
+# ⑥ 拉起 doco-cd，它会按 release.env 的 sha 重新部署（migrate 建全新的空表）
+docker compose -f doco-cd.yml up -d
+```
+
+doco-cd 是按「容器上有没有 `cd.doco.*` 标签」判断偏离的，容器已被删掉 ⇒ 它一定会重新部署，
+不需要额外推一个空提交。如果 5 分钟还没动静（先 `docker compose -f doco-cd.yml logs --tail=100`），
+用第 10 节的手工兜底把栈拉起来：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml pull
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-build
+```
+
+注意手工兜底**不带 `deploy/release.env`**，镜像会退回 `latest` tag；想钉住版本就加
+`--env-file deploy/release.env`（后加载的覆盖先加载的）。
+
+两个**别顺手做**的动作：
+
+- **不要 `down -v`**。它会连 `caddy-data` / `caddy-config` 一起删 —— 证书重签不说，Let's Encrypt
+  有每周同域名签发上限，反复清空很容易撞上。上面这四条卷名是你唯一该删的东西。
+- **不要手工删 `_replicator` / `_users` 库**。`couchdb-data` 整个换新之后它们是空库，不需要清；
+  中途去动反而可能破坏 proxy auth 的启动配置。
+
+清完之后验收：
+
+```bash
+# 该有的容器都 healthy；migrate 是一次性任务，看到 Exited (0) 才是对的
+docker compose --env-file .env.production -f docker-compose.prod.yml ps
+curl -s https://<域名>/api/health                                        # {"status":"ok"}
+
+# 账号表只剩引导创建的那一个管理员
+docker compose --env-file .env.production -f docker-compose.prod.yml exec -T postgres \
+  psql -U rssfed -d rssfed -c 'select count(*) from "user";'
+
+# CouchDB 应该只有 _users（没有 user-timeline_* / bot_* / feed_*）。
+# 生产编排不把 5984 映射到宿主，所以要在容器里问；凭证从容器自己的环境里取。
+docker compose --env-file .env.production -f docker-compose.prod.yml exec -T couchdb \
+  sh -c 'curl -s -u "$COUCHDB_USER:$COUCHDB_PASSWORD" http://127.0.0.1:5984/_all_dbs'
+```
+
+浏览器那侧不用管：用户库名是随机生成的（`user-timeline_<随机>`），客户端发现远端库名变了就会
+丢掉本地镜像整份重拉（`lastTimelineUrlKey`）；重新注册的账号连本地库名都不同（按 userId 隔离），
+不会串到旧数据上。
 
 ### 首次接管现有 stack
 
