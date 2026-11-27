@@ -411,8 +411,9 @@ export async function ensureTimelineDatabase(userId: string): Promise<string> {
  * **另起一个**用户库并接管该用户（`ensureTimelineDatabase` 走的是"有就复用"）。
  *
  * 只在「档案损坏、需要从零开始」时用：新库是空的，客户端发现远端库名变了会丢掉本地镜像
- * 重拉一遍（见 nuxt-client 的 lastTimelineUrlKey）。用户自己写过的订阅与已读收藏
- * 由调用方通过 `rederiveUserTimeline` 搬过去。
+ * 重拉一遍（见 nuxt-client 的 lastTimelineUrlKey）。用户自己写过的订阅与已读收藏需要
+ * 由调用方显式搬过去 —— 目前唯一的调用方 `scripts/reset-user-timelines.ts` 刻意不搬
+ * （它的语义就是"清空重来、用户自己重新导入 OPML"）。
  *
  * 注意与旧模型的区别：现在用户库**就是唯一真相**，换库等于丢掉已抓内容 ——
  * 只能靠重新抓 RSS 补回来（发布方当前还列着哪些就补哪些）。所以这条路是"抢救"而不是"重建"。

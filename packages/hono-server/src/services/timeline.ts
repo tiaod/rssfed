@@ -1,12 +1,12 @@
 import type { DocumentScope } from "nano"
 import { eq } from "drizzle-orm"
 import { db, userTimelineSettings, type NewUserTimelineSettings } from "../db"
-import { createCouchDb, createTimelineDatabase, ensureTimelineDatabase } from "../couchdb/client"
+import { createCouchDb, ensureTimelineDatabase } from "../couchdb/client"
 import { buildPurgeBody, countPurged, purgeRequest } from "../couchdb/retention"
 import { dropSourceSchedule } from "./owner-schedule"
 
 /**
- * 用户时间线的服务层：设置、退订清理、换库。
+ * 用户时间线的服务层：设置、退订清理、等同步。
  *
  * ## 与旧版本的根本差别
  *
@@ -18,8 +18,10 @@ import { dropSourceSchedule } from "./owner-schedule"
  *
  *   1. 每用户设置（AI 摘要开关等）；
  *   2. **退订清理**：把某源的订阅文档、条目、FeedDoc 副本、调度状态一起清掉；
- *   3. **换库**：档案损坏时另起一个空库，用户状态文档搬过去。**目前只有脚本在用**
- *      （`scripts/reset-user-timelines.ts`），没有路由入口。
+ *   3. **等同步**：`wait=1` 的手动刷新用它判断"这一轮到底进来了几条"。
+ *
+ * 换库（抢救档案损坏的用户）不在这一层：唯一入口是 `scripts/reset-user-timelines.ts`，
+ * 它调 `couchdb/client.ts` 的 `createTimelineDatabase` 直接换空库（不搬用户状态）。
  *
  * ## 一条必须成立的性质
  *
@@ -176,69 +178,6 @@ export async function purgeSubscriptionContent(
   await dropSourceSchedule(dbName, feedId)
 
   return result
-}
-
-// ── 换库（抢救） ──
-
-/** 换库时每批搬运的文档数（`_all_docs` 一页 + `_bulk_docs` 一次） */
-const INTENT_COPY_BATCH = 500
-/** 换库时最多搬多少页（每页 500，够一个用户的订阅 + 已读收藏量级） */
-const INTENT_COPY_MAX_PAGES = 400
-
-/**
- * 用户自己写的文档要不要搬？—— 服务端抓取产物**不搬**，用户状态搬。
- *
- * 判据是 `_id` 前缀而不是 `type`：墓碑没有 type 字段，而删除也要跟着走
- * （否则新库里会复活已被删掉的订阅/已读记录）。
- */
-function shouldCopyToNewDb(id: string): boolean {
-  return id.startsWith("subscription:")
-    || id.startsWith("entry-state:")
-    || id.startsWith("group-pref:")
-}
-
-/**
- * 另起一个空库并把用户状态文档搬过去，返回新库名。
- *
- * 只在「档案损坏、需要从零开始」时用。与旧模型的区别：抓取产物不再从别处搬
- * （没有源库了），所以新库里一开始**没有条目**，要等下一轮抓取才慢慢填回来。
- * 这是抢救场景的已知代价。
- *
- * **当前没有任何调用方**：一次性迁移用 `scripts/reset-user-timelines.ts`（它自己调
- * `createTimelineDatabase` 换库），路由层的「清空并重建」入口已随旧模型删除。
- * 留着是因为它是唯一能在进程内换库的实现，真要抢救时不必重写；但别以为有现成按钮。
- */
-export async function rederiveUserTimeline(userId: string, oldDbName: string): Promise<string> {
-  const newDbName = await createTimelineDatabase(userId)
-  const oldScope = createCouchDb(oldDbName)
-  const newScope = createCouchDb(newDbName)
-
-  for (let page = 0; page < INTENT_COPY_MAX_PAGES; page++) {
-    let rows: Array<{ id: string, doc?: Record<string, unknown> }>
-    try {
-      const res = await oldScope.list({
-        include_docs: true,
-        limit: INTENT_COPY_BATCH,
-        ...(page === 0 ? {} : { skip: page * INTENT_COPY_BATCH }),
-      })
-      rows = res.rows as Array<{ id: string, doc?: Record<string, unknown> }>
-    } catch {
-      break
-    }
-    const docs = rows
-      .filter((row) => shouldCopyToNewDb(row.id))
-      .map((row) => {
-        const doc = row.doc ?? {}
-        // 去掉修订相关字段：新库里这些是**新文档**（不是修订谱系的一部分）
-        const { _rev: _rev, _revisions: _revisions, ...rest } = doc
-        return rest
-      })
-    if (docs.length > 0) {
-      await newScope.bulk({ docs } as never).catch(() => {})
-    }
-    if (rows.length < INTENT_COPY_BATCH) break
-  }
-  return newDbName
 }
 
 export async function readTimelineUpdateSeq(userId: string): Promise<string | number> {
