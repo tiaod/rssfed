@@ -8,7 +8,7 @@
  *
  * 会话尚未就绪或未登录时落到 `guest`：这段时间写入的数据不会被任何账号继承。
  *
- * 服务端聚合 + 单库方案下本地也只有**一个**库：远端那一个库（条目 + 源元信息 +
+ * 单库方案下本地也只有**一个**库：远端那一个库（条目 + 源元信息 +
  * 订阅/已读收藏）整份同步下来，条目只读、状态可写。
  *
  * 名字沿用 `rssfed-timeline-<userId>` 而不是改成 `rssfed-user-*`：改名等于换库，
@@ -30,17 +30,6 @@ export function localDbAccountKey(userId: string | null | undefined): string {
 /** 本地 PouchDB 库名，如 rssfed-timeline-<userId>（每账号一个，装整个用户库） */
 export function localDbName(userId: string | null | undefined): string {
   return `rssfed-timeline-${localDbAccountKey(userId)}`
-}
-
-/**
- * 会话内「上次催促服务端聚合」的时间戳（localStorage，按账号隔离）。
- *
- * 只用来给「进入页面时催一次服务端聚合」节流，语义上是**提示性的**：
- * 丢了最多多催一次，催了也只是一次入队请求（服务端的增量判断会立刻返回），
- * 所以不需要任何一致性保证。
- */
-export function lastTimelineRefreshKey(userId: string | null | undefined): string {
-  return `rssfed-timeline-refresh-${localDbAccountKey(userId)}`
 }
 
 /**
@@ -130,4 +119,19 @@ export const LEGACY_LOCAL_STORAGE_PREFIXES = [
 /** 是否为要清理的历史 localStorage 键（含带账号后缀的形式） */
 export function isLegacyLocalStorageKey(key: string): boolean {
   return LEGACY_LOCAL_STORAGE_PREFIXES.some(prefix => key === prefix || key.startsWith(`${prefix}-`))
+}
+
+/**
+ * 「催促节流」的键前缀 —— 该机制已删除（唯一入口现在每次进列表都催，不再节流）。
+ *
+ * 与上面那批不同：它是**本版本刚废弃**的，存量浏览器里已经写下了
+ * `rssfed-timeline-refresh-<account>`，而迁移标记（v5）早就打过、不会再跑。
+ * 所以清理走「每次启动扫一遍、命中就删」——键很少（每账号一个、几十字节），
+ * 无条件扫的成本可以忽略。
+ */
+export const OBSOLETE_REFRESH_THROTTLE_PREFIX = 'rssfed-timeline-refresh'
+
+/** 是否为已废弃的催促节流键（含带账号后缀的形式） */
+export function isObsoleteRefreshThrottleKey(key: string): boolean {
+  return key === OBSOLETE_REFRESH_THROTTLE_PREFIX || key.startsWith(`${OBSOLETE_REFRESH_THROTTLE_PREFIX}-`)
 }

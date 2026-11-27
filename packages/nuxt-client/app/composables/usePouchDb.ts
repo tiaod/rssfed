@@ -16,10 +16,10 @@ import {
   lastTimelineTrimKey,
   lastTimelineUrlKey,
   localDbName,
-  lastTimelineRefreshKey,
   LEGACY_LOCAL_DB_NAMES,
   isLegacyLocalDbName,
   isLegacyLocalStorageKey,
+  isObsoleteRefreshThrottleKey,
   stripPouchNamePrefix
 } from '~/utils/localDbName'
 import {
@@ -194,7 +194,7 @@ function isValidDbId(id: unknown): id is string {
   return true
 }
 
-/** 用户库里的 feed 文档（订阅源元信息，服务端聚合时写入） */
+/** 用户库里的 feed 文档（订阅源元信息，抓取时写入） */
 interface FeedDoc {
   _id: string
   _rev: string
@@ -208,7 +208,7 @@ interface FeedDoc {
   imageCached?: { attachment?: string }
 }
 
-/** 用户库里的条目文档（服务端聚合产物，本地只读） */
+/** 用户库里的条目文档（服务端抓取产物，本地只读） */
 interface EntryDoc {
   _id: string
   _rev?: string
@@ -284,7 +284,7 @@ type NuxtAppWithPouchState = ReturnType<typeof useNuxtApp> & { $pouchDbState?: P
 /**
  * PouchDB 共享状态：通过 nuxtApp 单例化，确保所有组件使用同一份实例与同步状态。
  *
- * 单库架构：每个用户在服务端只有**一个**库（`user-timeline_*`），里面既有服务端聚合出的
+ * 单库架构：每个用户在服务端只有**一个**库（`user-timeline_*`），里面既有服务端抓进来的
  * 条目与源元信息，也有客户端自己的订阅与已读/收藏。浏览器把它整份同步到本地一个库
  * （rssfed-timeline-<uid>）：
  *   - 拉取（pull，live）：条目 + 附件 + 状态，一路进来；
@@ -490,7 +490,7 @@ const STATE_PUSH_ID = '__state_push__'
  *
  * 挡掉三类：
  *   - `_design/*`：本地库里的视图/索引设计文档（客户端自己装的），服务端既不需要也不允许写；
- *   - `entry:*` / `feed:*`：服务端聚合产物。推上去也会被服务端的 validate_doc_update 拒掉，
+ *   - `entry:*` / `feed:*`：服务端抓取产物。推上去也会被服务端的 validate_doc_update 拒掉，
  *     但那样每次同步都白跑一趟并刷出 403，不如在源头就过滤掉。
  *
  * **按 `_id` 前缀判断，不能按 `type`**：删除文档只剩 `_id` 与 `_deleted`，`type` 是 undefined，
@@ -653,7 +653,7 @@ export function usePouchSyncStatus(): Readonly<Record<string, SyncStatus>> {
 export function usePouchDb() {
   // 代理地址里的库名由后端下发（随机库名，无法推导），见 useCouchTargets
   const { remoteUrlForId, invalidate: invalidateTargets } = useCouchTargets()
-  // 只用于「催一次服务端聚合」（api.timeline.refresh）：订阅集合不再由客户端逐个比对，
+  // 只用于「催一次服务端抓取」（api.timeline.refresh）：订阅集合不再由客户端逐个比对，
   // 所以这里不读订阅列表，也不存在按 feeds.lastNewEntryAt 判断增量这回事
   const api = useApi()
   // 本地库按账号隔离，需要当前登录用户（惰性取 store：usePouchDb 也可能在异步回调里被调用）
@@ -670,8 +670,7 @@ export function usePouchDb() {
    * 迁移清理的幂等入口：每会话最多跑一次，重复调用复用同一个 Promise。
    *
    * 注意它**不保证**「已经跑完」——`getEntriesDb()` 不再 await 它（见 scheduleIdleCleanup）。
-   * 需要「清理确实做完了」的地方（`syncFeedsIfChanged`：旧库还占着空间且结构与新版不兼容）
-   * 自己 await 这个返回值。
+   * 需要「清理确实做完了」的地方自己 await 这个返回值。
    */
   function ensureCleanup() {
     if (!pouchState.cleanupPromise) pouchState.cleanupPromise = cleanupLegacyDbs()
@@ -682,7 +681,7 @@ export function usePouchDb() {
    * 暂停同步（左下角指示器在「正在同步」时点击）：停掉**拉取**通道，
    * 并阻止新的复制/催促发起，直到用户点同步恢复。
    *
-   * 只作用于拉取（服务端聚合结果 → 本地）；状态回写通道不动：
+   * 只作用于拉取（服务端抓取结果 → 本地）；状态回写通道不动：
    * 它是已读/收藏的实时通道，暂停拉取新条目不该顺带停掉状态回写。
    *
    * 被中断的库状态归位为 idle：UI 上不再是「同步中」（顶部进度条随之消失），
@@ -702,8 +701,6 @@ export function usePouchDb() {
   /** 恢复同步：清除暂停标记、重新挂上 live 复制（syncNow 也会调用它） */
   function resumeSync() {
     pouchState.paused.value = false
-    // 暂停期间攒下的变化要尽快拿到：清掉催促节流，让恢复后的第一次催立即发出去
-    saveLastRefreshAt(0)
     // 用户显式要求恢复：不受「上次挂载失败」的退避约束
     pouchState.timelineSyncRetryAt = 0
     void ensureTimelineLiveSync()
@@ -754,7 +751,6 @@ export function usePouchDb() {
     // 存储故障也一并清掉 —— 新账号可能对应另一套（更小的）本地库，值得重新尝试
     pouchState.paused.value = false
     pouchState.storageBroken.value = null
-    // 「上次催促时间」按账号存：新账号的节流窗口要从它自己的记录起算（loadLastRefreshAt 会读）
   }
 
   /**
@@ -900,6 +896,18 @@ export function usePouchDb() {
         // 删除旧库（限时 3 秒，超时放弃）
         await destroyLegacyLocalDbs()
         localStorage.setItem('rssfed-central-migrated-v5', '1')
+      }
+
+      // 已废弃的催促节流键：无条件清（机制删了，存量浏览器里还留着每账号一个）
+      try {
+        const obsolete: string[] = []
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i)
+          if (key && isObsoleteRefreshThrottleKey(key)) obsolete.push(key)
+        }
+        for (const key of obsolete) localStorage.removeItem(key)
+      } catch {
+        // localStorage 不可用时忽略
       }
 
       // 账号隔离前的固定库名：无条件清理（库不存在时 destroy 会报错，忽略即可）
@@ -1316,10 +1324,10 @@ export function usePouchDb() {
 
   // ── 同步引擎：同一个库上的两条 live 通道（拉取全量 / 回写状态） ──
   //
-  // 服务端聚合之后，浏览器不再逐源同步，因此**没有**一次性复制队列、没有增量水位表、
+  // 单库方案下，浏览器不再逐源同步，因此**没有**一次性复制队列、没有增量水位表、
   // 也没有同步窗口锚点：那三样东西存在的前提是「浏览器自己决定拉哪些源的哪些条目」，
-  // 而这个决定已经移到服务端。客户端只剩三个动作：
-  //   1. 催服务端聚合（POST /api/timeline/refresh，订阅/打开列表/手动同步时）；
+  // 而这个决定已经移到服务端（按 owner 直接抓进用户库）。客户端只剩三个动作：
+  //   1. 催服务端抓取（POST /api/timeline/refresh，打开列表/手动同步时）；
   //   2. 把用户库拉下来（服务端一写就到端，不需要客户端判断该不该拉）；
   //   3. 把本地写的状态文档推上去（只推状态，见 isClientWritableDoc）。
   //
@@ -1327,47 +1335,22 @@ export function usePouchDb() {
   // 状态机只有三档：syncing（有批次在写）/ idle（安静，已跟上服务端）/ error。
 
   /**
-   * 进入列表等场景催服务端聚合的最小间隔。
+   * 手动同步时等待「本轮抓取结果到达本地」的上限（毫秒）。
    *
-   * 催促只是把「服务端下一次定时抓取」提前；服务端本身每 FETCH_INTERVAL（默认 15 分钟）
-   * 调度一轮，所以不需要每次都打：1 分钟一次足以覆盖「连续切几个页面」的场景。
-   * 记在 localStorage（按账号隔离）而不是内存变量：用户反复刷新页面时同样受节流保护。
-   */
-  const REFRESH_THROTTLE_MS = 60_000
-
-  /**
-   * 手动同步时等待「服务端聚合结果到达本地」的上限（毫秒）。
-   *
-   * 服务端那一段（reconcile）由带 wait=1 的请求负责，这里等的是 live 复制把服务端刚写进去
-   * 的文档落到 IndexedDB。超时不算失败：复制没有取消，剩余内容随后自己到端（提示条会显示）。
+   * 服务端那一段由带 wait=1 的请求负责（它会等库安静下来并数出新增条数），这里等的是
+   * live 复制把服务端刚写进去的文档落到 IndexedDB。超时不算失败：复制没有取消，
+   * 剩余内容随后自己到端（提示条会显示）。
    */
   const TIMELINE_CATCHUP_WAIT_MS = 10_000
 
-  /** 上次催促服务端聚合的时间戳（localStorage，见 REFRESH_THROTTLE_MS） */
-  function loadLastRefreshAt(): number {
-    try {
-      return Number(localStorage.getItem(lastTimelineRefreshKey(pouchState.dbUserId))) || 0
-    } catch {
-      return 0
-    }
-  }
-
-  function saveLastRefreshAt(at: number) {
-    try {
-      localStorage.setItem(lastTimelineRefreshKey(pouchState.dbUserId), String(at))
-    } catch {
-      // localStorage 不可用时忽略：最坏结果是多催几次（服务端有 job 去重，多催无副作用）
-    }
-  }
-
   /**
-   * 催服务端聚合一次。
+   * 催服务端抓取一次。
    *
-   * wait=true 时服务端会在本请求里跑完一轮 reconcile 再返回（上限见服务端
+   * wait=true 时服务端会在本请求里等用户库安静下来再返回（上限见服务端
    * TIMELINE_REFRESH_WAIT_MS），于是「手动同步」能拿到确切的「本轮新增 N 条」；
    * wait=false 是即发即忘的 202（进入列表时用），数据靠 live 复制自己到端。
    *
-   * 失败一律静默（返回 null）：催促只是加速手段，服务端的定时任务与抓取完成通知都会兜底。
+   * 失败一律静默（返回 null）：催促只是加速手段，服务端自己的定时调度会兜底。
    */
   async function requestTimelineRefresh(wait: boolean): Promise<TimelineRefreshResult | null> {
     try {
@@ -1377,16 +1360,16 @@ export function usePouchDb() {
     }
   }
 
-  /** 带节流的催促（自动同步用）；返回本轮有没有真的发出请求 */
-  async function refreshServerTimeline(force = false): Promise<boolean> {
+  /**
+   * 催一次服务端抓取（即发即忘）；返回这一下有没有真的发出去。
+   *
+   * 没有节流：唯一的调用方是 `syncPriority`，而它只在**用户进入列表**时跑一次 ——
+   * 那正是最该催的时刻。多催一次无副作用（服务端按 owner 有 job 去重、调度本身也有间隔）。
+   */
+  async function refreshServerTimeline(): Promise<boolean> {
     if (pouchState.paused.value || pouchState.storageBroken.value) return false
-    // 离线短路：请求必然失败，不必等浏览器网络栈报错（调用方按「没催成功」处理）。
-    // 也**不**写节流时间戳 —— 恢复联网后要能立刻催一次，而不是被上一轮的失败记录挡住。
+    // 离线短路：请求必然失败，不必等浏览器网络栈报错（调用方按「没催成功」处理）
     if (isBrowserOffline()) return false
-    const now = Date.now()
-    if (!force && now - loadLastRefreshAt() < REFRESH_THROTTLE_MS) return false
-    // 先落盘再请求：并发调用都按「刚催过」处理（多催一次无副作用，少催才会慢）
-    saveLastRefreshAt(now)
     return (await requestTimelineRefresh(false)) !== null
   }
 
@@ -1426,8 +1409,8 @@ export function usePouchDb() {
   /**
    * 确保时间线库的 live 单向复制在跑（幂等）。
    *
-   * live + retry：服务端聚合出新条目后浏览器几秒内自动拿到，不需要用户点任何东西，
-   * 也不需要每次打开页面都决定「拉哪个源」—— 这正是服务端聚合改造要买到的东西。
+   * live + retry：服务端抓到新条目后浏览器几秒内自动拿到，不需要用户点任何东西，
+   * 也不需要每次打开页面都决定「拉哪个源」—— 这正是单库方案要买到的东西。
    *
    * restart=true 时先停掉旧句柄再重挂（本地库被重建 / 换账号之后用）。
    *
@@ -1734,36 +1717,6 @@ export function usePouchDb() {
   }
 
   /**
-   * 催一次服务端聚合（兼容旧调用点的轻量入口：以前是「把这个源加入复制队列」）。
-   *
-   * 不再接收源 id：服务端按它读到的订阅集合聚合，客户端指定单个源没有意义
-   * —— 而「刚订阅完希望立刻看到内容」正是「催一次」要买到的效果。
-   */
-  function syncFeed() {
-    void refreshServerTimeline(true)
-  }
-
-  /**
-   * 自动同步入口（列表页挂载时调用）。
-   *
-   * 以前这里按 feeds.lastNewEntryAt 逐个源判断「要不要复制」（还要读水位表与退避表），
-   * 现在这个判断在服务端（reconcile 内部一条 SQL 比完），客户端只做两件事：
-   * 确保 live 复制在跑、带节流地催一次聚合。
-   *
-   * `feeds` 只剩「没有订阅就短路」这一个用途（以及返回值里的订阅数）：
-   * 逐个源的字段一律不再读，调用方不必传 `lastNewEntryAt`。
-   */
-  async function syncFeedsIfChanged(feeds: ReadonlyArray<{ feedId: string }> = []): Promise<number> {
-    if (pouchState.paused.value) return 0
-    // 等迁移清理完成：旧本地库（rssfed-entries-*）还占着空间，且结构与新版不兼容
-    await ensureCleanup()
-    if (feeds.length === 0) return 0
-    await ensureTimelineLiveSync()
-    const requested = await refreshServerTimeline()
-    return requested ? feeds.length : 0
-  }
-
-  /**
    * 等「已同步条数」超过 before（首屏优先同步用，有界、不抛错）。
    *
    * **不再空等**：每轮轮询先看同步是否已经不可能推进 —— 离线 / 复制根本没挂上（挂载失败）/
@@ -1818,9 +1771,9 @@ export function usePouchDb() {
     if (isBrowserOffline()) return { done: false, added: current(), skipped: 1 }
 
     const started = Date.now()
-    const requested = await refreshServerTimeline(true)
+    const requested = await refreshServerTimeline()
     await ensureTimelineLiveSync()
-    // 催促没发出去（离线 / 登录过期 / 被节流）且复制没挂上：不可能有新内容到端了
+    // 催促没发出去（离线 / 登录过期）且复制没挂上：不可能有新内容到端了
     if (!requested && !syncHandles.has(TIMELINE_ID)) {
       return { done: false, added: current(), skipped: 1 }
     }
@@ -1833,7 +1786,7 @@ export function usePouchDb() {
    * 手动同步开始：把时间线目标标成「同步中」。
    *
    * 拉取通道是一条常驻 live 复制，它**只在真的写入时**才发 change/paused 事件；客户端已经
-   * 跟上服务端时，一次手动同步（等服务端聚合 + 等本地落库）全程一个事件都没有 —— 指示器
+   * 跟上服务端时，一次手动同步（等服务端抓取 + 等本地落库）全程一个事件都没有 —— 指示器
    * 纹丝不动、顶部进度条也不出现，看着像「点了没反应」。旧实现是逐源入队，入队那一刻就写
    * queued/syncing，这条状态迁移在「一个用户一个库」改造时丢了，这里补回来。
    *
@@ -1881,7 +1834,7 @@ export function usePouchDb() {
   async function syncNow(): Promise<SyncNowResult> {
     // 点同步即视为恢复：暂停由用户显式点停，点同步就是要它重新开始
     resumeSync()
-    // 先亮起「同步中」再等服务端：等待（服务端聚合 + 本地落库）最长十几秒，期间必须有反馈
+    // 先亮起「同步中」再等服务端：等待（服务端抓取 + 本地落库）最长十几秒，期间必须有反馈
     beginManualSync()
     try {
       const before = pouchState.syncedDocsByTarget[TIMELINE_ID] ?? 0
@@ -1895,11 +1848,11 @@ export function usePouchDb() {
           feedId: TIMELINE_ID,
           status: 'error',
           version: syncStatuses[TIMELINE_ID]?.version ?? 0,
-          error: '无法联系服务端触发聚合（离线或登录已过期）'
+          error: '无法联系服务端触发抓取（离线或登录已过期）'
         }
         return {
           ok: [],
-          failed: [{ id: TIMELINE_ID, error: '无法联系服务端触发聚合（离线或登录已过期）' }],
+          failed: [{ id: TIMELINE_ID, error: '无法联系服务端触发抓取（离线或登录已过期）' }],
           skipped: 0,
           added: 0,
           addedByFeed: {},
@@ -1917,7 +1870,7 @@ export function usePouchDb() {
         ok: [TIMELINE_ID],
         failed: [],
         // 服务端本轮没有新内容、或它仍在后台聚合：报「跳过」，
-        // 让 toast 说清「已是最新 / 仍在服务端聚合」，而不是含糊的「同步完成」
+        // 让 toast 说清「已是最新 / 服务端仍在抓取」，而不是含糊的「同步完成」
         skipped: added > 0 ? 0 : 1,
         added,
         addedByFeed: diffEntryDocsByFeed(beforeByFeed),
@@ -2345,12 +2298,6 @@ export function usePouchDb() {
     pouchState.entriesIndexed = false
     feedIconBlobs.clear()
     entryCoverBlobs.clear()
-    // 促催时间也清掉：重建之后立刻就要能催一次服务端
-    try {
-      localStorage.removeItem(lastTimelineRefreshKey(pouchState.dbUserId))
-    } catch {
-      // localStorage 不可用时忽略
-    }
     // 存储故障已通过重建本地库解除：清掉熔断标记，让后续同步可以继续
     pouchState.storageBroken.value = null
     // 同步状态重置为未同步（用 Reflect.deleteProperty 而不是 delete：后者对动态键会破坏
@@ -3011,11 +2958,7 @@ export function usePouchDb() {
   }
 
   return {
-    /** 催一次服务端聚合（订阅完成、手动触发的轻量入口） */
-    syncFeed,
-    /** 页面挂载时的自动同步：确保 live 复制在跑 + 带节流地催一次聚合 */
-    syncFeedsIfChanged,
-    /** 手动同步：让服务端在本请求内跑完一轮聚合，并等结果落到本地 */
+    /** 手动同步：让服务端在本请求内跑完一轮抓取，并等结果落到本地 */
     syncNow,
     /**
      * 优先同步当前列表并等它跑完（或 5s 超时），供列表页「先同步再显示」用。

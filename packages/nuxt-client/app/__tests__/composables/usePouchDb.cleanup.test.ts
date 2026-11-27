@@ -11,8 +11,10 @@ import { usePouchDb } from '~/composables/usePouchDb'
  * 这里锁定四件事：
  *   1. 取库（`getUserDb()` → `getEntriesDb()`）只**排**清理，不发起（首屏期间迁移标记不会被写上）；
  *   2. 空闲窗口到了才真的跑，且全程只跑一次；
- *   3. 首屏那几十次取库只排一个任务（幂等）；
- *   4. 需要「清理确实做完」的地方（`syncFeedsIfChanged`）仍然 await 得到。
+ *   3. 首屏那几十次取库只排一个任务（幂等）。
+ *
+ * 曾经的「需要清理确实做完的调用点」`syncFeedsIfChanged` 已随旧同步入口删除，
+ * 所以这里不再有第 4 条 —— 清理现在**只**由空闲窗口发起。
  */
 
 const H = vi.hoisted(() => ({
@@ -52,7 +54,6 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
-  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   // 清理逻辑真的会读这两个：空列表 = 没有要删的旧库，但清理流程本身照常跑
   LEGACY_LOCAL_DB_NAMES: [],
@@ -170,12 +171,6 @@ describe('旧库清理被排进空闲窗口（不挡首屏）', () => {
     idleCallbacks[0]!()
     await flush()
     expect(H.allDbsCalls).toBe(1)
-  })
-
-  it('syncFeedsIfChanged 仍会等清理完成（需要它做完的调用点语义不变）', async () => {
-    await pouch.syncFeedsIfChanged([{ feedId: 'feed-a' }])
-    // 它显式 await 了 ensureCleanup：返回时清理已经跑过（而不是排着队）
-    expect(localStorage.getItem(MIGRATED_KEY)).toBe('1')
   })
 
   it('清理由空闲窗口跑完之后不再重复（幂等）', async () => {

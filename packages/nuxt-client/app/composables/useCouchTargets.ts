@@ -4,7 +4,7 @@ import { isBrowserOffline, onBrowserOnline } from '~/utils/networkState'
 /**
  * 同步目标的虚拟 id（也是 usePouchDb 的 syncStatuses key）。
  *
- * 每个用户只有**一个**库：服务端聚合出的条目与用户自己的订阅/已读同库
+ * 每个用户只有**一个**库：服务端抓进来的条目与用户自己的订阅/已读同库
  * （写方向由库里的 validate_doc_update 兜底，见 hono-server 的 couchdb/client.ts）。
  * 所以浏览器只有一个同步目标 —— 不是业务 id（feedId/botId），
  * 用一个不可能与业务 id 撞车的形态（前后双下划线）。

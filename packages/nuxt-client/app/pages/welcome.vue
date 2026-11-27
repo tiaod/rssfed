@@ -55,7 +55,7 @@ const capabilities = [
 
 const steps = [
   { title: '订阅感兴趣的源', description: '添加 RSS / Atom 地址，或导入现有的 OPML 订阅列表。' },
-  { title: '服务端聚合去重', description: '定时抓取，每个源只保留最新内容，失效条目自动清理。' },
+  { title: '服务端抓取去重', description: '定时抓取，每个源只保留最新内容，失效条目自动清理。' },
   { title: '阅读并分发', description: '在时间线里阅读、收藏、标记已读；需要时交给 Bot 推送到 Fediverse。' }
 ] as const
 

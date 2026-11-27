@@ -5,7 +5,7 @@ import { isBrowserOffline, notifyNetworkRecovered } from '~/utils/networkState'
 /**
  * Background Sync：断网期间登记一次，浏览器恢复联网后在后台把 SW 唤醒（见 public/sw.js）。
  *
- * 这里**故意**只让 SW 催服务端聚合（`POST /api/timeline/refresh`），不在 SW 里跑 PouchDB 复制。
+ * 这里**故意**只让 SW 催服务端抓取（`POST /api/timeline/refresh`），不在 SW 里跑 PouchDB 复制。
  * 不是因为做不到 —— PouchDB 的 idb/http 适配器在 SW 里能跑（它不碰 window/document，
  * http 适配器用的是 fetch + `credentials: 'include'`）。是下面三条代价：
  *

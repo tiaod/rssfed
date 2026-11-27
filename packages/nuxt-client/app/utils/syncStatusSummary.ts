@@ -255,7 +255,7 @@ export function syncStatusDetails(
     const lines: string[] = []
     if (summary.lastSyncedAt) lines.push(`上次同步：${formatSyncedAt(summary.lastSyncedAt, now)}`)
     // 不再报「共 N 个同步目标」：目标就是那一个用户库，
-    // 「覆盖范围」在服务端聚合下已经没有信息量（整条时间线就是一个库）
+    // 「覆盖范围」在单库方案下已经没有信息量（整条时间线就是一个库）
     return lines
   }
 

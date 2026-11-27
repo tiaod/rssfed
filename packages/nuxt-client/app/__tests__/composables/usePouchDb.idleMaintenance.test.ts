@@ -92,7 +92,6 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
   localDbAccountKey: (uid: string | null) => uid ?? 'guest',
-  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   lastTimelineTrimKey: (uid: string | null) => `rssfed-test-trimmed-${uid ?? 'guest'}`,
   lastTimelineIndexCatchupKey: (uid: string | null) => `rssfed-test-indexed-${uid ?? 'guest'}`,
@@ -124,7 +123,6 @@ const sharedApp: Record<string, unknown> = {}
 const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => sharedApp
 
-const FEEDS = [{ feedId: 'feed-a' }]
 const INDEX_KEY = 'rssfed-test-indexed-idle-test'
 
 function pullTask(): FakeTask {
@@ -172,7 +170,7 @@ afterEach(() => {
 
 describe('空闲维护：追平视图索引', () => {
   it('同步安静下来后把两个视图都追一遍，并记下时间', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await runIdleMaintenance()
 
@@ -184,7 +182,7 @@ describe('空闲维护：追平视图索引', () => {
   })
 
   it('追平排在最前：先结掉「点查看要等的那一下」，再去做重的活', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await runIdleMaintenance()
 
@@ -193,7 +191,7 @@ describe('空闲维护：追平视图索引', () => {
   })
 
   it('十分钟内不重复追（索引热的时候追一次就够了）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await runIdleMaintenance()
     const afterFirst = H.queryViews.length
@@ -207,7 +205,7 @@ describe('空闲维护：追平视图索引', () => {
   })
 
   it('超过十分钟后下一轮空闲再追一次', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await runIdleMaintenance()
     const afterFirst = H.queryViews.length
@@ -220,7 +218,7 @@ describe('空闲维护：追平视图索引', () => {
   })
 
   it('用户暂停了同步：不追（维护整体停摆）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     pouch.pauseSync()
     await runIdleMaintenance()
@@ -235,7 +233,7 @@ describe('空闲维护：追平视图索引', () => {
       return { rows: [] }
     }
 
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await runIdleMaintenance()
 
@@ -248,7 +246,7 @@ describe('空闲维护：追平视图索引', () => {
 
 describe('空闲维护：与用户操作错开', () => {
   it('用户刚动过手就让位，等安静下来再动手', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
 
     // 到点前一刻用户还在翻列表：这一刻维护撞上他，正是「点查看卡两秒」的成因
@@ -269,7 +267,7 @@ describe('空闲维护：与用户操作错开', () => {
   })
 
   it('用户一直在操作也不会永远等：到上限照常维护', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
 
     // 每两秒动一下手、一直不停：让位必须有尽头，否则索引永远追不平，下一次点「查看」
@@ -292,7 +290,7 @@ describe('空闲维护：与用户操作错开', () => {
   it('页面在后台：不必等用户停手', async () => {
     const spy = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
     try {
-      await pouch.syncFeedsIfChanged(FEEDS)
+      await pouch.ensureTimelineLiveSync()
       pullTask().emitPaused()
       await vi.advanceTimersByTimeAsync(COMPACT_IDLE_DELAY_MS - 1_000)
       markUserActivity()
@@ -305,7 +303,7 @@ describe('空闲维护：与用户操作错开', () => {
   })
 
   it('让位期间被取消（暂停同步）：定时器与「到期起点」都清干净', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await vi.advanceTimersByTimeAsync(COMPACT_IDLE_DELAY_MS - 5_000)
     markUserActivity()

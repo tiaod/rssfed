@@ -40,7 +40,7 @@ const {
 const { loading, showSkeleton, renderFirstPaint } = useListFirstPaint({
   load,
   sync: async () => {
-    // 没有订阅就没有可聚合的内容：没必要为之空催一次服务端聚合
+    // 没有订阅就没有可抓的内容：没必要为之空催一次服务端抓取
     if (feedIds.value.length === 0) return
     await pouch.syncPriority()
   }
