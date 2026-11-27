@@ -153,7 +153,7 @@ botsRouter.post("/:id/feeds", requireOwnedBot, async (c) => {
   return c.json({ success: true }, 201)
 })
 
-/** 获取 Bot 已关联的订阅源列表（join feeds 表带出标题与 URL） */
+/** 获取 Bot 已关联的订阅源列表（标题与 URL 存在关联表 bot_feeds 上） */
 botsRouter.get("/:id/feeds", requireOwnedBot, async (c) => {
   const id = c.req.param("id")!
 

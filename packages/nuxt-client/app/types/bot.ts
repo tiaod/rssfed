@@ -18,7 +18,7 @@ export interface BotInfo {
 /** 公开 Bot（广场页）：结构与 BotInfo 相同，语义上区分「所有人可见」 */
 export type PublicBot = BotInfo
 
-/** Bot 已关联的订阅源（join feeds 表带出标题与 URL） */
+/** Bot 已关联的订阅源（标题与 URL 由服务端的关联表带出） */
 export interface AttachedFeed {
   feedId: string
   title: string

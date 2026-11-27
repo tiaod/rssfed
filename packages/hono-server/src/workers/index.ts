@@ -100,7 +100,7 @@ export async function runFetchJob(job: Job<FetchJobData>): Promise<{
   const ownerDbName = await resolveOwnerDbName(owner)
   const startedAt = new Date()
 
-  // 读该源在这个 owner 库里的保留条数（自适应算出来的，见 services/owner-retention.ts）
+  // 读该源在这个 owner 库里的保留条数（自适应算出来的，见 services/feed-retention-policy.ts）
   const schedule = await readSchedule(ownerDbName).catch(() => null)
   const entry = schedule?.sources?.[feedId]
   const retentionEntries = normalizeRetention(entry?.retentionEntries)

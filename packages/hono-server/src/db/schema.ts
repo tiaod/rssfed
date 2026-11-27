@@ -172,7 +172,7 @@ export const timelineEvents = pgTable("timeline_events", {
   level: text("level").notNull().default("info"),
   /** 给人看的一句话（中文、短），客户端直接展示 */
   message: text("message").notNull(),
-  /** 结构化补充（脏源数、耗时、源 id 等），客户端可展开看 */
+  /** 结构化补充（本轮 sources / due / 新增 / 裁剪 / 失败 与耗时），客户端可展开看 */
   data: jsonb("data"),
 }, (table) => [
   // 「某用户最近 N 条」是唯一的查询形态

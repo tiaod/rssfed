@@ -222,7 +222,8 @@ export async function cacheSingleImage(url: string): Promise<{ image: CachedImag
  * @param protocolCoverUrl 协议封面（media:thumbnail / 图片 enclosure / JSON Feed image）。
  *   存在且可缓存时作为封面图（cover: true），正文图片仅作内容图；
  *   无协议封面时从正文图中选第一张合格图作为封面。
- * @param options per-feed 图片缓存策略（来自 feeds 表），覆盖全局默认；未提供字段回退全局默认。
+ * @param options 图片缓存策略，覆盖全局默认；未提供的字段回退全局默认。
+ *   当前只由调用方按需拼（聚合链路不再有 per-feed 策略，`feeds` 表已随共享源库删除）。
  *   cacheAll 为 true 时数量与体积都不限制（漫画源全量离线）。
  */
 export async function cacheEntryImages(
