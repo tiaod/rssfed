@@ -9,11 +9,10 @@ import { describe, expect, it, vi } from "vitest"
  */
 
 // services/feeds 会拉进 Redis/PG 客户端，这里只关心 deriveFeedId，mock 掉即可
-vi.mock("../workers", () => ({ enqueueFetch: async () => {} }))
-vi.mock("../db", () => ({ db: {}, feeds: {}, bots: {} }))
+vi.mock("../workers", () => ({ enqueueOwnerFetch: async () => {} }))
+vi.mock("../db", () => ({ db: {}, bots: {} }))
 vi.mock("../couchdb/client", () => ({
   createCouchDb: () => ({}),
-  ensureFeedDatabase: async () => "db_feed",
   ensureTimelineDatabase: async () => "db_user",
 }))
 

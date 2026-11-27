@@ -35,7 +35,6 @@ vi.mock("../couchdb/client", () => ({
     },
   }),
   ensureTimelineDatabase: async () => "user-timeline_test",
-  ensureFeedDatabase: async () => "feed_test",
 }))
 
 vi.mock("../db", () => {
@@ -45,12 +44,11 @@ vi.mock("../db", () => {
   }
   return {
     db: { update: boom, select: boom, insert: boom, query: {} },
-    feeds: { id: "id", url: "url", title: "title", status: "status" },
     bots: { id: "id" },
   }
 })
 
-vi.mock("../workers", () => ({ enqueueFetch: async () => {} }))
+vi.mock("../workers", () => ({ enqueueOwnerFetch: async () => {} }))
 
 const { updateUserSubscription } = await import("../services/feeds")
 
