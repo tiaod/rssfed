@@ -127,7 +127,6 @@ vi.mock('~/utils/localDbName', async () => {
     ...actual,
     localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
     localDbAccountKey: (uid: string | null) => uid ?? 'guest',
-    lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
     lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
     lastTimelineTrimKey: (uid: string | null) => `rssfed-test-trimmed-${uid ?? 'guest'}`,
     lastTimelineUrlKey: (uid: string | null) => `rssfed-test-url-${uid ?? 'guest'}`,

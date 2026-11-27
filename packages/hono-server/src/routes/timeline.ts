@@ -7,19 +7,17 @@ import {
   getTimelineSettings,
   parseTimelineSettingsPatch,
   readTimelineUpdateSeq,
-  reconcileUserTimeline,
   updateTimelineSettings,
   waitForSync,
 } from "../services/timeline"
 import {
   clearTimelineEvents,
   listTimelineEvents,
-  listTimelineSources,
   readReconcileHeartbeat,
 } from "../services/timeline-events"
-import { enqueueSourceSyncs, waitForSourceSyncs } from "../workers/timeline-sync"
-import { enqueueTimelineRebuild, enqueueTimelineReconcile } from "../workers/timeline"
-import { resumeTimelineUser, touchTimelineActivity } from "../services/timeline-lifecycle"
+import { enqueueOwnerSubscriptions, type FetchOwnerJob } from "../workers"
+import { resumeOwner } from "../services/owner-platform"
+import { touchTimelineActivity } from "../services/timeline-lifecycle"
 
 /** 中间件写入的请求级变量 */
 type Variables = { userId: string }
@@ -30,23 +28,22 @@ export const TIMELINE_ROUTE_PREFIX = "/api/timeline"
 /**
  * 带 `wait=1` 的刷新请求里，服务端最多等多久（毫秒）。
  *
- * 手动同步要一个确定答案，但 HTTP 请求不能无限期挂着：一次「新订阅了上百个源、窗口内历史
- * 都要回填」的同步会远超这个值（单源复制几十毫秒到几秒，几百个源受队列并发限制要几分钟）。
- * 超时后那批同步继续在后台跑完，客户端按「仍在聚合」提示即可。
+ * 手动同步要一个确定答案，但 HTTP 请求不能无限期挂着：一次「新订阅了上百个源」会远超这个值
+ * （单源抓取几十毫秒到几秒，几百个源受并发限制要几分钟）。超时后那批抓取继续在后台跑完，
+ * 客户端按「仍在抓取」提示即可。
  */
 const TIMELINE_REFRESH_WAIT_MS = envInt("TIMELINE_REFRESH_WAIT_MS", 15_000)
 
 export const timelineRouter = new Hono<{ Variables: Variables }>()
 
 /**
- * 用户时间线聚合的设置与刷新接口。
+ * 用户时间线的设置与刷新接口。
  *
  * 客户端的同步模型：对 `user-timeline_*` 库做**单向 live 复制**（服务端一写就自动到端），
  * 所以本路由不返回任何条目数据 —— 它只负责两件事：
- *   1. 读写「服务端该怎么替这个用户聚合」的设置（窗口、AI 开关）；
- *   2. 在订阅/退订/打开应用时催一次聚合（`POST /refresh`），让新内容尽快进派生库。
+ *   1. 读写「服务端该怎么替这个用户抓取」的设置；
+ *   2. 在订阅/退订/打开应用时催一次抓取（`POST /refresh`），让新内容尽快进库。
  */
-
 timelineRouter.use("/*", async (c: Context<{ Variables: Variables }>, next: Next) => {
   const session = await auth.api.getSession({ headers: c.req.raw.headers })
   if (!session?.user) return c.json({ error: "unauthorized" }, 401)
@@ -57,11 +54,9 @@ timelineRouter.use("/*", async (c: Context<{ Variables: Variables }>, next: Next
   // 失败不能让请求挂掉，所以不 await 错误。
   void touchTimelineActivity(userId)
 
-  // 休眠用户回来了：清暂停标记 + 置 needsRebuild，入队重建。重建完成前不做增量
-  //（暂停期间源库墓碑可能已被 GC 清掉，增量会漏删，见 workers/timeline.ts）。
-  if (await resumeTimelineUser(userId)) {
-    console.log(`[Timeline] user=${userId} 休眠后恢复，已入队重建`)
-    await enqueueTimelineRebuild(userId)
+  // 休眠用户回来了：清掉休眠标记。不需要任何重建 —— 下一轮抓取自然把内容补上。
+  if (await resumeOwner(userId).catch(() => false)) {
+    console.log(`[Timeline] user=${userId} 休眠后恢复，已重新纳入调度`)
   }
 
   await next()
@@ -73,9 +68,7 @@ timelineRouter.get("/settings", async (c) => {
   return c.json({ settings, defaults: DEFAULT_TIMELINE_SETTINGS })
 })
 
-/**
- * 更新设置。条目内容与保留策略只由源库裁剪决定，不随用户设置变化；改完让聚合跑一轮即可。
- */
+/** 更新设置。条目内容与保留策略不随用户设置变化；改完让抓取跑一轮即可。 */
 timelineRouter.patch("/settings", async (c) => {
   const userId = c.get("userId")
   let body: unknown
@@ -90,93 +83,91 @@ timelineRouter.patch("/settings", async (c) => {
   if (Object.keys(patch).length === 0) return c.json({ error: "empty_patch" }, 400)
 
   const { settings } = await updateTimelineSettings(userId, patch)
-  await enqueueTimelineReconcile(userId)
-
   return c.json({ settings })
 })
 
 /**
- * 催一次聚合：订阅/退订/OPML 导入后，以及「同步」按钮按下时调用。
+ * 催一次抓取：订阅/退订/OPML 导入后，以及「同步」按钮按下时调用。
  *
  * 两种模式：
- *   - 默认（即发即忘）：入队后立刻 202。数据由派生库的 live 复制到端，客户端不该等 ——
+ *   - 默认（即发即忘）：入队后立刻 202。数据由用户库的 live 复制到端，客户端不该等 ——
  *     等待会把「几百个源里的那几个有更新的」变成一次阻塞式请求。
- *   - `?wait=1`：本请求内把拓扑对齐（新订阅/退订/换窗口在这一步生效）、把脏源交给同步队列，
- *     然后**等这批单源同步跑完**并数出确切的「本轮新增 N 条」。手动同步（用户点了按钮）用这个
- *     模式，才能给出「同步完成 / 已是最新」的确定结论；等待有上限（TIMELINE_REFRESH_WAIT_MS），
- *     超时就返回 completed=false，而同步仍在后台继续 —— 客户端按「服务端仍在聚合」处理即可。
- *   - `?force=1`：跳过水位判定，把该用户当前订阅的源**全部**重扫一遍。默认路径只在
- *     「源那边上次同步之后有过新内容」时才搬，而外部直接往源库写过东西（脚本验证、人工排查）
- *     是不会体现在 `feeds/bots.lastNewEntryAt` 上的，这时需要显式重扫。**客户端不发送它**：
- *     600+ 个源全量重扫是分钟级的机器负载，属于运维/验证手段。
+ *   - `?wait=1`：本请求内把该用户的全部订阅入队，然后**等库安静下来**并数出确切的
+ *     「本轮新增 N 条」。手动同步（用户点了按钮）用这个模式，才能给出确定结论；
+ *     等待有上限（TIMELINE_REFRESH_WAIT_MS），超时就返回 completed=false，
+ *     而抓取仍在后台继续 —— 客户端按「服务端仍在抓取」处理即可。
+ *   - `?force=1`：强制抓取（绕开缓存与"上次刚抓过"的判定）。供运维/验证使用，
+ *     **客户端不发送它**：几百个源同时真正发请求是分钟级的机器负载。
  */
 timelineRouter.post("/refresh", async (c) => {
   const userId = c.get("userId")
   const force = c.req.query("force") === "1"
+  const owner: FetchOwnerJob = { kind: "user", id: userId }
 
   if (c.req.query("wait") !== "1") {
-    await enqueueTimelineReconcile(userId, { force })
-    return c.json({ accepted: true, completed: false }, 202)
+    const queued = await enqueueOwnerSubscriptions(owner, { bypassCache: force })
+    return c.json({ accepted: true, completed: false, queued }, 202)
   }
 
-  // 留给最后"数一下到底进来多少条"的预算：任务跑完后派生库已经写好了，这段只是把这段
-  // 时间窗口内的 `_changes` 读一遍，几百毫秒就够（超时上限因此最多被撑出这么一点）
+  // 留给最后"数一下到底进来多少条"的预算：任务跑完后条目已经写好了，这段只是把这段时间
+  // 窗口内的 `_changes` 读一遍，几百毫秒就够（超时上限因此最多被撑出这么一点）
   const countBudgetMs = 2500
   const deadline = Date.now() + TIMELINE_REFRESH_WAIT_MS
 
   // 起始序号必须在**入队之前**取：等任务跑完再取的话，条目早就写进去了，会数成 0
   const since = await readTimelineUpdateSeq(userId)
 
-  // 拓扑对齐本身很轻（列一次订阅 + 一条水位 SQL，稳态下没有脏源就一个复制请求都不发）
-  const result = await reconcileUserTimeline(userId, { force })
-  const jobs = await enqueueSourceSyncs(userId, result.dirtySources)
-  const drained = await waitForSourceSyncs(jobs, deadline - countBudgetMs)
-
+  const queued = await enqueueOwnerSubscriptions(owner, { bypassCache: force })
   const sync = await waitForSync(userId, Math.max(countBudgetMs, deadline - Date.now()), {
     sinceSeq: since,
-    quietRounds: 1,
+    // 抓取是并发的，条目会陆续写进来：要允许它"多安静几轮"才算追平
+    quietRounds: 8,
     pollIntervalMs: 300,
     minWaitMs: 0,
   })
   return c.json({
     accepted: true,
-    completed: drained && sync.completed,
+    completed: sync.completed,
     added: sync.added,
-    sources: result.sources,
-    queued: jobs.length,
+    queued,
   })
 })
 
 /**
  * 同步日志：给设置页的「同步日志」面板用。
  *
- * 三段数据配着看才有用 ——
- *   - `events`：**发生过什么**（干了活的汇聚、重建、首搬、失败），空转轮次不进流水；
- *   - `sources`：**现在什么样**（每个订阅源上次同步时刻与状态），直接读水位表，不落流水；
- *   - `heartbeat`：**聚合还在不在跑**（最近一轮的时刻 + 连续多少轮无事发生）。
+ * 两段数据配着看才有用 ——
+ *   - `events`：**这一轮抓到了什么**（订阅几个源、几个到期、新增/裁剪/失败各多少），
+ *     空转轮次也记一条（能区分「没触发调度」和「触发了但所有源都没到期」）；
+ *   - `heartbeat`：**抓取还在不在跑**（最近一轮的时刻 + 连续多少轮无事发生）。
  *
- * `limit` 只作用于 events（默认 120，最多 500）；sources 总是全量（一个用户几十上百个源，很小）。
+ * 每个源**当前**的抓取状态（上次抓取时刻、失败原因）不在这里：它随抓取直接写在用户库的
+ * `_local/schedule` 里，用户订阅列表接口（`GET /api/feeds/subscriptions`）会带出来。
  */
 timelineRouter.get("/events", async (c) => {
   const userId = c.get("userId")
   const rawLimit = Number(c.req.query("limit") ?? 120)
   const limit = Math.min(500, Number.isFinite(rawLimit) && rawLimit > 0 ? Math.floor(rawLimit) : 120)
-  const [events, sources, heartbeat] = await Promise.all([
+  const [events, heartbeat] = await Promise.all([
     listTimelineEvents(userId, limit),
-    listTimelineSources(userId),
     readReconcileHeartbeat(userId),
   ])
-  return c.json({ events, sources, heartbeat })
+  return c.json({ events, heartbeat })
 })
 
-/** 清空同步流水（面板上的「清空」；源状态不受影响，它读的是水位表） */
+/** 清空同步流水（面板上的「清空」；心跳不受影响） */
 timelineRouter.delete("/events", async (c) => {
   await clearTimelineEvents(c.get("userId"))
   return c.json({ ok: true })
 })
 
-/** 重建派生库（服务端写的条目/源元信息整体删掉再全量回填；用户状态文档不动） */
+/**
+ * 立即重新抓取当前用户的全部订阅（设置页的「重新同步」按钮）。
+ *
+ * 与 `POST /refresh?force=1` 等价，保留这个路径是因为前端已经在调它。
+ */
 timelineRouter.post("/rebuild", async (c) => {
-  await enqueueTimelineRebuild(c.get("userId"))
-  return c.json({ accepted: true }, 202)
+  const userId = c.get("userId")
+  const queued = await enqueueOwnerSubscriptions({ kind: "user", id: userId }, { bypassCache: true })
+  return c.json({ accepted: true, queued }, 202)
 })

@@ -5,17 +5,17 @@ import type { ParsedFeed } from "../rss/parser"
  *
  * ## 这份文档为什么特殊
  *
- * FeedDoc 存在源库 `feed_*` 里，但它**会被 CouchDB 复制器原样搬进每个订阅者的用户聚合库**
- * （`user-timeline_*`），再经 live pull 同步到每个浏览器。也就是说：FeedDoc 每多一个修订，
- * 就是「每个订阅者各写一版 + 每个在线客户端收一次变更」。
+ * FeedDoc 现在就写在 **owner 自己的库**里（用户库 / Bot 库），经 live pull 同步到每个浏览器。
+ * 也就是说：FeedDoc 每多一个修订，就是「这个库的每个在线客户端收一次变更」。
  *
  * 所以它只该装**客户端离线渲染需要、且很少变化**的展示字段：
  * title / description / siteUrl / image（外加图标附件 `imageCached`）。
  *
  * 抓取簿记（ETag / Last-Modified / 验证器来源 URL / 最后抓取时间 / 错误信息）**不能放这里**：
- *   - 它们每轮抓取都可能变，客户端一个都不读（权威在 PostgreSQL `feeds` 表）；
- *   - 早期实现每轮 200 都重写一遍 FeedDoc，实测单源累计上千个修订、一个 129 订阅的账号
- *     11.4 万版（~90MB 死空间），并且这些修订会一版版复制进用户库。
+ *   - 它们每轮抓取都可能变，客户端一个都不读（权威在 owner 库的 `_local/schedule`）；
+ *   - 旧模型里同一个源只写一次、靠复制器扇出到各用户库，那时每轮重写一版 FeedDoc
+ *     实测能累计上千个修订、一个 129 订阅的账号 11.4 万版（~90MB 死空间）—— 现在
+ *     虽然是一库一份，但同理没必要为客户端不读的字段制造变更。
  *
  * 现在：`shouldWriteFeedDoc` 只在展示字段真的变化时返回 true，`buildFeedDoc` 构造出的文档
  * 还会顺手清掉旧版遗留的簿记字段（存量文档下一次写入时完成一次性迁移）。
@@ -57,10 +57,10 @@ export function mergeFeedDocDisplay(
     description: parsed.description ?? existing?.description,
     siteUrl: parsed.link ?? existing?.siteUrl,
     image: parsed.image?.url ?? existing?.image,
-    // url 取注册表里那份（调用方传进来的就是 **存库的抓取地址**，不是重定向后的地址：
+    // url 取订阅文档里那个地址（调用方传进来的就是 **存库的抓取地址**，不是重定向后的地址：
     // 重定向在 fetchFeed 内部消化掉了）。早先写的是 `existing?.url ?? feedUrl`，让旧文档
-    // 永久胜出 —— 重定向本来就不会走到这里，结果只有「管理员改了源地址」被吞掉：
-    // Postgres 已经是新地址、FeedDoc 还是旧的，前端编辑弹窗（读 FeedDoc）继续显示旧地址。
+    // 永久胜出 —— 重定向本来就不会走到这里，结果只有「改源地址」被吞掉：
+    // 订阅文档已经是新地址、FeedDoc 还是旧的，前端编辑弹窗（读 FeedDoc）继续显示旧地址。
     url: feedUrl,
   }
 }
@@ -69,8 +69,7 @@ export function mergeFeedDocDisplay(
  * 展示字段真的变了吗？
  *
  * 与 `shouldWriteFeedDoc` 分开是因为两者用途不同：清理遗留簿记也要写文档，但**不该**
- * 触发一次用户库同步（那只是把旧字段抹掉，客户端看不到任何变化）。只有展示字段变了
- * 才需要 bump `feeds.last_changed_at` 去让镜像跟着更新。
+ * 被当成"内容有变化"（那只是把旧字段抹掉，客户端看不到任何展示上的差别）。
  */
 export function feedDocDisplayChanged(
   existing: Record<string, any> | null | undefined,

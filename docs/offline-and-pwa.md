@@ -38,9 +38,9 @@
 断网期间页面登记一个 tag（`rssfed-sync`），浏览器在**恢复联网**后把 SW 唤醒。它买到的是
 「关着页面也在同步」，但同步动作**不在 SW 里做**：
 
-- **SW 只做一件事**：`POST /api/timeline/refresh`（即发即忘的 202）催服务端聚合一轮。
-  服务端本来就每 5 分钟给所有非休眠用户跑一轮（`TIMELINE_INTERVAL`），这一下只是把用户
-  断网期间错过的那一轮提前。派生库写好之后，页面下次打开 live 复制一次就补齐。
+- **SW 只做一件事**：`POST /api/timeline/refresh`（即发即忘的 202）催服务端抓取一轮。
+  服务端本来就每 `FETCH_INTERVAL`（默认 15 分钟）调度一轮，这一下只是把用户断网期间
+  错过的那一轮提前。用户库写好之后，页面下次打开 live 复制一次就补齐。
 - **不在 SW 里跑 PouchDB 复制**。不是做不到——PouchDB 的 idb/http 适配器在 SW 里能跑
   （不碰 `window`/`document`，http 适配器用 fetch + `credentials: 'include'`）。是三条代价：
   1. **写进去了页面也不知道**：PouchDB 的 changes 靠 localStorage 的 `storage` 事件唤醒，
@@ -66,8 +66,10 @@ Background Sync 的整个生命周期都在页面视野之外（页面关着时�
 所以**必须自己记日志**，否则「没触发」和「触发了但没成功」完全无法区分。日志落在浏览器
 IndexedDB 的 `rssfed-background-sync-log` 库，在**设置 → 数据 →「后台同步」**里看。
 
-之所以不复用服务端那份「同步日志」（`timeline_events`）：那份记的是「服务端聚合干了什么」。
-后台同步没触发时它永远是安静的——因为聚合根本没被催到，这恰恰是最容易误判的情形。
+之所以不复用服务端那份「同步日志」（`timeline_events`）：那份记的是「服务端每一轮抓取干了什么」。
+后台同步没触发时它永远是安静的——因为抓取根本没被催到，这恰恰是最容易误判的情形。
+（反过来，「各源现在什么状态、上次抓到什么时候」也不在那份日志里：抓取按 owner 直接写进
+用户库的 `_local/schedule`，用订阅列表接口读。）
 
 记录的事件（`app/utils/backgroundSyncLog.ts` 的 `BackgroundSyncEventKind`）：
 

@@ -53,7 +53,6 @@ export type DisplayMode = (typeof DISPLAY_MODES)[number]
 
 /** 图标路由的路径前缀（挂在公开的 /api/site-settings 下，反代无需额外放行） */
 export const ICON_PATH_PREFIX = '/api/site-settings/icon'
-export const MANIFEST_PATH = '/api/site-settings/manifest.webmanifest'
 
 /**
  * 图标规格表 —— manifest 声明与图标路由输出的共同真源。
@@ -249,7 +248,3 @@ export function buildManifest(config: ResolvedPwaConfig): WebAppManifest {
     icons
   }
 }
-
-/** iOS 主屏幕图标尺寸（<link rel="apple-touch-icon"> 用） */
-export const APPLE_TOUCH_ICON_SIZE = ICON_SPECS['apple-touch-180'].size
-export const APPLE_TOUCH_ICON_PATH = `${ICON_PATH_PREFIX}/apple-touch-180.png`

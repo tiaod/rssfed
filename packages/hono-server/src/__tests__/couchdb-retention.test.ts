@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest"
 
 /**
- * `createTrimDb` 在模块加载时就会调用 `createCouchDb`，所以必须在 import 之前把 client 换掉。
+ * `trimOwnerFeedToLatestN` 直接调 `createCouchDb`，所以必须在 import 之前把 client 换掉。
  * 只替换两个入口（`createCouchDb` / `nanoServer`），纯函数一律用真实实现。
  */
 const couchMock = vi.hoisted(() => ({
@@ -17,158 +17,27 @@ vi.mock("../couchdb/client", () => ({
   nanoServer: {
     request: (opts: { path?: string, body?: unknown }) => couchMock.request!(opts),
   },
-  /** retention.ts 只 import 了 createCouchDb，其余导出给别的模块用（这里不需要） */
-  authenticatedDbUrl: (db: string) => db,
 }))
 import {
   buildPurgeBody,
   countPurged,
-  DEFAULT_SOURCE_RETENTION_ENTRIES,
-  DEFAULT_TRIM_BATCH,
-  DEFAULT_TRIM_MAX_BATCHES,
-  trimExcess,
-  trimSourceToLatestN,
+  trimOwnerFeedToLatestN,
   USER_TIMELINE_TRIM_VIEW,
-  type TrimDb,
 } from "../couchdb/retention"
 
 /**
- * 库裁剪（每种源只保留最新 N 条）的边界。
+ * 库裁剪（每条源只保留最新 N 条）的边界。
  *
- * 这是保留策略的**唯一实现**：源库（整库裁）和汇聚库（逐源裁）都调它，只是参数不同。
- * 错误方向不对称 ——
+ * 新模型下只有一个入口 `trimOwnerFeedToLatestN`：用户库一个库里装着几百个源，裁剪必须
+ * **按源分组**各留 N 条。错误方向不对称 ——
  *   - 多留：库大一点，可恢复；
  *   - 少留/误删：内容永久消失，不可逆。
  * 所以测试重点在"不该删的没删"和"不会无限删"。
  *
- * 清理方式从标准 delete 改成了 `_purge`（见 `couchdb/retention.ts` 文件头）：
- * 新方案接受墓碑静默丢失，两侧各自裁、都不留墓碑。`_purge` 的两个易错点（请求体格式、
- * 「rev 已不存在」的幂等语义）由 `buildPurgeBody` / `countPurged` 的用例钉住。
+ * 清理方式从标准 delete 改成了 `_purge`（见 `couchdb/retention.ts` 文件头）：接受墓碑静默
+ * 丢失。`_purge` 的两个易错点（请求体格式、「rev 已不存在」的幂等语义）由
+ * `buildPurgeBody` / `countPurged` 的用例钉住。
  */
-
-/** 记录调用、按批次返回删除条数的假实现 */
-function fakeDb(total: number, deleteCounts: number[] = []) {
-  const calls = {
-    counts: [] as string[],
-    deletes: [] as Array<{ viewPath: string, limit: number }>,
-    compacted: 0,
-  }
-  let batch = 0
-  const db: TrimDb = {
-    async countEntries(viewPath) {
-      calls.counts.push(viewPath)
-      return total
-    },
-    async purgeOldest(viewPath, limit) {
-      calls.deletes.push({ viewPath, limit })
-      return deleteCounts[batch++] ?? 0
-    },
-    async compact() {
-      calls.compacted += 1
-    },
-  }
-  return { db, calls }
-}
-
-describe("trimExcess（total - N）", () => {
-  it("不超过 N：一条都不删", () => {
-    expect(trimExcess(0, 50)).toBe(0)
-    expect(trimExcess(50, 50)).toBe(0)
-    expect(trimExcess(10, 50)).toBe(0)
-  })
-
-  it("超出多少就删多少", () => {
-    expect(trimExcess(120, 50)).toBe(70)
-    expect(trimExcess(51, 50)).toBe(1)
-  })
-
-  it("并列时间戳不再影响结果（按行序删，不按时间下界）", () => {
-    // 300 条同一个 publishedAt 也要裁到 50 —— 旧的下界方案在这是 0
-    expect(trimExcess(300, 50)).toBe(250)
-  })
-
-  it("N 非正整数直接抛错（避免静默变成「全删」或「不删」）", () => {
-    expect(() => trimExcess(10, 0)).toThrow()
-    expect(() => trimExcess(10, -1)).toThrow()
-    expect(() => trimExcess(10, 1.5)).toThrow()
-  })
-})
-
-describe("trimSourceToLatestN", () => {
-  it("源库不足 N 条：完全不调用删除", async () => {
-    const { db, calls } = fakeDb(10)
-    const result = await trimSourceToLatestN(db, { n: 50 })
-    expect(result).toEqual({ total: 10, deleted: 0, batches: 0 })
-    expect(calls.deletes).toHaveLength(0)
-    expect(calls.compacted).toBe(0)
-  })
-
-  it("正好 N 条：也不动", async () => {
-    const { db, calls } = fakeDb(50)
-    expect(await trimSourceToLatestN(db, { n: 50 })).toEqual({ total: 50, deleted: 0, batches: 0 })
-    expect(calls.deletes).toHaveLength(0)
-  })
-
-  it("超限：一次删掉全部超出部分，批大小够用时只跑一批", async () => {
-    const { db, calls } = fakeDb(120, [70])
-    const result = await trimSourceToLatestN(db, { n: 50, batchSize: 200 })
-    expect(result).toEqual({ total: 120, deleted: 70, batches: 1 })
-    expect(calls.deletes).toEqual([{ viewPath: "main/entries-by-date", limit: 70 }])
-  })
-
-  it("多批：每批不超过 batchSize，最后一批用剩余量", async () => {
-    // total 450，N=50 → 删 400：200 + 200
-    const { db, calls } = fakeDb(450, [200, 200])
-    const result = await trimSourceToLatestN(db, { n: 50, batchSize: 200 })
-    expect(result.deleted).toBe(400)
-    expect(result.batches).toBe(2)
-    expect(calls.deletes).toEqual([
-      { viewPath: "main/entries-by-date", limit: 200 },
-      { viewPath: "main/entries-by-date", limit: 200 },
-    ])
-  })
-
-  it("最后一批按剩余量收窄（不会多删）", async () => {
-    // 删 70：批大小 200 → 一批就够，limit 应该是 70 而不是 200
-    const { db, calls } = fakeDb(120, [70])
-    await trimSourceToLatestN(db, { n: 50, batchSize: 200 })
-    expect(calls.deletes[0]!.limit).toBe(70)
-  })
-
-  it("一批一条都没删掉就停（并发 conflict 时不能拿同一页无限重试）", async () => {
-    const { db, calls } = fakeDb(1000, [0])
-    const result = await trimSourceToLatestN(db, { n: 50, batchSize: 200 })
-    expect(result.batches).toBe(1)
-    expect(result.deleted).toBe(0)
-    expect(calls.deletes).toHaveLength(1)
-  })
-
-  it("maxBatches 限速：首次上线的删除风暴分批来，剩下的下次再删", async () => {
-    const { db, calls } = fakeDb(100_000, [200, 200, 200])
-    const result = await trimSourceToLatestN(db, { n: 50, batchSize: 200, maxBatches: 3 })
-    expect(result.batches).toBe(3)
-    expect(result.deleted).toBe(600)
-    expect(calls.deletes).toHaveLength(3)
-  })
-
-  it("compact 只在真删了东西时调", async () => {
-    const { db: dbTrim, calls: callsTrim } = fakeDb(100, [50])
-    await trimSourceToLatestN(dbTrim, { n: 50, compact: true })
-    expect(callsTrim.compacted).toBe(1)
-
-    const { db: dbNoTrim, calls: callsNoTrim } = fakeDb(100, [0])
-    await trimSourceToLatestN(dbNoTrim, { n: 50, compact: true })
-    expect(callsNoTrim.compacted).toBe(0)
-  })
-
-  it("默认 N 是 50（= 旧 minFeedEntries，顺便给低频源兜底）", async () => {
-    expect(DEFAULT_SOURCE_RETENTION_ENTRIES).toBe(50)
-    const { db, calls } = fakeDb(60, [10])
-    const result = await trimSourceToLatestN(db)
-    expect(calls.counts[0]).toBe("main/entries-by-date")
-    expect(result.deleted).toBe(10)
-  })
-})
 
 describe("_purge 请求体与响应计数（纯函数）", () => {
   it("同 id 的多个 rev 合并进同一个键", () => {
@@ -195,70 +64,15 @@ describe("_purge 请求体与响应计数（纯函数）", () => {
   })
 })
 
-describe("trimSourceToLatestN：groupByFeed（汇聚库逐源保留）", () => {
-  /** 假的「按源分组裁剪」：记录调用参数，按给定结果返回 */
-  function fakeGroupDb(result: { total: number, deleted: number, batches: number }) {
-    const calls: Array<{ viewPath: string, n: number, batchSize: number, maxBatches: number }> = []
-    const db: TrimDb = {
-      async countEntries() {
-        throw new Error("groupByFeed 不该走整库计数")
-      },
-      async purgeOldest() {
-        throw new Error("groupByFeed 不该走整库清理")
-      },
-      async compact() {},
-      async purgeExcessPerGroup(viewPath, n, batchSize, maxBatches) {
-        calls.push({ viewPath, n, batchSize, maxBatches })
-        return result
-      },
-    }
-    return { db, calls }
-  }
-
-  it("走逐源裁剪，用汇聚库那个视图，结果原样透出", async () => {
-    const { db, calls } = fakeGroupDb({ total: 400, deleted: 120, batches: 2 })
-    const result = await trimSourceToLatestN(db, {
-      n: 50,
-      viewPath: USER_TIMELINE_TRIM_VIEW,
-      groupByFeed: true,
-    })
-    expect(result).toEqual({ total: 400, deleted: 120, batches: 2 })
-    expect(calls).toEqual([{
-      viewPath: "timeline-maintain/by-feed-date",
-      n: 50,
-      batchSize: DEFAULT_TRIM_BATCH,
-      maxBatches: DEFAULT_TRIM_MAX_BATCHES,
-    }])
-  })
-
-  it("groupByFeed 但实现没提供逐源能力时直接抛错（不能静默退化成整库裁剪）", async () => {
-    const db: TrimDb = {
-      async countEntries() { return 0 },
-      async purgeOldest() { return 0 },
-      async compact() {},
-    }
-    await expect(trimSourceToLatestN(db, { groupByFeed: true })).rejects.toThrow(/purgeExcessPerGroup/)
-  })
-
-  it("没清掉任何东西时不 compact", async () => {
-    const { db, calls } = fakeGroupDb({ total: 100, deleted: 0, batches: 0 })
-    const compacted: number[] = []
-    db.compact = async () => { compacted.push(1) }
-    await trimSourceToLatestN(db, { n: 50, groupByFeed: true, compact: true })
-    expect(compacted).toHaveLength(0)
-    expect(calls).toHaveLength(1)
-  })
-})
-
 /**
- * `createTrimDb().purgeExcessPerGroup` 的推进逻辑（用假 nano 验，不起真库）。
+ * `trimOwnerFeedToLatestN` 的推进逻辑（用假 nano 验，不起真库）。
  *
- * 这里钉住的是一个**曾经写错两次**的地方：汇聚库要"逐源各留 N 条"，而按页边分组会在
- * 「某个源被切在两页之间」时只看得到半截数据 —— 按半截裁会误删，跳过又永远轮不到它
- * （实测 25 条裁到 5 条时，跳过写法每轮清 0 条、永不收敛）。现在的实现是逐源整组读。
+ * 这里钉住的是一个**曾经写错两次**的地方：按页边分组会在「某个源被切在两页之间」时
+ * 只看得到半截数据 —— 按半截裁会误删，跳过又永远轮不到它（实测 25 条裁到 5 条时，
+ * 跳过写法每轮清 0 条、永不收敛）。现在的实现是**逐源整组读**。
  */
-describe("createTrimDb().purgeExcessPerGroup（逐源整组读）", () => {
-  /** 假 CouchDB：视图按 `[feedId, publishedAt]` 全序存，支持 head 查询与整组范围读 */
+describe("trimOwnerFeedToLatestN（逐源整组读）", () => {
+  /** 假 CouchDB：视图按 `[feedId, publishedAt]` 全序存，支持范围读与 `_purge` */
   function fakeCouch(rows: Array<{ feedId: string, at: string, rev: string }>) {
     const purged: string[] = []
     const sorted = () => [...rows].sort((a, b) =>
@@ -308,8 +122,21 @@ describe("createTrimDb().purgeExcessPerGroup（逐源整组读）", () => {
     }
   }
 
+  /** 把假 CouchDB 接到 mock 上，并返回一个跑一轮裁剪的函数 */
+  function setup(rows: Array<{ feedId: string, at: string, rev: string }>) {
+    const couch = fakeCouch(rows)
+    couchMock.view = couch.view as never
+    couchMock.request = (async (opts: { path?: string, body?: unknown }) => {
+      if (opts?.path?.endsWith("/_purge")) {
+        return { purged: await couch.purge("db", opts.body as Record<string, string[]>) }
+      }
+      return {}
+    }) as never
+    return couch
+  }
+
   it("多源各自保留最新 N 条：一轮到位，且保留的是各源最新的那些", async () => {
-    const couch = fakeCouch([
+    const couch = setup([
       // A：5 条（略超 N=3）
       ...["01", "02", "03", "04", "05"].map(at => ({ feedId: "A", at: `2026-01-${at}`, rev: `1-${at}` })),
       // B：2 条（不足 N，一条都不该动）
@@ -318,45 +145,75 @@ describe("createTrimDb().purgeExcessPerGroup（逐源整组读）", () => {
       ...["01", "02", "03", "04"].map(at => ({ feedId: "C", at: `2026-03-${at}`, rev: `1-${at}` })),
     ])
 
-    couchMock.view = couch.view as never
-    couchMock.request = (async (opts: { path?: string, body?: unknown }) => {
-      if (opts?.path?.endsWith("/_purge")) {
-        return { purged: await couch.purge("db", opts.body as Record<string, string[]>) }
-      }
-      return {}
-    }) as never
+    // 只裁 A：同库里 B/C 不该被碰（这是「按源逐个裁」与「整库裁」的关键区别）
+    const deleted = await trimOwnerFeedToLatestN("db", "A", 3, { maxBatches: 10 })
 
-    const { createTrimDb } = await import("../couchdb/retention")
-    const result = await createTrimDb("db").purgeExcessPerGroup!(USER_TIMELINE_TRIM_VIEW, 3, 200, 10)
-
-    expect(couch.counts()).toEqual({ A: 3, B: 2, C: 3 })
-    // A 保留 03/04/05、C 保留 02/03/04（最新 N 条），说明是"留尾部"而不是"留头部"
-    expect(couch.purged.sort()).toEqual([
-      "entry:A:2026-01-01", "entry:A:2026-01-02",
-      "entry:C:2026-03-01",
-    ])
-    expect(result.deleted).toBe(3)
+    expect(deleted).toBe(2)
+    expect(couch.counts()).toEqual({ A: 3, B: 2, C: 4 })
+    // A 保留 03/04/05（最新 N 条），说明是"留尾部"而不是"留头部"
+    expect(couch.purged.sort()).toEqual(["entry:A:2026-01-01", "entry:A:2026-01-02"])
   })
 
-  it("每个源只处理一次：源数量多于一批时也按 id 顺序推进，不重复不清漏", async () => {
-    const rows = ["A", "B", "C", "D"].flatMap(feed => ["01", "02", "03", "04"].map(at => (
-      { feedId: feed, at: `2026-01-${at}`, rev: `1-${feed}${at}` }
-    )))
-    const couch = fakeCouch(rows)
+  it("源不足 N 条：一条都不删", async () => {
+    const couch = setup(["01", "02"].map(at => ({ feedId: "A", at: `2026-01-${at}`, rev: `1-${at}` })))
 
-    couchMock.view = couch.view as never
-    couchMock.request = (async (opts: { path?: string, body?: unknown }) => {
-      if (opts?.path?.endsWith("/_purge")) {
-        return { purged: await couch.purge("db", opts.body as Record<string, string[]>) }
-      }
-      return {}
+    expect(await trimOwnerFeedToLatestN("db", "A", 50)).toBe(0)
+    expect(couch.purged).toEqual([])
+  })
+
+  it("正好 N 条：也不动", async () => {
+    const couch = setup(["01", "02", "03"].map(at => ({ feedId: "A", at: `2026-01-${at}`, rev: `1-${at}` })))
+
+    expect(await trimOwnerFeedToLatestN("db", "A", 3)).toBe(0)
+    expect(couch.purged).toEqual([])
+  })
+
+  it("超出部分多批清完，每批不超过 batchSize", async () => {
+    // 10 条裁到 2 条 = 删 8；batchSize=3 → 3+3+2，共 3 批
+    const couch = setup(Array.from({ length: 10 }, (_, i) => (
+      { feedId: "A", at: `2026-01-${String(i + 1).padStart(2, "0")}`, rev: `1-${i}` }
+    )))
+
+    const deleted = await trimOwnerFeedToLatestN("db", "A", 2, { batchSize: 3, maxBatches: 10 })
+
+    expect(deleted).toBe(8)
+    expect(couch.counts()).toEqual({ A: 2 })
+  })
+
+  it("maxBatches 限速：剩下的留给下一轮，不会一次删光", async () => {
+    const couch = setup(Array.from({ length: 10 }, (_, i) => (
+      { feedId: "A", at: `2026-01-${String(i + 1).padStart(2, "0")}`, rev: `1-${i}` }
+    )))
+
+    const deleted = await trimOwnerFeedToLatestN("db", "A", 2, { batchSize: 2, maxBatches: 2 })
+
+    expect(deleted).toBe(4)
+    expect(couch.counts()).toEqual({ A: 6 })
+  })
+
+  it("一批一条都没清掉就停（并发 conflict 时不能拿同一页无限重试）", async () => {
+    const couch = setup(Array.from({ length: 10 }, (_, i) => (
+      { feedId: "A", at: `2026-01-${String(i + 1).padStart(2, "0")}`, rev: `1-${i}` }
+    )))
+    // rev 全部对不上：_purge 返回空
+    couchMock.request = (async () => ({ purged: {} })) as never
+
+    expect(await trimOwnerFeedToLatestN("db", "A", 2, { batchSize: 2, maxBatches: 10 })).toBe(0)
+    expect(couch.counts()).toEqual({ A: 10 })
+  })
+
+  it("默认用 owner 库那个视图（main/by-feed-date）", async () => {
+    const seen: Array<[string, string]> = []
+    const couch = setup(["01", "02"].map(at => ({ feedId: "A", at: `2026-01-${at}`, rev: `1-${at}` })))
+    const inner = couch.view
+    couchMock.view = (async (design: string, view: string, opts: Record<string, unknown>) => {
+      seen.push([design, view])
+      return inner(design, view, opts as never)
     }) as never
 
-    const { createTrimDb } = await import("../couchdb/retention")
-    await createTrimDb("db").purgeExcessPerGroup!(USER_TIMELINE_TRIM_VIEW, 2, 200, 100)
-    // 4 个源各留 2 条 = 8 条；每个源只被处理一次
-    expect(couch.counts()).toEqual({ A: 2, B: 2, C: 2, D: 2 })
-    expect(couch.purged).toHaveLength(8)
-    expect(new Set(couch.purged).size).toBe(8) // 没有任何一条被重复清
+    await trimOwnerFeedToLatestN("db", "A", 1)
+
+    const [design, view] = USER_TIMELINE_TRIM_VIEW.split("/") as [string, string]
+    expect(seen.every(([d, v]) => d === design && v === view)).toBe(true)
   })
 })

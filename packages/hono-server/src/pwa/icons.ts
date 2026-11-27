@@ -145,11 +145,6 @@ function cacheSet(key: string, value: Buffer): void {
   }
 }
 
-/** 仅供测试：清空缓存，避免用例之间互相污染 */
-export function clearIconCache(): void {
-  iconCache.clear()
-}
-
 /**
  * 取站点图标（带缓存）。源图损坏 / 下载失败 / 渲染异常时一律回退内置默认图形，
  * 保证「装得上」这件事不被一张坏图搞崩。

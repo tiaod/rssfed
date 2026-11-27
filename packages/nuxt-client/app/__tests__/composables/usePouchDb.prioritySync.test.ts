@@ -80,7 +80,6 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
-  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []
@@ -208,12 +207,12 @@ describe('离线 / 熔断时立即返回，不空等满 5s', () => {
     expect(H.tasks).toHaveLength(0)
   })
 
-  it('离线时催促不发请求（refreshServerTimeline 短路，连节流时间戳都不写）', async () => {
+  it('离线时催促不发请求（refreshServerTimeline 短路），恢复联网后立刻能催', async () => {
     setOnline(false)
     await pouch.syncPriority(100)
     expect(H.refreshArgs).toHaveLength(0)
 
-    // 恢复联网后第一次 syncPriority 必须真的能催（没有被上一轮的失败节流挡住）
+    // 恢复联网后第一次 syncPriority 必须真的能催（没有被上一轮失败挡住）
     setOnline(true)
     const pending = pouch.syncPriority(1000)
     await vi.waitFor(() => expect(H.refreshArgs).toHaveLength(1))
@@ -223,7 +222,7 @@ describe('离线 / 熔断时立即返回，不空等满 5s', () => {
   })
 
   it('存储熔断后立即返回 done=false（库写不进去，等下去没有意义）', async () => {
-    await pouch.syncFeedsIfChanged([{ feedId: 'feed-a' }])
+    await pouch.ensureTimelineLiveSync()
     // 让复制报存储故障 → 熔断（配额耗尽 / 库进入 global failure）
     H.tasks[0]!.emitError({ name: 'indexed_db_went_bad', reason: 'QuotaExceededError' })
     expect(pouch.storageBroken.value).toBeTruthy()

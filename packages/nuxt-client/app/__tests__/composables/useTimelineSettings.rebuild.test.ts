@@ -1,92 +1,79 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { useTimelineSettings } from '../../composables/useTimelineSettings'
 
 /**
- * 设置页的「重建时间线」在客户端要做两件收尾，否则重建的结果在浏览器里看不见：
+ * 「重新抓取全部订阅」这个运维入口在客户端只需要一件事：**真的把请求发出去**。
  *
- *   ① 服务端重建是**换一个聚合库**（复制是变更投递不是投影，就地清空搬不回来），而且是异步入队的
- *      （202）—— 寻址缓存里的旧库名会被删掉，同步打到不存在的库上；
- *   ② 本地为「被剪掉的条目」留着删除记录（tombstone，修订号更高），重建搬回来的内容在本地会被
- *      判成冲突 —— 必须丢掉本地缓存重新全量拉一遍。
- *
- * 丢本地这件事本身归同步挂载（它记着"上次同步的是哪个远端地址"，一变就丢本地重拉，见
- * usePouchDb 的 startTimelineLiveSync），所以这里只钉住编排：库名变过来就重挂同步、变不过来就
- * 放弃（同步通道自己会重试）、拿不到地址时不轮询。
+ * 这里曾经做过两件收尾（轮询等库名变、换库后重挂 live 复制），因为旧模型的重建是
+ * 「换一个空的聚合库」。新模型里用户库就是唯一真相，`/api/timeline/rebuild` 只是
+ * 「绕开缓存把全部订阅入队抓一遍」，**不换库** —— 那两件收尾于是变成了「空转 60 秒、
+ * 最后什么也没发生」。这条用例钉住的就是：不要再等库名。
  */
+
 const H = vi.hoisted(() => ({
   rebuild: vi.fn(),
   settings: vi.fn(),
-  updateSettings: vi.fn(),
-  dbNameFor: vi.fn(),
-  invalidate: vi.fn(),
-  ensureTimelineLiveSync: vi.fn()
-}))
-
-vi.mock('~/composables/useCouchTargets', () => ({
-  TIMELINE_ID: '__timeline__',
-  useCouchTargets: () => ({
-    dbNameFor: H.dbNameFor,
-    invalidate: H.invalidate,
-    remoteUrlForId: vi.fn()
-  })
+  updateSettings: vi.fn()
 }))
 
 const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useApi = () => ({
   timeline: { rebuild: H.rebuild, settings: H.settings, updateSettings: H.updateSettings }
 })
-testGlobals.usePouchDb = () => ({ ensureTimelineLiveSync: H.ensureTimelineLiveSync })
 testGlobals.errorMessage = (e: unknown, fallback: string) => (e instanceof Error ? e.message : fallback)
 
 beforeEach(() => {
-  vi.useFakeTimers()
-  H.rebuild.mockReset().mockResolvedValue({ accepted: true })
-  H.dbNameFor.mockReset()
-  H.invalidate.mockReset()
-  H.ensureTimelineLiveSync.mockReset().mockResolvedValue(undefined)
+  H.rebuild.mockReset().mockResolvedValue({ accepted: true, queued: 12 })
+  H.settings.mockReset().mockResolvedValue({
+    settings: { aiSummaryEnabled: false },
+    defaults: { aiSummaryEnabled: false }
+  })
 })
 
-afterEach(() => {
-  vi.useRealTimers()
-})
-
-describe('重建时间线：换库之后客户端要跟上', () => {
-  it('库名换过来了：重挂同步（换库检测在那里丢本地缓存重拉，否则重建搬回来的内容被 tombstone 挡住）', async () => {
-    H.dbNameFor.mockResolvedValueOnce('user-timeline_old').mockResolvedValue('user-timeline_new')
-    const timeline = useTimelineSettings()
-
-    const running = timeline.rebuild()
-    expect(timeline.rebuilding.value).toBe(true)
-
-    await vi.advanceTimersByTimeAsync(2500)
-    await running
-
-    expect(H.rebuild).toHaveBeenCalledTimes(1)
-    expect(H.invalidate).toHaveBeenCalled()
-    expect(H.ensureTimelineLiveSync).toHaveBeenCalledWith(true)
-    expect(timeline.rebuilding.value).toBe(false)
-  })
-
-  it('库名一直没变（服务端还没跑起来）：等够一轮就放弃，不重挂、也不报错', async () => {
-    H.dbNameFor.mockResolvedValue('user-timeline_same')
-    const timeline = useTimelineSettings()
-
-    const running = timeline.rebuild()
-    await vi.advanceTimersByTimeAsync(61_000)
-    await running
-
-    expect(H.ensureTimelineLiveSync).not.toHaveBeenCalled()
-    expect(timeline.rebuilding.value).toBe(false)
-  })
-
-  it('还没拿到过库名（地址未知）：只发重建请求，不轮询', async () => {
-    H.dbNameFor.mockResolvedValue(null)
+describe('useTimelineSettings.rebuild', () => {
+  it('只发请求，不等库名（新模型不换库）', async () => {
     const timeline = useTimelineSettings()
 
     await timeline.rebuild()
 
     expect(H.rebuild).toHaveBeenCalledTimes(1)
-    expect(H.ensureTimelineLiveSync).not.toHaveBeenCalled()
-    expect(H.invalidate).not.toHaveBeenCalled()
+    // 没有定时器在跑：调用立刻返回
+    expect(timeline.rebuilding.value).toBe(false)
+  })
+
+  it('运行中 rebuilding 为真，结束后归假（按钮据此转圈）', async () => {
+    let finish!: (value: unknown) => void
+    H.rebuild.mockReturnValue(new Promise((resolve) => {
+      finish = resolve
+    }))
+    const timeline = useTimelineSettings()
+
+    const running = timeline.rebuild()
+    expect(timeline.rebuilding.value).toBe(true)
+
+    finish({ accepted: true })
+    await running
+    expect(timeline.rebuilding.value).toBe(false)
+  })
+
+  it('请求失败也把 rebuilding 放掉（否则按钮永远转着）', async () => {
+    H.rebuild.mockRejectedValue(new Error('boom'))
+    const timeline = useTimelineSettings()
+
+    await expect(timeline.rebuild()).rejects.toThrow('boom')
+    expect(timeline.rebuilding.value).toBe(false)
+  })
+
+  it('不改设置对象：重建只是重新抓，不动 aiSummaryEnabled', async () => {
+    H.settings.mockResolvedValue({
+      settings: { aiSummaryEnabled: true },
+      defaults: { aiSummaryEnabled: false }
+    })
+    const timeline = useTimelineSettings()
+    await timeline.load()
+
+    await timeline.rebuild()
+
+    expect(timeline.settings.value.aiSummaryEnabled).toBe(true)
   })
 })

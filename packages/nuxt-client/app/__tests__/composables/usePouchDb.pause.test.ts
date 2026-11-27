@@ -84,7 +84,6 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
-  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []
@@ -119,7 +118,6 @@ const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => sharedApp
 
 const TIMELINE_ID = '__timeline__'
-const FEEDS = [{ feedId: 'feed-a' }]
 
 /** 按通道类型取已挂上的任务（每次挂载会同时挂 pull 与 push） */
 function tasksOf(direction: 'pull' | 'push'): FakeTask[] {
@@ -156,7 +154,7 @@ beforeEach(async () => {
 
 describe('暂停同步（usePouchDb）', () => {
   it('暂停：取消时间线 live 复制，状态归位 idle 且不递增 version', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     const version = pouch.syncStatuses[TIMELINE_ID]!.version
     pullTask().emitChange({ docs_written: 10, pending: 5 })
 
@@ -169,7 +167,7 @@ describe('暂停同步（usePouchDb）', () => {
   })
 
   it('暂停后迟到的复制事件不再改状态（代次已变）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pouch.pauseSync()
     pullTask().emitChange({ docs_written: 99, pending: 1 })
     pullTask().emitPaused()
@@ -178,37 +176,39 @@ describe('暂停同步（usePouchDb）', () => {
     expect(pouch.syncedDocsByTarget[TIMELINE_ID]).toBeUndefined()
   })
 
-  it('暂停期间：自动同步既不催聚合，也不挂复制', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
-    expect(H.refreshCalls).toBe(1)
+  it('暂停期间：进入列表既不催抓取，也不挂复制', async () => {
+    // 「进入列表」这条路径就是 syncPriority（各列表页的首屏同步入口）
+    await pouch.ensureTimelineLiveSync()
     expect(tasksOf('pull')).toHaveLength(1)
     expect(tasksOf('push')).toHaveLength(1)
 
     pouch.pauseSync()
-    await pouch.syncFeedsIfChanged(FEEDS)
-    expect(H.refreshCalls).toBe(1)
-    // 暂停期间不再新挂通道（既不挂拉取也不再挂回写）
+    const result = await pouch.syncPriority(0)
+    // 暂停是显式动作：这里直接返回 done=true，不发请求、不挂通道
+    expect(result.done).toBe(true)
+    expect(H.refreshCalls).toBe(0)
     expect(tasksOf('pull')).toHaveLength(1)
     expect(tasksOf('push')).toHaveLength(1)
   })
 
   it('暂停不停状态回写通道（已读/收藏的实时通道）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pouch.pauseSync()
     expect(H.pushCancels).toBe(0)
     expect(tasksOf('push')[0]!.cancelled).toBe(false)
   })
 
-  it('恢复同步：重新挂上 live 复制，并可再次催聚合', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+  it('恢复同步：重新挂上 live 复制，并可再次催抓取', async () => {
+    await pouch.ensureTimelineLiveSync()
     pouch.pauseSync()
     pouch.resumeSync()
     expect(pouch.paused.value).toBe(false)
     await vi.waitFor(() => expect(tasksOf('pull')).toHaveLength(2))
     expect(tasksOf('pull')[1]!.cancelled).toBe(false)
 
-    await pouch.syncFeedsIfChanged(FEEDS)
-    expect(H.refreshCalls).toBe(2)
+    // 恢复之后再进列表：催促照常发得出去（不残留暂停态）
+    await pouch.syncPriority(0)
+    expect(H.refreshCalls).toBe(1)
   })
 
   it('暂停状态下点同步（syncNow）= 恢复并正常拉取', async () => {

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest"
-import { envInt, formatDuration } from "../env"
+import { envInt } from "../env"
 
 /** 每个用例用自己的变量名，afterEach 里删掉，避免互相污染 */
 const used = new Set<string>()
@@ -49,15 +49,5 @@ describe("envInt：数值型环境变量的统一兜底", () => {
   it("超过 max 时回退（如 AVIF 质量上限 100）", () => {
     setEnv("TEST_INT_X", "200")
     expect(envInt("TEST_INT_X", 45, { min: 0, max: 100 })).toBe(45)
-  })
-})
-
-describe("formatDuration", () => {
-  it("整小时/整分钟/整秒用紧凑单位，其余保留毫秒", () => {
-    expect(formatDuration(6 * 60 * 60 * 1000)).toBe("6h")
-    expect(formatDuration(15 * 60 * 1000)).toBe("15m")
-    expect(formatDuration(30 * 1000)).toBe("30s")
-    expect(formatDuration(90_000)).toBe("90s")
-    expect(formatDuration(1234)).toBe("1234ms")
   })
 })

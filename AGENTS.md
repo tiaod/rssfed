@@ -5,7 +5,7 @@ ActivityPub Bot 以联邦身份分发。pnpm workspace monorepo：
 
 | 包 | 职责 | 栈 |
 | --- | --- | --- |
-| `packages/hono-server` | API、抓取与聚合 Worker、联邦、MCP 端点 | Hono · Better Auth · PostgreSQL(Drizzle) · CouchDB · BullMQ(Redis) · BotKit(Fedify) |
+| `packages/hono-server` | API、抓取 Worker、联邦、MCP 端点 | Hono · Better Auth · PostgreSQL(Drizzle) · CouchDB · BullMQ(Redis) · BotKit(Fedify) |
 | `packages/nuxt-client` | Web 前端与离线阅读 | Nuxt 4 (SSR) · Vue 3 `<script setup>` · Nuxt UI · Pinia · PouchDB |
 
 架构不变量、库职责、数据流见 [ARCHITECTURE.md](ARCHITECTURE.md)，这里不重复。
@@ -13,7 +13,8 @@ ActivityPub Bot 以联邦身份分发。pnpm workspace monorepo：
 
 ## 结构
 
-- `hono-server/src/`：`routes/` 路由装配、`services/` 业务、`workers/` 抓取与聚合队列、`couchdb/` 库与复制、
+- `hono-server/src/`：`routes/` 路由装配、`services/` 业务（含 `owner-fetch` 抓取写入与 `owner-schedule` 调度状态）、
+  `workers/` 抓取队列与定时维护、`couchdb/` 库与保留策略、
   `db/` Drizzle schema、`rss/` 解析、`bots/` 活动流、`images/` 图片缓存
 - `nuxt-client/app/`：`pages/` · `components/` · `composables/`（`usePouchDb` 是本地库）· `stores/` · `utils/`；
   另有 `e2e/`（Playwright）与 `integration/`（真栈 vitest）

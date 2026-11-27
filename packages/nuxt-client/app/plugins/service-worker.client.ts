@@ -90,7 +90,7 @@ export default defineNuxtPlugin(() => {
     window.addEventListener('load', register, { once: true })
   }
 
-  // Background Sync（Chromium 专有）：断网时登记，恢复联网后由 SW 催一次服务端聚合。
+  // Background Sync（Chromium 专有）：断网时登记，恢复联网后由 SW 催一次服务端抓取。
   // 不支持的环境里 initBackgroundSync 静默降级，同步仍由页面自己的 online 监听负责。
   // 放在注册之前调用：它在「当前就已经断网」时会立刻登记一次，不必等 SW 装好
   // （getRegistration 取不到就返回 false，下一次 offline 事件还会再试）。

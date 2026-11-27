@@ -266,8 +266,8 @@ const draftView = computed({
     <SettingsGroup label="同步">
       <!--
         AI 摘要开关由**服务端**保存（每用户一份，见 useTimelineSettings）。
-        图片参数不在这里：它是 per-feed 的，管理员在「订阅源管理」里按源调，
-        抓取时就压好了（见 AdminFeedManager）。
+        图片参数不在这里：它是全局的，抓取时就压好了，用户改不了
+        （原先按源调的入口随「订阅源管理」一起删除了）。
       -->
       <SettingsRow
         label="AI 摘要"

@@ -51,6 +51,15 @@ const handleLogout = async () => {
   await userStore.logout()
   await navigateTo('/login')
 }
+
+/**
+ * 模板里不能直接调 `navigateTo`：它是 Nuxt 的自动导入，模板中的表达式不经过
+ * 那个导入注入，`vue-tsc` 会报 `Property 'navigateTo' does not exist`。
+ * script 里调没问题（见 handleLogout），所以包一层。
+ */
+const goSubscriptions = async () => {
+  await navigateTo('/subscriptions')
+}
 </script>
 
 <template>
@@ -201,7 +210,7 @@ const handleLogout = async () => {
 
           <UCard
             class="cursor-pointer transition-colors hover:ring-primary/40"
-            @click="navigateTo('/subscriptions')"
+            @click="goSubscriptions()"
           >
             <div class="flex items-start gap-3">
               <UIcon

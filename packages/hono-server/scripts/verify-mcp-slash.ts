@@ -15,7 +15,7 @@ async function parseBody(res: Response) {
   let json: any
   try {
     const dl = raw.split("\n").filter((l) => l.startsWith("data:")).map((l) => l.slice(5).trim())
-    json = dl.length ? JSON.parse(dl[dl.length - 1]) : JSON.parse(raw)
+    json = dl.length ? JSON.parse(dl[dl.length - 1]!) : JSON.parse(raw)
   } catch { json = null }
   return { raw, json }
 }

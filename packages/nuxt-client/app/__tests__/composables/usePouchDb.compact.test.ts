@@ -92,7 +92,6 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
   localDbAccountKey: (uid: string | null) => uid ?? 'guest',
-  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   lastTimelineTrimKey: (uid: string | null) => `rssfed-test-trimmed-${uid ?? 'guest'}`,
   lastTimelineIndexCatchupKey: (uid: string | null) => `rssfed-test-indexed-${uid ?? 'guest'}`,
@@ -127,7 +126,6 @@ const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => sharedApp
 
 const TIMELINE_ID = '__timeline__'
-const FEEDS = [{ feedId: 'feed-a' }]
 /** 压缩节流记录（与上面的 localDbName mock 保持一致） */
 const COMPACT_KEY = 'rssfed-test-compacted-compact-test'
 
@@ -172,7 +170,7 @@ afterEach(() => {
 
 describe('空闲压缩（usePouchDb）', () => {
   it('复制安静下来 30 秒后压缩一次，并记下时间', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await vi.advanceTimersByTimeAsync(COMPACT_IDLE_DELAY_MS + 10)
     await flush()
@@ -182,7 +180,7 @@ describe('空闲压缩（usePouchDb）', () => {
   })
 
   it('一天之内不再压第二次', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await vi.advanceTimersByTimeAsync(COMPACT_IDLE_DELAY_MS + 10)
     await flush()
@@ -195,7 +193,7 @@ describe('空闲压缩（usePouchDb）', () => {
   })
 
   it('距上次压缩超过一天后，下一轮空闲会再压一次', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await vi.advanceTimersByTimeAsync(COMPACT_IDLE_DELAY_MS + 10)
     await flush()
@@ -209,7 +207,7 @@ describe('空闲压缩（usePouchDb）', () => {
   })
 
   it('用户暂停同步：取消已经排上的压缩', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     pouch.pauseSync()
     await vi.advanceTimersByTimeAsync(COMPACT_IDLE_DELAY_MS + 10)
@@ -218,7 +216,7 @@ describe('空闲压缩（usePouchDb）', () => {
   })
 
   it('计时期间同步又忙起来：这轮不压（等下一轮空闲）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     const pull = pullTask()
     pull.emitPaused()
     pull.emitChange({ docs_written: 5, pending: 2 })
@@ -233,7 +231,7 @@ describe('空闲压缩（usePouchDb）', () => {
     }
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
 
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     await vi.advanceTimersByTimeAsync(COMPACT_IDLE_DELAY_MS + 10)
     await flush()
@@ -244,7 +242,7 @@ describe('空闲压缩（usePouchDb）', () => {
   })
 
   it('压缩不改变同步状态（不递增 version、不把 idle 改回去）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     pullTask().emitPaused()
     const before = { ...pouch.syncStatuses[TIMELINE_ID]! }
 

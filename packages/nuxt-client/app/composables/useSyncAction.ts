@@ -13,7 +13,7 @@ import type { ManualSyncOutcome } from '~/composables/useManualSync'
  * `syncing` 只表示**手动**同步进行中：live 同步的状态只驱动全局进度条，否则初始同步因连接
  * 竞争卡住时按钮会一直禁用，用户反而没法重试。
  *
- * 状态取自 syncStatuses 的全部条目：服务端聚合之后同步目标只有时间线库与用户状态库两个，
+ * 状态取自 syncStatuses 的全部条目：单库方案下同步目标只有一个时间线库，
  * 调用方（各列表页）不再需要、也无法按「本页涉及哪些源」来切分同步状态。
  */
 export function useSyncAction() {

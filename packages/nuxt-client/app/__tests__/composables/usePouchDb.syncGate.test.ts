@@ -2,15 +2,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 import { usePouchDb } from '~/composables/usePouchDb'
 
 /**
- * 自动同步入口（`syncFeedsIfChanged`）的闸门行为。
+ * 时间线 live 复制的**生命周期**：挂载失败退避、重建本地库、远端库被换掉。
  *
- * 服务端聚合之后，「要不要同步某个源」由服务端判断（reconcile 内部一条 SQL），
- * 客户端只负责两件事：确保 live 复制在跑、**带节流地**催一次聚合。于是这里锁定：
- *   1. 有订阅 → 催一次（并挂上 live 复制）；
- *   2. 节流窗口内重复调用不再打接口（页面反复挂载 / 用户反复刷新都不该每次都请求）；
- *   3. 空订阅、用户暂停、存储熔断 → 什么都不做；
- *   4. `syncFeed`（显式动作，如刚订阅完）不受节流限制；
- *   5. `resetLocalData` 清空本地库与同步状态，并重新挂上 live 复制。
+ * （催抓取的那部分 —— 什么时候该打 `/api/timeline/refresh`、暂停/熔断时是否短路 ——
+ * 归 `usePouchDb.prioritySync.test.ts`，因为现在唯一的入口是 `syncPriority`。
+ * 这里的用例只关心「复制通道本身」什么时候挂、什么时候重挂、什么时候丢掉本地镜像。）
  */
 
 interface FakeTask {
@@ -85,7 +81,6 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
-  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   lastTimelineUrlKey: (uid: string | null) => `rssfed-test-url-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
@@ -125,8 +120,6 @@ const testGlobals = globalThis as unknown as Record<string, unknown>
 testGlobals.useNuxtApp = () => sharedApp
 
 const TIMELINE_ID = '__timeline__'
-// 只有 feedId 有意义：syncFeedsIfChanged 现在只用数组长度判空（见 usePouchDb）
-const FEEDS = [{ feedId: 'feed-a' }]
 let pouch: ReturnType<typeof usePouchDb>
 
 beforeEach(() => {
@@ -145,54 +138,6 @@ beforeEach(() => {
   // 单库方案下不再需要预先创建本地库：条目与状态同一个库，第一次真正用到时懒建。
   // （若在这里先取库，会顺带挂上一条 live 复制，把「没有订阅/已暂停时不该挂复制」这类用例的
   //  H.tasks 断言搅乱。）
-})
-
-describe('自动同步（syncFeedsIfChanged）', () => {
-  it('有订阅：催一次服务端聚合（即发即忘、不带 wait），并挂上时间线 live 复制', async () => {
-    const count = await pouch.syncFeedsIfChanged(FEEDS)
-    expect(count).toBe(1)
-    // 即发即忘（不传 wait）：催一次就返回，数据靠 live 复制到端
-    expect(H.refreshArgs).toEqual([[undefined]])
-    expect(H.tasks).toHaveLength(1)
-    expect(H.tasks[0]!.url).toContain('timeline')
-  })
-
-  it('节流窗口内重复调用不再打接口（但仍确保 live 复制在跑）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
-    await pouch.syncFeedsIfChanged(FEEDS)
-    await pouch.syncFeedsIfChanged(FEEDS)
-    expect(H.refreshArgs).toHaveLength(1)
-    expect(H.tasks).toHaveLength(1)
-  })
-
-  it('syncFeed（显式动作）不受节流限制', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
-    pouch.syncFeed()
-    await vi.waitFor(() => expect(H.refreshArgs).toHaveLength(2))
-  })
-
-  it('没有订阅：不催、不挂复制', async () => {
-    expect(await pouch.syncFeedsIfChanged([])).toBe(0)
-    expect(H.refreshArgs).toHaveLength(0)
-    expect(H.tasks).toHaveLength(0)
-  })
-
-  it('用户暂停时不动：暂停是显式动作，进页面不该偷偷恢复', async () => {
-    pouch.pauseSync()
-    expect(await pouch.syncFeedsIfChanged(FEEDS)).toBe(0)
-    expect(H.refreshArgs).toHaveLength(0)
-    expect(H.tasks).toHaveLength(0)
-  })
-
-  it('本地存储熔断后不再催、不再挂复制', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
-    H.tasks[0]!.emitError({ name: 'indexed_db_went_bad', reason: 'QuotaExceededError' })
-    expect(pouch.storageBroken.value).toBeTruthy()
-
-    expect(await pouch.syncFeedsIfChanged(FEEDS)).toBe(0)
-    expect(H.refreshArgs).toHaveLength(1)
-    expect(H.tasks).toHaveLength(1)
-  })
 })
 
 describe('挂载失败后的退避（sync-targets 请求风暴的根因）', () => {
@@ -247,7 +192,7 @@ describe('挂载失败后的退避（sync-targets 请求风暴的根因）', () 
 
 describe('resetLocalData', () => {
   it('清空同步计数与状态，并重新挂上 live 复制', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     expect(H.tasks).toHaveLength(1)
 
     await pouch.resetLocalData()
@@ -259,7 +204,7 @@ describe('resetLocalData', () => {
   })
 
   it('重置同时解除存储熔断（重建本地库就是修复动作）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     H.tasks[0]!.emitError({ name: 'indexed_db_went_bad', reason: 'QuotaExceededError' })
     expect(pouch.storageBroken.value).toBeTruthy()
 
@@ -273,14 +218,14 @@ describe('远端聚合库被换掉（重建 / v1→v2 升级）', () => {
   const URL_KEY = 'rssfed-test-url-syncgate-test'
 
   it('首次同步：记下这次同步的远端地址', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
 
     expect(H.tasks).toHaveLength(1)
     expect(localStorage.getItem(URL_KEY)).toBe('http://remote.test/timeline')
   })
 
   it('地址没变：接着同步，不丢本地缓存', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     await pouch.ensureTimelineLiveSync(true)
 
     // 只多挂了一条（旧的那条被停掉），没有因为"换库"多清一次本地库
@@ -290,7 +235,7 @@ describe('远端聚合库被换掉（重建 / v1→v2 升级）', () => {
   })
 
   it('地址变了：丢掉本地旧镜像、按新库重新全量拉一遍（旧修订谱系会让新库内容变成冲突分支）', async () => {
-    await pouch.syncFeedsIfChanged(FEEDS)
+    await pouch.ensureTimelineLiveSync()
     expect(H.tasks).toHaveLength(1)
 
     // 服务端换库：新地址

@@ -40,12 +40,11 @@ vi.mock("../rss/parser", async (importOriginal) => {
   }
 })
 
-vi.mock("../workers", () => ({ enqueueFetch: async () => {} }))
+vi.mock("../workers", () => ({ enqueueOwnerFetch: async () => {} }))
 
 vi.mock("../couchdb/client", () => ({
   // get 抛错 = FeedDoc 还不存在，于是 seedFeedDoc 走首次插入路径（生产里就是这个行为）
   createCouchDb: () => ({ get: async () => { throw new Error("not found") }, insert: async () => ({}) }),
-  ensureFeedDatabase: async () => "db_feed",
   ensureTimelineDatabase: async () => "db_user",
 }))
 
@@ -53,10 +52,8 @@ vi.mock("../db", () => ({
   db: {
     insert: () => ({ values: () => ({ onConflictDoNothing: async () => ({}) }) }),
     select: () => ({ from: () => ({ where: () => ({ limit: async () => [] }) }) }),
-    // resolveFeedId 走 query.feeds.findFirst：没查到 = 新源，按 URL 哈希派生 id
-    query: { feeds: { findFirst: async () => undefined } },
   },
-  feeds: { id: "id", url: "url", title: "title" },
+  bots: { id: "id" },
 }))
 
 const { feedsRouter } = await import("../routes/feeds")

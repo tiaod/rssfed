@@ -72,7 +72,7 @@ export function readCloudInfo(payload: unknown): TimelineCloudInfo | null {
 /**
  * 缓存有效期（毫秒）。
  *
- * 云端体积只随「服务端聚合出新条目」变化，量级是分钟级的；组件每次悬停/挂载都会调 refresh，
+ * 云端体积只随「服务端抓到新条目」变化，量级是分钟级的；组件每次悬停/挂载都会调 refresh，
  * 没有缓存的话弹层一悬停就是一次请求。60 秒足够跟上变化，又不会把请求打散。
  */
 const CACHE_TTL_MS = 60_000

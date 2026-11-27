@@ -62,7 +62,7 @@ function refreshSizes() {
   void storageEstimate.refresh()
 }
 
-// 一轮同步结束后体积可能刚变大（服务端聚合进来新条目、本地也多了一份）：
+// 一轮同步结束后体积可能刚变大（服务端抓进来新条目、本地也多了一份）：
 // 顺手强刷一次，免得用户看到的是同步前的旧数字（refresh 的缓存默认 60 秒）
 watch(() => summary.value.lastSyncedAt, (next, prev) => {
   if (!next || next === prev) return

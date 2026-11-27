@@ -17,7 +17,7 @@ import "dotenv/config"
 import http from "node:http"
 import { app } from "../src/app"
 import { createToken } from "../src/services/api-token"
-import { db, apiToken, feeds, bots } from "../src/db"
+import { db, apiToken, bots } from "../src/db"
 import { eq, inArray } from "drizzle-orm"
 
 const USER_ID = process.env.MCP_TEST_USER_ID ?? "RtbOjQ0dXGbyepZTBizq8z4nYYUmE7nQ" // user10@test.com
@@ -40,7 +40,7 @@ async function parseBody(res: Response): Promise<{ raw: string; json?: any }> {
       .filter((l) => l.startsWith("data:"))
       .map((l) => l.slice(5).trim())
     if (dataLines.length) {
-      json = JSON.parse(dataLines[dataLines.length - 1])
+      json = JSON.parse(dataLines[dataLines.length - 1]!)
     } else {
       json = JSON.parse(raw)
     }
@@ -249,13 +249,8 @@ async function main() {
 
     console.log("\n=== 验证完成 ===")
   } finally {
-    // 复原测试期间对全局 feed 元数据/状态的改动（避免污染共享数据）
-    if (testFeedId) {
-      await db.update(feeds)
-        .set({ title: "https://news.ycombinator.com/rss", status: "active" })
-        .where(eq(feeds.id, testFeedId))
-        .catch(() => {})
-    }
+    // 新模型里没有全局 feed 元数据可复原：源级信息由抓取时的解析结果维护，
+    // 测试期间改的只有这个用户自己的订阅文档（后端已按 user 隔离，不会污染共享数据）。
     // 删除测试期间新增的 bot（含 organize_bots 自动创建的"未分组"），保持环境干净
     const nowBots = await db.select({ id: bots.id }).from(bots).where(eq(bots.userId, USER_ID))
     const newBotIds = nowBots.map((b) => b.id).filter((id) => !preExistingBotIds.has(id))

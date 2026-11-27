@@ -1,5 +1,5 @@
 // 统一 API 请求：跨源访问 Hono 后端时必须携带会话 Cookie（ofetch 默认 same-origin）
-import type { AdminFeed, FeedSubscriptionItem, RssFeed } from '~/types/rss'
+import type { FeedSubscriptionItem, RssFeed } from '~/types/rss'
 import type {
   AttachedFeed,
   BotCreateBody,
@@ -16,16 +16,16 @@ import type { TimelineSettings as TimelineSettingsPayload } from '~/utils/timeli
 import { resolveApiBase } from '~/utils/apiBase'
 import { importOpmlStreaming, type OpmlImportEvent } from '~/utils/opmlImport'
 
-/** 催促聚合的响应（POST /api/timeline/refresh） */
+/** 催促抓取的响应（POST /api/timeline/refresh） */
 export interface TimelineRefreshResult {
   /** 是否已受理（永远为 true；服务端拒绝的情况走 HTTP 错误） */
   accepted: boolean
-  /** 服务端是否在本请求内跑完了聚合（未带 wait 时为 undefined） */
+  /** 服务端是否在本请求内完成了等待（未带 wait 时为 undefined） */
   completed?: boolean
-  /** 本轮写入派生库的新条目数（仅 completed 时有意义） */
+  /** 本轮写进用户库的新条目数（仅 completed 时有意义） */
   added?: number
-  /** 该用户的订阅源总数 */
-  sources?: number
+  /** 本次入队的抓取任务数（= 该用户当前有效订阅里没被暂停的那些） */
+  queued?: number
 }
 
 function apiFetch<T>(url: string, options: Parameters<typeof $fetch<T>>[1] = {}) {
@@ -38,111 +38,65 @@ export function useApi() {
 
   return {
     feeds: {
-      discover: (url: string) => apiFetch<{ feedId: string, title?: string, items: number }>(
+      /**
+       * 解析并校验一个源（**不写订阅**）。
+       *
+       * 返回的 `url` 要原样写进订阅文档 —— 服务端抓取靠它（feedId 是 url 的哈希，不可逆）。
+       */
+      discover: (url: string) => apiFetch<{
+        feedId: string
+        url: string
+        title?: string
+        siteUrl?: string
+        description?: string
+        image?: string
+        items: number
+      }>(
         `${base}/api/feeds/discover`,
         { method: 'POST', body: { url } }
       ),
       get: (id: string) => apiFetch<RssFeed>(`${base}/api/feeds/${id}`),
       subscriptions: () => apiFetch<FeedSubscriptionItem[]>(`${base}/api/feeds/subscriptions`),
-      /** 管理员：获取全部 feed 注册表 */
-      listAll: () => apiFetch<AdminFeed[]>(`${base}/api/feeds`),
-      /** 管理员：暂停/恢复抓取 */
-      updateStatus: (id: string, status: 'active' | 'paused') =>
-        apiFetch(`${base}/api/feeds/${id}`, { method: 'PATCH', body: { status } }),
-      /** 管理员：修改订阅源信息（含 per-feed 图片缓存策略；数值传 null 表示重置回全局默认） */
-      update: (id: string, body: Partial<{
-        title: string
+      /** 订阅一个源（写订阅文档 + 触发首抓）。已订阅时 added=false */
+      subscribe: (url: string, category?: string) => apiFetch<{
+        feedId: string
         url: string
-        description: string
-        siteUrl: string
-        image: string
-        cacheImages: boolean
-        maxImageCount: number | null
-        maxEntryImageBytes: number | null
-        maxImageWidth: number | null
-        avifQuality: number | null
-        maxSourceImageBytes: number | null
-      }>) =>
-        apiFetch(`${base}/api/feeds/${id}`, { method: 'PUT', body }),
-      /** 管理员：触发重新抓取 */
-      refetch: (id: string) => apiFetch(`${base}/api/feeds/${id}/refetch`, { method: 'POST' }),
-      /**
-       * 管理员：删除订阅源（破坏性，含订阅/条目/源库）。
-       *
-       * 后端有订阅者守卫：还有别人订阅时返回 409 + `code: "feed_has_subscribers"`
-       * 与订阅者列表；确认要删须显式传 force。
-       */
-      remove: (id: string, options: { force?: boolean } = {}) =>
-        apiFetch<{
-          feedId: string
-          title?: string
-          deleted: boolean
-          purgedUsers: number
-          forced: boolean
-          failures: Array<{ userId?: string, error: string }>
-        }>(`${base}/api/feeds/${id}${options.force ? '?force=1' : ''}`, { method: 'DELETE' }),
-      /** 管理员：获取全局默认图片缓存参数（供输入框 placeholder 展示默认值） */
-      imageDefaults: () => apiFetch<{ maxImageCount: number, maxEntryImageBytes: number, maxImageWidth: number, avifQuality: number, maxSourceImageBytes: number }>(
-        `${base}/api/feeds/image-defaults`
+        title: string
+        added: boolean
+      }>(`${base}/api/feeds/subscriptions`, { method: 'POST', body: { url, category } }),
+      /** 退订（同时清掉该源已抓到的条目） */
+      unsubscribe: (feedId: string) => apiFetch<{ ok: true, removedEntries?: number }>(
+        `${base}/api/feeds/subscriptions/${encodeURIComponent(feedId)}`,
+        { method: 'DELETE' }
       ),
-      /**
-       * 管理员：扫描零订阅的孤儿源（只读）。
-       *
-       * 调度器只看 status=active，不看有没有人订阅，被退订干净的源会一直占着抓取配额。
-       * 判定口径见后端 services/feed-orphans.ts。
-       */
-      orphans: (limit = 50) => apiFetch<{
-        total: number
-        referenced: number
-        orphans: Array<{
-          id: string
-          url: string
-          title: string
-          status: string
-          pausedBySystem: boolean | null
-          lastFetchedAt: string | null
-        }>
-        activeOrphans: number
-        alreadyPaused: number
-        scanFailures: number
-      }>(`${base}/api/feeds/orphans?limit=${limit}`),
-      /** 管理员：批量暂停零订阅孤儿源（默认遵守冷静期，force 才立即处理） */
-      pauseOrphans: (options: { limit?: number, force?: boolean } = {}) =>
-        apiFetch<{ paused: number, skipped: number, aborted: boolean, reason?: string }>(
-          `${base}/api/feeds/orphans/pause`,
-          { method: 'POST', body: options }
+      /** 改一条订阅（仅显示名与分组；换源请重新订阅） */
+      updateSubscription: (feedId: string, body: { title?: string, category?: string }) =>
+        apiFetch<{ ok: true }>(
+          `${base}/api/feeds/subscriptions/${encodeURIComponent(feedId)}`,
+          { method: 'PATCH', body }
         ),
-      /** 管理员：孤儿源自动清理策略（多久后暂停 / 多久后删除） */
-      orphanPolicy: () => apiFetch<{
-        pauseAfterDays: number
-        deleteAfterDays: number
-        batchLimit: number
-        enabled: boolean
-        source: 'settings' | 'env'
-      }>(`${base}/api/feeds/orphans/policy`),
-      /** 管理员：修改孤儿源策略（存进站点设置，运行时生效，无需重启） */
-      saveOrphanPolicy: (body: { pauseAfterDays: number, deleteAfterDays: number, batchLimit?: number }) =>
-        apiFetch<{
-          pauseAfterDays: number
-          deleteAfterDays: number
-          batchLimit: number
-          enabled: boolean
-          source: 'settings' | 'env'
-        }>(`${base}/api/feeds/orphans/policy`, { method: 'PUT', body }),
-      /** 管理员：立刻跑一轮自动清理（等同于定时任务那一轮） */
-      sweepOrphans: () =>
-        apiFetch<{
-          marked: number
-          cleared: number
-          paused: number
-          deleted: number
-          skipped: number
-          aborted: boolean
-          reason?: string
-        }>(`${base}/api/feeds/orphans/sweep`, { method: 'POST' }),
-      /** 管理员：恢复那些曾自动暂停、但现在确实有人订阅的源 */
-      resumeOrphans: () =>
-        apiFetch<{ resumed: number }>(`${base}/api/feeds/orphans/resume`, { method: 'POST' }),
+      /** 暂停/恢复一条订阅的抓取（保留已抓到的内容） */
+      setSubscriptionPaused: (feedId: string, paused: boolean) =>
+        apiFetch<{ ok: true, paused: boolean }>(
+          `${base}/api/feeds/subscriptions/${encodeURIComponent(feedId)}/${paused ? 'pause' : 'resume'}`,
+          { method: 'POST' }
+        ),
+      /**
+       * 订阅一个 Bot 之后，把它已有的产出立刻搬进用户库。
+       *
+       * 客户端写订阅文档是纯本地操作（离线也能做），所以「搬内容」只能由服务端补 ——
+       * 不调用这一步的话要等下一个 Bot 产出周期才看到东西（可能几小时）。
+       * 幂等：已搬过的条目按 `_id` 跳过，重复调用只多一次查询。
+       */
+      syncBotSubscription: (botId: string) => apiFetch<{ ok: true, copied: number, scanned: number }>(
+        `${base}/api/feeds/bot-subscriptions/${encodeURIComponent(botId)}/sync`,
+        { method: 'POST' }
+      ),
+      /** 立即重新抓取一条订阅（清空失败计数并绕开抓取缓存） */
+      refetchSubscription: (feedId: string) => apiFetch<{ ok: true, queued: boolean }>(
+        `${base}/api/feeds/subscriptions/${encodeURIComponent(feedId)}/refetch`,
+        { method: 'POST' }
+      ),
       /**
        * 导入 OPML：批量注册订阅源并创建订阅。
        *
@@ -153,43 +107,45 @@ export function useApi() {
         importOpmlStreaming(`${base}/api/feeds/import-opml`, opml, options)
     },
     /**
-     * 服务端时间线聚合（每用户一个派生库）。
+     * 服务端时间线（每用户一个库）。
      *
-     * 条目本身走 CouchDB 的 live 复制，不经这些接口；它们只负责设置与「催一次聚合」。
+     * 条目本身走 CouchDB 的 live 复制，不经这些接口；它们只负责设置、催一次抓取与日志。
      */
     timeline: {
       /** 读取当前设置（顺带下发服务端默认值） */
       settings: () => apiFetch<{ settings: TimelineSettingsPayload, defaults: TimelineSettingsPayload }>(
         `${base}/api/timeline/settings`
       ),
-      /** 更新设置（只影响「往用户库里聚合什么」，服务端会顺手催一次聚合） */
+      /** 更新设置（设置不影响抓什么，服务端只落库） */
       updateSettings: (body: Partial<TimelineSettingsPayload>) => apiFetch<{ settings: TimelineSettingsPayload }>(
         `${base}/api/timeline/settings`,
         { method: 'PATCH', body }
       ),
       /**
-       * 催一次聚合（订阅/退订/打开列表/手动同步时调用）。
+       * 催一次抓取（订阅/退订/打开列表/手动同步时调用）。
        *
-       * `wait: 1` 时服务端会在本请求内跑完一轮 reconcile 再返回（有服务端超时上限），
-       * 于是手动同步能拿到确切的「本轮新增 N 条」；不传则立即 202，数据靠 live 复制到端。
+       * `wait: 1` 时服务端会在本请求内等用户库安静下来（有服务端超时上限），
+       * 于是手动同步能拿到确切的「本轮新增 N 条」；不传则立即 202，条目靠 live 复制到端。
        */
       refresh: (params?: { wait?: 1 }) => apiFetch<TimelineRefreshResult>(
         `${base}/api/timeline/refresh`,
         { method: 'POST', params }
       ),
-      /** 重建派生库（运维兜底入口，见 useTimelineSettings.rebuild） */
+      /** 立即重新抓取全部订阅（运维兜底入口，见 useTimelineSettings.rebuild） */
       rebuild: () => apiFetch<{ accepted: boolean }>(`${base}/api/timeline/rebuild`, { method: 'POST' }),
       /**
        * 同步日志（设置弹窗 → 数据 →「同步日志」调试面板）。
        *
-       * 返回两段：`events` = 服务端落下的流水（汇聚/重建/首搬/失败），
-       * `sources` = 每个订阅源的当前同步状态（读水位表，不是流水）。
+       * 返回两段：`events` = 服务端每一轮抓取干了什么（新增/裁剪/失败），
+       * `heartbeat` = 抓取还在不在跑（最近一轮时刻 + 连续空转轮数）。
+       *
+       * 各源**当前**状态不在这里：它在用户库的 `_local/schedule`，由订阅列表接口带出来。
        */
       events: (limit?: number) => apiFetch<TimelineLogPayload>(
         `${base}/api/timeline/events`,
         { params: limit ? { limit } : undefined }
       ),
-      /** 清空流水（源状态不受影响） */
+      /** 清空流水（心跳不受影响） */
       clearEvents: () => apiFetch<{ ok: boolean }>(`${base}/api/timeline/events`, { method: 'DELETE' })
     },
     bots: {

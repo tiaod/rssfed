@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LEGACY_LOCAL_DB_NAMES, LEGACY_LOCAL_DB_PREFIXES, lastTimelineCompactKey, lastTimelineRefreshKey, localDbAccountKey, localDbName, isLegacyLocalDbName, isLegacyLocalStorageKey, stripPouchNamePrefix } from '~/utils/localDbName'
+import { LEGACY_LOCAL_DB_NAMES, LEGACY_LOCAL_DB_PREFIXES, lastTimelineCompactKey, localDbAccountKey, localDbName, isLegacyLocalDbName, isLegacyLocalStorageKey, isObsoleteRefreshThrottleKey, stripPouchNamePrefix } from '~/utils/localDbName'
 
 describe('localDbName', () => {
   it('按账号隔离：不同账号的本地库名不同（单库方案下每账号只有一个库）', () => {
@@ -30,14 +30,6 @@ describe('localDbName', () => {
     for (const prefix of LEGACY_LOCAL_DB_PREFIXES) {
       expect(localDbName('u1').startsWith(prefix)).toBe(false)
     }
-  })
-})
-
-describe('lastTimelineRefreshKey', () => {
-  it('催促时间同样按账号隔离（否则 A 的催促会让 B 的页面不再催）', () => {
-    expect(lastTimelineRefreshKey('user-a')).toBe('rssfed-timeline-refresh-user-a')
-    expect(lastTimelineRefreshKey('user-a')).not.toBe(lastTimelineRefreshKey('user-b'))
-    expect(lastTimelineRefreshKey(null)).toBe('rssfed-timeline-refresh-guest')
   })
 })
 
@@ -87,9 +79,17 @@ describe('历史本地库 / localStorage 键的匹配', () => {
     expect(isLegacyLocalStorageKey('rssfed-sync-window-2RGBxIeXa')).toBe(true)
   })
 
+  it('已废弃的催促节流键（机制删了，存量浏览器里还有）要能被识别并清掉', () => {
+    expect(isObsoleteRefreshThrottleKey('rssfed-timeline-refresh-2RGBxIeXa')).toBe(true)
+    expect(isObsoleteRefreshThrottleKey('rssfed-timeline-refresh')).toBe(true)
+    // 不能误伤相邻的键族
+    expect(isObsoleteRefreshThrottleKey('rssfed-timeline-refreshX')).toBe(false)
+    expect(isObsoleteRefreshThrottleKey('rssfed-timeline-url-2RGBxIeXa')).toBe(false)
+  })
+
   it('当前在用的键不能被误删', () => {
     expect(isLegacyLocalStorageKey('rssfed-central-migrated-v5')).toBe(false)
-    expect(isLegacyLocalStorageKey('rssfed-timeline-refresh-2RGBxIeXa')).toBe(false)
+    expect(isLegacyLocalStorageKey('rssfed-timeline-url-2RGBxIeXa')).toBe(false)
     // 前缀相同但不是一个键族（少了分隔符）时不能误判
     expect(isLegacyLocalStorageKey('rssfed-synced-feedsX')).toBe(false)
   })

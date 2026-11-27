@@ -102,7 +102,6 @@ vi.mock('pouchdb-find', () => ({ default: {} }))
 
 vi.mock('~/utils/localDbName', () => ({
   localDbName: (uid: string | null) => `fake-${uid ?? 'guest'}`,
-  lastTimelineRefreshKey: (uid: string | null) => `rssfed-test-refresh-${uid ?? 'guest'}`,
   lastTimelineCompactKey: (uid: string | null) => `rssfed-test-compacted-${uid ?? 'guest'}`,
   LEGACY_LOCAL_DB_NAMES: [],
   LEGACY_LOCAL_DB_PREFIXES: []
@@ -142,9 +141,9 @@ let pouch: ReturnType<typeof usePouchDb>
 /** 一条复制写入的文档（只写断言关心的字段） */
 const doc = (type: string, feedId?: string) => ({ type, feedId })
 
-/** 触发一次「自动同步」，把 live 复制挂上 */
+/** 把 live 复制挂上（列表页首屏同步走的就是这条） */
 async function startLive() {
-  await pouch.syncFeedsIfChanged([{ feedId: 'feed-a' }])
+  await pouch.ensureTimelineLiveSync()
 }
 
 beforeEach(async () => {
@@ -229,7 +228,7 @@ describe('时间线 live 复制：进度与状态', () => {
     expect(pouch.storageBroken.value).toBeTruthy()
     expect(H.tasks[0]!.cancelled).toBe(true)
     // 熔断后不再挂新的 live 复制
-    await pouch.syncFeedsIfChanged([{ feedId: 'feed-a' }])
+    await pouch.ensureTimelineLiveSync()
     expect(H.tasks).toHaveLength(1)
   })
 

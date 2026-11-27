@@ -1,8 +1,8 @@
 /**
  * 自适应保留条数的**纯策略**：活动度 → 目标 N，含分档与滞回。
  *
- * 这里不碰数据库/CouchDB，边界由 `__tests__/feed-retention.test.ts` 钉住；
- * I/O 与定时任务在 `services/feed-retention.ts`。
+ * 这里不碰数据库/CouchDB；I/O 在 `services/owner-platform.ts` 的
+ * `recomputeOwnerRetention`，定时触发在 `workers/maintenance.ts`。
  */
 import { DEFAULT_SOURCE_RETENTION_ENTRIES } from "../couchdb/retention"
 

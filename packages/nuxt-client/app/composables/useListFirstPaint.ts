@@ -4,7 +4,7 @@ export interface ListFirstPaintOptions {
   /** 查一次本地库并整体替换列表（`useSyncedEntryList` 的 `load`） */
   load: () => Promise<void>
   /**
-   * 优先同步这个列表要看的内容（`usePouchDb` 的 `syncPriority`：催一次服务端聚合 +
+   * 优先同步这个列表要看的内容（`usePouchDb` 的 `syncPriority`：催一次服务端抓取 +
    * 等 live 复制把这一批送到本地）。
    *
    * 契约：不抛错、有等待上限（超时后复制仍在后台跑，剩下的条目照旧走提示条）。

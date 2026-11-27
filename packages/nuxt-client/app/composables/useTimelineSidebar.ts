@@ -1,6 +1,5 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useTimelineCloudInfo } from '~/composables/useTimelineCloudInfo'
-import { useTimelineLog } from '~/composables/useTimelineLog'
 import { formatBytes, useStorageEstimate } from '~/composables/useStorageEstimate'
 import { formatSyncedAt, summarizeSyncStatuses, syncStatusLabel } from '~/utils/syncStatusSummary'
 import { summarizeReading, type ReadingDigest } from '~/utils/readingStats'
@@ -9,7 +8,7 @@ import { summarizeReading, type ReadingDigest } from '~/utils/readingStats'
  * 时间线右栏两张卡的数据。
  *
  * 拆成两部分是有意的：
- *   - 同步健康：全是**现成**的数据源（本地同步状态、云端库体积、服务端水位表），组件只负责排版；
+ *   - 同步健康：全是**现成**的数据源（本地同步状态、云端库体积、订阅列表里的抓取状态），组件只负责排版；
  *   - 阅读小结：本地状态文档的一次全量扫描 + 纯函数汇总（见 utils/readingStats）。
  *
  * 都不新增后端接口：右栏是「顺手看一眼」的位置，为它加轮询或新端点不划算。
@@ -20,11 +19,21 @@ import { summarizeReading, type ReadingDigest } from '~/utils/readingStats'
 /** 同步健康里「哪些源有问题」的明细行，最多列这么多（再多就不适合放在侧栏了） */
 const MAX_PROBLEM_SOURCES = 3
 
+/** 订阅列表里这条订阅处在什么抓取状态（服务端从用户库 `_local/schedule` 读出来） */
+interface SubscriptionStatus {
+  feedId: string
+  title: string
+  status: string
+  errorMessage?: string
+  /** 上次抓取时刻（ISO）；从没抓过时没有 */
+  lastFetchedAt?: string
+}
+
 export function useTimelineSidebar() {
   const pouch = usePouchDb()
+  const api = useApi()
   const cloudInfo = useTimelineCloudInfo()
   const storageEstimate = useStorageEstimate()
-  const timelineLog = useTimelineLog()
 
   // ── 时钟：相对文案不能只在挂载时算一次 ──
 
@@ -62,16 +71,44 @@ export function useTimelineSidebar() {
   const syncLabel = computed(() => syncStatusLabel(syncSummary.value.state))
 
   /**
+   * 订阅列表里的抓取状态（服务端从用户库 `_local/schedule` 读出来）。
+   *
+   * 这就是「哪个源悄悄失败了」的唯一来源：每条订阅的 `status` / `errorMessage` /
+   * `lastFetchedAt` 都存在用户自己的库里，浏览器读自己那份权威数据即可，不必再问服务端
+   * 「每源状态表」—— 那张表已随旧模型的扇出一起删掉了。
+   */
+  const subscriptions = ref<SubscriptionStatus[]>([])
+  /** 是否成功读到过订阅列表：读失败时不显示「0 个源失败」，那会被当成好消息 */
+  const subscriptionsLoaded = ref(false)
+
+  async function refreshSubscriptions() {
+    try {
+      const remote = await api.feeds.subscriptions()
+      subscriptions.value = remote.map(item => ({
+        feedId: item.feedId,
+        title: item.title,
+        status: item.status,
+        errorMessage: item.errorMessage,
+        lastFetchedAt: item.lastFetchedAt
+      }))
+      subscriptionsLoaded.value = true
+    } catch {
+      // 离线时保持上一次的数字：侧栏是辅助信息，不该因为一次失败把卡片变成错误块
+    }
+  }
+
+  /**
    * 「上次同步」两种口径都取到：本地复制的 lastSyncedAt（实时、精确到这台机器）
-   * 与服务端水位表（另一台设备/后台聚合的结果）。
+   * 与订阅列表里各源最近一次抓到的时刻（服务端的视角）。
    *
    * 侧栏要回答的是「内容还新不新」，本地那个更贴近「我这台机器上看到的是什么时候的」；
-   * 但刚打开的机器可能还没有本地记录，此时服务端水位表能顶上。取两者里较新的那个。
+   * 但刚打开的机器可能还没有本地记录，此时服务端抓取时刻能顶上。取两者里较新的那个。
    */
   const lastSyncedAt = computed(() => {
     const local = syncSummary.value.lastSyncedAt
-    const remote = timelineLog.sources.value
-      .map(s => s.syncedAt)
+    // 服务端时间来自订阅列表（抓取直接写进用户库，这里不再有独立的"水位表"）
+    const remote = subscriptions.value
+      .map(s => s.lastFetchedAt)
       .filter((t): t is string => !!t)
       .reduce<string | null>((a, b) => (a === null || b > a ? b : a), null)
     if (!local) return remote
@@ -106,19 +143,26 @@ export function useTimelineSidebar() {
   })
 
   /**
-   * 有问题的源：状态是 error、或最后同步失败过的。
+   * 有问题的源：状态是 error、或有失败记录。
    *
    * 这是这张卡真正的价值 —— 汇总数字（几个源、多久前）在别处也能看到，而「哪个源悄悄死了」
-   * 只有服务端的源水位表知道。只列前 MAX_PROBLEM_SOURCES 条，剩下的折成一句「另有 N 个」。
+   * 只看总数是看不出来的。数据来自订阅列表，也就是用户自己库里那份 `_local/schedule`。
+   * 只列前 MAX_PROBLEM_SOURCES 条，剩下的折成一句「另有 N 个」。
    */
   const problemSources = computed(() => {
-    const bad = timelineLog.sources.value
-      .filter(s => s.status === 'error' || !!s.lastError)
-      .map(s => ({ id: s.sourceId, title: s.title || '（已删除的订阅源）' }))
-    return { items: bad.slice(0, MAX_PROBLEM_SOURCES), more: Math.max(0, bad.length - MAX_PROBLEM_SOURCES) }
+    // 订阅列表还没读到过：不能说「没有失败的源」，那会被当成好消息（模板按 known 决定显不显示）
+    if (!subscriptionsLoaded.value) return { items: [], more: 0, known: false }
+    const bad = subscriptions.value
+      .filter(s => s.status === 'error' || !!s.errorMessage)
+      .map(s => ({ id: s.feedId, title: s.title || '（已删除的订阅源）' }))
+    return {
+      items: bad.slice(0, MAX_PROBLEM_SOURCES),
+      more: Math.max(0, bad.length - MAX_PROBLEM_SOURCES),
+      known: true
+    }
   })
 
-  /** 订阅源总数：本地订阅（含 bot）比服务端水位表更贴近用户认知，优先用它 */
+  /** 订阅源总数：本地订阅（含 bot）更贴近用户认知，优先用它 */
   const feedCount = ref(0)
 
   async function refreshFeeds() {
@@ -158,8 +202,9 @@ export function useTimelineSidebar() {
       refreshDigest(),
       cloudInfo.refresh(force),
       storageEstimate.refresh(),
-      // 源水位表：同步健康卡靠它说「哪个源失败了」。失败不该让整张卡空掉，load 内部已兜底
-      timelineLog.load()
+      // 订阅列表里的抓取状态：同步健康卡靠它说「哪个源失败了」。失败不该让整张卡空掉，
+      // refreshSubscriptions 内部已兜底
+      refreshSubscriptions()
     ])
   }
 
@@ -203,12 +248,12 @@ export function useTimelineSidebar() {
    * 切回这个标签页时补一次。
    *
    * 后台标签页的定时器会被浏览器节流甚至冻结，回来时「3 分钟前」可能停在半小时前的数字上；
-   * 顺手也把服务端水位表重读一遍（前台时同步多半已经推进过了）。
+   * 顺手也把订阅列表的抓取状态重读一遍（前台时同步多半已经推进过了）。
    */
   function onVisibilityChange() {
     if (document.visibilityState !== 'visible') return
     clockNow.value = Date.now()
-    void timelineLog.load()
+    void refreshSubscriptions()
     void refreshDigest()
     void cloudInfo.refresh()
   }
@@ -228,9 +273,10 @@ export function useTimelineSidebar() {
   watch(pouch.timelineVersion, () => {
     void cloudInfo.refresh()
   })
-  // 订阅增减会影响「N 个源」
+  // 订阅增减会影响「N 个源」，也影响失败源的名单（新订阅还没抓过，不该被漏掉）
   watch(pouch.subscriptionsVersion, () => {
     void refreshFeeds()
+    void refreshSubscriptions()
   })
 
   return {
@@ -242,7 +288,6 @@ export function useTimelineSidebar() {
     localText,
     problemSources,
     feedCount,
-    logLoading: computed(() => timelineLog.loading.value),
     /** 自动刷新（挂载 / 重新可见）：走缓存 */
     refreshAll,
     /** 手动刷新：绕过缓存、推进时钟，并在跑的过程中把按钮变成 loading */
