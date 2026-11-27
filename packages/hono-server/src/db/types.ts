@@ -19,11 +19,11 @@ export interface FeedDoc {
   /** feed 图标缓存（AVIF 附件 feed-image.avif），供前端离线展示 */
   imageCached?: CachedImage
   /**
-   * @deprecated 抓取簿记已移回 PostgreSQL `feeds` 表（不写 FeedDoc）。
+   * @deprecated 抓取簿记早已不在 FeedDoc 里（权威是 owner 库的 `_local/schedule`）。
    * 旧文档里可能还带着；下一次展示字段变化时会随重写清掉（见 workers/feed-doc.ts）。
    */
   errorMessage?: string
-  /** @deprecated 同上：最后抓取时间以 `feeds.last_fetched_at` 为准 */
+  /** @deprecated 同上：最后抓取时间以 `_local/schedule` 的 `lastFetchedAt` 为准 */
   lastFetchedAt?: string
   createdAt: string
 }
