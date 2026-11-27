@@ -56,26 +56,26 @@
 
 ### 控制台刷 `GET /api/couchdb/proxy/` 404（数量≈订阅数+1）
 
-- **现象**：每个订阅同步时都出现一条 `GET /api/couchdb/proxy/` 404，功能正常，没有别的报错。
-- **原因**：这是 **PouchDB 建立复制前对远端库的 uuid 探测**，不是脏数据 —— 探测打的是「去掉库名段后的路径」，所以所有订阅都是同一条 404；拿不到 uuid 时 PouchDB 回退用远端库 URL 当复制 id，同步不受影响。
-- **快速验证**（库名从 `GET /api/couchdb/sync-targets` 拿，或按库名规律从 `_all_dbs` 找）：
+- **现象**：同步时控制台出现一条 `GET /api/couchdb/proxy/` 404，功能正常，没有别的报错。
+- **原因**：这是 **PouchDB 建立复制前对远端库的 uuid 探测**，不是脏数据 —— 探测打的是「去掉库名段后的路径」，所以整次同步只有这一条 404；拿不到 uuid 时 PouchDB 回退用远端库 URL 当复制 id，同步不受影响。
+- **快速验证**（库名从 `GET /api/couchdb/sync-targets` 拿，只有一个用户库）：
   ```js
   const PouchDB = require('pouchdb')
-  const db = new PouchDB('http://localhost:3001/api/couchdb/proxy/feed_xxxxxxxxxxxxxxxxxxxxxxxx')
-  await db.id() // 实际发出 GET .../feed_xxx/ 和 GET .../proxy/（后者就是那条 404）
+  const db = new PouchDB('http://localhost:3001/api/couchdb/proxy/user-timeline_xxxxxxxxxxxxxxxx')
+  await db.id() // 实际发出 GET .../user-timeline_xxx/ 和 GET .../proxy/（后者就是那条 404）
   ```
-- **解法**：后端对探测路径返回 CouchDB 风格的根信息（`couchRootInfo`）：[routes/couchdb.ts](../packages/hono-server/src/routes/couchdb.ts)，回归用例 [couchdb-proxy-route.test.ts](../packages/hono-server/src/__tests__/couchdb-proxy-route.test.ts)。**响应里必须不带 `uuid`**：带上后 `api.id` 就改用 `uuid + 库名` 当复制 id，既有 checkpoint 全部失效、每个订阅白跑一次全量重同步（第一版带 uuid 时每个 feed 都多出一条 `_local/...` 404）。
-- **别从这条 404 推断「有脏订阅」**：代理不再按业务 id 拼地址，空 feedId 的订阅在前后端都会被过滤掉（[usePouchDb.ts](../packages/nuxt-client/app/composables/usePouchDb.ts) 的 `isValidDbId`、[services/feeds.ts](../packages/hono-server/src/services/feeds.ts) 的 `listSubscriptionsForUser`），不会进入复制队列。
+- **解法**：后端对探测路径返回 CouchDB 风格的根信息（`couchRootInfo`）：[routes/couchdb.ts](../packages/hono-server/src/routes/couchdb.ts)，回归用例 [couchdb-proxy-route.test.ts](../packages/hono-server/src/__tests__/couchdb-proxy-route.test.ts)。**响应里必须不带 `uuid`**：带上后 `api.id` 就改用 `uuid + 库名` 当复制 id，既有 checkpoint 全部失效、用户库白跑一次全量重同步（第一版带 uuid 时每个库都多出一条 `_local/...` 404）。
+- **别从这条 404 推断「有脏订阅」**：代理不再按业务 id 拼地址，空 feedId 的订阅在前后端都会被过滤掉（[usePouchDb.ts](../packages/nuxt-client/app/composables/usePouchDb.ts) 的 `isValidDbId`、[services/feeds.ts](../packages/hono-server/src/services/feeds.ts) 的 `listSubscriptionsForUser`），不会进入同步队列。
 
 ### 同步时 `.../proxy/<库名>/_local/<id>` 返回 404
 
 - **现象**：`GET /api/couchdb/proxy/<库名>/_local/xxxx==` 404，响应体 `{"error":"not_found","reason":"missing"}`。
 - **原因**：PouchDB 复制前的 **checkpoint 读取**：checkpoint 尚不存在时 CouchDB 就返回 404，PouchDB 据此从头复制、结束时 PUT 写入。**属于正常链路**，只有首次会 404，之后同一复制 id 会命中并返回 200。
-- **排查**（路径里的库名是随机生成的，不是 `feed_<feedId>`；feed 库名在 `feeds.couch_db_name` 列，代理只下发用户库名）：
+- **排查**（路径里的库名是随机生成的，不是 `feed_<feedId>`；库名在 `user.timeline_db_name` 列，`GET /api/couchdb/sync-targets` 下发的就是它）：
   ```bash
   docker exec hono-server-postgres-1 psql -U rssfed -d rssfed -c \
-    "select couch_db_name from feeds where id='<feedId>';"
-  curl -s -u admin:admin "http://localhost:5984/<couch_db_name>/_local_docs?include_docs=true"
+    "select timeline_db_name from \"user\" where id='<userId>';"
+  curl -s -u admin:admin "http://localhost:5984/<timeline_db_name>/_local_docs?include_docs=true"
   ```
   复制过就能看到 `_local/<replicationId>` 文档（`_rev` 递增、带 `last_seq`）。
 - **什么时候才是真问题**：**每次**同步都 404 且库里始终没有 checkpoint —— 说明 PUT 失败（权限或代理问题），每个订阅会反复全量复制。
@@ -127,26 +127,34 @@
 - **原因**：库名解析走快路径：已登记的库名直接返回、不再校验库是否还在（[client.ts](../packages/hono-server/src/couchdb/client.ts) 的 `resolveDatabase`），手工删库、数据卷丢失**不会自动重建**。
 - **解法**：把对应行的库名置空，下次寻址/抓取会重新建库：
   ```bash
+  # 用户库（最常见）
   docker exec hono-server-postgres-1 psql -U rssfed -d rssfed -c \
-    "update feeds set couch_db_name = null where id='<feedId>';"
+    "update \"user\" set timeline_db_name = null where id='<userId>';"
+  # Bot 产出库
+  docker exec hono-server-postgres-1 psql -U rssfed -d rssfed -c \
+    "update bots set couch_db_name = null where id='<botId>';"
   ```
-  feed / bot 库同理（`feeds` / `bots` 表的 `couch_db_name`）；**用户库**置空 `user.timeline_db_name` 后下次聚合会重建。重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次（用户状态文档要从客户端再推上来，见下面那条）。库级 `_security` 只在建库时设置一次，改坏了同样用置空库名的方式重建。
+  重建出来的是**新库**，旧数据不会回来，本地 PouchDB 也会因远端库 URL 变化全量重同步一次（用户状态文档要从客户端再推上来，见下面那条）。库级 `_security` 只在建库时设置一次，改坏了同样用置空库名的方式重建。
+  旧版本还有第三条 `update feeds set couch_db_name = null ...` —— `feeds` 表已随共享源库删除，现在没有这一行可改。
 
-### 约 1/64 的源「订阅在、队列在跑、条目库一直空」：feedId 以下划线开头
+### 约 1/64 的源「订阅在、队列在跑、这个源永远抓不动」：feedId 以下划线开头
 
-- **现象**：某个源的库建出来了、`_design/main` 也装了，但 FeedDoc 永远写不进去（库里只剩设计文档），
-  条目一条都没有。用户看到的就是「订阅在、队列在跑，这个源永远是暂无条目」。
+- **现象**：这个源每次抓取都失败（`_local/schedule` 里 `errorStreak` 一直涨），
+  用户库里的条目与 FeedDoc 都不会更新。
 - **原因**：feedId 由 `sha256(url).base64url.slice(0, 16)` 派生，base64url 字母表含 `_`，于是约 1/64 的源
   feedId 以 `_` 开头，而 CouchDB **保留** `_` 开头的文档 id：
   ```
   Error: Only reserved document ids may start with underscore.
   ```
-  错误只落在那一次 job 上，没有回显到任何用户可见的地方，很容易漏看。
-- **解法**：所有 `feed_*` 库的文档 id 一律走 [`doc-ids.ts`](../packages/hono-server/src/couchdb/doc-ids.ts)
+  `updateFeedDoc` 在写条目**之前**跑且没有 try/catch，所以这个错会把整轮抓取带走 —— 不是
+  "只有图标丢了"。错误只落在那一次 job 上，没有回显到任何用户可见的地方，很容易漏看。
+- **解法**：所有 owner 库里 FeedDoc 的文档 id 一律走 [`doc-ids.ts`](../packages/hono-server/src/couchdb/doc-ids.ts)
   的 `feedDocId()` —— 以 `_` 开头的 feedId 加 `feed` 前缀（加完长度 20，与未加前缀的 12/16 位不可能撞车），
   其余原样返回，所以存量文档不受影响、**不需要迁移**。前端
   [`utils/feedDocId.ts`](../packages/nuxt-client/app/utils/feedDocId.ts) 有一份同样的实现，两边必须同步改。
-- **排查**：`select id from feeds where id like '\_%'` 能列出受影响的源。
+- **排查**：没有全局源表可查了，只能直接看用户库 —— 里面 `feed_`/`feed` 开头的文档是否缺了某个订阅。
+  按 `_` 前缀判断源已经不可行（`feedId` 只存在订阅文档里），真要定位就遍历该用户的 `subscription:` 文档，
+  对照 `feedDocId(feedId)` 在库里是否存在。
 
 ### 「重建」之后内容回来了，但浏览器里看不见（**该现象已不存在**）
 
@@ -163,7 +171,8 @@
 
 这条只对应旧版本的一次性迁移（`_local/state.version` 从 1 升到 2 时换库重搬）。
 新模型里**没有派生库**，也就没有"换库重搬"这条链路：`STATE_VERSION` 那套判断与抓取路径里的调用
-已随扇出一起删除（`rederiveUserTimeline` 现在只剩"抢救档案损坏"一个用途）。
+已随扇出一起删除（进程内的换库实现 `rederiveUserTimeline` 也已删掉，换库只剩
+`scripts/reset-user-timelines.ts` 这一个入口）。
 
 从旧版本升级上来时，跑一次 `scripts/reset-to-owner-model.ts` 即可 ——
 它会清掉旧库内容，客户端重新订阅一次就回到干净状态。
@@ -272,8 +281,10 @@
 
 - **现象**：把 `url` 改成 `abc`、把 `siteUrl` 改成 `javascript:alert(1)` 能存进去；
   之后抓取一直失败，或点「访问网站」执行了脚本。
-- **现状**：**这个入口已经没了** —— `url` / `siteUrl` / `image` 不再接受用户修改
-  （源级字段由抓取时的解析结果维护，见 `services/feeds.ts` 的 `updateUserSubscription`）。
+- **现状**：**这个入口已经没了** —— `url` / `siteUrl` / `image` 不再接受用户修改。
+  `PATCH /api/feeds/subscriptions/:feedId` 只收 `title` / `category`
+  （见 `services/feeds.ts` 的 `updateUserSubscription`）；抓取地址与展示字段由抓取路径从
+  订阅文档和解析结果维护。
 - **但校验仍然必须存在，而且理由更强了**：订阅文档里的 `url` 是**客户端可写**的
   （PouchDB 双向同步），用户能绕过所有接口直接改本地库再同步上来。所以：
   - 写入路径（`POST /api/feeds/discover` / `subscriptions`）过一遍 `assertFetchableUrl`；
@@ -388,7 +399,7 @@ JS
   代价：`direct` 下被墙源第一轮会先等满一次 10s 直连超时，之后由路由记忆（默认 30 分钟）走代理；
   想恢复旧行为删掉该变量即可（默认 `proxy`）。
 - **验证**：重启服务后看连续两轮抓取——支持验证器的源第二轮应是 304（抓取耗时骤降），
-  代理侧流量明显下降；`feeds.last_fetched_at` 仍照常滚动。
+  代理侧流量明显下降；订阅列表里各源的 `lastFetchedAt`（`_local/schedule`）仍照常滚动。
 
 ## 前端交互
 

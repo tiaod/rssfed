@@ -114,9 +114,14 @@ Nuxt DevTools 的 overlay/检查器（每次导航 ~100–230ms）+ Vite dev 的
 | --- | --- | --- |
 | feed 图标压到 64px | `hono-server/src/rss/entry-images.ts` | 新增 `FEED_ICON_MAX_WIDTH`（默认 64）+ `FEED_ICON_CACHE_VERSION`；图标不再继承正文图片的 1200px 上限 |
 | 图标缓存版本化失效 | `entry-images.ts` + `workers/index.ts` + `db/types.ts` | `CachedImage.v`；worker 在 `imageCached.v !== 当前版本` 时重压（附件名固定，光比 URL 发现不了参数变化） |
-| 存量图标重建脚本 | `hono-server/scripts/rebuild-feed-icons.ts` | 幂等、支持 `--dry-run`；本次实跑：25 个图标重建，**76KB → 17KB**（源图有 640/540/500/268px 的） |
+| 存量图标重建脚本 | `hono-server/scripts/rebuild-feed-icons.ts`（**已删除**，见下） | 幂等、支持 `--dry-run`；本次实跑：25 个图标重建，**76KB → 17KB**（源图有 640/540/500/268px 的） |
 | 分组默认折叠 | `nuxt-client/.../useFeedNavigation.ts` + `FeedNavigation.vue` | 只展开当前路由所在分组，受控 `v-model` 维护展开状态；路由变化时并入新分组 |
 | 复制并发 3 → 2 | `nuxt-client/.../usePouchDb.ts` | 削同步落库的主线程峰值 |
+
+> **关于「存量图标重建脚本」**：它按 `feed_*` 库枚举存量 FeedDoc，而那一批库已随
+> 「共享源库 → 按 owner 抓取」的重构整体删除（图标现在写在各个 owner 库的 FeedDoc 上），
+> 脚本跑起来只会打印「发现 0 个 feed 库」。所以它已被删除；上表那行是**当时的实测记录**，
+> 不是现在还存在的工具。翻到本文时别去找这个文件。
 
 ### 复测（生产构建、热态、同一账号与数据）
 
