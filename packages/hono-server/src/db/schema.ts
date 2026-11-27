@@ -229,9 +229,6 @@ export const botFeeds = pgTable("bot_feeds", {
   url: text("url").notNull(),
   /** 展示名；抓取成功后由 FeedDoc 更新，失败时作为兜底标题 */
   title: text("title").notNull(),
-  /** 用户暂停了这个源针对该 Bot 的抓取（true = 不抓） */
-  paused: boolean("paused").notNull().default(false),
-  lastProcessedEntryId: text("last_processed_entry_id"),
   createdAt: timestamp("created_at").notNull().defaultNow(),
 }, (table) => [
   index("bot_feeds_bot_id_idx").on(table.botId),

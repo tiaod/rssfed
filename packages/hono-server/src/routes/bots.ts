@@ -162,7 +162,6 @@ botsRouter.get("/:id/feeds", requireOwnedBot, async (c) => {
     feedId: botFeeds.feedId,
     title: botFeeds.title,
     url: botFeeds.url,
-    paused: botFeeds.paused,
   })
     .from(botFeeds)
     .where(eq(botFeeds.botId, id))

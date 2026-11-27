@@ -275,7 +275,12 @@ export interface OwnerSource {
   feedId: string
   url: string
   title: string
-  /** 用户暂停了这条订阅 */
+  /**
+   * 暂停了这条订阅（不抓、但保留已抓内容）。
+   *
+   * 只有**用户**订阅带这个状态（存在库里的 `subscription:` 文档上，客户端能改）；
+   * Bot 关联没有暂停入口，恒为 false —— 见下面 bot 分支的说明。
+   */
   paused: boolean
 }
 
@@ -288,11 +293,13 @@ export interface OwnerSource {
 export async function collectOwnerSources(owner: FetchOwnerJob): Promise<OwnerSource[]> {
   if (owner.kind === "bot") {
     const rows = await db.select().from(botFeeds).where(eq(botFeeds.botId, owner.id))
+    // Bot 关联没有"暂停"这个概念，也没有对应端点（`bot_feeds` 那一列已随旧模型删掉），
+    // 所以恒为 false：调度照常按自适应间隔抓它关联的源。
     return rows.map((row) => ({
       feedId: row.feedId,
       url: row.url,
       title: row.title,
-      paused: row.paused,
+      paused: false,
     }))
   }
 
